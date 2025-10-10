@@ -29,3 +29,36 @@ void *clj_h2o_globalconf_get_hosts(void *globalconf_ptr) {
   h2o_globalconf_t *conf = (h2o_globalconf_t *)globalconf_ptr;
   return conf->hosts;
 }
+
+void clj_handler_set_on_req(void *handler_ptr, void *callback) {
+  h2o_handler_t *handler = (h2o_handler_t *)handler_ptr;
+  handler->on_req = (int (*)(h2o_handler_t *, h2o_req_t *))callback;
+}
+
+size_t clj_h2o_handler_size(void) { return sizeof(h2o_handler_t); }
+
+void clj_h2o_req_set_status(void *req_ptr, int status) {
+  h2o_req_t *req = (h2o_req_t *)req_ptr;
+  req->res.status = status;
+}
+
+void clj_h2o_req_set_reason(void *req_ptr, const char *reason) {
+  h2o_req_t *req = (h2o_req_t *)req_ptr;
+  req->res.reason = reason;
+}
+
+void *clj_h2o_req_get_pool(void *req_ptr) {
+  h2o_req_t *req = (h2o_req_t *)req_ptr;
+  return &req->pool;
+}
+
+void *clj_h2o_req_get_res_headers(void *req_ptr) {
+  h2o_req_t *req = (h2o_req_t *)req_ptr;
+  return &req->res.headers;
+}
+
+void *clj_h2o_get_content_type_token(void) { return H2O_TOKEN_CONTENT_TYPE; }
+
+static h2o_generator_t static_generator = {NULL, NULL};
+
+void *clj_h2o_get_static_generator(void) { return &static_generator; }

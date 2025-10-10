@@ -221,6 +221,66 @@
   h2o_config_register_path
   [::mem/pointer ::mem/c-string ::mem/int] ::mem/pointer)
 
+(defcfn create-handler
+  "Create h2o handler for pathconf. Returns pointer to h2o_handler_t"
+  h2o_create_handler
+  [::mem/pointer ::mem/long] ::mem/pointer)
+
+(defcfn handler-set-on-req
+  "Set on_req callback for handler"
+  clj_handler_set_on_req
+  [::mem/pointer ::mem/pointer] ::mem/void)
+
+(defcfn handler-size
+  "Get size of h2o_handler_t structure"
+  clj_h2o_handler_size
+  [] ::mem/long)
+
+(defcfn h2o-send
+  "Send response data. iovec-array is pointer to h2o_iovec_t array, count is array length"
+  h2o_send
+  [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void)
+
+(defcfn add-header
+  "Add response header"
+  h2o_add_header
+  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer ::mem/c-string ::mem/long] ::mem/void)
+
+(defcfn get-content-type-token
+  "Get H2O_TOKEN_CONTENT_TYPE pointer"
+  clj_h2o_get_content_type_token
+  [] ::mem/pointer)
+
+(defcfn get-static-generator
+  "Get static h2o_generator_t pointer"
+  clj_h2o_get_static_generator
+  [] ::mem/pointer)
+
+(defcfn req-set-status
+  "Set response status code"
+  clj_h2o_req_set_status
+  [::mem/pointer ::mem/int] ::mem/void)
+
+(defcfn req-set-reason
+  "Set response reason phrase"
+  clj_h2o_req_set_reason
+  [::mem/pointer ::mem/c-string] ::mem/void)
+
+(defcfn req-get-pool
+  "Get request memory pool pointer"
+  clj_h2o_req_get_pool
+  [::mem/pointer] ::mem/pointer)
+
+(defcfn req-get-res-headers
+  "Get response headers pointer"
+  clj_h2o_req_get_res_headers
+  [::mem/pointer] ::mem/pointer)
+
+(defcfn mem-alloc-shared
+  "Allocate memory from h2o pool. Returns pointer to allocated memory."
+  h2o_mem_alloc_shared
+  [::mem/pointer ::mem/long ::mem/pointer] ::mem/pointer)
+
 (defn create-iovec
   "Create an h2o_iovec_t from a string.
    IMPORTANT: Caller must provide arena to ensure string memory lives long enough
@@ -231,9 +291,62 @@
         iovec-data {:base str-ptr :len len}]
     (mem/serialize iovec-data ::h2o-iovec-t arena)))
 
+(defn create-hello-handler
+  "Create a handler that responds with 'Hello World' to all requests.
+   Returns handler pointer that must be kept alive."
+  [pathconf-ptr]
+  (let [handler-ptr (create-handler pathconf-ptr (handler-size))
+        on-req-callback (mem/serialize
+                         (fn [_self-ptr req-ptr]
+                           (try
+                             ;; Set response status and reason
+                             (req-set-status req-ptr 200)
+                             (req-set-reason req-ptr "OK")
+
+                             ;; Get request pool for allocations
+                             (let [pool-ptr (req-get-pool req-ptr)]
+
+                               ;; Create response body
+                               (let [body "Hello World\n"
+                                     body-bytes (.getBytes ^String body "UTF-8")
+                                     body-len (long (alength body-bytes))
+
+                                     ;; Allocate body using h2o's pool allocator
+                                     body-ptr-raw (mem-alloc-shared pool-ptr body-len java.lang.foreign.MemorySegment/NULL)
+                                     body-ptr (mem/reinterpret body-ptr-raw body-len)]
+
+                                 ;; Write body bytes
+                                 (let [byte-array-seg (java.lang.foreign.MemorySegment/ofArray body-bytes)]
+                                   (java.lang.foreign.MemorySegment/copy byte-array-seg 0 body-ptr 0 body-len))
+
+                                 ;; Allocate sendvec structure from pool
+                                 (let [sendvec-size (long (mem/size-of ::h2o-sendvec-t))
+                                       sendvec-ptr-raw (mem-alloc-shared pool-ptr sendvec-size java.lang.foreign.MemorySegment/NULL)
+                                       sendvec-seg (mem/reinterpret sendvec-ptr-raw sendvec-size)]
+
+                                   ;; Initialize sendvec with raw bytes
+                                   (sendvec-init-raw sendvec-seg body-ptr-raw body-len)
+
+                                   ;; Start response with generator
+                                   (let [generator-ptr (get-static-generator)]
+                                     (start-response req-ptr generator-ptr))
+
+                                   ;; Send response body using sendvec (final chunk)
+                                   (sendvec req-ptr sendvec-seg 1 H2O_SEND_STATE_FINAL)))
+
+                               ;; Return 0 for success
+                               0)
+                             (catch Exception e
+                               (println "Handler error:" (.getMessage e))
+                               (.printStackTrace e)
+                               -1)))
+                         [::ffi/fn [::mem/pointer ::mem/pointer] ::mem/int])]
+    (handler-set-on-req handler-ptr on-req-callback)
+    handler-ptr))
+
 (defn create-server-config
   "Create and initialize h2o global configuration with a default host.
-   Returns map with ::arena, ::config-ptr, ::hostconf-ptr, ::pathconf-ptr"
+   Returns map with ::arena, ::config-ptr, ::hostconf-ptr, ::pathconf-ptr, ::handler-ptr"
   []
   (let [arena (mem/auto-arena)
         size (globalconf-size)
@@ -242,12 +355,13 @@
     (let [host-iovec-seg (create-iovec "default" arena)
           host-iovec-data (mem/deserialize host-iovec-seg ::h2o-iovec-t)
           hostconf-ptr (config-register-host config-ptr host-iovec-data 65535)
-          pathconf-ptr (config-register-path hostconf-ptr "/" 0)]
-      ;; TODO: Register actual handler later
+          pathconf-ptr (config-register-path hostconf-ptr "/" 0)
+          handler-ptr (create-hello-handler pathconf-ptr)]
       {::arena arena
        ::config-ptr config-ptr
        ::hostconf-ptr hostconf-ptr
-       ::pathconf-ptr pathconf-ptr})))
+       ::pathconf-ptr pathconf-ptr
+       ::handler-ptr handler-ptr})))
 
 (defn create-context
   "Create and initialize h2o context for an event loop.
