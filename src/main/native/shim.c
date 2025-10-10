@@ -82,3 +82,28 @@ void *clj_h2o_req_get_query_at(void *req_ptr) {
   h2o_req_t *req = (h2o_req_t *)req_ptr;
   return &req->query_at;
 }
+
+void *clj_h2o_req_get_scheme(void *req_ptr) {
+  h2o_req_t *req = (h2o_req_t *)req_ptr;
+  return req->scheme ? (void *)&req->scheme->name : NULL;
+}
+
+void *clj_h2o_req_get_entity(void *req_ptr) {
+  h2o_req_t *req = (h2o_req_t *)req_ptr;
+  return &req->entity;
+}
+
+void *clj_h2o_req_get_headers(void *req_ptr) {
+  h2o_req_t *req = (h2o_req_t *)req_ptr;
+  return req->headers.entries;
+}
+
+uint32_t clj_h2o_req_get_headers_size(void *req_ptr) {
+  h2o_req_t *req = (h2o_req_t *)req_ptr;
+  return (uint32_t)req->headers.size;
+}
+
+uint16_t clj_h2o_req_get_version(void *req_ptr) {
+  h2o_req_t *req = (h2o_req_t *)req_ptr;
+  return req->version;
+}

@@ -4,7 +4,8 @@
    [clojure.string :as str]
    [coffi.ffi :as ffi :refer [defcfn]]
    [coffi.layout :as layout]
-   [coffi.mem :as mem :refer [defalias]])
+   [coffi.mem :as mem :refer [defalias]]
+   [ring.core.protocols :as ring-protocols])
   (:import [java.nio.file Files]))
 
 (defn copy-resource [resource-path output-path]
@@ -200,6 +201,32 @@
       [:len ::mem/long]
       [:raw ::mem/pointer]]]))
 
+;; h2o_header_t structure
+;; typedef struct {
+;;     h2o_iovec_t *name;
+;;     const char *orig_name;
+;;     h2o_iovec_t value;
+;;     h2o_header_flags_t flags;
+;; } h2o_header_t;
+(mem/defalias ::h2o-header-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:name ::mem/pointer]
+      [:orig_name ::mem/pointer]
+      [:value ::h2o-iovec-t]
+      [:flags ::mem/char]]]))
+
+;; h2o_generator_t structure
+;; typedef struct st_h2o_generator_t {
+;;     void (*proceed)(struct st_h2o_generator_t *self, h2o_req_t *req);
+;;     void (*stop)(struct st_h2o_generator_t *self, h2o_req_t *req);
+;; } h2o_generator_t;
+(mem/defalias ::h2o-generator-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:proceed ::mem/pointer]
+      [:stop ::mem/pointer]]]))
+
 (defcfn sendvec-init-raw
   "Initialize a sendvec with raw bytes"
   h2o_sendvec_init_raw
@@ -235,11 +262,6 @@
   "Get size of h2o_handler_t structure"
   clj_h2o_handler_size
   [] ::mem/long)
-
-(defcfn h2o-send
-  "Send response data. iovec-array is pointer to h2o_iovec_t array, count is array length"
-  h2o_send
-  [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void)
 
 (defcfn add-header
   "Add response header"
@@ -296,6 +318,31 @@
   clj_h2o_req_get_query_at
   [::mem/pointer] ::mem/pointer)
 
+(defcfn req-get-scheme
+  "Get request scheme iovec pointer (NULL if not set)"
+  clj_h2o_req_get_scheme
+  [::mem/pointer] ::mem/pointer)
+
+(defcfn req-get-entity
+  "Get request entity iovec pointer"
+  clj_h2o_req_get_entity
+  [::mem/pointer] ::mem/pointer)
+
+(defcfn req-get-headers
+  "Get request headers array pointer"
+  clj_h2o_req_get_headers
+  [::mem/pointer] ::mem/pointer)
+
+(defcfn req-get-headers-size
+  "Get request headers count"
+  clj_h2o_req_get_headers_size
+  [::mem/pointer] ::mem/int)
+
+(defcfn req-get-version
+  "Get request HTTP version"
+  clj_h2o_req_get_version
+  [::mem/pointer] ::mem/short)
+
 (defcfn mem-alloc-shared
   "Allocate memory from h2o pool. Returns pointer to allocated memory."
   h2o_mem_alloc_shared
@@ -333,19 +380,215 @@
   (let [method-iovec (req-get-method req-ptr)
         path-iovec (req-get-path req-ptr)
         authority-iovec (req-get-authority req-ptr)
+        scheme-iovec (req-get-scheme req-ptr)
+        entity-iovec (req-get-entity req-ptr)
 
         method-str (read-iovec-string method-iovec)
         path-str (read-iovec-string path-iovec)
-        authority-str (read-iovec-string authority-iovec)]
+        authority-str (read-iovec-string authority-iovec)
+        scheme-str (when-not (mem/null? scheme-iovec)
+                     (read-iovec-string scheme-iovec))
 
-    {:request-method (keyword (clojure.string/lower-case method-str))
-     :uri path-str
-     :server-name (or authority-str "localhost")
-     :server-port 8080
-     :scheme :http
-     :headers {}
-     :protocol "HTTP/1.1"
-     :remote-addr "127.0.0.1"}))
+        ;; Get version as short (uint16_t)
+        version-int (req-get-version req-ptr)
+        protocol-str (case version-int
+                       0x100 "HTTP/1.0"
+                       0x101 "HTTP/1.1"
+                       0x200 "HTTP/2.0"
+                       "HTTP/1.1")
+
+;; Parse query string from query_at - for now just parse from path
+        ;; TODO: Use query_at field properly once we figure out proper size_t handling
+        query-idx (.indexOf path-str "?")
+        has-query? (>= query-idx 0)
+
+        query-string (when has-query?
+                       (subs path-str (inc query-idx)))
+
+        uri (if has-query?
+              (subs path-str 0 query-idx)
+              path-str)
+
+        ;; Extract headers
+        headers-ptr (req-get-headers req-ptr)
+        headers-count (req-get-headers-size req-ptr)
+
+        headers (if (and (pos? headers-count) (not (mem/null? headers-ptr)))
+                  (let [header-size (mem/size-of ::h2o-header-t)
+                        ;; Reinterpret as array big enough for all headers
+                        headers-array-ptr (mem/reinterpret headers-ptr (* header-size headers-count))]
+                    (into {}
+                          (keep identity)
+                          (for [i (range headers-count)]
+                            (let [;; Slice to get specific header
+                                  header-seg (mem/slice headers-array-ptr (* header-size i) header-size)
+                                  header-data (mem/deserialize header-seg ::h2o-header-t)
+
+                                  name-iovec-ptr (:name header-data)
+                                  name-str (when-not (mem/null? name-iovec-ptr)
+                                             (read-iovec-string name-iovec-ptr))
+
+                                  value-iovec (:value header-data)
+                                  value-str (when-let [base (:base value-iovec)]
+                                              (when (pos? (:len value-iovec))
+                                                (let [value-seg (mem/reinterpret base (:len value-iovec))
+                                                      byte-arr (byte-array (:len value-iovec))]
+                                                  (java.lang.foreign.MemorySegment/copy
+                                                   value-seg 0
+                                                   (java.lang.foreign.MemorySegment/ofArray byte-arr) 0
+                                                   (:len value-iovec))
+                                                  (String. byte-arr "UTF-8"))))]
+                              (when (and name-str value-str)
+                                [(str/lower-case name-str) value-str])))))
+                  {})
+
+        ;; Check for request body
+        entity-seg (when-not (mem/null? entity-iovec)
+                     (let [iovec-size (mem/size-of ::h2o-iovec-t)
+                           entity-data-seg (mem/reinterpret entity-iovec iovec-size)
+                           entity-data (mem/deserialize entity-data-seg ::h2o-iovec-t)]
+                       entity-data))
+
+        ;; Parse server name and port from authority
+        [server-name server-port] (if authority-str
+                                    (let [parts (str/split authority-str #":" 2)]
+                                      (if (= 2 (count parts))
+                                        [(first parts) (Integer/parseInt (second parts))]
+                                        [authority-str 80]))
+                                    ["localhost" 80])]
+
+    (cond-> {:request-method (keyword (str/lower-case method-str))
+             :uri uri
+             :server-name server-name
+             :server-port server-port
+             :scheme (if scheme-str (keyword scheme-str) :http)
+             :headers headers
+             :protocol protocol-str
+             :remote-addr "127.0.0.1"}
+
+      query-string
+      (assoc :query-string query-string)
+
+      (and entity-seg (:base entity-seg) (pos? (:len entity-seg)))
+      (assoc :body (let [body-seg (mem/reinterpret (:base entity-seg) (:len entity-seg))
+                         body-bytes (byte-array (:len entity-seg))]
+                     (java.lang.foreign.MemorySegment/copy
+                      body-seg 0
+                      (java.lang.foreign.MemorySegment/ofArray body-bytes) 0
+                      (:len entity-seg))
+                     (java.io.ByteArrayInputStream. body-bytes))))))
+
+(defn create-streaming-output
+  "Create a streaming output for a request.
+   Returns a map with :stream and :state for managing response streaming."
+  [req-ptr arena]
+  (let [state (atom {:closed? false
+                     :response-started? false
+                     :final-sent? false
+                     :content-sent 0
+                     :content-length -1
+                     :status -1
+                     :headers {}})
+        stream (proxy [java.io.OutputStream java.io.Closeable] []
+                 (close []
+                   (when-not (:closed? @state)
+                     (when (:response-started? @state)
+                       (when-not (:final-sent? @state)
+                         (let [empty-vec-seg (mem/alloc (mem/size-of ::h2o-sendvec-t) arena)
+                               empty-data (mem/alloc 0 arena)]
+                           (sendvec-init-raw empty-vec-seg empty-data 0)
+                           (sendvec req-ptr empty-vec-seg 1 H2O_SEND_STATE_FINAL))))
+                     (swap! state assoc :closed? true)))
+
+                 (write
+                   ([b-or-arr]
+                    (when (:closed? @state)
+                      (throw (java.io.IOException. "Stream already closed")))
+                    (let [bytes (if (int? b-or-arr)
+                                  (byte-array [(byte b-or-arr)])
+                                  b-or-arr)]
+                      (.write ^java.io.OutputStream this bytes 0 (alength bytes))))
+                   ([bytes off len]
+                    (when (:closed? @state)
+                      (throw (java.io.IOException. "Stream already closed")))
+                    (when (pos? len)
+                      (when-not (:response-started? @state)
+                        (throw (IllegalStateException. "Must call setResponseHeaders before writing")))
+
+                      (let [chunk-data (mem/alloc len arena)
+                            byte-arr-seg (java.lang.foreign.MemorySegment/ofArray bytes)]
+                        (java.lang.foreign.MemorySegment/copy byte-arr-seg off chunk-data 0 len)
+
+                        (let [content-len (:content-length @state -1)
+                              content-sent (:content-sent @state 0)
+                              new-sent (+ content-sent len)
+                              is-final (and (not= content-len -1) (>= new-sent content-len))]
+
+                          (let [vec-seg (mem/alloc (mem/size-of ::h2o-sendvec-t) arena)]
+                            (sendvec-init-raw vec-seg chunk-data len)
+                            (sendvec req-ptr vec-seg 1 (if is-final H2O_SEND_STATE_FINAL H2O_SEND_STATE_IN_PROGRESS)))
+
+                          (swap! state assoc
+                                 :content-sent new-sent
+                                 :final-sent? is-final))))))
+
+                 (flush []))]
+    {:stream stream
+     :state state
+     :req-ptr req-ptr
+     :arena arena}))
+
+(defn set-response-headers!
+  "Set response headers for streaming output. Must be called before first write."
+  [streaming-output status headers]
+  (let [{:keys [state req-ptr]} streaming-output]
+    (when (:response-started? @state)
+      (throw (IllegalStateException. "Cannot set headers after streaming has started")))
+
+    ;; Set status and reason
+    (req-set-status req-ptr status)
+    (req-set-reason req-ptr "OK")
+
+    ;; Extract Content-Length if present, remove from headers we send
+    (let [content-length (when-let [cl (get headers "content-length")]
+                           (try
+                             (Long/parseLong cl)
+                             (catch Exception _ -1)))
+          headers-to-send (dissoc headers "content-length")]
+
+      ;; Add headers to response
+      (let [pool-ptr (req-get-pool req-ptr)
+            res-headers-ptr (req-get-res-headers req-ptr)]
+        (doseq [[name value] headers-to-send]
+          (let [name-str (str name)
+                value-str (str value)
+                name-len (count name-str)
+                value-len (count value-str)
+                name-ptr-raw (mem-alloc-shared pool-ptr name-len java.lang.foreign.MemorySegment/NULL)
+                value-ptr-raw (mem-alloc-shared pool-ptr value-len java.lang.foreign.MemorySegment/NULL)
+                name-ptr (mem/reinterpret name-ptr-raw name-len)
+                value-ptr (mem/reinterpret value-ptr-raw value-len)]
+            (let [name-bytes (.getBytes name-str "UTF-8")
+                  value-bytes (.getBytes value-str "UTF-8")]
+              (java.lang.foreign.MemorySegment/copy
+               (java.lang.foreign.MemorySegment/ofArray name-bytes) 0
+               name-ptr 0 name-len)
+              (java.lang.foreign.MemorySegment/copy
+               (java.lang.foreign.MemorySegment/ofArray value-bytes) 0
+               value-ptr 0 value-len))
+            (add-header pool-ptr res-headers-ptr
+                        java.lang.foreign.MemorySegment/NULL
+                        java.lang.foreign.MemorySegment/NULL
+                        name-str name-len))))
+
+      ;; Start response with static generator (we'll send via sendvec directly)
+      (let [generator-ptr (get-static-generator)]
+        (start-response req-ptr generator-ptr))
+
+      (swap! state assoc
+             :response-started? true
+             :status status
+             :content-length (or content-length -1)))))
 
 (defn create-ring-handler
   "Create an h2o handler that delegates to a Ring handler.
@@ -357,12 +600,11 @@
                            (try
                              ;; Build Ring request from h2o request
                              (let [ring-req (build-ring-request req-ptr)
-
                                    ;; Call user's Ring handler
                                    ring-resp (ring-handler ring-req)
-
                                    ;; Extract response fields
                                    status (:status ring-resp 200)
+                                   headers (:headers ring-resp {})
                                    body (:body ring-resp "")]
 
                                ;; Set response status
@@ -372,8 +614,11 @@
                                ;; Get request pool for allocations
                                (let [pool-ptr (req-get-pool req-ptr)]
 
-                                 ;; Handle body as String for now
-                                 (let [body-str (str body)
+                                 ;; Convert body to string and bytes
+                                 (let [body-str (cond
+                                                  (string? body) body
+                                                  (nil? body) ""
+                                                  :else (str body))
                                        body-bytes (.getBytes ^String body-str "UTF-8")
                                        body-len (long (alength body-bytes))
 
@@ -382,8 +627,9 @@
                                        body-ptr (mem/reinterpret body-ptr-raw body-len)]
 
                                    ;; Write body bytes
-                                   (let [byte-array-seg (java.lang.foreign.MemorySegment/ofArray body-bytes)]
-                                     (java.lang.foreign.MemorySegment/copy byte-array-seg 0 body-ptr 0 body-len))
+                                   (when (pos? body-len)
+                                     (let [byte-array-seg (java.lang.foreign.MemorySegment/ofArray body-bytes)]
+                                       (java.lang.foreign.MemorySegment/copy byte-array-seg 0 body-ptr 0 body-len)))
 
                                    ;; Allocate sendvec structure from pool
                                    (let [sendvec-size (long (mem/size-of ::h2o-sendvec-t))

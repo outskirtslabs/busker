@@ -63,6 +63,11 @@ void *clj_h2o_req_get_method(void *req_ptr);
 void *clj_h2o_req_get_path(void *req_ptr);
 void *clj_h2o_req_get_authority(void *req_ptr);
 void *clj_h2o_req_get_query_at(void *req_ptr);
+void *clj_h2o_req_get_scheme(void *req_ptr);
+void *clj_h2o_req_get_entity(void *req_ptr);
+void *clj_h2o_req_get_headers(void *req_ptr);
+uint32_t clj_h2o_req_get_headers_size(void *req_ptr);
+uint16_t clj_h2o_req_get_version(void *req_ptr);
 
 /* Standard tokens and generator for responses */
 void *clj_h2o_get_content_type_token(void);
