@@ -5,6 +5,11 @@
  :tasks          {:requires         ([babashka.fs :as fs]
                                      [clojure.string :as str]
                                      [babashka.tasks :refer [shell]])
+                  build.shim        (let [opt {:inherit true}]
+                                      (shell opt "mkdir -p cmake-build-debug")
+                                      (shell opt "cmake -DCMAKE_BUILD_TYPE=Debug -B cmake-build-debug")
+                                      (shell opt "cmake --build cmake-build-debug --config Debug --target h2oclj"))
+                  prep              (clojure "-Xdeps prep :aliases '[:dev :test]'")
                   build             {:depends [build.shim prep]}
                   test              (apply clojure "-M:dev:test:kaocha" *command-line-args*)
                   deps-tree         (clojure "-X:deps tree :aliases '[:dev]'")
@@ -26,9 +31,9 @@
                                      :task
                                      (do
                                        (shell {:dir "."} "rm -rf cmake-build-debug")
-                                       (shell {:dir "."} "clj -T:build clean"))}
+                                       #_(shell {:dir "."} "clj -T:build clean"))}
                   publish           {:doc     "Publish the clojure sdk libs to clojars"
                                      :depends [jar]
                                      :task    (clojure "-T:build deploy")}
                   pom               {:doc "Generate the pom.xml from clj" :task (clojure "-Xdeps mvn-pom :aliases '[:dev :test]'")}
-                  ci                {:depends [lint lint.shim build.shim test]}}}
+                  ci                {:depends [lint build.shim test]}}}

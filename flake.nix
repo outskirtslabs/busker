@@ -45,11 +45,11 @@
           jdk = pkgs."jdk${javaVersion}";
           clojure = pkgs.clojure.override { inherit jdk; };
 
-          inherit (self.packages.${pkgs.system}) h2o-static;
+          inherit (self.packages.${pkgs.system}) h2o-shared;
           #clj-h2o-shim = self.packages.${pkgs.system}.clj-h2o-shim;
           libraries = [
             #clj-h2o-shim
-            h2o-static
+            h2o-shared
           ];
         in
         {
@@ -75,7 +75,7 @@
             pkgs.ruby
             pkgs.liburing
 
-            self.packages.${pkgs.system}.h2o-static
+            self.packages.${pkgs.system}.h2o-shared
 
             # Development tools
             pkgs.gdb
@@ -90,8 +90,8 @@
             pkgs.nghttp2 # for h2load
           ];
           env.LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libraries;
-          #env.PKG_CONFIG_PATH = "${h2o-static}/lib/pkgconfig:${clj-h2o-shim}/lib/pkgconfig";
-          env.PKG_CONFIG_PATH = "${h2o-static}/lib/pkgconfig";
+          #env.PKG_CONFIG_PATH = "${h2o-shared}/lib/pkgconfig:${clj-h2o-shim}/lib/pkgconfig";
+          env.PKG_CONFIG_PATH = "${h2o-shared}/lib/pkgconfig";
         };
 
       flakelight.builtinFormatters = false;

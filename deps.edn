@@ -13,6 +13,7 @@
                     :jvm-opts
                     ["--enable-native-access=ALL-UNNAMED"
                      "-Duser.timezone=UTC"
+                     "-Dol.libh2o.path=/home/ramblurr/src/ol/http-clj/cmake-build-debug/libh2oclj.so"
                      "-XX:+UseZGC"]
                     :extra-deps {virgil/virgil {:mvn/version "0.4.0"}
                                  babashka/process {:mvn/version "0.6.23"}

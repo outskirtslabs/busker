@@ -1,0 +1,7 @@
+#kaocha/v1
+ {:kaocha/reporter
+  [kaocha.report/documentation]
+
+  :tests
+  [{:id         :h2o
+    :test-paths ["src/test/clojure"]}]}
