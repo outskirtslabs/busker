@@ -4,6 +4,9 @@
 (defn -main [& _]
   (let [s (server/create-server {})
         s (server/start-server s)]
-    (println "Server created successfully")
-    (Thread/sleep 3000)
-    (println "Test passed!")))
+    (println "Server started on port 8080")
+    (println "Listening for connections...")
+    (Thread/sleep 10000)
+    (println "Shutting down...")
+    (server/stop-server s)
+    (println "Server stopped")))

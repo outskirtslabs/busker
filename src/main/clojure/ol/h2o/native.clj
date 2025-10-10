@@ -79,6 +79,16 @@
   clj_h2o_context_size
   [] ::mem/long)
 
+(defcfn accept-ctx-size
+  "Get size of h2o_accept_ctx_t structure"
+  clj_h2o_accept_ctx_size
+  [] ::mem/long)
+
+(defcfn globalconf-get-hosts
+  "Get hosts pointer (h2o_hostconf_t**) from h2o_globalconf_t"
+  clj_h2o_globalconf_get_hosts
+  [::mem/pointer] ::mem/pointer)
+
 ;; h2o_iovec_t is:
 ;;   typedef struct { char *base; size_t len; } h2o_iovec_t;
 ;; Use a typed pointer for clarity; size_t→::mem/long is OK on typical *nix.
@@ -87,6 +97,25 @@
     [::mem/struct
      [[:base ::mem/pointer]
       [:len ::mem/long]]]))
+
+;; h2o_accept_ctx_t structure
+;; typedef struct st_h2o_accept_ctx_t {
+;;     h2o_context_t *ctx;
+;;     h2o_hostconf_t **hosts;
+;;     SSL_CTX *ssl_ctx;
+;;     h2o_iovec_t *http2_origin_frame;
+;;     int expect_proxy_line;
+;;     h2o_multithread_receiver_t *libmemcached_receiver;
+;; } h2o_accept_ctx_t;
+(mem/defalias ::h2o-accept-ctx-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:ctx ::mem/pointer]
+      [:hosts ::mem/pointer]
+      [:ssl_ctx ::mem/pointer]
+      [:http2_origin_frame ::mem/pointer]
+      [:expect_proxy_line ::mem/int]
+      [:libmemcached_receiver ::mem/pointer]]]))
 
 (defcfn config-register-host
   "Register a virtual host with the h2o configuration.
@@ -160,6 +189,38 @@
   h2o_accept
   [::mem/pointer ::mem/pointer] ::mem/void)
 
+(def ^:const H2O_SEND_STATE_IN_PROGRESS 0)
+(def ^:const H2O_SEND_STATE_FINAL 1)
+(def ^:const H2O_SEND_STATE_ERROR 2)
+
+(mem/defalias ::h2o-sendvec-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:callbacks ::mem/pointer]
+      [:len ::mem/long]
+      [:raw ::mem/pointer]]]))
+
+(defcfn sendvec-init-raw
+  "Initialize a sendvec with raw bytes"
+  h2o_sendvec_init_raw
+  [::mem/pointer ::mem/pointer ::mem/long] ::mem/void)
+
+(defcfn sendvec
+  "Send response data using sendvec"
+  h2o_sendvec
+  [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void)
+
+(defcfn start-response
+  "Start sending HTTP response"
+  h2o_start_response
+  [::mem/pointer ::mem/pointer] ::mem/void)
+
+(defcfn config-register-path
+  "Register a path with the h2o configuration.
+   Returns pointer to h2o_pathconf_t"
+  h2o_config_register_path
+  [::mem/pointer ::mem/c-string ::mem/int] ::mem/pointer)
+
 (defn create-iovec
   "Create an h2o_iovec_t from a string.
    IMPORTANT: Caller must provide arena to ensure string memory lives long enough
@@ -172,7 +233,7 @@
 
 (defn create-server-config
   "Create and initialize h2o global configuration with a default host.
-   Returns map with ::arena, ::config-ptr, ::hostconf-ptr"
+   Returns map with ::arena, ::config-ptr, ::hostconf-ptr, ::pathconf-ptr"
   []
   (let [arena (mem/auto-arena)
         size (globalconf-size)
@@ -180,10 +241,13 @@
     (config-init config-ptr)
     (let [host-iovec-seg (create-iovec "default" arena)
           host-iovec-data (mem/deserialize host-iovec-seg ::h2o-iovec-t)
-          hostconf-ptr (config-register-host config-ptr host-iovec-data 65535)]
+          hostconf-ptr (config-register-host config-ptr host-iovec-data 65535)
+          pathconf-ptr (config-register-path hostconf-ptr "/" 0)]
+      ;; TODO: Register actual handler later
       {::arena arena
        ::config-ptr config-ptr
-       ::hostconf-ptr hostconf-ptr})))
+       ::hostconf-ptr hostconf-ptr
+       ::pathconf-ptr pathconf-ptr})))
 
 (defn create-context
   "Create and initialize h2o context for an event loop.
@@ -228,6 +292,42 @@
   [loops]
   (doseq [loop loops]
     (evloop-destroy loop)))
+
+(defn create-accept-callback
+  "Create accept callback for a listener socket.
+   The callback signature is: void on_accept(h2o_socket_t *listener, const char *err)"
+  [accept-ctx-ptr]
+  (mem/serialize
+   (fn [listener-ptr err-ptr]
+     (when-not (mem/null? err-ptr)
+       ;; Error occurred during accept - just return
+       nil)
+
+     ;; Accept the connection
+     (let [sock-ptr (evloop-socket-accept listener-ptr)]
+       (when-not (mem/null? sock-ptr)
+         ;; Pass the socket to h2o for HTTP processing
+         (h2o-accept accept-ctx-ptr sock-ptr))))
+   [::ffi/fn [::mem/pointer ::mem/c-string] ::mem/void]))
+
+(defn create-accept-ctx
+  "Create h2o_accept_ctx_t for accepting connections.
+   
+   Parameters:
+   - arena: memory arena for allocation
+   - ctx-ptr: pointer to h2o_context_t
+   - config-ptr: pointer to h2o_globalconf_t
+   
+   Returns: pointer to h2o_accept_ctx_t"
+  [arena ctx-ptr config-ptr]
+  (let [hosts-ptr (globalconf-get-hosts config-ptr)
+        accept-ctx-data {:ctx ctx-ptr
+                         :hosts hosts-ptr
+                         :ssl_ctx (mem/as-segment 0) ; NULL for now (no TLS)
+                         :http2_origin_frame (mem/as-segment 0) ; NULL
+                         :expect_proxy_line 0
+                         :libmemcached_receiver (mem/as-segment 0)}] ; NULL
+    (mem/serialize accept-ctx-data ::h2o-accept-ctx-t arena)))
 
 ;; POSIX socket syscalls via libc
 

@@ -22,3 +22,10 @@ void *clj_h2o_socket_get_write_cb(h2o_socket_t *sock) {
 size_t clj_h2o_globalconf_size(void) { return sizeof(h2o_globalconf_t); }
 
 size_t clj_h2o_context_size(void) { return sizeof(h2o_context_t); }
+
+size_t clj_h2o_accept_ctx_size(void) { return sizeof(h2o_accept_ctx_t); }
+
+void *clj_h2o_globalconf_get_hosts(void *globalconf_ptr) {
+  h2o_globalconf_t *conf = (h2o_globalconf_t *)globalconf_ptr;
+  return conf->hosts;
+}

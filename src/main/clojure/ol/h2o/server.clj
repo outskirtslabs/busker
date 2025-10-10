@@ -57,13 +57,31 @@
         dup-fds (vec (for [master-fd listener-fds]
                        (socket/dup-for-threads master-fd n-workers)))
 
+        ;; Create accept contexts for each worker/listener pair
+        accept-ctxs (vec (for [thread-idx (range n-workers)
+                               listener-idx (range (count listeners))]
+                           (native/create-accept-ctx
+                            arena
+                            (nth contexts thread-idx)
+                            config-ptr)))
+
+        ;; Create accept callbacks for each accept context
+        accept-callbacks (vec (for [accept-ctx-ptr accept-ctxs]
+                                (native/create-accept-callback accept-ctx-ptr)))
+
+        ;; Create listener sockets and start accepting
         listener-sockets (vec (for [thread-idx (range n-workers)]
                                 (vec (for [listener-idx (range (count listeners))]
-                                       (let [fd (nth (nth dup-fds listener-idx) thread-idx)]
-                                         (native/create-socket-for-loop
-                                          (nth loops thread-idx)
-                                          fd
-                                          H2O_SOCKET_FLAG_DONT_READ))))))
+                                       (let [fd (nth (nth dup-fds listener-idx) thread-idx)
+                                             sock-ptr (native/create-socket-for-loop
+                                                       (nth loops thread-idx)
+                                                       fd
+                                                       H2O_SOCKET_FLAG_DONT_READ)
+                                             cb-idx (+ (* thread-idx (count listeners)) listener-idx)
+                                             callback (nth accept-callbacks cb-idx)]
+                                         ;; Start reading to accept connections
+                                         (native/socket-read-start sock-ptr callback)
+                                         sock-ptr)))))
 
         evloop-system (evloop/create-system)
 
@@ -82,6 +100,8 @@
     (assoc server
            ::loops loops
            ::contexts contexts
+           ::accept-ctxs accept-ctxs
+           ::accept-callbacks accept-callbacks
            ::listener-fds listener-fds
            ::dup-fds dup-fds
            ::listener-sockets listener-sockets

@@ -40,4 +40,10 @@ size_t clj_h2o_globalconf_size(void);
 /* Return size of h2o_context_t for FFI allocation */
 size_t clj_h2o_context_size(void);
 
+/* Return size of h2o_accept_ctx_t for FFI allocation */
+size_t clj_h2o_accept_ctx_size(void);
+
+/* Get hosts pointer from h2o_globalconf_t */
+void *clj_h2o_globalconf_get_hosts(void *globalconf_ptr);
+
 #endif /* CLJ_H2O_SHIM_H */
