@@ -62,3 +62,23 @@ void *clj_h2o_get_content_type_token(void) { return H2O_TOKEN_CONTENT_TYPE; }
 static h2o_generator_t static_generator = {NULL, NULL};
 
 void *clj_h2o_get_static_generator(void) { return &static_generator; }
+
+void *clj_h2o_req_get_method(void *req_ptr) {
+  h2o_req_t *req = (h2o_req_t *)req_ptr;
+  return &req->method;
+}
+
+void *clj_h2o_req_get_path(void *req_ptr) {
+  h2o_req_t *req = (h2o_req_t *)req_ptr;
+  return &req->path;
+}
+
+void *clj_h2o_req_get_authority(void *req_ptr) {
+  h2o_req_t *req = (h2o_req_t *)req_ptr;
+  return &req->authority;
+}
+
+void *clj_h2o_req_get_query_at(void *req_ptr) {
+  h2o_req_t *req = (h2o_req_t *)req_ptr;
+  return &req->query_at;
+}

@@ -17,16 +17,20 @@
   "Create an h2o server with the given configuration.
    
    Options:
+   - :handler      Ring handler function (fn [request-map] response-map) (required)
    - :n-workers    Number of worker threads (default: 2)
    - :listeners    Vector of listener configs [{:port 8080}]
    - :max-connections Maximum concurrent connections (default: 1024)"
-  [{:keys [n-workers listeners max-connections]
+  [{:keys [handler n-workers listeners max-connections]
     :or {n-workers 2
          listeners [{:port 8080}]
          max-connections default-max-connections}}]
-  (let [config (h2o/create-server-config)]
+  (when-not handler
+    (throw (ex-info "Handler is required" {:handler handler})))
+  (let [config (h2o/create-server-config handler)]
     (merge config
-           {::n-workers n-workers
+           {::handler handler
+            ::n-workers n-workers
             ::listeners listeners
             ::max-connections max-connections
             ::started? (AtomicBoolean. false)

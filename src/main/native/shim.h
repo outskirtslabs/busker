@@ -58,6 +58,12 @@ void clj_h2o_req_set_reason(void *req_ptr, const char *reason);
 void *clj_h2o_req_get_pool(void *req_ptr);
 void *clj_h2o_req_get_res_headers(void *req_ptr);
 
+/* Request info extraction */
+void *clj_h2o_req_get_method(void *req_ptr);
+void *clj_h2o_req_get_path(void *req_ptr);
+void *clj_h2o_req_get_authority(void *req_ptr);
+void *clj_h2o_req_get_query_at(void *req_ptr);
+
 /* Standard tokens and generator for responses */
 void *clj_h2o_get_content_type_token(void);
 void *clj_h2o_get_static_generator(void);

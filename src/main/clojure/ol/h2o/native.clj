@@ -276,6 +276,26 @@
   clj_h2o_req_get_res_headers
   [::mem/pointer] ::mem/pointer)
 
+(defcfn req-get-method
+  "Get request method iovec pointer"
+  clj_h2o_req_get_method
+  [::mem/pointer] ::mem/pointer)
+
+(defcfn req-get-path
+  "Get request path iovec pointer"
+  clj_h2o_req_get_path
+  [::mem/pointer] ::mem/pointer)
+
+(defcfn req-get-authority
+  "Get request authority iovec pointer"
+  clj_h2o_req_get_authority
+  [::mem/pointer] ::mem/pointer)
+
+(defcfn req-get-query-at
+  "Get request query_at (SIZE_MAX if no query)"
+  clj_h2o_req_get_query_at
+  [::mem/pointer] ::mem/pointer)
+
 (defcfn mem-alloc-shared
   "Allocate memory from h2o pool. Returns pointer to allocated memory."
   h2o_mem_alloc_shared
@@ -291,51 +311,97 @@
         iovec-data {:base str-ptr :len len}]
     (mem/serialize iovec-data ::h2o-iovec-t arena)))
 
-(defn create-hello-handler
-  "Create a handler that responds with 'Hello World' to all requests.
+(defn read-iovec-string
+  "Read a string from an h2o_iovec_t pointer"
+  [iovec-ptr]
+  (let [iovec-size (mem/size-of ::h2o-iovec-t)
+        iovec-seg (mem/reinterpret iovec-ptr iovec-size)
+        iovec-data (mem/deserialize iovec-seg ::h2o-iovec-t)
+        base-ptr (:base iovec-data)
+        len (:len iovec-data)]
+    (when (and base-ptr (pos? len))
+      (let [reinterpreted (mem/reinterpret base-ptr len)
+            byte-arr (byte-array len)]
+        (java.lang.foreign.MemorySegment/copy reinterpreted 0
+                                              (java.lang.foreign.MemorySegment/ofArray byte-arr) 0
+                                              len)
+        (String. byte-arr "UTF-8")))))
+
+(defn build-ring-request
+  "Build a Ring request map from h2o_req_t pointer"
+  [req-ptr]
+  (let [method-iovec (req-get-method req-ptr)
+        path-iovec (req-get-path req-ptr)
+        authority-iovec (req-get-authority req-ptr)
+
+        method-str (read-iovec-string method-iovec)
+        path-str (read-iovec-string path-iovec)
+        authority-str (read-iovec-string authority-iovec)]
+
+    {:request-method (keyword (clojure.string/lower-case method-str))
+     :uri path-str
+     :server-name (or authority-str "localhost")
+     :server-port 8080
+     :scheme :http
+     :headers {}
+     :protocol "HTTP/1.1"
+     :remote-addr "127.0.0.1"}))
+
+(defn create-ring-handler
+  "Create an h2o handler that delegates to a Ring handler.
    Returns handler pointer that must be kept alive."
-  [pathconf-ptr]
+  [pathconf-ptr ring-handler]
   (let [handler-ptr (create-handler pathconf-ptr (handler-size))
         on-req-callback (mem/serialize
                          (fn [_self-ptr req-ptr]
                            (try
-                             ;; Set response status and reason
-                             (req-set-status req-ptr 200)
-                             (req-set-reason req-ptr "OK")
+                             ;; Build Ring request from h2o request
+                             (let [ring-req (build-ring-request req-ptr)
 
-                             ;; Get request pool for allocations
-                             (let [pool-ptr (req-get-pool req-ptr)]
+                                   ;; Call user's Ring handler
+                                   ring-resp (ring-handler ring-req)
 
-                               ;; Create response body
-                               (let [body "Hello World\n"
-                                     body-bytes (.getBytes ^String body "UTF-8")
-                                     body-len (long (alength body-bytes))
+                                   ;; Extract response fields
+                                   status (:status ring-resp 200)
+                                   body (:body ring-resp "")]
 
-                                     ;; Allocate body using h2o's pool allocator
-                                     body-ptr-raw (mem-alloc-shared pool-ptr body-len java.lang.foreign.MemorySegment/NULL)
-                                     body-ptr (mem/reinterpret body-ptr-raw body-len)]
+                               ;; Set response status
+                               (req-set-status req-ptr status)
+                               (req-set-reason req-ptr "OK")
 
-                                 ;; Write body bytes
-                                 (let [byte-array-seg (java.lang.foreign.MemorySegment/ofArray body-bytes)]
-                                   (java.lang.foreign.MemorySegment/copy byte-array-seg 0 body-ptr 0 body-len))
+                               ;; Get request pool for allocations
+                               (let [pool-ptr (req-get-pool req-ptr)]
 
-                                 ;; Allocate sendvec structure from pool
-                                 (let [sendvec-size (long (mem/size-of ::h2o-sendvec-t))
-                                       sendvec-ptr-raw (mem-alloc-shared pool-ptr sendvec-size java.lang.foreign.MemorySegment/NULL)
-                                       sendvec-seg (mem/reinterpret sendvec-ptr-raw sendvec-size)]
+                                 ;; Handle body as String for now
+                                 (let [body-str (str body)
+                                       body-bytes (.getBytes ^String body-str "UTF-8")
+                                       body-len (long (alength body-bytes))
 
-                                   ;; Initialize sendvec with raw bytes
-                                   (sendvec-init-raw sendvec-seg body-ptr-raw body-len)
+                                       ;; Allocate body using h2o's pool allocator
+                                       body-ptr-raw (mem-alloc-shared pool-ptr body-len java.lang.foreign.MemorySegment/NULL)
+                                       body-ptr (mem/reinterpret body-ptr-raw body-len)]
 
-                                   ;; Start response with generator
-                                   (let [generator-ptr (get-static-generator)]
-                                     (start-response req-ptr generator-ptr))
+                                   ;; Write body bytes
+                                   (let [byte-array-seg (java.lang.foreign.MemorySegment/ofArray body-bytes)]
+                                     (java.lang.foreign.MemorySegment/copy byte-array-seg 0 body-ptr 0 body-len))
 
-                                   ;; Send response body using sendvec (final chunk)
-                                   (sendvec req-ptr sendvec-seg 1 H2O_SEND_STATE_FINAL)))
+                                   ;; Allocate sendvec structure from pool
+                                   (let [sendvec-size (long (mem/size-of ::h2o-sendvec-t))
+                                         sendvec-ptr-raw (mem-alloc-shared pool-ptr sendvec-size java.lang.foreign.MemorySegment/NULL)
+                                         sendvec-seg (mem/reinterpret sendvec-ptr-raw sendvec-size)]
 
-                               ;; Return 0 for success
-                               0)
+                                     ;; Initialize sendvec with raw bytes
+                                     (sendvec-init-raw sendvec-seg body-ptr-raw body-len)
+
+                                     ;; Start response with generator
+                                     (let [generator-ptr (get-static-generator)]
+                                       (start-response req-ptr generator-ptr))
+
+                                     ;; Send response body using sendvec (final chunk)
+                                     (sendvec req-ptr sendvec-seg 1 H2O_SEND_STATE_FINAL)))
+
+                                 ;; Return 0 for success
+                                 0))
                              (catch Exception e
                                (println "Handler error:" (.getMessage e))
                                (.printStackTrace e)
@@ -345,9 +411,9 @@
     handler-ptr))
 
 (defn create-server-config
-  "Create and initialize h2o global configuration with a default host.
+  "Create and initialize h2o global configuration with a default host and Ring handler.
    Returns map with ::arena, ::config-ptr, ::hostconf-ptr, ::pathconf-ptr, ::handler-ptr"
-  []
+  [ring-handler]
   (let [arena (mem/auto-arena)
         size (globalconf-size)
         config-ptr (mem/alloc size arena)]
@@ -356,7 +422,7 @@
           host-iovec-data (mem/deserialize host-iovec-seg ::h2o-iovec-t)
           hostconf-ptr (config-register-host config-ptr host-iovec-data 65535)
           pathconf-ptr (config-register-path hostconf-ptr "/" 0)
-          handler-ptr (create-hello-handler pathconf-ptr)]
+          handler-ptr (create-ring-handler pathconf-ptr ring-handler)]
       {::arena arena
        ::config-ptr config-ptr
        ::hostconf-ptr hostconf-ptr
