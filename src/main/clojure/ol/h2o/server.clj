@@ -48,9 +48,9 @@
                  (println "Handler error:" (.getMessage e))
                  (.printStackTrace e)
                  (evloop/send-msg! evloop-system worker-id
-                                   [:h2o/send-response req {:status  500
+                                   [:h2o/send-response req {:status 500
                                                             :headers {"content-type" "text/plain"}
-                                                            :body    "Internal Server Error"}]))))))
+                                                            :body "Internal Server Error"}]))))))
 
 (defn on-request-callback
   [ring-handler evloop-system req-ptr]
@@ -70,11 +70,10 @@
 
 (defn create-server-config
   "Create and initialize h2o global configuration with a default host and Ring handler.
-   Uses global arena for server lifetime resources.
-   Returns map with ::h2o/arena, ::h2o/config-ptr, ::h2o/hostconf-ptr, ::h2o/pathconf-ptr, ::h2o/handler-ptr"
-  [ring-handler evloop-system]
-  (let [arena (mem/global-arena)
-        size (h2o/globalconf-size)
+   Uses provided arena for server lifetime resources.
+   Returns map with ::config-ptr, ::hostconf-ptr, ::pathconf-ptr, ::handler-ptr"
+  [arena ring-handler evloop-system]
+  (let [size (h2o/globalconf-size)
         config-ptr (mem/alloc size arena)]
     (h2o/config-init config-ptr)
     (let [host-iovec-seg (h2o/create-iovec "default" arena)
@@ -82,11 +81,10 @@
           hostconf-ptr (h2o/config-register-host config-ptr host-iovec-data 65535)
           pathconf-ptr (h2o/config-register-path hostconf-ptr "/" 0)
           handler-ptr (create-ring-handler pathconf-ptr ring-handler evloop-system)]
-      {::h2o/arena arena
-       ::h2o/config-ptr config-ptr
-       ::h2o/hostconf-ptr hostconf-ptr
-       ::h2o/pathconf-ptr pathconf-ptr
-       ::h2o/handler-ptr handler-ptr})))
+      {::config-ptr config-ptr
+       ::hostconf-ptr hostconf-ptr
+       ::pathconf-ptr pathconf-ptr
+       ::handler-ptr handler-ptr})))
 
 (defn worker-loop [shutting-down? loop-ptr worker]
   (when-not (.get ^AtomicBoolean shutting-down?)
@@ -106,10 +104,12 @@
          max-connections default-max-connections}}]
   (when-not handler
     (throw (ex-info "Handler is required" {:handler handler})))
-  (let [evloop-system (evloop/create-system)
-        config (create-server-config handler evloop-system)]
+  (let [arena (mem/shared-arena)
+        evloop-system (evloop/create-system)
+        config (create-server-config arena handler evloop-system)]
     (merge config
-           {::handler handler
+           {::arena arena
+            ::handler handler
             ::n-workers n-workers
             ::listeners listeners
             ::max-connections max-connections
@@ -126,8 +126,8 @@
   (when (.get ^AtomicBoolean (::started? server))
     (throw (ex-info "Server already started" {:server server})))
 
-  (let [config-ptr (::h2o/config-ptr server)
-        arena (::h2o/arena server)
+  (let [config-ptr (::config-ptr server)
+        arena (::arena server)
         n-workers (::n-workers server)
         listeners (::listeners server)
         shutting-down? (::shutting-down? server)
@@ -195,7 +195,14 @@
 
 (defn stop-server
   "Stop the h2o server and clean up resources.
-   Note: The config is kept alive and will be cleaned up when the server object is GC'd."
+   Follows proper shutdown order:
+   1. Signal shutdown to workers
+   2. Stop event loops and wait for workers to exit
+   3. Dispose h2o contexts (sends GOAWAY, cleans up connections)
+   4. Destroy event loops
+   5. Close file descriptors
+   6. Dispose h2o config
+   7. Close arena (frees all server-scoped memory)"
   [server]
   (when-not (.get ^AtomicBoolean (::started? server))
     (throw (ex-info "Server not started" {:server server})))
@@ -208,6 +215,10 @@
     (socket/close-fd! fd))
   (doseq [fd (::listener-fds server)]
     (socket/close-fd! fd))
+  (when-let [config-ptr (::config-ptr server)]
+    (h2o/config-dispose config-ptr))
+  (when-let [arena (::arena server)]
+    (.close ^java.lang.AutoCloseable arena))
   (.set ^AtomicBoolean (::started? server) false)
   server)
 
