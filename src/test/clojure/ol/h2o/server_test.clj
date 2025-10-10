@@ -170,6 +170,78 @@
           (is (string? (:protocol req)))
           (is (map? (:headers req))))))))
 
+(deftest test-ring-body-types
+  (testing "All Ring StreamableResponseBody types work correctly"
+    (with-server [_server (test-server (fn [{:keys [uri]}]
+                                         (case uri
+                                           "/string" {:status 200
+                                                      :headers {"content-type" "text/plain"}
+                                                      :body "Hello String"}
+
+                                           "/bytes" {:status 200
+                                                     :headers {"content-type" "application/octet-stream"}
+                                                     :body (.getBytes "Hello Bytes" "UTF-8")}
+
+                                           "/seq" {:status 200
+                                                   :headers {"content-type" "text/plain"}
+                                                   :body (seq ["Hello " "from " "sequence"])}
+
+                                           "/file" (let [temp-file (java.io.File/createTempFile "test" ".txt")]
+                                                     (.deleteOnExit temp-file)
+                                                     (spit temp-file "Hello from file")
+                                                     {:status 200
+                                                      :headers {"content-type" "text/plain"}
+                                                      :body temp-file})
+
+                                           "/stream" (let [data "Hello from stream"
+                                                           input-stream (java.io.ByteArrayInputStream. (.getBytes data "UTF-8"))]
+                                                       {:status 200
+                                                        :headers {"content-type" "text/plain"}
+                                                        :body input-stream})
+
+                                           "/nil-body" {:status 200
+                                                        :headers {"content-type" "text/plain"}
+                                                        :body nil}
+
+                                           "/no-body" {:status 204
+                                                       :headers {}}
+
+                                           {:status 404})))]
+      (testing "String body"
+        (let [response (req :get "/string")]
+          (is (= 200 (:status response)))
+          (is (= "Hello String" (:body response)))))
+
+      (testing "Byte array body"
+        (let [response (req :get "/bytes")]
+          (is (= 200 (:status response)))
+          (is (= "Hello Bytes" (:body response)))))
+
+      (testing "Sequence body"
+        (let [response (req :get "/seq")]
+          (is (= 200 (:status response)))
+          (is (= "Hello from sequence" (:body response)))))
+
+      (testing "File body"
+        (let [response (req :get "/file")]
+          (is (= 200 (:status response)))
+          (is (= "Hello from file" (:body response)))))
+
+      (testing "InputStream body"
+        (let [response (req :get "/stream")]
+          (is (= 200 (:status response)))
+          (is (= "Hello from stream" (:body response)))))
+
+      (testing "Nil body"
+        (let [response (req :get "/nil-body")]
+          (is (= 200 (:status response)))
+          (is (= "" (:body response)))))
+
+      (testing "No body (204)"
+        (let [response (req :get "/no-body")]
+          (is (= 204 (:status response)))
+          (is (= "" (:body response))))))))
+
 ;; TLS tests disabled - not yet implemented
 #_(deftest test-http2-request
     (let [cert-file (.getAbsolutePath (io/file "src/test/fixtures/server.crt"))

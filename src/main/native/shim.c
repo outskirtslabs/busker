@@ -47,6 +47,11 @@ void clj_h2o_req_set_reason(void *req_ptr, const char *reason) {
   req->res.reason = reason;
 }
 
+void clj_h2o_req_set_content_length(void *req_ptr, size_t content_length) {
+  h2o_req_t *req = (h2o_req_t *)req_ptr;
+  req->res.content_length = content_length;
+}
+
 void *clj_h2o_req_get_pool(void *req_ptr) {
   h2o_req_t *req = (h2o_req_t *)req_ptr;
   return &req->pool;

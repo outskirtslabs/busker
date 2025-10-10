@@ -55,6 +55,7 @@ size_t clj_h2o_handler_size(void);
 /* h2o_req_t field accessors - minimal helpers for struct access */
 void clj_h2o_req_set_status(void *req_ptr, int status);
 void clj_h2o_req_set_reason(void *req_ptr, const char *reason);
+void clj_h2o_req_set_content_length(void *req_ptr, size_t content_length);
 void *clj_h2o_req_get_pool(void *req_ptr);
 void *clj_h2o_req_get_res_headers(void *req_ptr);
 

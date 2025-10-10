@@ -298,6 +298,11 @@
   clj_h2o_req_set_reason
   [::mem/pointer ::mem/c-string] ::mem/void)
 
+(defcfn req-set-content-length
+  "Set response content length"
+  clj_h2o_req_set_content_length
+  [::mem/pointer ::mem/long] ::mem/void)
+
 (defcfn req-get-pool
   "Get request memory pool pointer"
   clj_h2o_req_get_pool
@@ -596,16 +601,28 @@
                                    ring-resp (ring-handler ring-req)
                                    status (:status ring-resp 200)
                                    headers (:headers ring-resp {})
-                                   body (:body ring-resp "")]
+                                   body (:body ring-resp)
 
+                                   ;; Parse content-length header if present
+                                   content-length-str (get headers "content-length")
+                                   content-length (when content-length-str
+                                                    (try
+                                                      (Long/parseLong (str content-length-str))
+                                                      (catch Exception _ nil)))
+
+                                   ;; Filter out content-length - h2o will add it automatically
+                                   headers-to-send (dissoc headers "content-length")]
+
+                               ;; Set status and content-length
                                (req-set-status req-ptr status)
-                               (req-set-reason req-ptr "OK")
+                               (when content-length
+                                 (req-set-content-length req-ptr content-length))
 
                                (let [pool-ptr (req-get-pool req-ptr)
                                      res-headers-ptr (req-get-res-headers req-ptr)]
 
                                  ;; Add headers from Ring response to h2o response
-                                 (doseq [[name value] headers]
+                                 (doseq [[name value] headers-to-send]
                                    (let [name-lower (str/lower-case (str name))
                                          name-orig (str name)
                                          value-str (str value)
@@ -635,35 +652,45 @@
                                      ;; Add header using raw pointers
                                      (add-header-by-str pool-ptr res-headers-ptr
                                                         name-lower-ptr-raw name-lower-len
-                                                        0 ; maybe_token: don't check for tokens
+                                                        0
                                                         name-orig-ptr-raw
                                                         value-ptr-raw value-len)))
 
-                                 (let [body-str (cond
-                                                  (string? body) body
-                                                  (nil? body) ""
-                                                  :else (str body))
-                                       body-bytes (.getBytes ^String body-str "UTF-8")
-                                       body-len (long (alength body-bytes))
-                                       body-ptr-raw (mem-alloc-shared pool-ptr body-len java.lang.foreign.MemorySegment/NULL)
-                                       body-ptr (mem/reinterpret body-ptr-raw body-len)]
+                                 ;; Buffer all writes using Ring protocol
+                                 (let [buffer (java.io.ByteArrayOutputStream.)
+                                       output-stream (proxy [java.io.OutputStream] []
+                                                       (write
+                                                         ([b-or-arr]
+                                                          (if (int? b-or-arr)
+                                                            (.write buffer (int b-or-arr))
+                                                            (.write buffer ^bytes b-or-arr)))
+                                                         ([bytes off len]
+                                                          (.write buffer ^bytes bytes (int off) (int len))))
+                                                       (close [])
+                                                       (flush []))]
 
-                                   (when (pos? body-len)
-                                     (let [byte-array-seg (java.lang.foreign.MemorySegment/ofArray body-bytes)]
-                                       (java.lang.foreign.MemorySegment/copy byte-array-seg 0 body-ptr 0 body-len)))
+                                   ;; Use Ring protocol to write body to stream
+                                   (when body
+                                     (ring-protocols/write-body-to-stream body ring-resp output-stream))
 
-                                   (let [sendvec-size (long (mem/size-of ::h2o-sendvec-t))
-                                         sendvec-ptr-raw (mem-alloc-shared pool-ptr sendvec-size java.lang.foreign.MemorySegment/NULL)
-                                         sendvec-seg (mem/reinterpret sendvec-ptr-raw sendvec-size)]
+                                   ;; Now send everything as one FINAL chunk
+                                   (let [body-bytes (.toByteArray buffer)
+                                         body-len (alength body-bytes)
+                                         body-ptr-raw (mem-alloc-shared pool-ptr body-len java.lang.foreign.MemorySegment/NULL)
+                                         body-ptr (mem/reinterpret body-ptr-raw body-len)]
+                                     (when (pos? body-len)
+                                       (java.lang.foreign.MemorySegment/copy
+                                        (java.lang.foreign.MemorySegment/ofArray body-bytes) 0
+                                        body-ptr 0 body-len))
+                                     (let [sendvec-size (mem/size-of ::h2o-sendvec-t)
+                                           sendvec-ptr-raw (mem-alloc-shared pool-ptr sendvec-size java.lang.foreign.MemorySegment/NULL)
+                                           sendvec-seg (mem/reinterpret sendvec-ptr-raw sendvec-size)]
+                                       (sendvec-init-raw sendvec-seg body-ptr-raw body-len)
+                                       (let [generator-ptr (get-static-generator)]
+                                         (start-response req-ptr generator-ptr))
+                                       (sendvec req-ptr sendvec-seg 1 H2O_SEND_STATE_FINAL)))))
 
-                                     (sendvec-init-raw sendvec-seg body-ptr-raw body-len)
-
-                                     (let [generator-ptr (get-static-generator)]
-                                       (start-response req-ptr generator-ptr))
-
-                                     (sendvec req-ptr sendvec-seg 1 H2O_SEND_STATE_FINAL)))
-
-                                 0))
+                               0)
                              (catch Exception e
                                (println "Handler error:" (.getMessage e))
                                (.printStackTrace e)
