@@ -1,5 +1,4 @@
 (ns ol.h2o.evloop
-  (:require [clojure.string :as str])
   (:import
    [java.util.concurrent.atomic AtomicBoolean]
    [java.util.concurrent

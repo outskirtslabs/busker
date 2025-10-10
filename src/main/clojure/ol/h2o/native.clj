@@ -397,13 +397,11 @@
         authority-iovec (req-get-authority req-ptr)
         scheme-iovec (req-get-scheme req-ptr)
         entity-iovec (req-get-entity req-ptr)
-
         method-str (read-iovec-string method-iovec)
         path-str (read-iovec-string path-iovec)
         authority-str (read-iovec-string authority-iovec)
         scheme-str (when-not (mem/null? scheme-iovec)
                      (read-iovec-string scheme-iovec))
-
         ;; Get version as short (uint16_t)
         version-int (req-get-version req-ptr)
         protocol-str (case version-int
@@ -412,7 +410,7 @@
                        0x200 "HTTP/2.0"
                        "HTTP/1.1")
 
-;; Parse query string from query_at - for now just parse from path
+        ;; Parse query string from query_at - for now just parse from path
         ;; TODO: Use query_at field properly once we figure out proper size_t handling
         query-idx (.indexOf path-str "?")
         has-query? (>= query-idx 0)
@@ -653,7 +651,7 @@
 (defn create-request-callback
   "Create the on-req upcall callback for h2o.
    This is called by native code when a request arrives."
-  [ring-handler evloop-system callback]
+  [callback]
   (mem/serialize
    (fn [_self-ptr req-ptr]
      (try
