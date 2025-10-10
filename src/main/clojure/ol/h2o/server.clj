@@ -96,8 +96,39 @@
        ::pathconf-ptr pathconf-ptr
        ::handler-ptr handler-ptr})))
 
-(defn worker-loop [shutting-down? loop-ptr worker]
+(defn update-listener-state!
+  "Throttle TCP listeners by starting/stopping accept callbacks based on connection count.
+   Prevents accepting new connections when at/over max-connections limit.
+   
+   QUIC listeners (when supported) must remain active as their UDP socket handles
+   all connections; only TCP listeners are throttled here."
+  [server thread-idx]
+  (let [active (.get ^AtomicLong (::active-connections server))
+        max-conns (::max-connections server)
+        should-accept? (< active max-conns)
+        listeners (::listeners server)
+        n-listeners (count listeners)
+        listener-socks (nth (::listener-sockets server) thread-idx)
+        accept-callbacks (::accept-callbacks server)]
+
+    (doseq [listener-idx (range n-listeners)]
+      (let [sock-ptr (nth listener-socks listener-idx)]
+        (when-not (mem/null? sock-ptr)
+          ;; TODO: Skip QUIC listeners when implemented (check listener config)
+          (if should-accept?
+            ;; Below limit: ensure TCP listeners are accepting
+            (when (zero? (h2o/socket-reading? sock-ptr))
+              (let [cb-idx (+ (* thread-idx n-listeners) listener-idx)
+                    callback (nth accept-callbacks cb-idx)]
+                (h2o/socket-read-start sock-ptr callback)))
+            ;; At/over limit: stop accepting new connections
+            (when-not (zero? (h2o/socket-reading? sock-ptr))
+              (h2o/socket-read-stop sock-ptr))))))))
+
+(defn worker-loop [server thread-idx shutting-down? loop-ptr worker]
   (when-not (.get ^AtomicBoolean shutting-down?)
+    ;; Throttle listeners based on connection count before processing events
+    (update-listener-state! server thread-idx)
     (h2o/evloop-run loop-ptr (int (:max-wait-ms worker)))))
 
 (defn create-server
@@ -183,7 +214,7 @@
                           (let [loop-ptr (nth loops thread-idx)]
                             (evloop/start-worker!
                              evloop-system
-                             (partial worker-loop shutting-down? loop-ptr)
+                             (partial worker-loop server thread-idx shutting-down? loop-ptr)
                              {:loop-ptr loop-ptr
                               :thread-idx thread-idx}
                              {:thread-name-prefix "h2o-worker"
