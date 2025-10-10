@@ -1,7 +1,7 @@
 (ns ol.h2o.server
   (:require
    [ol.h2o.evloop :as evloop]
-   [ol.h2o.native :as native]
+   [ol.h2o.native :as h2o]
    [ol.h2o.native.socket :as socket])
   (:import
    [java.util.concurrent.atomic AtomicBoolean]))
@@ -11,7 +11,7 @@
 
 (defn worker-loop [shutting-down? loop-ptr worker]
   (when-not (.get ^AtomicBoolean shutting-down?)
-    (native/evloop-run loop-ptr (int (:max-wait-ms worker)))))
+    (h2o/evloop-run loop-ptr (int (:max-wait-ms worker)))))
 
 (defn create-server
   "Create an h2o server with the given configuration.
@@ -24,7 +24,7 @@
     :or {n-workers 2
          listeners [{:port 8080}]
          max-connections default-max-connections}}]
-  (let [config (native/create-server-config)]
+  (let [config (h2o/create-server-config)]
     (merge config
            {::n-workers n-workers
             ::listeners listeners
@@ -42,14 +42,14 @@
   (when (.get ^AtomicBoolean (::started? server))
     (throw (ex-info "Server already started" {:server server})))
 
-  (let [config-ptr (::native/config-ptr server)
-        arena (::native/arena server)
+  (let [config-ptr (::h2o/config-ptr server)
+        arena (::h2o/arena server)
         n-workers (::n-workers server)
         listeners (::listeners server)
         shutting-down? (::shutting-down? server)
 
-        loops (native/create-loops n-workers)
-        contexts (native/create-contexts arena loops config-ptr)
+        loops (h2o/create-loops n-workers)
+        contexts (h2o/create-contexts arena loops config-ptr)
 
         listener-fds (vec (for [{:keys [port]} listeners]
                             (socket/open-master-listener {:port port})))
@@ -60,27 +60,27 @@
         ;; Create accept contexts for each worker/listener pair
         accept-ctxs (vec (for [thread-idx (range n-workers)
                                listener-idx (range (count listeners))]
-                           (native/create-accept-ctx
+                           (h2o/create-accept-ctx
                             arena
                             (nth contexts thread-idx)
                             config-ptr)))
 
         ;; Create accept callbacks for each accept context
         accept-callbacks (vec (for [accept-ctx-ptr accept-ctxs]
-                                (native/create-accept-callback accept-ctx-ptr)))
+                                (h2o/create-accept-callback accept-ctx-ptr)))
 
         ;; Create listener sockets and start accepting
         listener-sockets (vec (for [thread-idx (range n-workers)]
                                 (vec (for [listener-idx (range (count listeners))]
                                        (let [fd (nth (nth dup-fds listener-idx) thread-idx)
-                                             sock-ptr (native/create-socket-for-loop
+                                             sock-ptr (h2o/create-socket-for-loop
                                                        (nth loops thread-idx)
                                                        fd
                                                        H2O_SOCKET_FLAG_DONT_READ)
                                              cb-idx (+ (* thread-idx (count listeners)) listener-idx)
                                              callback (nth accept-callbacks cb-idx)]
                                          ;; Start reading to accept connections
-                                         (native/socket-read-start sock-ptr callback)
+                                         (h2o/socket-read-start sock-ptr callback)
                                          sock-ptr)))))
 
         evloop-system (evloop/create-system)
@@ -115,14 +115,14 @@
     (throw (ex-info "Server not started" {:server server})))
   (.set ^AtomicBoolean (::shutting-down? server) true)
   (evloop/stop-all! (::evloop-system server))
-  (native/dispose-contexts (::contexts server))
-  (native/destroy-loops (::loops server))
+  (h2o/dispose-contexts (::contexts server))
+  (h2o/destroy-loops (::loops server))
   (doseq [dup-fd-vec (::dup-fds server)
           fd dup-fd-vec]
     (socket/close-fd! fd))
   (doseq [fd (::listener-fds server)]
     (socket/close-fd! fd))
-  (native/dispose-server-config (::config-ptr server))
+  (h2o/dispose-server-config (::config-ptr server))
   (.set ^AtomicBoolean (::started? server) false)
   server)
 
