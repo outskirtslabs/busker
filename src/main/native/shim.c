@@ -19,6 +19,13 @@ void *clj_h2o_socket_get_write_cb(h2o_socket_t *sock) {
   return sock ? (void *)sock->_cb.write : NULL;
 }
 
+void clj_h2o_socket_set_on_close(h2o_socket_t *sock, void *callback, void *data) {
+  if (sock) {
+    sock->on_close.cb = (void (*)(void *))callback;
+    sock->on_close.data = data;
+  }
+}
+
 size_t clj_h2o_globalconf_size(void) { return sizeof(h2o_globalconf_t); }
 
 size_t clj_h2o_context_size(void) { return sizeof(h2o_context_t); }

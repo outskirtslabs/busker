@@ -1,5 +1,6 @@
 (ns ol.h2o.server
   (:require
+   [coffi.ffi :as ffi]
    [coffi.mem :as mem]
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
@@ -7,7 +8,7 @@
    [ol.h2o.response :as response])
   (:import
    [java.util.concurrent Executors]
-   [java.util.concurrent.atomic AtomicBoolean]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicLong]))
 
 (def ^:const default-max-connections 1024)
 (def ^:const H2O_SOCKET_FLAG_DONT_READ 0x20)
@@ -68,6 +69,15 @@
     (h2o/handler-set-on-req handler-ptr on-req-callback)
     handler-ptr))
 
+(defn create-connection-close-callback
+  "Create callback for socket close events to track connection count.
+   The callback signature is: void on_close(void *data)"
+  [active-connections]
+  (mem/serialize
+   (fn [_data-ptr]
+     (.decrementAndGet ^AtomicLong active-connections))
+   [::ffi/fn [::mem/pointer] ::mem/void]))
+
 (defn create-server-config
   "Create and initialize h2o global configuration with a default host and Ring handler.
    Uses provided arena for server lifetime resources.
@@ -113,6 +123,7 @@
             ::n-workers n-workers
             ::listeners listeners
             ::max-connections max-connections
+            ::active-connections (AtomicLong. 0)
             ::started? (AtomicBoolean. false)
             ::shutting-down? (AtomicBoolean. false)
             ::loops []
@@ -132,10 +143,13 @@
         listeners (::listeners server)
         shutting-down? (::shutting-down? server)
         evloop-system (::evloop-system server)
+        active-connections (::active-connections server)
         message-handler evloop-msg-processor
 
         loops (h2o/create-loops n-workers)
         contexts (h2o/create-contexts arena loops config-ptr)
+
+        on-close-callback (create-connection-close-callback active-connections)
 
         listener-fds (vec (for [{:keys [port]} listeners]
                             (socket/open-master-listener {:port port})))
@@ -143,7 +157,6 @@
         dup-fds (vec (for [master-fd listener-fds]
                        (socket/dup-for-threads master-fd n-workers)))
 
-        ;; Create accept contexts for each worker/listener pair
         accept-ctxs (vec (for [thread-idx (range n-workers)
                                listener-idx (range (count listeners))]
                            (h2o/create-accept-ctx
@@ -151,11 +164,9 @@
                             (nth contexts thread-idx)
                             config-ptr)))
 
-        ;; Create accept callbacks for each accept context
         accept-callbacks (vec (for [accept-ctx-ptr accept-ctxs]
-                                (h2o/create-accept-callback accept-ctx-ptr)))
+                                (h2o/create-accept-callback accept-ctx-ptr active-connections on-close-callback)))
 
-        ;; Create listener sockets and start accepting
         listener-sockets (vec (for [thread-idx (range n-workers)]
                                 (vec (for [listener-idx (range (count listeners))]
                                        (let [fd (nth (nth dup-fds listener-idx) thread-idx)
@@ -165,7 +176,6 @@
                                                        H2O_SOCKET_FLAG_DONT_READ)
                                              cb-idx (+ (* thread-idx (count listeners)) listener-idx)
                                              callback (nth accept-callbacks cb-idx)]
-                                         ;; Start reading to accept connections
                                          (h2o/socket-read-start sock-ptr callback)
                                          sock-ptr)))))
 
@@ -187,6 +197,7 @@
            ::contexts contexts
            ::accept-ctxs accept-ctxs
            ::accept-callbacks accept-callbacks
+           ::on-close-callback on-close-callback
            ::listener-fds listener-fds
            ::dup-fds dup-fds
            ::listener-sockets listener-sockets
@@ -198,27 +209,39 @@
    Follows proper shutdown order:
    1. Signal shutdown to workers
    2. Stop event loops and wait for workers to exit
-   3. Dispose h2o contexts (sends GOAWAY, cleans up connections)
-   4. Destroy event loops
-   5. Close file descriptors
-   6. Dispose h2o config
-   7. Close arena (frees all server-scoped memory)"
+   3. Request graceful shutdown on contexts (sends GOAWAY to HTTP/2 clients)
+   4. Dispose h2o contexts (cleans up connections)
+   5. Destroy event loops
+   6. Close file descriptors
+   7. Dispose h2o config
+   8. Close arena (frees all server-scoped memory)"
   [server]
   (when-not (.get ^AtomicBoolean (::started? server))
     (throw (ex-info "Server not started" {:server server})))
+
   (.set ^AtomicBoolean (::shutting-down? server) true)
+
   (evloop/stop-all! (::evloop-system server))
+
+  (doseq [ctx (::contexts server)]
+    (h2o/context-request-shutdown ctx))
+
   (h2o/dispose-contexts (::contexts server))
+
   (h2o/destroy-loops (::loops server))
+
   (doseq [dup-fd-vec (::dup-fds server)
           fd dup-fd-vec]
     (socket/close-fd! fd))
   (doseq [fd (::listener-fds server)]
     (socket/close-fd! fd))
+
   (when-let [config-ptr (::config-ptr server)]
     (h2o/config-dispose config-ptr))
+
   (when-let [arena (::arena server)]
     (.close ^java.lang.AutoCloseable arena))
+
   (.set ^AtomicBoolean (::started? server) false)
   server)
 

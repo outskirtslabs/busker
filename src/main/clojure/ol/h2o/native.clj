@@ -165,10 +165,28 @@
   h2o_socket_read_start
   [::mem/pointer ::mem/pointer] ::mem/void)
 
+(defcfn socket-read-stop
+  "Stop reading from socket.
+   
+   Parameters:
+   - sock: pointer to h2o_socket_t"
+  h2o_socket_read_stop
+  [::mem/pointer] ::mem/void)
+
 (defcfn socket-reading? "clj_h2o_socket_is_reading" [::mem/pointer] ::mem/int)
 (defcfn socket-writing? "clj_h2o_socket_is_writing" [::mem/pointer] ::mem/int)
 (defcfn socket-read-cb "clj_h2o_socket_get_read_cb" [::mem/pointer] ::mem/pointer)
 (defcfn socket-write-cb "clj_h2o_socket_get_write_cb" [::mem/pointer] ::mem/pointer)
+
+(defcfn socket-set-on-close
+  "Set socket close callback for connection tracking.
+   
+   Parameters:
+   - sock: pointer to h2o_socket_t
+   - callback: function pointer for on_close callback
+   - data: user data pointer passed to callback"
+  clj_h2o_socket_set_on_close
+  [::mem/pointer ::mem/pointer ::mem/pointer] ::mem/void)
 
 (defcfn evloop-socket-accept
   "Accept new connection from listening socket.
@@ -632,19 +650,23 @@
     (evloop-destroy loop)))
 
 (defn create-accept-callback
-  "Create accept callback for a listener socket.
-   The callback signature is: void on_accept(h2o_socket_t *listener, const char *err)"
-  [accept-ctx-ptr]
+  "Create accept callback for a listener socket with connection tracking.
+   The callback signature is: void on_accept(h2o_socket_t *listener, const char *err)
+   
+   Parameters:
+   - accept-ctx-ptr: pointer to h2o_accept_ctx_t
+   - active-connections: AtomicLong for connection counting
+   - on-close-callback: callback function pointer for socket close"
+  [accept-ctx-ptr active-connections on-close-callback]
   (mem/serialize
    (fn [listener-ptr err-ptr]
      (when-not (mem/null? err-ptr)
-       ;; Error occurred during accept - just return
        nil)
 
-     ;; Accept the connection
      (let [sock-ptr (evloop-socket-accept listener-ptr)]
        (when-not (mem/null? sock-ptr)
-         ;; Pass the socket to h2o for HTTP processing
+         (.incrementAndGet ^java.util.concurrent.atomic.AtomicLong active-connections)
+         (socket-set-on-close sock-ptr on-close-callback (mem/as-segment 0))
          (h2o-accept accept-ctx-ptr sock-ptr))))
    [::ffi/fn [::mem/pointer ::mem/c-string] ::mem/void]))
 

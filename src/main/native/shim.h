@@ -34,6 +34,9 @@ int clj_h2o_socket_is_writing(h2o_socket_t *sock);
 void *clj_h2o_socket_get_read_cb(h2o_socket_t *sock);
 void *clj_h2o_socket_get_write_cb(h2o_socket_t *sock);
 
+/* Socket on_close callback support for connection tracking */
+void clj_h2o_socket_set_on_close(h2o_socket_t *sock, void *callback, void *data);
+
 /* Return size of h2o_globalconf_t for FFI allocation */
 size_t clj_h2o_globalconf_size(void);
 
