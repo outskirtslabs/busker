@@ -19,7 +19,8 @@ void *clj_h2o_socket_get_write_cb(h2o_socket_t *sock) {
   return sock ? (void *)sock->_cb.write : NULL;
 }
 
-void clj_h2o_socket_set_on_close(h2o_socket_t *sock, void *callback, void *data) {
+void clj_h2o_socket_set_on_close(h2o_socket_t *sock, void *callback,
+                                 void *data) {
   if (sock) {
     sock->on_close.cb = (void (*)(void *))callback;
     sock->on_close.data = data;
@@ -118,4 +119,24 @@ uint32_t clj_h2o_req_get_headers_size(void *req_ptr) {
 uint16_t clj_h2o_req_get_version(void *req_ptr) {
   h2o_req_t *req = (h2o_req_t *)req_ptr;
   return req->version;
+}
+
+uint64_t clj_h2o_evloop_now(void *loop_ptr) {
+  h2o_evloop_t *loop = (h2o_evloop_t *)loop_ptr;
+  return loop->_now_millisec;
+}
+
+size_t clj_h2o_context_get_active_conns(void *ctx_ptr) {
+  h2o_context_t *ctx = (h2o_context_t *)ctx_ptr;
+  return ctx->_conns.num_conns.active;
+}
+
+size_t clj_h2o_context_get_idle_conns(void *ctx_ptr) {
+  h2o_context_t *ctx = (h2o_context_t *)ctx_ptr;
+  return ctx->_conns.num_conns.idle;
+}
+
+size_t clj_h2o_context_get_shutdown_conns(void *ctx_ptr) {
+  h2o_context_t *ctx = (h2o_context_t *)ctx_ptr;
+  return ctx->_conns.num_conns.shutdown;
 }

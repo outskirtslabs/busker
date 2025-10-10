@@ -125,11 +125,66 @@
             (when-not (zero? (h2o/socket-reading? sock-ptr))
               (h2o/socket-read-stop sock-ptr))))))))
 
-(defn worker-loop [server thread-idx shutting-down? loop-ptr worker]
-  (when-not (.get ^AtomicBoolean shutting-down?)
-    ;; Throttle listeners based on connection count before processing events
-    (update-listener-state! server thread-idx)
-    (h2o/evloop-run loop-ptr (int (:max-wait-ms worker)))))
+(defn- initiate-worker-shutdown!
+  "Phase 1-3 of graceful shutdown: stop accepting, close listeners, request context shutdown"
+  [listener-socks n-listeners loop-ptr ctx-ptr]
+  ;; Phase 1: Stop accepting new connections
+  (doseq [listener-idx (range n-listeners)]
+    (let [sock-ptr (nth listener-socks listener-idx)]
+      (when (and (not (mem/null? sock-ptr))
+                 (not (zero? (h2o/socket-reading? sock-ptr))))
+        (h2o/socket-read-stop sock-ptr))))
+
+  ;; Process stop events immediately
+  (h2o/evloop-run loop-ptr 0)
+
+  ;; Phase 2: Close listener sockets
+  (doseq [listener-idx (range n-listeners)]
+    (let [sock-ptr (nth listener-socks listener-idx)]
+      (when-not (mem/null? sock-ptr)
+        (h2o/socket-close sock-ptr))))
+
+  ;; Phase 3: Request graceful shutdown (sends GOAWAY to HTTP/2 clients)
+  (h2o/context-request-shutdown ctx-ptr))
+
+(defn- all-connections-drained?
+  "Check if all connections for this context are closed"
+  [ctx-ptr]
+  (and (zero? (h2o/context-get-active-conns ctx-ptr))
+       (zero? (h2o/context-get-shutdown-conns ctx-ptr))))
+
+(defn- check-and-initiate-shutdown!
+  "Check shutdown flag and initiate shutdown phases if needed.
+   Returns true if shutdown is active (either just initiated or already in progress)."
+  [shutdown-initiated? shutting-down? listener-socks n-listeners loop-ptr ctx-ptr]
+  (let [should-shutdown? (.get ^AtomicBoolean shutting-down?)]
+    (when (and should-shutdown? (not shutdown-initiated?))
+      (initiate-worker-shutdown! listener-socks n-listeners loop-ptr ctx-ptr))
+    should-shutdown?))
+
+(defn worker-loop [server thread-idx shutting-down? loop-ptr ctx-ptr listener-socks worker {:keys [shutdown-initiated?]}]
+  (let [n-listeners (count (::listeners server))
+        shutdown-initiated? (check-and-initiate-shutdown! shutdown-initiated? shutting-down? listener-socks n-listeners loop-ptr ctx-ptr)]
+
+    ;; Exit condition: shutdown initiated AND all connections drained
+    ;; this will stop the thread on the next iteration
+    (when (and shutdown-initiated? (all-connections-drained? ctx-ptr))
+      (evloop/send-msg! (::evloop-system server) (:id worker) evloop/stop-msg))
+
+    ;; Perform periodic cleanup tasks
+    (let [now (h2o/evloop-now loop-ptr)
+          max-wait (h2o/cleanup-thread now ctx-ptr)]
+
+      ;; Throttle listeners based on connection count (only if not shutting down)
+      (when-not shutdown-initiated?
+        (update-listener-state! server thread-idx))
+
+      ;; Responsive during shutdown: cap wait at 100ms
+      (let [wait-ms (if shutdown-initiated?
+                      100
+                      (min max-wait 100))]
+        (h2o/evloop-run loop-ptr wait-ms)))
+    {:shutdown-initiated? shutdown-initiated?}))
 
 (defn create-server
   "Create an h2o server with the given configuration.
@@ -211,10 +266,12 @@
                                          sock-ptr)))))
 
         worker-ids (vec (for [thread-idx (range n-workers)]
-                          (let [loop-ptr (nth loops thread-idx)]
+                          (let [loop-ptr (nth loops thread-idx)
+                                ctx-ptr (nth contexts thread-idx)
+                                listener-socks-for-thread (nth listener-sockets thread-idx)]
                             (evloop/start-worker!
                              evloop-system
-                             (partial worker-loop server thread-idx shutting-down? loop-ptr)
+                             (fn [worker loop-state] (worker-loop server thread-idx shutting-down? loop-ptr ctx-ptr listener-socks-for-thread worker loop-state))
                              {:loop-ptr loop-ptr
                               :thread-idx thread-idx}
                              {:thread-name-prefix "h2o-worker"
@@ -239,34 +296,37 @@
   "Stop the h2o server and clean up resources.
    Follows proper shutdown order:
    1. Signal shutdown to workers
-   2. Stop event loops and wait for workers to exit
-   3. Request graceful shutdown on contexts (sends GOAWAY to HTTP/2 clients)
-   4. Dispose h2o contexts (cleans up connections)
-   5. Destroy event loops
-   6. Close file descriptors
-   7. Dispose h2o config
-   8. Close arena (frees all server-scoped memory)"
+   2. Wait for workers to drain connections and exit naturally
+   3. Dispose h2o contexts (cleans up connections)
+   4. Destroy event loops
+   5. Close file descriptors
+   6. Dispose h2o config
+   7. Close arena (frees all server-scoped memory)"
   [server]
   (when-not (.get ^AtomicBoolean (::started? server))
     (throw (ex-info "Server not started" {:server server})))
 
+  ;; Signal shutdown to all workers
   (.set ^AtomicBoolean (::shutting-down? server) true)
 
+  ;; Wake up all workers so they see the shutdown signal (send dummy message)
+  (evloop/broadcast! (::evloop-system server) [:h2o/wake-up])
+
+  ;; Wait for all workers to stop themselves after draining connections
   (evloop/stop-all! (::evloop-system server))
 
-  (doseq [ctx (::contexts server)]
-    (h2o/context-request-shutdown ctx))
-
+  ;; All workers have exited; clean up h2o resources
   (h2o/dispose-contexts (::contexts server))
-
   (h2o/destroy-loops (::loops server))
 
+  ;; Close file descriptors
   (doseq [dup-fd-vec (::dup-fds server)
           fd dup-fd-vec]
     (socket/close-fd! fd))
   (doseq [fd (::listener-fds server)]
     (socket/close-fd! fd))
 
+  ;; Dispose config and arena
   (when-let [config-ptr (::config-ptr server)]
     (h2o/config-dispose config-ptr))
 

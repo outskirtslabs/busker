@@ -35,7 +35,8 @@ void *clj_h2o_socket_get_read_cb(h2o_socket_t *sock);
 void *clj_h2o_socket_get_write_cb(h2o_socket_t *sock);
 
 /* Socket on_close callback support for connection tracking */
-void clj_h2o_socket_set_on_close(h2o_socket_t *sock, void *callback, void *data);
+void clj_h2o_socket_set_on_close(h2o_socket_t *sock, void *callback,
+                                 void *data);
 
 /* Return size of h2o_globalconf_t for FFI allocation */
 size_t clj_h2o_globalconf_size(void);
@@ -76,5 +77,11 @@ uint16_t clj_h2o_req_get_version(void *req_ptr);
 /* Standard tokens and generator for responses */
 void *clj_h2o_get_content_type_token(void);
 void *clj_h2o_get_static_generator(void);
+
+/* Event loop and context state access */
+uint64_t clj_h2o_evloop_now(void *loop_ptr);
+size_t clj_h2o_context_get_active_conns(void *ctx_ptr);
+size_t clj_h2o_context_get_idle_conns(void *ctx_ptr);
+size_t clj_h2o_context_get_shutdown_conns(void *ctx_ptr);
 
 #endif /* CLJ_H2O_SHIM_H */

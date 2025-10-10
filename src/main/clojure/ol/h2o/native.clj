@@ -376,6 +376,31 @@
   clj_h2o_req_get_version
   [::mem/pointer] ::mem/short)
 
+(defcfn evloop-now
+  "Get current time in milliseconds from event loop"
+  clj_h2o_evloop_now
+  [::mem/pointer] ::mem/long)
+
+(defcfn context-get-active-conns
+  "Get count of active connections for this context"
+  clj_h2o_context_get_active_conns
+  [::mem/pointer] ::mem/long)
+
+(defcfn context-get-shutdown-conns
+  "Get count of shutdown connections for this context"
+  clj_h2o_context_get_shutdown_conns
+  [::mem/pointer] ::mem/long)
+
+(defcfn cleanup-thread
+  "Perform periodic cleanup tasks for a context.
+   Returns maximum wait time in milliseconds before next cleanup.
+   
+   Parameters:
+   - now: current time in milliseconds (from evloop-now)
+   - ctx: pointer to h2o_context_t"
+  h2o_cleanup_thread
+  [::mem/long ::mem/pointer] ::mem/int)
+
 (defcfn mem-alloc-shared
   "Allocate memory from h2o pool. Returns pointer to allocated memory."
   h2o_mem_alloc_shared

@@ -76,9 +76,10 @@
   (try
     (let [running? ^AtomicBoolean (:running? w)
           loop-fn (:loop-fn w)]
-      (while (.get running?)
-        (let [w (drain-mailbox! w)]
-          (loop-fn w))))
+      (loop [s {}]
+        (when (.get running?)
+          (let [w (drain-mailbox! w)]
+            (recur (loop-fn w s))))))
     (catch InterruptedException _
       (.set ^AtomicBoolean (:running? w) false))
     (catch Throwable t
