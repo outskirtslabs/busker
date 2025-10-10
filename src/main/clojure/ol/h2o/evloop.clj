@@ -15,11 +15,11 @@
   (max 1 (.availableProcessors (Runtime/getRuntime))))
 
 (defrecord Worker
-           [id          ;; int
-            thread      ;; java.lang.Thread (platform)
-            running?    ;; AtomicBoolean
-            mailbox     ;; ArrayBlockingQueue of control messages
-            evloop      ;; opaque: native pointer/handle when interop lands
+           [id ;; int
+            thread ;; java.lang.Thread (platform)
+            running? ;; AtomicBoolean
+            mailbox ;; ArrayBlockingQueue of control messages
+            evloop ;; opaque: native pointer/handle when interop lands
             max-wait-ms ;; int, passed to h2o_evloop_run(loop, max_wait)
             loop-fn ;; fn: (worker, max-wait-ms) -> void, the loop iteration body
             args])
@@ -114,7 +114,7 @@
      id)))
 
 (defn stop-worker!
-  "Stop a specific worker by id.
+  "Stop a specific worker by id. Blocks until worker thread terminates.
    
    Parameters:
    - system: the system context
@@ -124,10 +124,10 @@
   [system id]
   (when-let [^Worker w (.get ^ConcurrentHashMap (:workers system) id)]
     (.offer ^ArrayBlockingQueue (:mailbox w) stop-msg)
-    ;; Best-effort join
+    ;; Wait for thread to fully terminate before returning
     (when-let [^Thread t (:thread w)]
       (.interrupt t)
-      (.join t 200))
+      (.join t))
     (.remove ^ConcurrentHashMap (:workers system) id)
     true))
 

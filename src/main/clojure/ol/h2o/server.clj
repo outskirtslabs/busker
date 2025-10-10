@@ -113,7 +113,8 @@
            ::worker-ids worker-ids)))
 
 (defn stop-server
-  "Stop the h2o server and clean up resources"
+  "Stop the h2o server and clean up resources.
+   Note: The config is kept alive and will be cleaned up when the server object is GC'd."
   [server]
   (when-not (.get ^AtomicBoolean (::started? server))
     (throw (ex-info "Server not started" {:server server})))
@@ -126,7 +127,6 @@
     (socket/close-fd! fd))
   (doseq [fd (::listener-fds server)]
     (socket/close-fd! fd))
-  (h2o/dispose-server-config (::config-ptr server))
   (.set ^AtomicBoolean (::started? server) false)
   server)
 
