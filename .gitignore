@@ -1,0 +1,18 @@
+.*
+!.github
+!.gitignore
+.clj-kondo
+!.clj-kondo/config.edn
+!.clj-kondo/app/*
+!.env.edn
+extra/
+archive
+result
+libs/*/target
+*.log
+# native build artifacts
+*.o
+*.so
+compile_flags.txt
+build/
+cmake-build*
