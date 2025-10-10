@@ -17,17 +17,17 @@
 ;; If you support additional OSes, consider split-by-target or detect at runtime.
 ;; ------------------------------------------------------------
 
-(def ^:private AF_INET        2)
-(def ^:private SOCK_STREAM    1)
-(def ^:private SOL_SOCKET     1)
-(def ^:private SO_REUSEADDR   2)
-(def ^:private SO_REUSEPORT  15)   ;; may differ on some BSDs; set only if requested
+(def ^:private AF_INET 2)
+(def ^:private SOCK_STREAM 1)
+(def ^:private SOL_SOCKET 1)
+(def ^:private SO_REUSEADDR 2)
+(def ^:private SO_REUSEPORT 15) ;; may differ on some BSDs; set only if requested
 
-(def ^:private F_GETFL        3)
-(def ^:private F_SETFL        4)
-(def ^:private F_SETFD        2)
-(def ^:private O_NONBLOCK  0x800)
-(def ^:private FD_CLOEXEC     1)
+(def ^:private F_GETFL 3)
+(def ^:private F_SETFL 4)
+(def ^:private F_SETFD 2)
+(def ^:private O_NONBLOCK 0x800)
+(def ^:private FD_CLOEXEC 1)
 
 (def ^:private INADDR_ANY 0x00000000)
 
@@ -52,9 +52,9 @@
   (layout/with-c-layout
     [::mem/struct
      [[:sin_family ::mem/short]
-      [:sin_port   ::mem/short]
-      [:sin_addr   ::in_addr]
-      [:sin_zero   [::mem/array ::mem/byte 8]]]]))
+      [:sin_port ::mem/short]
+      [:sin_addr ::in_addr]
+      [:sin_zero [::mem/array ::mem/byte 8]]]]))
 
 ;; ------------------------------------------------------------
 ;; libc bindings (thin)
@@ -67,7 +67,7 @@
 (defcfn listen "listen" [::mem/int ::mem/int] ::mem/int)
 (defcfn dup "dup" [::mem/int] ::mem/int)
 (defcfn close "close" [::mem/int] ::mem/int)
-(defcfn htons "htons" [::mem/short] ::mem/short)  ;; network byte order
+(defcfn htons "htons" [::mem/short] ::mem/short) ;; network byte order
 
 ;; Optional: inet_pton for non-ANY binds; keeping IPv4 only here
 (defcfn inet_pton "inet_pton" [::mem/int ::mem/c-string ::mem/pointer] ::mem/int)
@@ -89,45 +89,31 @@
 
 (defn- set-bool-sockopt! [fd level opt on?]
   (with-open [arena (mem/confined-arena)]
-    (let [v   (if on? 1 0)
-          ptr (mem/serialize v ::mem/int arena)]
-      (when (neg? (setsockopt fd level opt ptr (mem/size-of ::mem/int)))
+    (let [v (if on? 1 0)
+          ptr (mem/alloc-instance ::mem/int arena)]
+      (mem/write-int ptr 0 v)
+      (when (neg? (setsockopt fd level opt ptr 4))
         (throw (ex-info "setsockopt failed" {:fd fd :level level :opt opt :val v}))))))
 
 (defn- sockaddr-in
   "Build a sockaddr_in for IPv4.
    host can be nil/\"0.0.0.0\" for INADDR_ANY."
   [{:keys [host port] :or {host "0.0.0.0"}} arena]
-  (let [seg (mem/alloc ::sockaddr_in arena)]
-    ;; family
-    (mem/serialize-into AF_INET ::mem/short seg arena)
-    ;; port (network byte order)
-    (mem/serialize-into (htons (short port))
-                        ::mem/short
-                        (mem/slice seg (mem/size-of ::mem/short))
-                        arena)
-    ;; addr
-    (let [addr-off (+ (mem/size-of ::mem/short) (mem/size-of ::mem/short))
-          addr-seg (mem/slice seg addr-off (mem/size-of ::in_addr))]
-      (if (or (nil? host) (= host "0.0.0.0"))
-        ;; INADDR_ANY
-        (mem/serialize-into {:s_addr INADDR_ANY} ::in_addr addr-seg arena)
-        ;; inet_pton(AF_INET, host, &sin_addr)
-        (let [dst (mem/alloc ::in_addr arena)
-              r   (inet_pton AF_INET host dst)]
-          (when (neg? r)
-            (throw (ex-info "inet_pton error" {:host host :port port})))
-          (when (zero? r)
-            (throw (ex-info "inet_pton: invalid address" {:host host})))
-          ;; copy the parsed address into our struct
-          (mem/serialize-into (mem/deserialize dst ::in_addr) ::in_addr addr-seg arena))))
-    ;; zero padding (8 bytes)
-    (let [zero-off (+ (mem/size-of ::mem/short)
-                      (mem/size-of ::mem/short)
-                      (mem/size-of ::in_addr))
-          zero (mem/slice seg zero-off 8)]
-      (dotimes [i 8] (mem/write-byte zero i 0)))
-    seg))
+  (let [s_addr (if (or (nil? host) (= host "0.0.0.0"))
+                 INADDR_ANY
+                 (with-open [tmp-arena (mem/confined-arena)]
+                   (let [dst (mem/alloc ::in_addr tmp-arena)
+                         r (inet_pton AF_INET host dst)]
+                     (when (neg? r)
+                       (throw (ex-info "inet_pton error" {:host host :port port})))
+                     (when (zero? r)
+                       (throw (ex-info "inet_pton: invalid address" {:host host})))
+                     (:s_addr (mem/deserialize dst ::in_addr)))))
+        data {:sin_family (short AF_INET)
+              :sin_port (htons (short port))
+              :sin_addr {:s_addr s_addr}
+              :sin_zero [0 0 0 0 0 0 0 0]}]
+    (mem/serialize data ::sockaddr_in arena)))
 
 ;; ------------------------------------------------------------
 ;; public API
@@ -145,7 +131,7 @@
      :cloexec?    (default true)
   returns fd (int). Caller owns fd and must close on error."
   [{:keys [host port backlog reuseaddr? reuseport? nonblock? cloexec?]
-    :or   {host "0.0.0.0" backlog 65535 reuseaddr? true reuseport? false nonblock? true cloexec? true}}]
+    :or {host "0.0.0.0" backlog 65535 reuseaddr? true reuseport? false nonblock? true cloexec? true}}]
   (when-not (int? port)
     (throw (ex-info "port must be int" {:port port})))
   (let [fd (socket AF_INET SOCK_STREAM 0)]
@@ -158,7 +144,7 @@
       (when reuseport? (set-bool-sockopt! fd SOL_SOCKET SO_REUSEPORT true))
       (with-open [arena (mem/confined-arena)]
         (let [addr (sockaddr-in {:host host :port port} arena)
-              addrlen (mem/size-of ::sockaddr_in)]
+              addrlen (int (mem/size-of ::sockaddr_in))]
           (when (neg? (bind fd addr addrlen))
             (throw (ex-info "bind() failed" {:host host :port port :errno :check-errno})))
           (when (neg? (listen fd (int backlog)))

@@ -1,6 +1,7 @@
 // Minimal exported helpers for libh2o interop
 // Intended for FFI use from Clojure (coffi/FFM).
 #include "shim.h"
+#include <h2o.h>
 
 int clj_h2o_socket_is_reading(h2o_socket_t *sock) {
   return (sock != NULL && sock->_cb.read != NULL) ? 1 : 0;
@@ -17,3 +18,7 @@ void *clj_h2o_socket_get_read_cb(h2o_socket_t *sock) {
 void *clj_h2o_socket_get_write_cb(h2o_socket_t *sock) {
   return sock ? (void *)sock->_cb.write : NULL;
 }
+
+size_t clj_h2o_globalconf_size(void) { return sizeof(h2o_globalconf_t); }
+
+size_t clj_h2o_context_size(void) { return sizeof(h2o_context_t); }

@@ -69,20 +69,30 @@
   h2o_config_dispose
   [::mem/pointer] ::mem/void)
 
+(defcfn globalconf-size
+  "Get size of h2o_globalconf_t structure"
+  clj_h2o_globalconf_size
+  [] ::mem/long)
+
+(defcfn context-size
+  "Get size of h2o_context_t structure"
+  clj_h2o_context_size
+  [] ::mem/long)
+
 ;; h2o_iovec_t is:
 ;;   typedef struct { char *base; size_t len; } h2o_iovec_t;
 ;; Use a typed pointer for clarity; size_t→::mem/long is OK on typical *nix.
 (mem/defalias ::h2o-iovec-t
   (layout/with-c-layout
     [::mem/struct
-     [[:base [::mem/pointer ::mem/byte]]
-      [:len  ::mem/long]]]))
+     [[:base ::mem/pointer]
+      [:len ::mem/long]]]))
 
 (defcfn config-register-host
   "Register a virtual host with the h2o configuration.
    Returns pointer to h2o_hostconf_t"
   h2o_config_register_host
-  [::mem/pointer ::h2o-iovec-t ::mem/short] ::mem/pointer)
+  [::mem/pointer ::h2o-iovec-t ::mem/int] ::mem/pointer)
 
 (defcfn context-init
   "Initialize h2o context for an event loop.
@@ -125,10 +135,10 @@
   h2o_socket_read_start
   [::mem/pointer ::mem/pointer] ::mem/void)
 
-(defcfn socket-reading?  "clj_h2o_socket_is_reading"  [::mem/pointer] ::mem/int)
-(defcfn socket-writing?  "clj_h2o_socket_is_writing"  [::mem/pointer] ::mem/int)
-(defcfn socket-read-cb   "clj_h2o_socket_get_read_cb" [::mem/pointer] ::mem/pointer)
-(defcfn socket-write-cb  "clj_h2o_socket_get_write_cb" [::mem/pointer] ::mem/pointer)
+(defcfn socket-reading? "clj_h2o_socket_is_reading" [::mem/pointer] ::mem/int)
+(defcfn socket-writing? "clj_h2o_socket_is_writing" [::mem/pointer] ::mem/int)
+(defcfn socket-read-cb "clj_h2o_socket_get_read_cb" [::mem/pointer] ::mem/pointer)
+(defcfn socket-write-cb "clj_h2o_socket_get_write_cb" [::mem/pointer] ::mem/pointer)
 
 (defcfn evloop-socket-accept
   "Accept new connection from listening socket.
@@ -151,20 +161,26 @@
   [::mem/pointer ::mem/pointer] ::mem/void)
 
 (defn create-iovec
-  "Create an h2o_iovec_t from a string"
-  [s]
-  {:base (mem/serialize s ::mem/c-string)
-   :len (count s)})
+  "Create an h2o_iovec_t from a string.
+   IMPORTANT: Caller must provide arena to ensure string memory lives long enough
+   Returns a memory segment containing the h2o_iovec_t struct"
+  [s arena]
+  (let [str-ptr (mem/serialize s ::mem/c-string arena)
+        len (count s)
+        iovec-data {:base str-ptr :len len}]
+    (mem/serialize iovec-data ::h2o-iovec-t arena)))
 
 (defn create-server-config
   "Create and initialize h2o global configuration with a default host.
    Returns map with ::arena, ::config-ptr, ::hostconf-ptr"
   []
   (let [arena (mem/auto-arena)
-        config-ptr (mem/alloc-instance ::mem/pointer arena)]
+        size (globalconf-size)
+        config-ptr (mem/alloc size arena)]
     (config-init config-ptr)
-    (let [host-iovec (create-iovec "default")
-          hostconf-ptr (config-register-host config-ptr host-iovec 65535)]
+    (let [host-iovec-seg (create-iovec "default" arena)
+          host-iovec-data (mem/deserialize host-iovec-seg ::h2o-iovec-t)
+          hostconf-ptr (config-register-host config-ptr host-iovec-data 65535)]
       {::arena arena
        ::config-ptr config-ptr
        ::hostconf-ptr hostconf-ptr})))
@@ -173,7 +189,8 @@
   "Create and initialize h2o context for an event loop.
    Returns pointer to h2o_context_t"
   [arena loop-ptr config-ptr]
-  (let [ctx-ptr (mem/alloc-instance ::mem/pointer arena)]
+  (let [size (context-size)
+        ctx-ptr (mem/alloc size arena)]
     (context-init ctx-ptr loop-ptr config-ptr)
     ctx-ptr))
 

@@ -42,7 +42,12 @@
   (when (.get ^AtomicBoolean (::started? server))
     (throw (ex-info "Server already started" {:server server})))
 
-  (let [{::keys [config-ptr n-workers listeners arena shutting-down?]} server
+  (let [config-ptr (::native/config-ptr server)
+        arena (::native/arena server)
+        n-workers (::n-workers server)
+        listeners (::listeners server)
+        shutting-down? (::shutting-down? server)
+
         loops (native/create-loops n-workers)
         contexts (native/create-contexts arena loops config-ptr)
 
@@ -88,26 +93,17 @@
   [server]
   (when-not (.get ^AtomicBoolean (::started? server))
     (throw (ex-info "Server not started" {:server server})))
-
   (.set ^AtomicBoolean (::shutting-down? server) true)
-
   (evloop/stop-all! (::evloop-system server))
-
   (native/dispose-contexts (::contexts server))
-
   (native/destroy-loops (::loops server))
-
   (doseq [dup-fd-vec (::dup-fds server)
           fd dup-fd-vec]
     (socket/close-fd! fd))
-
   (doseq [fd (::listener-fds server)]
     (socket/close-fd! fd))
-
   (native/dispose-server-config (::config-ptr server))
-
   (.set ^AtomicBoolean (::started? server) false)
-
   server)
 
 (comment

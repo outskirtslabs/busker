@@ -34,4 +34,10 @@ int clj_h2o_socket_is_writing(h2o_socket_t *sock);
 void *clj_h2o_socket_get_read_cb(h2o_socket_t *sock);
 void *clj_h2o_socket_get_write_cb(h2o_socket_t *sock);
 
+/* Return size of h2o_globalconf_t for FFI allocation */
+size_t clj_h2o_globalconf_size(void);
+
+/* Return size of h2o_context_t for FFI allocation */
+size_t clj_h2o_context_size(void);
+
 #endif /* CLJ_H2O_SHIM_H */
