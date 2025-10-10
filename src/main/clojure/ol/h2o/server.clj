@@ -2,7 +2,8 @@
   (:require
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
-   [ol.h2o.native.socket :as socket])
+   [ol.h2o.native.socket :as socket]
+   [ol.h2o.orchestration :as orchestration])
   (:import
    [java.util.concurrent.atomic AtomicBoolean]))
 
@@ -27,7 +28,8 @@
          max-connections default-max-connections}}]
   (when-not handler
     (throw (ex-info "Handler is required" {:handler handler})))
-  (let [config (h2o/create-server-config handler)]
+  (let [evloop-system (evloop/create-system)
+        config (orchestration/create-server-config handler evloop-system)]
     (merge config
            {::handler handler
             ::n-workers n-workers
@@ -37,7 +39,7 @@
             ::shutting-down? (AtomicBoolean. false)
             ::loops []
             ::contexts []
-            ::evloop-system nil
+            ::evloop-system evloop-system
             ::worker-ids []})))
 
 (defn start-server
@@ -51,6 +53,8 @@
         n-workers (::n-workers server)
         listeners (::listeners server)
         shutting-down? (::shutting-down? server)
+        evloop-system (::evloop-system server)
+        message-handler (orchestration/create-message-handler)
 
         loops (h2o/create-loops n-workers)
         contexts (h2o/create-contexts arena loops config-ptr)
@@ -87,8 +91,6 @@
                                          (h2o/socket-read-start sock-ptr callback)
                                          sock-ptr)))))
 
-        evloop-system (evloop/create-system)
-
         worker-ids (vec (for [thread-idx (range n-workers)]
                           (let [loop-ptr (nth loops thread-idx)]
                             (evloop/start-worker!
@@ -97,7 +99,8 @@
                              {:loop-ptr loop-ptr
                               :thread-idx thread-idx}
                              {:thread-name-prefix "h2o-worker"
-                              :max-wait-ms 100}))))]
+                              :max-wait-ms 100
+                              :message-handler message-handler}))))]
 
     (.set ^AtomicBoolean (::started? server) true)
 

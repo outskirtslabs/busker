@@ -22,17 +22,26 @@
             evloop ;; opaque: native pointer/handle when interop lands
             max-wait-ms ;; int, passed to h2o_evloop_run(loop, max_wait)
             loop-fn ;; fn: (worker, max-wait-ms) -> void, the loop iteration body
+            message-handler ;; fn: (op, args) -> void, handles custom messages
             args])
 
 (defonce ^:private next-id_ (atom 0))
+
+;; thread local to store current worker on each platform thread
+(def ^ThreadLocal worker-context (ThreadLocal.))
+
+(defn get-current-worker
+  "Get the Worker record for the current thread.
+   Only valid when called from a worker thread."
+  []
+  (.get worker-context))
 
 ;; ------------------------------
 ;; Control messages
 ;; ------------------------------
 
-(defn set-max-wait [millis] [:set-max-wait (int millis)])
-(def stop-msg [:stop])
-(def poke-msg [:poke]) ;; optional wake-up hint for future: nudges the loop
+(defn set-max-wait [millis] [::set-max-wait (int millis)])
+(def stop-msg [::stop])
 
 ;; ------------------------------
 ;; Worker loop
@@ -41,39 +50,42 @@
 (defn- drain-mailbox!
   "Non-blocking drain. Returns a possibly updated worker state map."
   [^Worker w]
-  (loop [max-wait (:max-wait-ms w)]
+  (loop [max-wait (:max-wait-ms w)
+         stop-requested? false]
     (let [msg (.poll ^ArrayBlockingQueue (:mailbox w))]
       (if (nil? msg)
-        (assoc w :max-wait-ms max-wait)
-        (let [[op arg] msg]
-          (recur
-           (case op
-             :set-max-wait (max 0 (int arg))
-             :stop (do (.set ^AtomicBoolean (:running? w) false)
-                       max-wait)
-             ;; :poke: with real interop we'd signal the loop here
-             max-wait)))))))
+        (do
+          (when stop-requested?
+            (.set ^AtomicBoolean (:running? w) false))
+          (assoc w :max-wait-ms max-wait))
+        (let [[op & args] msg]
+          (case op
+            ::set-max-wait
+            (recur (max 0 (int (first args))) stop-requested?)
+            ::stop
+            (recur max-wait true)
+            (do
+              (when-let [handler (:message-handler w)]
+                (handler op args))
+              (recur max-wait stop-requested?))))))))
 
 (defn- run-evloop-on-thread!
   "Owns the OS thread and drives the event loop until stopped.
    Calls the worker's loop-fn for each iteration."
   [^Worker w]
-  (let [running? ^AtomicBoolean (:running? w)
-        loop-fn (:loop-fn w)]
-    (try
+  (.set worker-context w)
+  (try
+    (let [running? ^AtomicBoolean (:running? w)
+          loop-fn (:loop-fn w)]
       (while (.get running?)
-        ;; 1) apply any pending control changes (non-blocking)
         (let [w (drain-mailbox! w)]
-          ;; 2) call the injected loop iteration function
-          (loop-fn w)))
-      (catch InterruptedException _
-        ;; Cooperative shutdown – treat as stop
-        (.set running? false))
-      (catch Throwable t
-        ;; Surface error, but don't kill the process
-        (println "[evloop] worker crashed:" (.getMessage t))))
-    ;; (finally) tear down resources when interop exists
-    ))
+          (loop-fn w))))
+    (catch InterruptedException _
+      (.set ^AtomicBoolean (:running? w) false))
+    (catch Throwable t
+      (println "[evloop] worker crashed:" (.getMessage t)))
+    (finally
+      (.remove worker-context))))
 
 ;; ------------------------------
 ;; Public API
@@ -93,12 +105,13 @@
    - :max-wait-ms - maximum time to wait in each loop iteration (default 10ms)
    - :thread-name-prefix - prefix for thread name (default 'h2o-evloop')
    - :loop-fn - function called for each loop iteration: (worker, max-wait-ms) -> void
+   - :message-handler - function to handle custom messages: (op, args) -> void
 
    Returns: worker id"
   ([system loop-fn args]
    (start-worker! system loop-fn args nil))
   ([system loop-fn args
-    {:keys [max-wait-ms thread-name-prefix]
+    {:keys [max-wait-ms thread-name-prefix message-handler]
      :or {max-wait-ms 10
           thread-name-prefix "h2o-evloop"}}]
    (let [id (swap! next-id_ inc)
@@ -106,7 +119,7 @@
          mailbox (ArrayBlockingQueue. 256)
          ;; TODO evloop: will be a native handle after FFM init (nil for now)
          evloop nil
-         w (->Worker id nil running? mailbox evloop (int max-wait-ms) loop-fn args)
+         w (->Worker id nil running? mailbox evloop (int max-wait-ms) loop-fn message-handler args)
          t (Thread. #(run-evloop-on-thread! w) (format "%s-%d" thread-name-prefix id))
          w (assoc w :thread t)]
      (.put ^ConcurrentHashMap (:workers system) id w)

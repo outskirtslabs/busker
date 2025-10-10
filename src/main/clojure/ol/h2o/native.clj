@@ -589,136 +589,6 @@
              :status status
              :content-length (or content-length -1)))))
 
-(defn create-ring-handler
-  "Create an h2o handler that delegates to a Ring handler.
-   Returns handler pointer that must be kept alive."
-  [pathconf-ptr ring-handler]
-  (let [handler-ptr (create-handler pathconf-ptr (handler-size))
-        on-req-callback (mem/serialize
-                         (fn [_self-ptr req-ptr]
-                           (try
-                             (let [ring-req (build-ring-request req-ptr)
-                                   ring-resp (ring-handler ring-req)
-                                   status (:status ring-resp 200)
-                                   headers (:headers ring-resp {})
-                                   body (:body ring-resp)
-
-                                   ;; Parse content-length header if present
-                                   content-length-str (get headers "content-length")
-                                   content-length (when content-length-str
-                                                    (try
-                                                      (Long/parseLong (str content-length-str))
-                                                      (catch Exception _ nil)))
-
-                                   ;; Filter out content-length - h2o will add it automatically
-                                   headers-to-send (dissoc headers "content-length")]
-
-                               ;; Set status and content-length
-                               (req-set-status req-ptr status)
-                               (when content-length
-                                 (req-set-content-length req-ptr content-length))
-
-                               (let [pool-ptr (req-get-pool req-ptr)
-                                     res-headers-ptr (req-get-res-headers req-ptr)]
-
-                                 ;; Add headers from Ring response to h2o response
-                                 (doseq [[name value] headers-to-send]
-                                   (let [name-lower (str/lower-case (str name))
-                                         name-orig (str name)
-                                         value-str (str value)
-                                         name-lower-bytes (.getBytes name-lower "UTF-8")
-                                         name-orig-bytes (.getBytes name-orig "UTF-8")
-                                         value-bytes (.getBytes value-str "UTF-8")
-                                         name-lower-len (alength name-lower-bytes)
-                                         name-orig-len (alength name-orig-bytes)
-                                         value-len (alength value-bytes)
-                                         ;; Allocate from pool
-                                         name-lower-ptr-raw (mem-alloc-shared pool-ptr name-lower-len java.lang.foreign.MemorySegment/NULL)
-                                         name-orig-ptr-raw (mem-alloc-shared pool-ptr name-orig-len java.lang.foreign.MemorySegment/NULL)
-                                         value-ptr-raw (mem-alloc-shared pool-ptr value-len java.lang.foreign.MemorySegment/NULL)]
-                                     ;; Copy bytes to pool memory
-                                     (let [name-lower-ptr (mem/reinterpret name-lower-ptr-raw name-lower-len)
-                                           name-orig-ptr (mem/reinterpret name-orig-ptr-raw name-orig-len)
-                                           value-ptr (mem/reinterpret value-ptr-raw value-len)]
-                                       (java.lang.foreign.MemorySegment/copy
-                                        (java.lang.foreign.MemorySegment/ofArray name-lower-bytes) 0
-                                        name-lower-ptr 0 name-lower-len)
-                                       (java.lang.foreign.MemorySegment/copy
-                                        (java.lang.foreign.MemorySegment/ofArray name-orig-bytes) 0
-                                        name-orig-ptr 0 name-orig-len)
-                                       (java.lang.foreign.MemorySegment/copy
-                                        (java.lang.foreign.MemorySegment/ofArray value-bytes) 0
-                                        value-ptr 0 value-len))
-                                     ;; Add header using raw pointers
-                                     (add-header-by-str pool-ptr res-headers-ptr
-                                                        name-lower-ptr-raw name-lower-len
-                                                        0
-                                                        name-orig-ptr-raw
-                                                        value-ptr-raw value-len)))
-
-                                 ;; Buffer all writes using Ring protocol
-                                 (let [buffer (java.io.ByteArrayOutputStream.)
-                                       output-stream (proxy [java.io.OutputStream] []
-                                                       (write
-                                                         ([b-or-arr]
-                                                          (if (int? b-or-arr)
-                                                            (.write buffer (int b-or-arr))
-                                                            (.write buffer ^bytes b-or-arr)))
-                                                         ([bytes off len]
-                                                          (.write buffer ^bytes bytes (int off) (int len))))
-                                                       (close [])
-                                                       (flush []))]
-
-                                   ;; Use Ring protocol to write body to stream
-                                   (when body
-                                     (ring-protocols/write-body-to-stream body ring-resp output-stream))
-
-                                   ;; Now send everything as one FINAL chunk
-                                   (let [body-bytes (.toByteArray buffer)
-                                         body-len (alength body-bytes)
-                                         body-ptr-raw (mem-alloc-shared pool-ptr body-len java.lang.foreign.MemorySegment/NULL)
-                                         body-ptr (mem/reinterpret body-ptr-raw body-len)]
-                                     (when (pos? body-len)
-                                       (java.lang.foreign.MemorySegment/copy
-                                        (java.lang.foreign.MemorySegment/ofArray body-bytes) 0
-                                        body-ptr 0 body-len))
-                                     (let [sendvec-size (mem/size-of ::h2o-sendvec-t)
-                                           sendvec-ptr-raw (mem-alloc-shared pool-ptr sendvec-size java.lang.foreign.MemorySegment/NULL)
-                                           sendvec-seg (mem/reinterpret sendvec-ptr-raw sendvec-size)]
-                                       (sendvec-init-raw sendvec-seg body-ptr-raw body-len)
-                                       (let [generator-ptr (get-static-generator)]
-                                         (start-response req-ptr generator-ptr))
-                                       (sendvec req-ptr sendvec-seg 1 H2O_SEND_STATE_FINAL)))))
-
-                               0)
-                             (catch Exception e
-                               (println "Handler error:" (.getMessage e))
-                               (.printStackTrace e)
-                               -1)))
-                         [::ffi/fn [::mem/pointer ::mem/pointer] ::mem/int])]
-    (handler-set-on-req handler-ptr on-req-callback)
-    handler-ptr))
-
-(defn create-server-config
-  "Create and initialize h2o global configuration with a default host and Ring handler.
-   Uses global arena for server lifetime resources.
-   Returns map with ::arena, ::config-ptr, ::hostconf-ptr, ::pathconf-ptr, ::handler-ptr"
-  [ring-handler]
-  (let [arena (mem/global-arena)
-        size (globalconf-size)
-        config-ptr (mem/alloc size arena)]
-    (config-init config-ptr)
-    (let [host-iovec-seg (create-iovec "default" arena)
-          host-iovec-data (mem/deserialize host-iovec-seg ::h2o-iovec-t)
-          hostconf-ptr (config-register-host config-ptr host-iovec-data 65535)
-          pathconf-ptr (config-register-path hostconf-ptr "/" 0)
-          handler-ptr (create-ring-handler pathconf-ptr ring-handler)]
-      {::arena arena
-       ::config-ptr config-ptr
-       ::hostconf-ptr hostconf-ptr
-       ::pathconf-ptr pathconf-ptr
-       ::handler-ptr handler-ptr})))
-
 (defn create-context
   "Create and initialize h2o context for an event loop.
    Returns pointer to h2o_context_t"
@@ -779,6 +649,21 @@
          ;; Pass the socket to h2o for HTTP processing
          (h2o-accept accept-ctx-ptr sock-ptr))))
    [::ffi/fn [::mem/pointer ::mem/c-string] ::mem/void]))
+
+(defn create-request-callback
+  "Create the on-req upcall callback for h2o.
+   This is called by native code when a request arrives."
+  [ring-handler evloop-system callback]
+  (mem/serialize
+   (fn [_self-ptr req-ptr]
+     (try
+       (callback req-ptr)
+       0
+       (catch Exception e
+         (println "Error enqueuing request:" (.getMessage e))
+         (.printStackTrace e)
+         -1)))
+   [::ffi/fn [::mem/pointer ::mem/pointer] ::mem/int]))
 
 (defn create-accept-ctx
   "Create h2o_accept_ctx_t for accepting connections.
