@@ -29,9 +29,10 @@
       legacyPackages = pkgs: pkgs;
       packages = {
         h2o-shared = pkgs: pkgs.callPackage ./pkgs/h2o.nix { };
+        h2o-bundle = pkgs: pkgs.callPackage ./pkgs/h2o-bundle.nix { };
       };
 
-      devShell.default =
+      devShell =
         pkgs:
         let
           javaVersion = "25";

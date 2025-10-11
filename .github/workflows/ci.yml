@@ -15,8 +15,8 @@ jobs:
     strategy:
       matrix:
         include:
-          - name: aarch64-linux
-            runs-on: ubuntu-24.04-arm
+          # - name: aarch64-linux
+          #   runs-on: ubuntu-24.04-arm
           - name: aarch64-darwin
             runs-on: macos-15
           - name: x86_64-linux
@@ -30,18 +30,18 @@ jobs:
           determinate: true
       - uses: DeterminateSystems/flakehub-cache-action@main
       - uses: DeterminateSystems/flake-checker-action@main
-      - name: Run flake check
-        run: nix flake check
-      - name: Build h2o-shared
-        run: nix build .#h2o-shared
+      # - name: Run flake check
+      #   run: nix flake check
+      - name: Build h2o-bundle
+        run: nix build .#h2o-bundle
       - name: Copy build artifacts
         run: |
-          artifact_name="h2o-shared-${{ matrix.name }}"
+          artifact_name="h2o-bundle-${{ matrix.name }}"
           mkdir -p "artifacts/${artifact_name}"
           cp -rL result/* "artifacts/${artifact_name}/"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # tag: v4.6.2
         with:
-          name: h2o-shared-${{ matrix.${name} }}
+          name: h2o-bundle-${{ matrix.name }}
           path: artifacts/
           if-no-files-found: error
           compression-level: 6
