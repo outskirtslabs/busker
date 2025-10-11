@@ -29,26 +29,9 @@
       legacyPackages = pkgs: pkgs;
       packages = {
         h2o-shared = pkgs: pkgs.callPackage ./pkgs/h2o.nix { };
-        # h2o-shared = pkgs:
-        # pkgs.h2o.overrideAttrs (oldAttrs: {
-        #   cmakeFlags = (oldAttrs.cmakeFlags or [ ]) ++ [ "-DBUILD_SHARED_LIBS=ON" ];
-        #   # Disable multiple outputs to avoid cyclic dependency with shared libs
-        #   outputs = [ "out" ];
-        # });
-        #h2o-static =
-        #  pkgs:
-        #  pkgs.h2o.overrideAttrs (oldAttrs: {
-        #    cmakeFlags = (oldAttrs.cmakeFlags or [ ]) ++ [
-        #      "-DDISABLE_LIBUV=ON" # Use evloop instead of libuv
-        #    ];
-        #    # Disable multiple outputs to avoid cyclic dependency with shared libs
-        #    outputs = [ "out" ];
-        #  });
-        #clj-h2o-shim =
-        #  pkgs: pkgs.callPackage ./libs/h2o/package.nix { h2o = self.packages.${pkgs.system}.h2o-static; };
       };
 
-      devShell =
+      devShell.default =
         pkgs:
         let
           javaVersion = "25";
@@ -56,10 +39,12 @@
           clojure = pkgs.clojure.override { inherit jdk; };
 
           inherit (self.packages.${pkgs.system}) h2o-shared;
-          #clj-h2o-shim = self.packages.${pkgs.system}.clj-h2o-shim;
           libraries = [
-            #clj-h2o-shim
             h2o-shared
+            #pkgs.llvmPackages.clangUseLLVM
+            #pkgs.llvmPackages.llvm
+            #pkgs.llvmPackages.libclang
+            #pkgs.llvmPackages.stdenv
           ];
         in
         {
@@ -89,7 +74,6 @@
 
             # Development tools
             pkgs.gdb
-            pkgs.valgrind
             pkgs.clojure-lsp
             pkgs.jdt-language-server
             pkgs.clang-tools
@@ -97,10 +81,11 @@
             pkgs.cljfmt
             pkgs.babashka
             pkgs.git
-            pkgs.nghttp2 # for h2load
+            #pkgs.nghttp2 # for h2load
+            #pkgs.clang
+            #pkgs.llvmPackages.clangUseLLVM
           ];
           env.LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libraries;
-          #env.PKG_CONFIG_PATH = "${h2o-shared}/lib/pkgconfig:${clj-h2o-shim}/lib/pkgconfig";
           env.PKG_CONFIG_PATH = "${h2o-shared}/lib/pkgconfig";
         };
 
