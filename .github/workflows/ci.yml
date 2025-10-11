@@ -36,8 +36,9 @@ jobs:
         run: nix build .#h2o-shared
       - name: Copy build artifacts
         run: |
-          mkdir -p artifacts
-          cp -rL result/* artifacts/
+          artifact_name="h2o-shared-${{ matrix.name }}"
+          mkdir -p "artifacts/${artifact_name}"
+          cp -rL result/* "artifacts/${artifact_name}/"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # tag: v4.6.2
         with:
           name: h2o-shared-${{ matrix.${name} }}
