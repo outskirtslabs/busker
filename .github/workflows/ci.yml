@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+---
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  build-h2o:
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            system: x86_64-linux
+          - os: macos-14
+            system: aarch64-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          determinate: true
+      - uses: DeterminateSystems/flakehub-cache-action@main
+      - uses: DeterminateSystems/flake-checker-action@main
+      #- name: Run flake check
+      #  run: nix flake check
+      - name: Build h2o-shared
+        run: nix build .#h2o-shared
+      - name: Copy build artifacts
+        run: |
+          mkdir -p artifacts
+          cp -rL result/* artifacts/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # tag: v4.6.2
+        with:
+          name: h2o-shared-${{ matrix.system }}
+          path: artifacts/
+          if-no-files-found: error
+          compression-level: 6

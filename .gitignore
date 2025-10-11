@@ -16,3 +16,4 @@ target/
 compile_flags.txt
 build/
 cmake-build*
+src/test/resources/3gb-test-file.bin

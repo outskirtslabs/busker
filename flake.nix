@@ -17,25 +17,35 @@
       treefmtEval = pkgs: treefmt-nix.lib.evalModule pkgs ./.treefmt.nix;
     in
     flakelight ./. {
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
+      nixpkgs.config = {
+        allowUnsupportedSystem = true;
+      };
+      legacyPackages = pkgs: pkgs;
       packages = {
-        h2o-shared =
-          pkgs:
-          pkgs.h2o.overrideAttrs (oldAttrs: {
-            cmakeFlags = (oldAttrs.cmakeFlags or [ ]) ++ [ "-DBUILD_SHARED_LIBS=ON" ];
-            # Disable multiple outputs to avoid cyclic dependency with shared libs
-            outputs = [ "out" ];
-          });
-        h2o-static =
-          pkgs:
-          pkgs.h2o.overrideAttrs (oldAttrs: {
-            cmakeFlags = (oldAttrs.cmakeFlags or [ ]) ++ [
-              "-DDISABLE_LIBUV=ON" # Use evloop instead of libuv
-            ];
-            # Disable multiple outputs to avoid cyclic dependency with shared libs
-            outputs = [ "out" ];
-          });
-        clj-h2o-shim =
-          pkgs: pkgs.callPackage ./libs/h2o/package.nix { h2o = self.packages.${pkgs.system}.h2o-static; };
+        h2o-shared = pkgs: pkgs.callPackage ./pkgs/h2o.nix { };
+        # h2o-shared = pkgs:
+        # pkgs.h2o.overrideAttrs (oldAttrs: {
+        #   cmakeFlags = (oldAttrs.cmakeFlags or [ ]) ++ [ "-DBUILD_SHARED_LIBS=ON" ];
+        #   # Disable multiple outputs to avoid cyclic dependency with shared libs
+        #   outputs = [ "out" ];
+        # });
+        #h2o-static =
+        #  pkgs:
+        #  pkgs.h2o.overrideAttrs (oldAttrs: {
+        #    cmakeFlags = (oldAttrs.cmakeFlags or [ ]) ++ [
+        #      "-DDISABLE_LIBUV=ON" # Use evloop instead of libuv
+        #    ];
+        #    # Disable multiple outputs to avoid cyclic dependency with shared libs
+        #    outputs = [ "out" ];
+        #  });
+        #clj-h2o-shim =
+        #  pkgs: pkgs.callPackage ./libs/h2o/package.nix { h2o = self.packages.${pkgs.system}.h2o-static; };
       };
 
       devShell =
