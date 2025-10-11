@@ -5,12 +5,14 @@
  :tasks          {:requires         ([babashka.fs :as fs]
                                      [clojure.string :as str]
                                      [babashka.tasks :refer [shell]])
-                  build.shim        (let [opt {:inherit true}]
-                                      (shell opt "mkdir -p cmake-build-debug")
-                                      (shell opt "cmake -DCMAKE_BUILD_TYPE=Debug -B cmake-build-debug")
-                                      (shell opt "cmake --build cmake-build-debug --config Debug --target h2oclj"))
+                  compile-shim        (let [opt {:inherit true}]
+                                        (shell opt "mkdir -p cmake-build-debug")
+                                        (shell opt "cmake -DCMAKE_BUILD_TYPE=Debug -B cmake-build-debug")
+                                        (shell opt "cmake --build cmake-build-debug --config Debug --target h2oclj"))
+                  jextract          {:doc "Generate Java bindings from h2o headers" :task (clojure "-T:build jextract-h2o")}
+                  compile-java      {:doc "Compile jextract-generated Java" :task (clojure "-T:build compile-jextract")}
                   prep              (clojure "-Xdeps prep :aliases '[:dev :test]'")
-                  build             {:depends [build.shim prep]}
+                  build             {:depends [compile-shim jextract compile-java prep]}
                   test              (apply clojure "-M:dev:test:kaocha" *command-line-args*)
                   deps-tree         (clojure "-X:deps tree :aliases '[:dev]'")
                   dev               {:doc "Start a local development server" :task (apply clojure "-M:dev:repl/dev" *command-line-args*)}
@@ -36,4 +38,4 @@
                                      :depends [jar]
                                      :task    (clojure "-T:build deploy")}
                   pom               {:doc "Generate the pom.xml from clj" :task (clojure "-Xdeps mvn-pom :aliases '[:dev :test]'")}
-                  ci                {:depends [lint build.shim test]}}}
+                  ci                {:depends [lint compile-shim test]}}}

@@ -4,6 +4,7 @@
    [coffi.mem :as mem]
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
+   [ol.h2o.native.raw :as raw]
    [ol.h2o.native.socket :as socket]
    [ol.h2o.response :as response])
   (:import
@@ -57,7 +58,7 @@
   [ring-handler evloop-system req-ptr]
   (let [worker (evloop/get-current-worker)
         worker-id (:id worker)
-        req (Request. req-ptr (h2o/build-ring-request req-ptr))]
+        req (Request. req-ptr (raw/build-ring-request req-ptr))]
     (enqueue-request! worker-id req ring-handler evloop-system)))
 
 (defn create-ring-handler

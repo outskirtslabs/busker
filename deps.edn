@@ -1,26 +1,27 @@
-{:paths   ["src/main/clojure"]
- :deps    {io.github.IGJoshua/coffi {:git/sha "03d74aedecfc7b38238f1cf8b676c1f7a00e1788"}
-           org.ring-clojure/ring-core-protocols {:mvn/version "1.15.0-beta2"}
+{:paths   ["src/main/clojure" "target/classes"]
+ :deps    {io.github.IGJoshua/coffi                  {:git/sha "03d74aedecfc7b38238f1cf8b676c1f7a00e1788"}
+           org.ring-clojure/ring-core-protocols      {:mvn/version "1.15.0-beta2"}
            org.ring-clojure/ring-websocket-protocols {:mvn/version "1.15.0-beta2"}}
  :aliases {:kaocha {:extra-paths []
-                    :extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}}
-                    :main-opts  ["-m" "kaocha.runner"]}
+                    :extra-deps  {lambdaisland/kaocha {:mvn/version "1.91.1392"}}
+                    :main-opts   ["-m" "kaocha.runner"]}
            :build  {:deps       {io.github.clojure/tools.build {:git/tag "v0.10.10"
                                                                 :git/sha "deedd62"}
                                  slipset/deps-deploy           {:mvn/version "0.2.2"}}
                     :ns-default build}
-           :test {:extra-paths ["src/test/clojure"]
-                  :extra-deps {}}
+           :test   {:extra-paths ["src/test/clojure"]
+                    :extra-deps  {}}
            :dev    {:extra-paths ["dev"]
                     :jvm-opts
                     ["--enable-native-access=ALL-UNNAMED"
                      "-Duser.timezone=UTC"
                      "-Dol.libh2o.path=/home/ramblurr/src/ol/http-clj/cmake-build-debug/libh2oclj.so"
                      "-XX:+UseZGC"]
-                    :extra-deps {virgil/virgil {:mvn/version "0.4.0"}
-                                 babashka/process {:mvn/version "0.6.23"}
-                                 org.babashka/http-client {:mvn/version "0.4.22"}
-                                 com.cnuernber/charred             {:mvn/version "1.034"}
-                                 org.clojure/clojure    {:mvn/version "1.12.1"}
-                                 org.clojure/tools.deps {:mvn/version "0.24.1523"}}}}}
-
+                    :extra-deps  {#_#_com.phronemophobic/clong   {:local/root "extra/clong"}
+                                  #_#_org.bytedeco/llvm-platform {:mvn/version "16.0.4-1.5.9"}
+                                  virgil/virgil                  {:mvn/version "0.4.0"}
+                                  babashka/process               {:mvn/version "0.6.23"}
+                                  org.babashka/http-client       {:mvn/version "0.4.22"}
+                                  com.cnuernber/charred          {:mvn/version "1.034"}
+                                  org.clojure/clojure            {:mvn/version "1.12.1"}
+                                  org.clojure/tools.deps         {:mvn/version "0.24.1523"}}}}}

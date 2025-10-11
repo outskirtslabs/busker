@@ -2,6 +2,7 @@
   "Response handling for h2o HTTP server."
   (:require
    [ol.h2o.native :as h2o]
+   [ol.h2o.native.raw :as raw]
    [clojure.string :as str]
    [coffi.mem :as mem]
    [ring.core.protocols :as ring-protocols])
@@ -62,13 +63,14 @@
                            value-ptr value-len)))
 
 (defn- set-headers! [req-ptr headers]
-  (let [pool-ptr (h2o/req-get-pool req-ptr)
+  (let [req-seg (mem/reinterpret req-ptr 2048)
+        pool-ptr (raw/get-req-pool req-seg)
         res-headers-ptr (h2o/req-get-res-headers req-ptr)
         content-length (parse-content-length headers)
         headers-to-send (dissoc-header headers "content-length")]
 
     (when content-length
-      (h2o/req-set-content-length req-ptr content-length))
+      (raw/set-res-content-length! req-seg content-length))
 
     (doseq [[name value] headers-to-send]
       (add-header! pool-ptr res-headers-ptr name value))))
@@ -106,10 +108,13 @@
   (let [arena (Arena/ofConfined)]
     (try
       (let [{:keys [status headers body]
-             :or {status 500 headers {}}} ring-resp]
+             :or {status 500 headers {}}} ring-resp
+            req-seg (mem/reinterpret req-ptr 2048)
+            pool-ptr (raw/get-req-pool req-seg)
+            {:keys [ptr len]} (copy-string-to-segment "OK" pool-ptr)]
 
-        (h2o/req-set-status req-ptr status)
-        (h2o/req-set-reason req-ptr "OK")
+        (raw/set-res-status! req-seg status)
+        (raw/set-res-reason! req-seg ptr)
         (set-headers! req-ptr headers)
         (h2o/start-response req-ptr (h2o/get-static-generator))
 
