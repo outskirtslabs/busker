@@ -8,7 +8,7 @@
 extra/
 archive
 result
-libs/*/target
+target/
 *.log
 # native build artifacts
 *.o
