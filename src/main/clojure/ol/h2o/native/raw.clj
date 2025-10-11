@@ -9,8 +9,8 @@
    [coffi.mem :as mem]
    [clojure.string :as str])
   (:import
-   [org.h2o.generated st_h2o_req_t st_h2o_res_t
-    st_h2o_iovec_t h2o_headers_t h2o_header_t]
+   [net.example.h2o st_h2o_req_t st_h2o_res_t
+    st_h2o_iovec_t h2o_headers_t st_h2o_header_t]
    [java.lang.foreign MemorySegment]))
 
 ;;
@@ -165,12 +165,12 @@
 (defn header-name
   "Get name iovec from h2o_header_t MemorySegment."
   [header-seg]
-  (h2o_header_t/name header-seg))
+  (st_h2o_header_t/name header-seg))
 
 (defn header-value
   "Get value iovec from h2o_header_t MemorySegment."
   [header-seg]
-  (h2o_header_t/value header-seg))
+  (st_h2o_header_t/value header-seg))
 
 ;;
 ;; Helper functions for Ring request building

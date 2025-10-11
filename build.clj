@@ -92,8 +92,10 @@
         struct-args ["--include-struct" "st_h2o_req_t"
                      "--include-struct" "st_h2o_res_t"
                      "--include-struct" "st_h2o_iovec_t"
-                     "--include-struct" "h2o_headers_t"
-                     "--include-struct" "h2o_header_t"
+                     "--include-typedef" "h2o_headers_t"
+                     "--include-struct" "st_h2o_header_t"
+                     "--include-struct" "st_h2o_header_flags_t"
+                     "--include-typedef" "h2o_iovec_vector_t"
                      "--include-struct" "st_h2o_timestamp_t"
                      "--include-struct" "timeval"
                      "--include-struct" "st_h2o_httpclient_timings_t"
@@ -105,7 +107,7 @@
                      struct-args
                      ["--include-dir" h2o-include
                       "--output" "target/jextract"
-                      "--target-package" "org.h2o.generated"
+                      "--target-package" "net.example.h2o"
                       (str h2o-include "/h2o.h")])]
 
     (-jextract {:args args})
