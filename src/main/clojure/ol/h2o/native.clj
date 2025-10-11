@@ -306,6 +306,12 @@
   clj_h2o_get_static_generator
   [] ::mem/pointer)
 
+(defcfn create-streaming-generator
+  "Create a streaming generator with proceed/stop callbacks for backpressure.
+   Returns h2o_generator_t* pointer."
+  clj_create_streaming_generator
+  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer] ::mem/pointer)
+
 (defcfn req-set-status
   "Set response status code"
   clj_h2o_req_set_status
@@ -400,6 +406,11 @@
    - ctx: pointer to h2o_context_t"
   h2o_cleanup_thread
   [::mem/long ::mem/pointer] ::mem/int)
+
+(defcfn req-print-offsets
+  "Debug helper: print h2o_req_t field offsets to stderr for struct layout verification"
+  clj_h2o_req_print_offsets
+  [] ::mem/void)
 
 (defcfn mem-alloc-shared
   "Allocate memory from h2o pool. Returns pointer to allocated memory."

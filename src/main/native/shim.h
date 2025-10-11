@@ -84,4 +84,14 @@ size_t clj_h2o_context_get_active_conns(void *ctx_ptr);
 size_t clj_h2o_context_get_idle_conns(void *ctx_ptr);
 size_t clj_h2o_context_get_shutdown_conns(void *ctx_ptr);
 
+/* Debug helper for struct layout verification */
+void clj_h2o_req_print_offsets(void);
+
+/* Streaming generator with upcall support for backpressure */
+void* clj_create_streaming_generator(
+    void* req_ptr,
+    void* on_proceed_callback,
+    void* on_stop_callback,
+    void* jvm_handle);
+
 #endif /* CLJ_H2O_SHIM_H */

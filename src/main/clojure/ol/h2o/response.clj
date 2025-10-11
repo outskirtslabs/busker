@@ -1,14 +1,17 @@
 (ns ol.h2o.response
+  "Response handling for h2o HTTP server."
   (:require
    [ol.h2o.native :as h2o]
    [clojure.string :as str]
    [coffi.mem :as mem]
-   [ring.core.protocols :as ring-protocols]))
+   [ring.core.protocols :as ring-protocols])
+  (:import
+   [java.lang.foreign Arena MemorySegment]))
 
 (set! *warn-on-reflection* true)
 
-(defn find-header
-  "Find a header value by name (case-insensitive). Returns [key value] or nil."
+(defn- find-header
+  "Find a header value by name (case-insensitive)."
   [headers header-name]
   (let [target-lower (str/lower-case header-name)]
     (some (fn [[k v]]
@@ -16,7 +19,7 @@
               v))
           headers)))
 
-(defn dissoc-header
+(defn- dissoc-header
   "Remove all case variations of a header by name (case-insensitive)."
   [headers header-name]
   (let [target-lower (str/lower-case header-name)]
@@ -25,106 +28,97 @@
                     (= (str/lower-case (str k)) target-lower))
                   headers))))
 
-(defn- send-headers!
-  "Send Ring headers to h2o via FFI."
-  [pool-ptr res-headers-ptr headers]
-  (doseq [[name value] headers]
-    (let [name-lower (str/lower-case (str name))
-          name-orig (str name)
-          value-str (str value)
-          name-lower-bytes (.getBytes name-lower "UTF-8")
-          name-orig-bytes (.getBytes name-orig "UTF-8")
-          value-bytes (.getBytes value-str "UTF-8")
-          name-lower-len (alength name-lower-bytes)
-          name-orig-len (alength name-orig-bytes)
-          value-len (alength value-bytes)
-          name-lower-ptr-raw (h2o/mem-alloc-shared pool-ptr name-lower-len
-                                                   java.lang.foreign.MemorySegment/NULL)
-          name-orig-ptr-raw (h2o/mem-alloc-shared pool-ptr name-orig-len
-                                                  java.lang.foreign.MemorySegment/NULL)
-          value-ptr-raw (h2o/mem-alloc-shared pool-ptr value-len
-                                              java.lang.foreign.MemorySegment/NULL)]
-      (let [name-lower-ptr (mem/reinterpret name-lower-ptr-raw name-lower-len)
-            name-orig-ptr (mem/reinterpret name-orig-ptr-raw name-orig-len)
-            value-ptr (mem/reinterpret value-ptr-raw value-len)]
-        (java.lang.foreign.MemorySegment/copy
-         (java.lang.foreign.MemorySegment/ofArray name-lower-bytes) 0
-         name-lower-ptr 0 name-lower-len)
-        (java.lang.foreign.MemorySegment/copy
-         (java.lang.foreign.MemorySegment/ofArray name-orig-bytes) 0
-         name-orig-ptr 0 name-orig-len)
-        (java.lang.foreign.MemorySegment/copy
-         (java.lang.foreign.MemorySegment/ofArray value-bytes) 0
-         value-ptr 0 value-len))
-      (h2o/add-header-by-str pool-ptr res-headers-ptr
-                             name-lower-ptr-raw name-lower-len
-                             0
-                             name-orig-ptr-raw
-                             value-ptr-raw value-len))))
+(defn- parse-content-length [headers]
+  (when-let [cl (find-header headers "content-length")]
+    (try
+      (Long/parseLong (str cl))
+      (catch Exception _ nil))))
+
+(defn- copy-string-to-segment [s pool-ptr]
+  (let [bytes (.getBytes ^String s "UTF-8")
+        len (alength bytes)
+        ptr-raw (h2o/mem-alloc-shared pool-ptr len MemorySegment/NULL)
+        ptr (mem/reinterpret ptr-raw len)]
+    (MemorySegment/copy (MemorySegment/ofArray bytes) 0 ptr 0 len)
+    {:ptr ptr-raw :len len}))
+
+(defn- add-header! [pool-ptr res-headers-ptr name value]
+  (let [name-lower (str/lower-case (str name))
+        name-orig (str name)
+        value-str (str value)
+        {:keys [ptr len]} (copy-string-to-segment name-lower pool-ptr)
+        name-lower-ptr ptr
+        name-lower-len len
+        {:keys [ptr len]} (copy-string-to-segment name-orig pool-ptr)
+        name-orig-ptr ptr
+        name-orig-len len
+        {:keys [ptr len]} (copy-string-to-segment value-str pool-ptr)
+        value-ptr ptr
+        value-len len]
+    (h2o/add-header-by-str pool-ptr res-headers-ptr
+                           name-lower-ptr name-lower-len
+                           0
+                           name-orig-ptr
+                           value-ptr value-len)))
+
+(defn- set-headers! [req-ptr headers]
+  (let [pool-ptr (h2o/req-get-pool req-ptr)
+        res-headers-ptr (h2o/req-get-res-headers req-ptr)
+        content-length (parse-content-length headers)
+        headers-to-send (dissoc-header headers "content-length")]
+
+    (when content-length
+      (h2o/req-set-content-length req-ptr content-length))
+
+    (doseq [[name value] headers-to-send]
+      (add-header! pool-ptr res-headers-ptr name value))))
+
+(defn- body->bytes [body ring-resp]
+  (let [baos (java.io.ByteArrayOutputStream.)]
+    (ring-protocols/write-body-to-stream body ring-resp baos)
+    (.toByteArray baos)))
+
+(defn- send-body! [req-ptr body-bytes arena]
+  (let [pool-ptr (h2o/req-get-pool req-ptr)
+        body-len (alength ^bytes body-bytes)]
+    (when (pos? body-len)
+      (let [body-seg-raw (h2o/mem-alloc-shared pool-ptr body-len MemorySegment/NULL)
+            body-seg (mem/reinterpret body-seg-raw body-len)]
+        (MemorySegment/copy (MemorySegment/ofArray ^bytes body-bytes) 0
+                            body-seg 0 body-len)
+        (let [vec-seg (mem/alloc (mem/size-of ::h2o/h2o-sendvec-t) arena)]
+          (h2o/sendvec-init-raw vec-seg body-seg-raw body-len)
+          (h2o/sendvec req-ptr vec-seg 1 h2o/H2O_SEND_STATE_FINAL))))))
+
+(defn- send-empty-final! [req-ptr arena]
+  (let [vec-seg (mem/alloc (mem/size-of ::h2o/h2o-sendvec-t) arena)]
+    (h2o/sendvec-init-raw vec-seg MemorySegment/NULL 0)
+    (h2o/sendvec req-ptr vec-seg 1 h2o/H2O_SEND_STATE_FINAL)))
 
 (defn send-ring-response!
-  "Send Ring response via h2o FFI.
+  "Send Ring response via h2o FFI using simple synchronous model.
    MUST be called from the worker thread that owns the request.
 
    Parameters:
    - req-ptr: Native pointer to h2o_req_t
    - ring-resp: Ring response map {:status :headers :body}"
   [req-ptr ring-resp]
-  (try
-    (let [status (:status ring-resp 500)
-          headers (:headers ring-resp {})
-          body (:body ring-resp)
-          content-length-str (find-header headers "content-length")
-          content-length (when content-length-str
-                           (try
-                             (Long/parseLong (str content-length-str))
-                             (catch Exception _ nil)))
-          headers-to-send (if content-length-str (dissoc-header headers "content-length") headers)]
+  (let [arena (Arena/ofConfined)]
+    (try
+      (let [{:keys [status headers body]
+             :or {status 500 headers {}}} ring-resp]
 
-      (h2o/req-set-status req-ptr status)
-      (when content-length
-        (h2o/req-set-content-length req-ptr content-length))
+        (h2o/req-set-status req-ptr status)
+        (h2o/req-set-reason req-ptr "OK")
+        (set-headers! req-ptr headers)
+        (h2o/start-response req-ptr (h2o/get-static-generator))
 
-      (let [pool-ptr (h2o/req-get-pool req-ptr)
-            res-headers-ptr (h2o/req-get-res-headers req-ptr)]
+        (if body
+          (send-body! req-ptr (body->bytes body ring-resp) arena)
+          (send-empty-final! req-ptr arena)))
 
-        (send-headers! pool-ptr res-headers-ptr headers-to-send)
-
-        (let [buffer (java.io.ByteArrayOutputStream.)
-              output-stream (proxy [java.io.OutputStream] []
-                              (write
-                                ([b-or-arr]
-                                 (if (int? b-or-arr)
-                                   (.write buffer (int b-or-arr))
-                                   (.write buffer ^bytes b-or-arr)))
-                                ([bytes off len]
-                                 (.write buffer ^bytes bytes (int off) (int len))))
-                              (close [])
-                              (flush []))]
-
-          (when body
-            (ring-protocols/write-body-to-stream body ring-resp output-stream))
-
-          (let [body-bytes (.toByteArray buffer)
-                body-len (alength body-bytes)
-                body-ptr-raw (h2o/mem-alloc-shared pool-ptr body-len
-                                                   java.lang.foreign.MemorySegment/NULL)
-                body-ptr (mem/reinterpret body-ptr-raw body-len)]
-            (when (pos? body-len)
-              (java.lang.foreign.MemorySegment/copy
-               (java.lang.foreign.MemorySegment/ofArray body-bytes) 0
-               body-ptr 0 body-len))
-            (let [sendvec-size (mem/size-of ::h2o/h2o-sendvec-t)
-                  sendvec-ptr-raw (h2o/mem-alloc-shared pool-ptr sendvec-size
-                                                        java.lang.foreign.MemorySegment/NULL)
-                  sendvec-seg (mem/reinterpret sendvec-ptr-raw sendvec-size)]
-              (h2o/sendvec-init-raw sendvec-seg body-ptr-raw body-len)
-              (let [generator-ptr (h2o/get-static-generator)]
-                (h2o/start-response req-ptr generator-ptr))
-              (h2o/sendvec req-ptr sendvec-seg 1 h2o/H2O_SEND_STATE_FINAL))))))
-
-    (catch Exception e
-      (println "Error sending response:" (.getMessage e))
-      (.printStackTrace e))))
-
-
+      (catch Exception e
+        (println "Error sending response:" (.getMessage e))
+        (.printStackTrace e))
+      (finally
+        (.close arena)))))
