@@ -45,26 +45,6 @@ void clj_handler_set_on_req(void *handler_ptr, void *callback) {
 
 size_t clj_h2o_handler_size(void) { return sizeof(h2o_handler_t); }
 
-void clj_h2o_req_set_status(void *req_ptr, int status) {
-  h2o_req_t *req = (h2o_req_t *)req_ptr;
-  req->res.status = status;
-}
-
-void clj_h2o_req_set_reason(void *req_ptr, const char *reason) {
-  h2o_req_t *req = (h2o_req_t *)req_ptr;
-  req->res.reason = reason;
-}
-
-void clj_h2o_req_set_content_length(void *req_ptr, size_t content_length) {
-  h2o_req_t *req = (h2o_req_t *)req_ptr;
-  req->res.content_length = content_length;
-}
-
-void *clj_h2o_req_get_pool(void *req_ptr) {
-  h2o_req_t *req = (h2o_req_t *)req_ptr;
-  return &req->pool;
-}
-
 void *clj_h2o_req_get_res_headers(void *req_ptr) {
   h2o_req_t *req = (h2o_req_t *)req_ptr;
   return &req->res.headers;
@@ -75,51 +55,6 @@ void *clj_h2o_get_content_type_token(void) { return H2O_TOKEN_CONTENT_TYPE; }
 static h2o_generator_t static_generator = {NULL, NULL};
 
 void *clj_h2o_get_static_generator(void) { return &static_generator; }
-
-void *clj_h2o_req_get_method(void *req_ptr) {
-  h2o_req_t *req = (h2o_req_t *)req_ptr;
-  return &req->method;
-}
-
-void *clj_h2o_req_get_path(void *req_ptr) {
-  h2o_req_t *req = (h2o_req_t *)req_ptr;
-  return &req->path;
-}
-
-void *clj_h2o_req_get_authority(void *req_ptr) {
-  h2o_req_t *req = (h2o_req_t *)req_ptr;
-  return &req->authority;
-}
-
-void *clj_h2o_req_get_query_at(void *req_ptr) {
-  h2o_req_t *req = (h2o_req_t *)req_ptr;
-  return &req->query_at;
-}
-
-void *clj_h2o_req_get_scheme(void *req_ptr) {
-  h2o_req_t *req = (h2o_req_t *)req_ptr;
-  return req->scheme ? (void *)&req->scheme->name : NULL;
-}
-
-void *clj_h2o_req_get_entity(void *req_ptr) {
-  h2o_req_t *req = (h2o_req_t *)req_ptr;
-  return &req->entity;
-}
-
-void *clj_h2o_req_get_headers(void *req_ptr) {
-  h2o_req_t *req = (h2o_req_t *)req_ptr;
-  return req->headers.entries;
-}
-
-uint32_t clj_h2o_req_get_headers_size(void *req_ptr) {
-  h2o_req_t *req = (h2o_req_t *)req_ptr;
-  return (uint32_t)req->headers.size;
-}
-
-uint16_t clj_h2o_req_get_version(void *req_ptr) {
-  h2o_req_t *req = (h2o_req_t *)req_ptr;
-  return req->version;
-}
 
 uint64_t clj_h2o_evloop_now(void *loop_ptr) {
   h2o_evloop_t *loop = (h2o_evloop_t *)loop_ptr;

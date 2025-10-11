@@ -56,23 +56,7 @@ void clj_handler_set_on_req(void *handler_ptr, void *callback);
 /* Struct size helpers for FFI layout */
 size_t clj_h2o_handler_size(void);
 
-/* h2o_req_t field accessors - minimal helpers for struct access */
-void clj_h2o_req_set_status(void *req_ptr, int status);
-void clj_h2o_req_set_reason(void *req_ptr, const char *reason);
-void clj_h2o_req_set_content_length(void *req_ptr, size_t content_length);
-void *clj_h2o_req_get_pool(void *req_ptr);
 void *clj_h2o_req_get_res_headers(void *req_ptr);
-
-/* Request info extraction */
-void *clj_h2o_req_get_method(void *req_ptr);
-void *clj_h2o_req_get_path(void *req_ptr);
-void *clj_h2o_req_get_authority(void *req_ptr);
-void *clj_h2o_req_get_query_at(void *req_ptr);
-void *clj_h2o_req_get_scheme(void *req_ptr);
-void *clj_h2o_req_get_entity(void *req_ptr);
-void *clj_h2o_req_get_headers(void *req_ptr);
-uint32_t clj_h2o_req_get_headers_size(void *req_ptr);
-uint16_t clj_h2o_req_get_version(void *req_ptr);
 
 /* Standard tokens and generator for responses */
 void *clj_h2o_get_content_type_token(void);

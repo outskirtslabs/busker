@@ -81,7 +81,8 @@
     (.toByteArray baos)))
 
 (defn- send-body! [req-ptr body-bytes arena]
-  (let [pool-ptr (h2o/req-get-pool req-ptr)
+  (let [req-seg (mem/reinterpret req-ptr 2048)
+        pool-ptr (raw/get-req-pool req-seg)
         body-len (alength ^bytes body-bytes)]
     (when (pos? body-len)
       (let [body-seg-raw (h2o/mem-alloc-shared pool-ptr body-len MemorySegment/NULL)
