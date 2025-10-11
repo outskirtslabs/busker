@@ -7,6 +7,61 @@
 
 (set! *warn-on-reflection* true)
 
+(defn find-header
+  "Find a header value by name (case-insensitive). Returns [key value] or nil."
+  [headers header-name]
+  (let [target-lower (str/lower-case header-name)]
+    (some (fn [[k v]]
+            (when (= (str/lower-case (str k)) target-lower)
+              v))
+          headers)))
+
+(defn dissoc-header
+  "Remove all case variations of a header by name (case-insensitive)."
+  [headers header-name]
+  (let [target-lower (str/lower-case header-name)]
+    (into {}
+          (remove (fn [[k _]]
+                    (= (str/lower-case (str k)) target-lower))
+                  headers))))
+
+(defn- send-headers!
+  "Send Ring headers to h2o via FFI."
+  [pool-ptr res-headers-ptr headers]
+  (doseq [[name value] headers]
+    (let [name-lower (str/lower-case (str name))
+          name-orig (str name)
+          value-str (str value)
+          name-lower-bytes (.getBytes name-lower "UTF-8")
+          name-orig-bytes (.getBytes name-orig "UTF-8")
+          value-bytes (.getBytes value-str "UTF-8")
+          name-lower-len (alength name-lower-bytes)
+          name-orig-len (alength name-orig-bytes)
+          value-len (alength value-bytes)
+          name-lower-ptr-raw (h2o/mem-alloc-shared pool-ptr name-lower-len
+                                                   java.lang.foreign.MemorySegment/NULL)
+          name-orig-ptr-raw (h2o/mem-alloc-shared pool-ptr name-orig-len
+                                                  java.lang.foreign.MemorySegment/NULL)
+          value-ptr-raw (h2o/mem-alloc-shared pool-ptr value-len
+                                              java.lang.foreign.MemorySegment/NULL)]
+      (let [name-lower-ptr (mem/reinterpret name-lower-ptr-raw name-lower-len)
+            name-orig-ptr (mem/reinterpret name-orig-ptr-raw name-orig-len)
+            value-ptr (mem/reinterpret value-ptr-raw value-len)]
+        (java.lang.foreign.MemorySegment/copy
+         (java.lang.foreign.MemorySegment/ofArray name-lower-bytes) 0
+         name-lower-ptr 0 name-lower-len)
+        (java.lang.foreign.MemorySegment/copy
+         (java.lang.foreign.MemorySegment/ofArray name-orig-bytes) 0
+         name-orig-ptr 0 name-orig-len)
+        (java.lang.foreign.MemorySegment/copy
+         (java.lang.foreign.MemorySegment/ofArray value-bytes) 0
+         value-ptr 0 value-len))
+      (h2o/add-header-by-str pool-ptr res-headers-ptr
+                             name-lower-ptr-raw name-lower-len
+                             0
+                             name-orig-ptr-raw
+                             value-ptr-raw value-len))))
+
 (defn send-ring-response!
   "Send Ring response via h2o FFI.
    MUST be called from the worker thread that owns the request.
@@ -16,17 +71,15 @@
    - ring-resp: Ring response map {:status :headers :body}"
   [req-ptr ring-resp]
   (try
-    (let [status (:status ring-resp 200)
+    (let [status (:status ring-resp 500)
           headers (:headers ring-resp {})
           body (:body ring-resp)
-
-          content-length-str (get headers "content-length")
+          content-length-str (find-header headers "content-length")
           content-length (when content-length-str
                            (try
                              (Long/parseLong (str content-length-str))
                              (catch Exception _ nil)))
-
-          headers-to-send (dissoc headers "content-length")]
+          headers-to-send (if content-length-str (dissoc-header headers "content-length") headers)]
 
       (h2o/req-set-status req-ptr status)
       (when content-length
@@ -35,39 +88,7 @@
       (let [pool-ptr (h2o/req-get-pool req-ptr)
             res-headers-ptr (h2o/req-get-res-headers req-ptr)]
 
-        (doseq [[name value] headers-to-send]
-          (let [name-lower (str/lower-case (str name))
-                name-orig (str name)
-                value-str (str value)
-                name-lower-bytes (.getBytes name-lower "UTF-8")
-                name-orig-bytes (.getBytes name-orig "UTF-8")
-                value-bytes (.getBytes value-str "UTF-8")
-                name-lower-len (alength name-lower-bytes)
-                name-orig-len (alength name-orig-bytes)
-                value-len (alength value-bytes)
-                name-lower-ptr-raw (h2o/mem-alloc-shared pool-ptr name-lower-len
-                                                         java.lang.foreign.MemorySegment/NULL)
-                name-orig-ptr-raw (h2o/mem-alloc-shared pool-ptr name-orig-len
-                                                        java.lang.foreign.MemorySegment/NULL)
-                value-ptr-raw (h2o/mem-alloc-shared pool-ptr value-len
-                                                    java.lang.foreign.MemorySegment/NULL)]
-            (let [name-lower-ptr (mem/reinterpret name-lower-ptr-raw name-lower-len)
-                  name-orig-ptr (mem/reinterpret name-orig-ptr-raw name-orig-len)
-                  value-ptr (mem/reinterpret value-ptr-raw value-len)]
-              (java.lang.foreign.MemorySegment/copy
-               (java.lang.foreign.MemorySegment/ofArray name-lower-bytes) 0
-               name-lower-ptr 0 name-lower-len)
-              (java.lang.foreign.MemorySegment/copy
-               (java.lang.foreign.MemorySegment/ofArray name-orig-bytes) 0
-               name-orig-ptr 0 name-orig-len)
-              (java.lang.foreign.MemorySegment/copy
-               (java.lang.foreign.MemorySegment/ofArray value-bytes) 0
-               value-ptr 0 value-len))
-            (h2o/add-header-by-str pool-ptr res-headers-ptr
-                                   name-lower-ptr-raw name-lower-len
-                                   0
-                                   name-orig-ptr-raw
-                                   value-ptr-raw value-len)))
+        (send-headers! pool-ptr res-headers-ptr headers-to-send)
 
         (let [buffer (java.io.ByteArrayOutputStream.)
               output-stream (proxy [java.io.OutputStream] []
