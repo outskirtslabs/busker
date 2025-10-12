@@ -78,6 +78,21 @@
                        :exit exit})))
     ret))
 
+(defn include-headers
+  "Generate --include-dir args for jextract from directory paths."
+  [dirs]
+  (mapcat (fn [d] ["--include-dir" d]) dirs))
+
+(defn include-structs
+  "Generate --include-struct args for jextract from struct names."
+  [structs]
+  (mapcat (fn [s] ["--include-struct" s]) structs))
+
+(defn include-typedefs
+  "Generate --include-typedef args for jextract from typedef names."
+  [typedefs]
+  (mapcat (fn [t] ["--include-typedef" t]) typedefs))
+
 (defn jextract-h2o
   "Generate Java bindings for h2o structs using jextract.
    Only generates specific structs to reduce generated code size."
@@ -86,38 +101,61 @@
   (b/delete {:path "target/jextract"})
 
   (let [h2o-include (h2o-include-dir)
-        sys-includes (system-includes)
-        include-args (mapcat (fn [path] ["--include-dir" path]) sys-includes)
-        ;; Only include specific structs to minimize generated code
-        struct-args ["--include-struct" "st_h2o_req_t"
-                     "--include-struct" "st_h2o_res_t"
-                     "--include-struct" "st_h2o_iovec_t"
-                     "--include-typedef" "h2o_headers_t"
-                     "--include-struct" "st_h2o_header_t"
-                     "--include-struct" "st_h2o_header_flags_t"
-                     "--include-typedef" "h2o_iovec_vector_t"
-                     "--include-struct" "st_h2o_timestamp_t"
-                     "--include-struct" "timeval"
-                     "--include-struct" "st_h2o_httpclient_timings_t"
-                     "--include-struct" "st_h2o_httpclient_conn_properties_t"
-                     "--include-struct" "st_h2o_timerwheel_entry_t"
-                     "--include-struct" "st_h2o_mem_pool_t"
-                     "--include-struct" "st_h2o_linklist_t"]
+        include-args (include-headers (conj (system-includes) h2o-include))
+        structs (include-structs ["st_h2o_req_t"
+                                  "st_h2o_res_t"
+                                  "st_h2o_iovec_t"
+                                  "st_h2o_header_t"
+                                  "st_h2o_header_flags_t"
+                                  "st_h2o_timestamp_t"
+                                  "timeval"
+                                  "st_h2o_handler_t"
+                                  "st_h2o_socket_t"
+                                  "st_ptls_log_conn_state_t"
+                                  "st_ptls_log_state_t"
+                                  "in6_addr"
+                                  "st_h2o_httpclient_timings_t"
+                                  "st_h2o_httpclient_conn_properties_t"
+                                  "st_h2o_timerwheel_entry_t"
+                                  "st_h2o_mem_pool_t"
+                                  "st_h2o_linklist_t"
+                                  "st_h2o_globalconf_t"
+                                  "st_h2o_socket_latency_optimization_conditions_t"
+                                  "st_h2o_socketpool_t"
+                                  "st_h2o_context_t"
+                                  "st_h2o_multithread_receiver_t"
+                                  "st_quicly_cid_plaintext_t"
+                                  "st_h2o_httpclient_ctx_t"
+                                  "st_h2o_httpclient_connection_pool_t"
+                                  "st_h2o_quic_stats_t"
+                                  "st_h2o_httpclient_protocol_ratio_t"
+                                  "st_h2o_accept_ctx_t"
+                                  "st_h2o_evloop_t"
+                                  "st_h2o_sliding_counter_t"])
+        typedefs (include-typedefs ["h2o_headers_t"
+                                    "h2o_socket_t"
+                                    "h2o_handler_t"
+                                    "h2o_req_t"
+                                    "h2o_res_t"
+                                    "h2o_iovec_vector_t"
+                                    "h2o_globalconf_t"
+                                    "h2o_context_t"
+                                    "h2o_accept_ctx_t"
+                                    "h2o_evloop_t"])
         args (concat include-args
-                     struct-args
-                     ["--include-dir" h2o-include
-                      "--output" "target/jextract"
+                     structs
+                     typedefs
+                     ["--output" "target/jextract"
                       "--target-package" "net.example.h2o"
                       (str h2o-include "/h2o.h")])]
-
     (-jextract {:args args})
     (println "Generated Java bindings in target/jextract")))
 
 (defn compile-jextract
-  "Compile jextract-generated Java sources."
+  "Compile jextract-generated Java sources and custom Java sources."
   [_]
   (println "Compiling jextract-generated Java...")
-  (b/javac {:src-dirs ["target/jextract"]
+  (b/javac {:src-dirs ["target/jextract" "src/main/java"]
             :class-dir class-dir
             :basis @basis
             :javac-opts ["--release" "25" "--enable-preview"]})
