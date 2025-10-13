@@ -11,6 +11,8 @@
    [java.util.concurrent Executors]
    [java.util.concurrent.atomic AtomicBoolean AtomicLong]))
 
+(set! *warn-on-reflection* true)
+
 (def ^:const default-max-connections 1024)
 (def ^:const H2O_SOCKET_FLAG_DONT_READ 0x20)
 

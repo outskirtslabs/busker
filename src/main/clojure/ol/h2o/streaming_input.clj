@@ -3,9 +3,8 @@
    [java.nio ByteBuffer]
    [java.nio.channels Channels ReadableByteChannel]
    [java.util.concurrent LinkedBlockingQueue]))
-(set! *warn-on-reflection* true)
 
-;;; --------------------- BORDER
+(set! *warn-on-reflection* true)
 
 (defprotocol WriteReq
   (add-chunk [this chunk is-last] "Add a chunk of bytes to the channel. is-last indicates end of stream.")

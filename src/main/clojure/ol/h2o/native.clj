@@ -4,8 +4,9 @@
    [clojure.string :as str]
    [coffi.ffi :as ffi :refer [defcfn]]
    [coffi.layout :as layout]
-   [coffi.mem :as mem :refer [defalias]]
-   [ring.core.protocols :as ring-protocols]))
+   [coffi.mem :as mem]))
+
+(set! *warn-on-reflection* true)
 
 (import 'java.lang.foreign.MemoryLayout)
 (import 'java.lang.foreign.MemoryLayout$PathElement)
