@@ -5,8 +5,29 @@
    [coffi.ffi :as ffi :refer [defcfn]]
    [coffi.layout :as layout]
    [coffi.mem :as mem :refer [defalias]]
-   [ring.core.protocols :as ring-protocols])
-  (:import [java.nio.file Files]))
+   [ring.core.protocols :as ring-protocols]))
+
+(import 'java.lang.foreign.MemoryLayout)
+(import 'java.lang.foreign.MemoryLayout$PathElement)
+
+(defn offset-of
+  "Given a `struct-def`, returns the byte offset of the `field`."
+  [struct-def field]
+  (let [layout ^MemoryLayout (mem/c-layout struct-def)
+        path-elts
+        ^"[Ljava.lang.foreign.MemoryLayout$PathElement;"
+        (into-array MemoryLayout$PathElement
+                    [(MemoryLayout$PathElement/groupElement (name field))])]
+    (.byteOffset layout path-elts)))
+
+(defn print-offsets-for [struct-def-vec]
+  (let [layout (layout/with-c-layout struct-def-vec)
+        [_struct-type fields] struct-def-vec
+        struct-name (or (some-> struct-def-vec meta :name str) "struct")]
+    (println (str "COFFI: " struct-name " field offsets:"))
+    (println (str "  sizeof(" struct-name ") = " (mem/size-of layout)))
+    (doseq [[field-name _field-type] fields]
+      (println (str "  " (name field-name) " = " (offset-of layout field-name))))))
 
 (defn copy-resource [resource-path output-path]
   (with-open [in (io/input-stream (io/resource resource-path))
@@ -40,6 +61,141 @@
 
 (ffi/load-system-library "h2o-evloop")
 (ffi/load-library (System/getProperty "ol.libh2o.path"))
+
+(mem/defalias ::clj-header-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:name ::mem/pointer]
+      [:name_len ::mem/int]
+      [:value ::mem/pointer]
+      [:value_len ::mem/int]]]))
+
+(mem/defalias ::clj-iovec-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:data ::mem/pointer]
+      [:len ::mem/int]]]))
+
+;; h2o_iovec_t is:
+;;   typedef struct { char *base; size_t len; } h2o_iovec_t;
+;; Use a typed pointer for clarity; size_t→::mem/long is OK on typical *nix.
+(mem/defalias ::h2o-iovec-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:base ::mem/pointer]
+      [:len ::mem/long]]]))
+
+;; h2o_accept_ctx_t structure
+;; typedef struct st_h2o_accept_ctx_t {
+;;     h2o_context_t *ctx;
+;;     h2o_hostconf_t **hosts;
+;;     SSL_CTX *ssl_ctx;
+;;     h2o_iovec_t *http2_origin_frame;
+;;     int expect_proxy_line;
+;;     h2o_multithread_receiver_t *libmemcached_receiver;
+;; } h2o_accept_ctx_t;
+(mem/defalias ::h2o-accept-ctx-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:ctx ::mem/pointer]
+      [:hosts ::mem/pointer]
+      [:ssl_ctx ::mem/pointer]
+      [:http2_origin_frame ::mem/pointer]
+      [:expect_proxy_line ::mem/int]
+      [:libmemcached_receiver ::mem/pointer]]]))
+
+(mem/defalias ::h2o-sendvec-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:callbacks ::mem/pointer]
+      [:len ::mem/long]
+      [:raw ::mem/pointer]]]))
+
+;; h2o_header_t structure
+;; typedef struct {
+;;     h2o_iovec_t *name;
+;;     const char *orig_name;
+;;     h2o_iovec_t value;
+;;     h2o_header_flags_t flags;
+;; } h2o_header_t;
+(mem/defalias ::h2o-header-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:name ::mem/pointer]
+      [:orig_name ::mem/pointer]
+      [:value ::h2o-iovec-t]
+      [:flags ::mem/char]]]))
+
+;; h2o_generator_t structure
+;; typedef struct st_h2o_generator_t {
+;;     void (*proceed)(struct st_h2o_generator_t *self, h2o_req_t *req);
+;;     void (*stop)(struct st_h2o_generator_t *self, h2o_req_t *req);
+;; } h2o_generator_t;
+(mem/defalias ::h2o-generator-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:proceed ::mem/pointer]
+      [:stop ::mem/pointer]]]))
+
+(mem/defalias ::clj-req-meta-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:authority ::mem/pointer]
+      [:charset ::mem/pointer]
+      [:method ::mem/pointer]
+      [:path ::mem/pointer]
+      [:remote_addr ::mem/pointer]
+      [:scheme ::mem/pointer]
+      [:headers ::mem/pointer]
+
+      [:authority_len ::mem/long]
+      [:charset_len ::mem/long]
+      [:method_len ::mem/long]
+      [:path_len ::mem/long]
+      [:remote_addr_len ::mem/long]
+      [:scheme_len ::mem/long]
+      [:headers_len ::mem/long]
+
+      [:http_version ::mem/int]
+      [:has_body ::mem/int]]]))
+#_(print-offsets-for (layout/with-c-layout
+                       [::mem/struct
+                        [[:authority ::mem/pointer]
+                         [:charset ::mem/pointer]
+                         [:method ::mem/pointer]
+                         [:path ::mem/pointer]
+                         [:remote_addr ::mem/pointer]
+                         [:scheme ::mem/pointer]
+                         [:headers ::mem/pointer]
+
+                         [:authority_len ::mem/long]
+                         [:charset_len ::mem/long]
+                         [:method_len ::mem/long]
+                         [:path_len ::mem/long]
+                         [:remote_addr_len ::mem/long]
+                         [:scheme_len ::mem/long]
+                         [:headers_len ::mem/long]
+
+                         [:http_version ::mem/int]
+                         [:has_body ::mem/int]]]))
+
+(mem/defalias ::clj-req-ctx-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:req ::mem/pointer]
+      [:meta ::clj-req-meta-t]
+      [:on-cleanup ::mem/pointer]
+      [:generator ::h2o-generator-t]
+      [:cleanup ::mem/int]]]))
+
+#_(print-offsets-for
+   (layout/with-c-layout
+     [::mem/struct
+      [[:req ::mem/pointer]
+       [:meta ::clj-req-meta-t]
+       [:on-cleanup ::mem/pointer]
+       [:generator ::h2o-generator-t]
+       [:cleanup ::mem/int]]]))
 
 (defcfn evloop-create
   "Creates a new event loop. Returns a pointer to h2o_evloop_t."
@@ -89,34 +245,6 @@
   "Get hosts pointer (h2o_hostconf_t**) from h2o_globalconf_t"
   clj_h2o_globalconf_get_hosts
   [::mem/pointer] ::mem/pointer)
-
-;; h2o_iovec_t is:
-;;   typedef struct { char *base; size_t len; } h2o_iovec_t;
-;; Use a typed pointer for clarity; size_t→::mem/long is OK on typical *nix.
-(mem/defalias ::h2o-iovec-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:base ::mem/pointer]
-      [:len ::mem/long]]]))
-
-;; h2o_accept_ctx_t structure
-;; typedef struct st_h2o_accept_ctx_t {
-;;     h2o_context_t *ctx;
-;;     h2o_hostconf_t **hosts;
-;;     SSL_CTX *ssl_ctx;
-;;     h2o_iovec_t *http2_origin_frame;
-;;     int expect_proxy_line;
-;;     h2o_multithread_receiver_t *libmemcached_receiver;
-;; } h2o_accept_ctx_t;
-(mem/defalias ::h2o-accept-ctx-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:ctx ::mem/pointer]
-      [:hosts ::mem/pointer]
-      [:ssl_ctx ::mem/pointer]
-      [:http2_origin_frame ::mem/pointer]
-      [:expect_proxy_line ::mem/int]
-      [:libmemcached_receiver ::mem/pointer]]]))
 
 (defcfn config-register-host
   "Register a virtual host with the h2o configuration.
@@ -212,39 +340,6 @@
 (def ^:const H2O_SEND_STATE_FINAL 1)
 (def ^:const H2O_SEND_STATE_ERROR 2)
 
-(mem/defalias ::h2o-sendvec-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:callbacks ::mem/pointer]
-      [:len ::mem/long]
-      [:raw ::mem/pointer]]]))
-
-;; h2o_header_t structure
-;; typedef struct {
-;;     h2o_iovec_t *name;
-;;     const char *orig_name;
-;;     h2o_iovec_t value;
-;;     h2o_header_flags_t flags;
-;; } h2o_header_t;
-(mem/defalias ::h2o-header-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:name ::mem/pointer]
-      [:orig_name ::mem/pointer]
-      [:value ::h2o-iovec-t]
-      [:flags ::mem/char]]]))
-
-;; h2o_generator_t structure
-;; typedef struct st_h2o_generator_t {
-;;     void (*proceed)(struct st_h2o_generator_t *self, h2o_req_t *req);
-;;     void (*stop)(struct st_h2o_generator_t *self, h2o_req_t *req);
-;; } h2o_generator_t;
-(mem/defalias ::h2o-generator-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:proceed ::mem/pointer]
-      [:stop ::mem/pointer]]]))
-
 (defcfn sendvec-init-raw
   "Initialize a sendvec with raw bytes"
   h2o_sendvec_init_raw
@@ -260,58 +355,33 @@
   h2o_start_response
   [::mem/pointer ::mem/pointer] ::mem/void)
 
-(defcfn config-register-path
-  "Register a path with the h2o configuration.
-   Returns pointer to h2o_pathconf_t"
-  h2o_config_register_path
-  [::mem/pointer ::mem/c-string ::mem/int] ::mem/pointer)
-
-(defcfn handler-set-on-req
-  "Set on_req callback for handler"
-  clj_handler_set_on_req
-  [::mem/pointer ::mem/pointer] ::mem/void)
-
-(defcfn handler-size
-  "Get size of h2o_handler_t structure"
-  clj_h2o_handler_size
-  [] ::mem/long)
-
 (defcfn create-handler
   "Create and configure h2o handler with optional callbacks.
    Registers path '/', creates handler, and configures callbacks.
 
    Parameters:
    - hostconf-ptr: h2o_hostconf_t* pointer
-   - on-context-init: Clojure fn (handler-ptr ctx-ptr -> void) or nil
-   - on-context-dispose: Clojure fn (handler-ptr ctx-ptr -> void) or nil
-   - dispose: Clojure fn (handler-ptr -> void) or nil
-   - on-req-callback: Clojure fn (handler-ptr req-ptr -> int) (required)
+   - on-req-callback: Clojure fn (clj_req_ctx map) (required)
+   - on-cleanup-callback: Clojure fn  (clj_req_ctx map) (required)
    - supports-request-streaming: boolean
    - handles-expect: boolean
 
    Returns handler pointer."
   "clj_h2o_create_handler"
-  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer ::mem/int ::mem/int] ::mem/pointer
+  [::mem/pointer  ::mem/pointer ::mem/pointer ::mem/int ::mem/int] ::mem/pointer
   native-fn
-  [hostconf-ptr on-context-init on-context-dispose dispose on-req-callback supports-request-streaming handles-expect]
-  (let [null-ptr (mem/as-segment 0)
-        on-context-init-ptr (if on-context-init
-                              (mem/serialize on-context-init [::ffi/fn [::mem/pointer ::mem/pointer] ::mem/void])
-                              null-ptr)
-        on-context-dispose-ptr (if on-context-dispose
-                                 (mem/serialize on-context-dispose [::ffi/fn [::mem/pointer ::mem/pointer] ::mem/void])
-                                 null-ptr)
-        dispose-ptr (if dispose
-                      (mem/serialize dispose [::ffi/fn [::mem/pointer] ::mem/void])
-                      null-ptr)
-        on-req-ptr (mem/serialize on-req-callback [::ffi/fn [::mem/pointer ::mem/pointer] ::mem/int])
+  [hostconf-ptr on-req-callback on-cleanup-callback supports-request-streaming handles-expect]
+  (let [on-req-ptr (mem/serialize (fn [ctx-ptr]
+                                    (on-req-callback (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t)))
+                                  [::ffi/fn [::mem/pointer] ::mem/int])
+        on-cleanup-ptr (mem/serialize (fn [ctx-ptr]
+                                        (on-cleanup-callback (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t)))
+                                      [::ffi/fn [::mem/pointer] ::mem/void])
         streaming-flag (if supports-request-streaming 1 0)
         expect-flag (if handles-expect 1 0)]
     (native-fn hostconf-ptr
-               on-context-init-ptr
-               on-context-dispose-ptr
-               dispose-ptr
                on-req-ptr
+               on-cleanup-ptr
                streaming-flag
                expect-flag)))
 
@@ -330,21 +400,21 @@
   h2o_add_header_by_str
   [::mem/pointer ::mem/pointer ::mem/pointer ::mem/long ::mem/int ::mem/pointer ::mem/pointer ::mem/long] ::mem/long)
 
-(defcfn get-content-type-token
-  "Get H2O_TOKEN_CONTENT_TYPE pointer"
-  clj_h2o_get_content_type_token
-  [] ::mem/pointer)
+#_(defcfn get-content-type-token
+    "Get H2O_TOKEN_CONTENT_TYPE pointer"
+    clj_h2o_get_content_type_token
+    [] ::mem/pointer)
 
-(defcfn get-static-generator
-  "Get static h2o_generator_t pointer"
-  clj_h2o_get_static_generator
-  [] ::mem/pointer)
+#_(defcfn get-static-generator
+    "Get static h2o_generator_t pointer"
+    clj_h2o_get_static_generator
+    [] ::mem/pointer)
 
-(defcfn create-streaming-generator
-  "Create a streaming generator with proceed/stop callbacks for backpressure.
+#_(defcfn create-streaming-generator
+    "Create a streaming generator with proceed/stop callbacks for backpressure.
    Returns h2o_generator_t* pointer."
-  clj_create_streaming_generator
-  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer] ::mem/pointer)
+    clj_create_streaming_generator
+    [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer] ::mem/pointer)
 
 (defcfn req-get-res-headers
   "Get response headers pointer"
@@ -376,10 +446,10 @@
   h2o_cleanup_thread
   [::mem/long ::mem/pointer] ::mem/int)
 
-(defcfn req-print-offsets
-  "Debug helper: print h2o_req_t field offsets to stderr for struct layout verification"
-  clj_h2o_req_print_offsets
-  [] ::mem/void)
+#_(defcfn req-print-offsets
+    "Debug helper: print h2o_req_t field offsets to stderr for struct layout verification"
+    clj_h2o_req_print_offsets
+    [] ::mem/void)
 
 (defcfn mem-alloc-shared
   "Allocate memory from h2o pool. Returns pointer to allocated memory."
@@ -405,10 +475,10 @@
     (context-init ctx-ptr loop-ptr config-ptr)
     ctx-ptr))
 
-(defn dispose-server-config
-  "Dispose h2o configuration and free resources"
-  [config-ptr]
-  (config-dispose config-ptr))
+#_(defn dispose-server-config
+    "Dispose h2o configuration and free resources"
+    [config-ptr]
+    (config-dispose config-ptr))
 
 (defn create-loops
   "Create n event loops.
@@ -461,20 +531,20 @@
          (h2o-accept accept-ctx-ptr sock-ptr))))
    [::ffi/fn [::mem/pointer ::mem/c-string] ::mem/void]))
 
-(defn create-request-callback
-  "Create the on-req upcall callback for h2o.
+#_(defn create-request-callback
+    "Create the on-req upcall callback for h2o.
    This is called by native code when a request arrives."
-  [callback]
-  (mem/serialize
-   (fn [_self-ptr req-ptr]
-     (try
-       (callback req-ptr)
-       0
-       (catch Exception e
-         (println "Error enqueuing request:" (.getMessage e))
-         (.printStackTrace e)
-         -1)))
-   [::ffi/fn [::mem/pointer ::mem/pointer] ::mem/int]))
+    [callback]
+    (mem/serialize
+     (fn [_self-ptr req-ptr]
+       (try
+         (callback req-ptr)
+         0
+         (catch Exception e
+           (println "Error enqueuing request:" (.getMessage e))
+           (.printStackTrace e)
+           -1)))
+     [::ffi/fn [::mem/pointer ::mem/pointer] ::mem/int]))
 
 (defn create-accept-ctx
   "Create h2o_accept_ctx_t for accepting connections.
@@ -495,6 +565,77 @@
                          :libmemcached_receiver (mem/as-segment 0)}] ; NULL
     (mem/serialize accept-ctx-data ::h2o-accept-ctx-t arena)))
 
-;; POSIX socket syscalls via libc
+(defn ->string
+  "Read bytes from a pointer with given length as a UTF-8 string. Returns nil if pointer is null."
+  [ptr len]
+  (when (and ptr (not (mem/null? ptr)) (pos? len))
+    (String. (mem/read-bytes (mem/reinterpret ptr len) len) "UTF-8")))
 
+(defn build-ring-request
+  "Build a Ring request map from clj_req_meta_t.
+   Returns: Ring request map"
+  [meta]
+  (let [{:keys [method method_len path path_len authority authority_len
+                http_version headers headers_len has_body
+                scheme scheme_len remote_addr remote_addr_len
+                #_#_charset charset_len]} meta
 
+        method-str  (->string method method_len)
+
+        path-str (->string path path_len)
+
+        authority-str (->string authority authority_len)
+
+        scheme-str (->string scheme scheme_len)
+
+        remote-addr-str (->string remote_addr remote_addr_len)
+
+        #_#_charset-str (->string charset charset_len)
+
+        headers-map (when (and (not (mem/null? headers)) (pos? headers_len))
+                      (let [header-size (mem/size-of ::clj-header-t)
+                            total-size (* headers_len header-size)
+                            sized-headers (mem/reinterpret headers total-size)]
+                        (into {}
+                              (for [i (range headers_len)]
+                                (let [header-seg (mem/slice sized-headers (* i header-size) header-size)
+                                      header (mem/deserialize header-seg ::clj-header-t)
+                                      {:keys [name name_len value value_len]} header
+                                      name-str (->string name name_len)
+                                      value-str (->string value value_len)]
+                                  [(str/lower-case name-str) value-str])))))
+
+        [uri query-string] (if path-str
+                             (let [idx (str/index-of path-str "?")]
+                               (if idx
+                                 [(subs path-str 0 idx) (subs path-str (inc idx))]
+                                 [path-str nil]))
+                             [nil nil])
+
+        version (case http_version
+                  0x0101 [1 1]
+                  0x0200 [2 0]
+                  0x0300 [3 0]
+                  [1 1])]
+
+    {:server-port (if authority-str
+                    (if-let [colon-idx (str/last-index-of authority-str ":")]
+                      (Integer/parseInt (subs authority-str (inc colon-idx)))
+                      80)
+                    80)
+     :server-name (if authority-str
+                    (if-let [colon-idx (str/last-index-of authority-str ":")]
+                      (subs authority-str 0 colon-idx)
+                      authority-str)
+                    "localhost")
+     :remote-addr (or remote-addr-str "")
+     :uri uri
+     :query-string query-string
+     :scheme (keyword (or scheme-str "http"))
+     :request-method (keyword (str/lower-case (or method-str "get")))
+     :protocol (str "HTTP/" (first version) "." (second version))
+     :headers headers-map
+     :body (when (= 1 has_body)
+             ;; Body handling would go here
+             ;; For now return nil, streaming support will be added later
+             nil)}))

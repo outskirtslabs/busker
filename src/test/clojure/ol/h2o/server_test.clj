@@ -35,7 +35,8 @@
          (server/stop-server ~server-sym)))))
 
 (deftest test-simple-request
-  (with-server [_server (test-server (fn [{:keys [request-method body]}]
+  (with-server [_server (test-server (fn [{:keys [request-method body] :as req}]
+                                       #p req
                                        (cond
                                          (= :get request-method)
                                          {:status 200

@@ -2,41 +2,39 @@
 {:min-bb-version "0.8.156"
  :deps           {lambdaisland/kaocha {:mvn/version "1.91.1392"}}
  :paths          ["scripts"]
- :tasks          {:requires         ([babashka.fs :as fs]
-                                     [clojure.string :as str]
-                                     [babashka.tasks :refer [shell]])
-                  compile-shim        (let [opt {:inherit true}]
-                                        (shell opt "mkdir -p cmake-build-debug")
-                                        (shell opt "cmake -DCMAKE_BUILD_TYPE=Debug -B cmake-build-debug")
-                                        (shell opt "cmake --build cmake-build-debug --config Debug --target h2oclj"))
-                  jextract          {:doc "Generate Java bindings from h2o headers" :task (clojure "-T:build jextract-h2o")}
-                  compile-java      {:doc "Compile jextract-generated Java" :task (clojure "-T:build compile-jextract")}
-                  prep              (clojure "-Xdeps prep :aliases '[:dev :test]'")
-                  h2o (shell {:out :inherit :err :out} "nix" "build" ".#packages.x86_64-linux.h2o-bundle" "--print-build-logs")
-                  build             {:depends [compile-shim jextract compile-java prep]}
-                  test              (apply clojure "-M:dev:test:kaocha" *command-line-args*)
-                  deps-tree         (clojure "-X:deps tree :aliases '[:dev]'")
-                  dev               {:doc "Start a local development server" :task (apply clojure "-M:dev:repl/dev" *command-line-args*)}
-                  lint.copy-configs {:doc  "Copy clj-kondo config files from deps in the project"
-                                     :task (let [cp (-> (shell {:out :string} "clojure -Spath -M:test:dev") :out str/trim)]
-                                             (shell (str "clj-kondo --lint " cp " --dependencies --copy-configs --skip-lint")))}
-                  lint              {:doc  "Run the clj-kondo linter on the clojure code"
-                                     :task (shell (str "clj-kondo" " --fail-level error"
-                                                       (if (seq *command-line-args*)
-                                                         (str " --lint " (first *command-line-args*))
-                                                         " --lint src")))}
-                  jar               {:override-builtin true
-                                     :depends          [clean]
-                                     :doc              "Build an jar"
-                                     :task             (shell "clojure -T:build jar")}
-                  clean             {:override-builtin true
-                                     :doc              "Clean build artifacts"
-                                     :task
-                                     (do
-                                       (shell {:dir "."} "rm -rf cmake-build-debug")
-                                       #_(shell {:dir "."} "clj -T:build clean"))}
-                  publish           {:doc     "Publish the clojure sdk libs to clojars"
-                                     :depends [jar]
-                                     :task    (clojure "-T:build deploy")}
-                  pom               {:doc "Generate the pom.xml from clj" :task (clojure "-Xdeps mvn-pom :aliases '[:dev :test]'")}
-                  ci                {:depends [lint compile-shim test]}}}
+ :tasks          {:requires           ([babashka.fs :as fs]
+                                       [clojure.string :as str]
+                                       [babashka.tasks :refer [shell]])
+                  h2o                 {:doc "Build libh2o" :task (shell {:out :inherit :err :out} "nix" "build" ".#packages.x86_64-linux.h2o-bundle" "--print-build-logs")}
+                  compile-shim        {:doc "Compile C shim library" :task (clojure "-T:build compile-shim")}
+                  prep                {:doc "Prepare the clojure deps" :task (clojure "-Xdeps prep :aliases '[:dev :test]'")}
+                  compile             {:doc "Compile all the things" :task (do (clojure "-T:build compile")
+                                                                               (clojure "-Xdeps prep :aliases '[:dev :test]'"))}
+                  test                (apply clojure "-M:dev:test:kaocha" *command-line-args*)
+                  test.large-payloads {:doc  "Run large payload tests with restricted memory (2GB heap)"
+                                       :task (clojure "-J-Xmx2g" "-J-Xms2g" "-M:dev:test:kaocha" "--no-capture-output" "--focus" "ol.h2o.large-payload-test")}
+                  deps-tree           (clojure "-X:deps tree :aliases '[:dev]'")
+                  dev                 {:doc "Start a local development server" :task (apply clojure "-M:dev:repl/dev" *command-line-args*)}
+                  lint.copy-configs   {:doc  "Copy clj-kondo config files from deps in the project"
+                                       :task (let [cp (-> (shell {:out :string} "clojure -Spath -M:test:dev") :out str/trim)]
+                                               (shell (str "clj-kondo --lint " cp " --dependencies --copy-configs --skip-lint")))}
+                  lint                {:doc  "Run the clj-kondo linter on the clojure code"
+                                       :task (shell (str "clj-kondo" " --fail-level error"
+                                                         (if (seq *command-line-args*)
+                                                           (str " --lint " (first *command-line-args*))
+                                                           " --lint src")))}
+                  jar                 {:override-builtin true
+                                       :depends          [clean]
+                                       :doc              "Build an jar"
+                                       :task             (shell "clojure -T:build jar")}
+                  clean               {:override-builtin true
+                                       :doc              "Clean build artifacts"
+                                       :task
+                                       (do
+                                         (shell {:dir "."} "rm -rf cmake-build-debug")
+                                         #_(shell {:dir "."} "clj -T:build clean"))}
+                  publish             {:doc     "Publish the clojure sdk libs to clojars"
+                                       :depends [jar]
+                                       :task    (clojure "-T:build deploy")}
+                  pom                 {:doc "Generate the pom.xml from clj" :task (clojure "-Xdeps mvn-pom :aliases '[:dev :test]'")}
+                  ci                  {:depends [lint compile-shim test]}}}

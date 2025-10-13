@@ -4,7 +4,6 @@
    [coffi.mem :as mem]
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
-   [ol.h2o.native.raw :as raw]
    [ol.h2o.native.socket :as socket]
    [ol.h2o.response :as response])
   (:import
@@ -55,10 +54,11 @@
                                                             :body "Internal Server Error"}]))))))
 
 (defn on-request-callback
-  [ring-handler evloop-system req-ptr]
+  [ring-handler evloop-system req-ctx]
   (let [worker (evloop/get-current-worker)
         worker-id (:id worker)
-        req (Request. req-ptr (raw/build-ring-request req-ptr))]
+        ring-req #p (h2o/build-ring-request (:meta req-ctx))
+        req (Request. req-ctx ring-req)]
     (enqueue-request! worker-id req ring-handler evloop-system)))
 
 (defn create-ring-handler
@@ -66,9 +66,14 @@
    Returns handler pointer that must be kept alive."
   [hostconf-ptr ring-handler evloop-system]
   (h2o/create-handler
-   hostconf-ptr nil nil nil (fn [_handler-ptr req-ptr]
-                              (on-request-callback ring-handler evloop-system req-ptr)
-                              0) true false))
+   hostconf-ptr
+   (fn [req-ctx]
+     (on-request-callback ring-handler evloop-system req-ctx)
+     0)
+   (fn [req-ctx]
+     (println "ON CLEANUP" req-ctx)
+
+     0) true false))
 
 (defn create-connection-close-callback
   "Create callback for socket close events to track connection count.
