@@ -163,8 +163,8 @@ void clj_stream_start_response(h2o_req_t *req, int status,
  */
 clj_h2o_handler_t *
 clj_h2o_create_handler(h2o_hostconf_t *hostconf,
-                       int (*on_req_callback)(clj_req_ctx_t *),
-                       void (*on_cleanup_callback)(clj_req_ctx_t *),
+                       int (*on_request)(clj_req_ctx_t *),
+                       void (*on_request_cleanup)(clj_req_ctx_t *),
                        int supports_request_streaming, int handles_expect);
 
 void clj_h2o_set_on_request_body_chunk(
