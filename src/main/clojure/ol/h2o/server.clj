@@ -8,7 +8,7 @@
    [ol.h2o.streaming-input :as streaming]
    [ol.h2o.response :as response])
   (:import
-   [java.util.concurrent Executors]
+   [java.util.concurrent Executors ExecutorService]
    [java.util.concurrent.atomic AtomicBoolean AtomicLong]))
 
 (set! *warn-on-reflection* true)
@@ -52,26 +52,26 @@
    - ring-handler: Ring handler function (request-map -> response-map)
    - evloop-system: Event loop system for sending messages back to worker"
   [worker-id ^Request req ring-handler evloop-system]
-  (.submit @vthread-executor
-           (fn []
-             (try
-               (let [ring-resp (ring-handler (:ring-req req))]
-                 (evloop/send-msg! evloop-system worker-id
-                                   (send-response req ring-resp)))
-               (catch Exception e
-                 (println "Handler error:" (.getMessage e))
-                 (.printStackTrace e)
-                 (evloop/send-msg! evloop-system worker-id
-                                   (send-response req {:status 500
-                                                       :headers {"content-type" "text/plain"}
-                                                       :body "Internal Server Error"})))))))
+  (.submit ^ExecutorService @vthread-executor
+           ^Runnable (fn []
+                       (try
+                         (let [ring-resp (ring-handler (:ring-req req))]
+                           (evloop/send-msg! evloop-system worker-id
+                                             (send-response req ring-resp)))
+                         (catch Exception e
+                           (println "Handler error:" (.getMessage e))
+                           (.printStackTrace e)
+                           (evloop/send-msg! evloop-system worker-id
+                                             (send-response req {:status 500
+                                                                 :headers {"content-type" "text/plain"}
+                                                                 :body "Internal Server Error"})))))))
 
 (defn set-req-body-channel [evloop-system worker-id req-ctx-ptr req-ctx]
   (let [proceed-callback  (fn []
                             (evloop/send-msg! evloop-system worker-id
                                               (proceed-request req-ctx)))
         write-req-channel  (streaming/create-write-req-channel proceed-callback)
-        on-req-body-chunk (mem/serialize (fn [_ chunk-seg chunk-len is-last]
+        on-req-body-chunk (mem/serialize (fn [_ chunk-seg ^long chunk-len ^long is-last]
                                            #_#p{:chunk-len chunk-len :is-last is-last}
                                            (streaming/add-chunk write-req-channel (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len) (if (= 1 is-last) true false)))
                                          [::ffi/fn [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void])]

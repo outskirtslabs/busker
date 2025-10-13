@@ -595,7 +595,7 @@
 
 (defn ->string
   "Read bytes from a pointer with given length as a UTF-8 string. Returns nil if pointer is null."
-  [ptr len]
+  [ptr ^long len]
   (when (and ptr (not (mem/null? ptr)) (pos? len))
     (String. (mem/read-bytes (mem/reinterpret ptr len) len) "UTF-8")))
 
@@ -634,7 +634,7 @@
                                  [(subs path-str 0 idx) (subs path-str (inc idx))]
                                  [path-str nil]))
                              [nil nil])
-        version            (case http_version
+        version            (case  (int http_version)
                              0x0101 [1 1]
                              0x0200 [2 0]
                              0x0300 [3 0]
