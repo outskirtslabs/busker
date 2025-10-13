@@ -19,7 +19,7 @@
 #define _FORTIFY_SOURCE 0
 #endif
 
-#include <h2o/socket.h>
+#include <h2o.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -77,5 +77,19 @@ void* clj_create_streaming_generator(
     void* on_proceed_callback,
     void* on_stop_callback,
     void* jvm_handle);
+
+/* Create and configure h2o handler with optional callbacks.
+ * All callback parameters can be NULL except on_req_callback.
+ * supports_request_streaming: 1 to enable, 0 to disable
+ * handles_expect: 1 to enable, 0 to disable
+ */
+h2o_handler_t* clj_h2o_create_handler(
+    h2o_hostconf_t* hostconf,
+    void (*on_context_init)(h2o_handler_t*, h2o_context_t*),
+    void (*on_context_dispose)(h2o_handler_t*, h2o_context_t*),
+    void (*dispose)(h2o_handler_t*),
+    int (*on_req_callback)(h2o_handler_t*, h2o_req_t*),
+    int supports_request_streaming,
+    int handles_expect);
 
 #endif /* CLJ_H2O_SHIM_H */

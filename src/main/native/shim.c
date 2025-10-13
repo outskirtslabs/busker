@@ -159,3 +159,34 @@ void* clj_create_streaming_generator(
 
   return &gen->generator;
 }
+
+h2o_handler_t* clj_h2o_create_handler(
+    h2o_hostconf_t* hostconf,
+    void (*on_context_init)(h2o_handler_t*, h2o_context_t*),
+    void (*on_context_dispose)(h2o_handler_t*, h2o_context_t*),
+    void (*dispose)(h2o_handler_t*),
+    int (*on_req_callback)(h2o_handler_t*, h2o_req_t*),
+    int supports_request_streaming,
+    int handles_expect) {
+
+  h2o_pathconf_t* pathconf = h2o_config_register_path(hostconf, "/", 0);
+  h2o_handler_t* handler = h2o_create_handler(pathconf, sizeof(h2o_handler_t));
+
+  if (on_context_init != NULL) {
+    handler->on_context_init = on_context_init;
+  }
+
+  if (on_context_dispose != NULL) {
+    handler->on_context_dispose = on_context_dispose;
+  }
+
+  if (dispose != NULL) {
+    handler->dispose = dispose;
+  }
+
+  handler->on_req = on_req_callback;
+  handler->supports_request_streaming = supports_request_streaming ? 1 : 0;
+  handler->handles_expect = handles_expect ? 1 : 0;
+
+  return handler;
+}

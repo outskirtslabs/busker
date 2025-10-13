@@ -266,11 +266,6 @@
   h2o_config_register_path
   [::mem/pointer ::mem/c-string ::mem/int] ::mem/pointer)
 
-(defcfn create-handler
-  "Create h2o handler for pathconf. Returns pointer to h2o_handler_t"
-  h2o_create_handler
-  [::mem/pointer ::mem/long] ::mem/pointer)
-
 (defcfn handler-set-on-req
   "Set on_req callback for handler"
   clj_handler_set_on_req
@@ -280,6 +275,45 @@
   "Get size of h2o_handler_t structure"
   clj_h2o_handler_size
   [] ::mem/long)
+
+(defcfn create-handler
+  "Create and configure h2o handler with optional callbacks.
+   Registers path '/', creates handler, and configures callbacks.
+
+   Parameters:
+   - hostconf-ptr: h2o_hostconf_t* pointer
+   - on-context-init: Clojure fn (handler-ptr ctx-ptr -> void) or nil
+   - on-context-dispose: Clojure fn (handler-ptr ctx-ptr -> void) or nil
+   - dispose: Clojure fn (handler-ptr -> void) or nil
+   - on-req-callback: Clojure fn (handler-ptr req-ptr -> int) (required)
+   - supports-request-streaming: boolean
+   - handles-expect: boolean
+
+   Returns handler pointer."
+  "clj_h2o_create_handler"
+  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer ::mem/int ::mem/int] ::mem/pointer
+  native-fn
+  [hostconf-ptr on-context-init on-context-dispose dispose on-req-callback supports-request-streaming handles-expect]
+  (let [null-ptr (mem/as-segment 0)
+        on-context-init-ptr (if on-context-init
+                              (mem/serialize on-context-init [::ffi/fn [::mem/pointer ::mem/pointer] ::mem/void])
+                              null-ptr)
+        on-context-dispose-ptr (if on-context-dispose
+                                 (mem/serialize on-context-dispose [::ffi/fn [::mem/pointer ::mem/pointer] ::mem/void])
+                                 null-ptr)
+        dispose-ptr (if dispose
+                      (mem/serialize dispose [::ffi/fn [::mem/pointer] ::mem/void])
+                      null-ptr)
+        on-req-ptr (mem/serialize on-req-callback [::ffi/fn [::mem/pointer ::mem/pointer] ::mem/int])
+        streaming-flag (if supports-request-streaming 1 0)
+        expect-flag (if handles-expect 1 0)]
+    (native-fn hostconf-ptr
+               on-context-init-ptr
+               on-context-dispose-ptr
+               dispose-ptr
+               on-req-ptr
+               streaming-flag
+               expect-flag)))
 
 (defcfn add-header-by-str
   "Add response header by string.

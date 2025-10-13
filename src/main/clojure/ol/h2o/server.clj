@@ -64,11 +64,11 @@
 (defn create-ring-handler
   "Create an h2o handler that delegates to a Ring handler.
    Returns handler pointer that must be kept alive."
-  [pathconf-ptr ring-handler evloop-system]
-  (let [handler-ptr (h2o/create-handler pathconf-ptr (h2o/handler-size))
-        on-req-callback (h2o/create-request-callback (partial on-request-callback ring-handler evloop-system))]
-    (h2o/handler-set-on-req handler-ptr on-req-callback)
-    handler-ptr))
+  [hostconf-ptr ring-handler evloop-system]
+  (h2o/create-handler
+   hostconf-ptr nil nil nil (fn [_handler-ptr req-ptr]
+                              (on-request-callback ring-handler evloop-system req-ptr)
+                              0) true false))
 
 (defn create-connection-close-callback
   "Create callback for socket close events to track connection count.
@@ -82,7 +82,7 @@
 (defn create-server-config
   "Create and initialize h2o global configuration with a default host and Ring handler.
    Uses provided arena for server lifetime resources.
-   Returns map with ::config-ptr, ::hostconf-ptr, ::pathconf-ptr, ::handler-ptr"
+   Returns map with ::config-ptr, ::hostconf-ptr, ::handler-ptr"
   [arena ring-handler evloop-system]
   (let [size (h2o/globalconf-size)
         config-ptr (mem/alloc size arena)]
@@ -90,11 +90,9 @@
     (let [host-iovec-seg (h2o/create-iovec "default" arena)
           host-iovec-data (mem/deserialize host-iovec-seg ::h2o/h2o-iovec-t)
           hostconf-ptr (h2o/config-register-host config-ptr host-iovec-data 65535)
-          pathconf-ptr (h2o/config-register-path hostconf-ptr "/" 0)
-          handler-ptr (create-ring-handler pathconf-ptr ring-handler evloop-system)]
+          handler-ptr (create-ring-handler hostconf-ptr ring-handler evloop-system)]
       {::config-ptr config-ptr
        ::hostconf-ptr hostconf-ptr
-       ::pathconf-ptr pathconf-ptr
        ::handler-ptr handler-ptr})))
 
 (defn update-listener-state!
