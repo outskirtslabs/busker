@@ -1,7 +1,7 @@
 {:paths   ["src/main/clojure" "target/classes"]
  :deps    {io.github.IGJoshua/coffi                  {:git/sha "03d74aedecfc7b38238f1cf8b676c1f7a00e1788"}
            org.ring-clojure/ring-core-protocols      {:mvn/version "1.15.0-beta2"}
-           org.ring-clojure/ring-websocket-protocols {:mvn/version "1.15.0-beta2"}}
+           org.ring-clojure/ring-websocket-protocols {:mvn/version "1.15.3"}}
  :aliases {:kaocha {:extra-paths []
                     :extra-deps  {lambdaisland/kaocha {:mvn/version "1.91.1392"}}
                     :main-opts   ["-m" "kaocha.runner"]}
