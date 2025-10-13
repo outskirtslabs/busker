@@ -33,6 +33,12 @@ typedef enum {
   CLJ_COMPLETE_ERROR = 3
 } clj_complete_reason_t;
 
+typedef enum {
+  CLJ_HANDLER_OK = 0,        /* Handler accepted and will process the request */
+  CLJ_HANDLER_DECLINED = -1, /* Handler declined; h2o should try next handler */
+  CLJ_HANDLER_OVERLOADED = -2 /* System overloaded; send 503 immediately */
+} clj_handler_status_t;
+
 /* Per-request generator upcalls for streaming HTTP responses */
 typedef struct {
   void (*on_proceed)(void *jvm_handle);
@@ -87,6 +93,8 @@ struct clj_req_ctx_t {
   h2o_req_t *req;
   clj_req_meta_t meta;
   void (*on_cleanup)(clj_req_ctx_t *);
+  void (*on_request_body_chunk)(clj_req_ctx_t *ctx, char *chunk,
+                                size_t chunk_len, int is_end_stream);
   h2o_generator_t generator;
   int cleanup;
 };
@@ -158,5 +166,11 @@ clj_h2o_create_handler(h2o_hostconf_t *hostconf,
                        int (*on_req_callback)(clj_req_ctx_t *),
                        void (*on_cleanup_callback)(clj_req_ctx_t *),
                        int supports_request_streaming, int handles_expect);
+
+void clj_h2o_set_on_request_body_chunk(
+    clj_req_ctx_t *ctx,
+    void (*on_request_body_chunk)(clj_req_ctx_t *ctx, char *chunk,
+                                  size_t chunk_len, int is_end_stream));
+void clj_h2o_proceed_req(h2o_req_t *req);
 
 #endif /* CLJ_H2O_SHIM_H */

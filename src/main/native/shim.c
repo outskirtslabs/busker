@@ -148,20 +148,13 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
 
   clj_req_ctx_print_offsets();
   clj_req_meta_print_offsets();
-
   meta->method = (const uint8_t *)req->method.base;
   meta->method_len = req->method.len;
-
-  DEBUG_LOG("method len is %d", meta->method_len);
-
   meta->path = (const uint8_t *)req->path.base;
   meta->path_len = req->path.len;
-
   meta->authority = (const uint8_t *)req->authority.base;
   meta->authority_len = req->authority.len;
-
   meta->http_version = req->version;
-
   if (req->headers.size > 0) {
     clj_header_t *headers =
         h2o_mem_alloc_pool(&req->pool, clj_header_t, req->headers.size);
@@ -289,7 +282,39 @@ static void cleanup_request(void *ptr) {
   ctx->on_cleanup(ctx);
 }
 
-static int clj_h2o_handler(h2o_handler_t *self, h2o_req_t *req) {
+/**
+ * from h2o.h:
+ * Called be the protocol handler to submit chunk of request body to the
+ * generator. The callback returns 0 if successful, otherwise a non-zero value.
+ * Once `write_req.cb` is called, subsequent invocations MUST be postponed until
+ * the `proceed_req` is called. At the moment, `write_req_cb` is required to
+ * create a copy of data being provided before returning. To avoid copying, we
+ * should consider delegating the responsibility of retaining the buffer to the
+ * caller.
+ */
+static int clj_body_write_callback(void *self, int is_end_stream) {
+  clj_req_ctx_t *ctx = (clj_req_ctx_t *)self;
+  if (!ctx || !ctx->req) {
+    return 1;
+  }
+  if (ctx->on_request_body_chunk == 0) {
+    return 1;
+  }
+
+  h2o_req_t *req = ctx->req;
+
+  if (req->entity.base && req->entity.len > 0) {
+    ctx->on_request_body_chunk(ctx, req->entity.base, req->entity.len,
+                               is_end_stream ? 1 : 0);
+  } else if (is_end_stream) {
+    /* End of stream marker with no data */
+    ctx->on_request_body_chunk(ctx, NULL, 0, 1);
+  }
+
+  return 0;
+}
+
+static int on_request(h2o_handler_t *self, h2o_req_t *req) {
   /* Cast self back to our custom handler type to access the server pointer */
   clj_h2o_handler_t *handler = (clj_h2o_handler_t *)self;
 
@@ -298,16 +323,39 @@ static int clj_h2o_handler(h2o_handler_t *self, h2o_req_t *req) {
                        H2O_SEND_ERROR_HTTP1_CLOSE_CONNECTION);
     return 0;
   }
-  clj_req_ctx_t *const clj_req_ctx = calloc(1, sizeof(*clj_req_ctx));
-  if (clj_req_ctx) {
+  clj_req_ctx_t *const ctx = calloc(1, sizeof(*ctx));
+  if (ctx) {
     clj_req_ctx_t **const p =
         h2o_mem_alloc_shared(&req->pool, sizeof(*p), cleanup_request);
-    *p = clj_req_ctx;
-    clj_req_ctx->req = req;
-    clj_req_ctx->cleanup = 0;
-    clj_h2o_extract_req_meta(req, &clj_req_ctx->meta);
-    handler->on_req(clj_req_ctx);
+    *p = ctx;
+    ctx->req = req;
+    ctx->cleanup = 0;
+    ctx->on_request_body_chunk = 0;
+    clj_h2o_extract_req_meta(req, &ctx->meta);
     handler->on_cleanup = handler->on_cleanup;
+
+    // upcall to the jvm's on-request-callback
+    int ret = handler->on_req(ctx);
+    if (ret == CLJ_HANDLER_OVERLOADED) {
+      h2o_send_error_503(req, "Service Unavailable", "Server overloaded", 0);
+      return 0;
+    } else if (ret == CLJ_HANDLER_DECLINED) {
+      return -1;
+    }
+    if (ctx->meta.has_body) {
+
+      if (req->entity.base != NULL) {
+        if (ctx->on_request_body_chunk)
+          ctx->on_request_body_chunk(ctx, req->entity.base, req->entity.len, 1);
+      } else if (req->proceed_req != NULL) {
+        /* Set up our body write callback to receive chunks */
+        req->write_req.cb = clj_body_write_callback;
+        req->write_req.ctx = ctx;
+        /* Start receiving body chunks - this will trigger
+         * clj_body_write_callback when the first chunk arrives */
+        req->proceed_req(req, NULL);
+      }
+    }
   } else {
     send_error(INTERNAL_SERVER_ERROR, REQ_ERROR, req);
   }
@@ -336,7 +384,7 @@ clj_h2o_create_handler(h2o_hostconf_t *hostconf,
   handler->on_req = on_req_callback;
   handler->on_cleanup = on_cleanup_callback;
   handler->shutting_down = 0;
-  handler->super.on_req = clj_h2o_handler;
+  handler->super.on_req = on_request;
   handler->super.supports_request_streaming = 1;
   handler->super.on_context_init = on_context_init;
   handler->super.on_context_dispose = on_context_dispose;
@@ -345,4 +393,18 @@ clj_h2o_create_handler(h2o_hostconf_t *hostconf,
       supports_request_streaming ? 1 : 0;
   handler->super.handles_expect = handles_expect ? 1 : 0;
   return handler;
+}
+
+void clj_h2o_set_on_request_body_chunk(
+    clj_req_ctx_t *ctx,
+    void (*on_request_body_chunk)(clj_req_ctx_t *ctx, char *chunk,
+                                  size_t chunk_len, int is_end_stream)) {
+  if (ctx) {
+    ctx->on_request_body_chunk = on_request_body_chunk;
+  }
+}
+
+void clj_h2o_proceed_req(h2o_req_t *req) {
+  if (req && req->proceed_req)
+    req->proceed_req(req, NULL);
 }

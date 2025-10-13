@@ -30,7 +30,17 @@
       (throw (ex-info "CMake build failed" build-result)))
     (println "Compiled C shim to cmake-build-debug/libh2oclj.so")))
 
+(defn compile-java
+  [_]
+  (println "Compiling Java...")
+  (b/javac {:src-dirs ["src/main/java"]
+            :class-dir class-dir
+            :basis @basis
+            :javac-opts ["--release" "25" "--enable-preview"]})
+  (println "Compiled Java classes to" class-dir))
+
 (defn compile
   "Run complete build: compile shim."
   [opts]
-  (compile-shim opts))
+  (compile-shim opts)
+  #_(compile-java opts))

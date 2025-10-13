@@ -5,6 +5,7 @@
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
    [ol.h2o.native.socket :as socket]
+   [ol.h2o.streaming-input :as streaming]
    [ol.h2o.response :as response])
   (:import
    [java.util.concurrent Executors]
@@ -16,7 +17,7 @@
 (defonce vthread-executor
   (delay (Executors/newVirtualThreadPerTaskExecutor)))
 
-(defrecord Request [req-ptr ring-req])
+(defrecord Request [req-ptr ring-req write-req])
 
 (defn evloop-msg-processor
   "Called by drain-mailbox! inside each worker thread for each message on the evloop"
@@ -54,11 +55,11 @@
                                                             :body "Internal Server Error"}]))))))
 
 (defn on-request-callback
-  [ring-handler evloop-system req-ctx]
+  [ring-handler evloop-system req-ctx write-req]
   (let [worker (evloop/get-current-worker)
         worker-id (:id worker)
-        ring-req #p (h2o/build-ring-request (:meta req-ctx))
-        req (Request. req-ctx ring-req)]
+        ring-req (h2o/build-ring-request (:meta req-ctx) (streaming/input-stream write-req))
+        req (Request. req-ctx ring-req write-req)]
     (enqueue-request! worker-id req ring-handler evloop-system)))
 
 (defn create-ring-handler
@@ -67,13 +68,22 @@
   [hostconf-ptr ring-handler evloop-system]
   (h2o/create-handler
    hostconf-ptr
-   (fn [req-ctx]
-     (on-request-callback ring-handler evloop-system req-ctx)
-     0)
+   (fn [req-ctx-ptr req-ctx]
+     (let [proceed-callback  (fn [] (h2o/proceed-req (:req req-ctx)))
+           write-req         (streaming/create-write-req-channel proceed-callback {:queue-capacity 1})
+           on-req-body-chunk (mem/serialize (fn [_ chunk-seg chunk-len is-last]
+                                              #p{:chunk-len chunk-len :is-last is-last}
+                                              (streaming/add-chunk write-req (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len) (if (= 1 is-last) true false)))
+                                            [::ffi/fn [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void])]
+       (h2o/set-on-request-body-chunk-callback req-ctx-ptr on-req-body-chunk)
+       (on-request-callback ring-handler evloop-system req-ctx write-req))
+
+     ;; TODO: return CLJ_HANDLER_OVERLOADED if system cannot handle more requests
+     h2o/CLJ_HANDLER_OK)
    (fn [req-ctx]
      (println "ON CLEANUP" req-ctx)
-
-     0) true false))
+     0)
+   true false))
 
 (defn create-connection-close-callback
   "Create callback for socket close events to track connection count.

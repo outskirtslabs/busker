@@ -185,6 +185,7 @@
      [[:req ::mem/pointer]
       [:meta ::clj-req-meta-t]
       [:on-cleanup ::mem/pointer]
+      [:on-request-body-chunk ::mem/pointer]
       [:generator ::h2o-generator-t]
       [:cleanup ::mem/int]]]))
 
@@ -355,13 +356,17 @@
   h2o_start_response
   [::mem/pointer ::mem/pointer] ::mem/void)
 
+(def CLJ_HANDLER_OVERLOADED -2)
+(def CLJ_HANDLER_DECLINED -1)
+(def CLJ_HANDLER_OK 0)
+
 (defcfn create-handler
   "Create and configure h2o handler with optional callbacks.
    Registers path '/', creates handler, and configures callbacks.
 
    Parameters:
    - hostconf-ptr: h2o_hostconf_t* pointer
-   - on-req-callback: Clojure fn (clj_req_ctx map) (required)
+   - on-req-callback: Clojure fn (req-ctx-ptr, clj_req_ctx map) (required)
    - on-cleanup-callback: Clojure fn  (clj_req_ctx map) (required)
    - supports-request-streaming: boolean
    - handles-expect: boolean
@@ -372,7 +377,12 @@
   native-fn
   [hostconf-ptr on-req-callback on-cleanup-callback supports-request-streaming handles-expect]
   (let [on-req-ptr (mem/serialize (fn [ctx-ptr]
-                                    (on-req-callback (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t)))
+                                    (try
+                                      (on-req-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t))
+                                      (catch Exception e
+                                        #p e
+                                        CLJ_HANDLER_OVERLOADED)))
+
                                   [::ffi/fn [::mem/pointer] ::mem/int])
         on-cleanup-ptr (mem/serialize (fn [ctx-ptr]
                                         (on-cleanup-callback (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t)))
@@ -384,6 +394,15 @@
                on-cleanup-ptr
                streaming-flag
                expect-flag)))
+(defcfn proceed-req
+  "Call req->proceed_req to signal readiness for next request body chunk"
+  clj_h2o_proceed_req
+  [::mem/pointer] ::mem/void)
+
+(defcfn set-on-request-body-chunk-callback
+  "Sets the on_request_body_chunk callback in the clj_req_ctx_t struct."
+  clj_h2o_set_on_request_body_chunk
+  [::mem/pointer ::mem/pointer] ::mem/void)
 
 (defcfn add-header-by-str
   "Add response header by string.
@@ -571,71 +590,62 @@
   (when (and ptr (not (mem/null? ptr)) (pos? len))
     (String. (mem/read-bytes (mem/reinterpret ptr len) len) "UTF-8")))
 
+(defn build-ring-headers-map [headers headers_len]
+  (when (and (not (mem/null? headers)) (pos? headers_len))
+    (let [header-size   (mem/size-of ::clj-header-t)
+          total-size    (* headers_len header-size)
+          sized-headers (mem/reinterpret headers total-size)]
+      (into {}
+            (for [i (range headers_len)]
+              (let [header-seg                (mem/slice sized-headers (* i header-size) header-size)
+                    header                    (mem/deserialize header-seg ::clj-header-t)
+                    {:keys [name name_len
+                            value value_len]} header
+                    name-str                  (->string name name_len)
+                    value-str                 (->string value value_len)]
+                [(str/lower-case name-str) value-str]))))))
 (defn build-ring-request
   "Build a Ring request map from clj_req_meta_t.
    Returns: Ring request map"
-  [meta]
-  (let [{:keys [method method_len path path_len authority authority_len
-                http_version headers headers_len has_body
-                scheme scheme_len remote_addr remote_addr_len
-                #_#_charset charset_len]} meta
-
-        method-str  (->string method method_len)
-
-        path-str (->string path path_len)
-
-        authority-str (->string authority authority_len)
-
-        scheme-str (->string scheme scheme_len)
-
-        remote-addr-str (->string remote_addr remote_addr_len)
-
-        #_#_charset-str (->string charset charset_len)
-
-        headers-map (when (and (not (mem/null? headers)) (pos? headers_len))
-                      (let [header-size (mem/size-of ::clj-header-t)
-                            total-size (* headers_len header-size)
-                            sized-headers (mem/reinterpret headers total-size)]
-                        (into {}
-                              (for [i (range headers_len)]
-                                (let [header-seg (mem/slice sized-headers (* i header-size) header-size)
-                                      header (mem/deserialize header-seg ::clj-header-t)
-                                      {:keys [name name_len value value_len]} header
-                                      name-str (->string name name_len)
-                                      value-str (->string value value_len)]
-                                  [(str/lower-case name-str) value-str])))))
-
+  [{:keys [method method_len path path_len authority authority_len
+           http_version headers headers_len has_body
+           scheme scheme_len remote_addr remote_addr_len
+           #_#_charset charset_len]}
+   input-stream]
+  (let [method-str         (->string method method_len)
+        path-str           (->string path path_len)
+        authority-str      (->string authority authority_len)
+        scheme-str         (->string scheme scheme_len)
+        remote-addr-str    (->string remote_addr remote_addr_len)
+        #_#_charset-str    (->string charset charset_len)
+        headers-map        (build-ring-headers-map headers headers_len)
         [uri query-string] (if path-str
                              (let [idx (str/index-of path-str "?")]
                                (if idx
                                  [(subs path-str 0 idx) (subs path-str (inc idx))]
                                  [path-str nil]))
                              [nil nil])
-
-        version (case http_version
-                  0x0101 [1 1]
-                  0x0200 [2 0]
-                  0x0300 [3 0]
-                  [1 1])]
-
-    {:server-port (if authority-str
-                    (if-let [colon-idx (str/last-index-of authority-str ":")]
-                      (Integer/parseInt (subs authority-str (inc colon-idx)))
-                      80)
-                    80)
-     :server-name (if authority-str
-                    (if-let [colon-idx (str/last-index-of authority-str ":")]
-                      (subs authority-str 0 colon-idx)
-                      authority-str)
-                    "localhost")
-     :remote-addr (or remote-addr-str "")
-     :uri uri
-     :query-string query-string
-     :scheme (keyword (or scheme-str "http"))
+        version            (case http_version
+                             0x0101 [1 1]
+                             0x0200 [2 0]
+                             0x0300 [3 0]
+                             [1 1])]
+    {:server-port    (if authority-str
+                       (if-let [colon-idx (str/last-index-of authority-str ":")]
+                         (Integer/parseInt (subs authority-str (inc colon-idx)))
+                         80)
+                       80)
+     :server-name    (if authority-str
+                       (if-let [colon-idx (str/last-index-of authority-str ":")]
+                         (subs authority-str 0 colon-idx)
+                         authority-str)
+                       "localhost")
+     :remote-addr    (or remote-addr-str "")
+     :uri            uri
+     :query-string   query-string
+     :scheme         (keyword (or scheme-str "http"))
      :request-method (keyword (str/lower-case (or method-str "get")))
-     :protocol (str "HTTP/" (first version) "." (second version))
-     :headers headers-map
-     :body (when (= 1 has_body)
-             ;; Body handling would go here
-             ;; For now return nil, streaming support will be added later
-             nil)}))
+     :protocol       (str "HTTP/" (first version) "." (second version))
+     :headers        headers-map
+     :body           (when (= 1 has_body)
+                       input-stream)}))

@@ -108,20 +108,21 @@
   [req-ptr ring-resp]
   (let [arena (Arena/ofConfined)]
     (try
-      (let [{:keys [status headers body]
-             :or {status 500 headers {}}} ring-resp
-            req-seg (mem/reinterpret req-ptr 2048)
-            pool-ptr (raw/get-req-pool req-seg)
-            {:keys [ptr len]} (copy-string-to-segment "OK" pool-ptr)]
+      (println "SEND RING RESP")
+      #_(let [{:keys [status headers body]
+               :or {status 500 headers {}}} ring-resp
+              req-seg (mem/reinterpret req-ptr 2048)
+              pool-ptr (raw/get-req-pool req-seg)
+              {:keys [ptr len]} (copy-string-to-segment "OK" pool-ptr)]
 
-        (raw/set-res-status! req-seg status)
-        (raw/set-res-reason! req-seg ptr)
-        (set-headers! req-ptr headers)
-        (h2o/start-response req-ptr (h2o/get-static-generator))
+          (raw/set-res-status! req-seg status)
+          (raw/set-res-reason! req-seg ptr)
+          (set-headers! req-ptr headers)
+          (h2o/start-response req-ptr (h2o/get-static-generator))
 
-        (if body
-          (send-body! req-ptr (body->bytes body ring-resp) arena)
-          (send-empty-final! req-ptr arena)))
+          (if body
+            (send-body! req-ptr (body->bytes body ring-resp) arena)
+            (send-empty-final! req-ptr arena)))
 
       (catch Exception e
         (println "Error sending response:" (.getMessage e))
