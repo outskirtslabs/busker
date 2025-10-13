@@ -92,7 +92,7 @@ typedef struct clj_req_ctx_t clj_req_ctx_t;
 struct clj_req_ctx_t {
   h2o_req_t *req;
   clj_req_meta_t meta;
-  void (*on_cleanup)(clj_req_ctx_t *);
+  void (*on_request_cleanup)(clj_req_ctx_t *);
   void (*on_request_body_chunk)(clj_req_ctx_t *ctx, char *chunk,
                                 size_t chunk_len, int is_end_stream);
   h2o_generator_t generator;
@@ -101,8 +101,8 @@ struct clj_req_ctx_t {
 
 typedef struct {
   h2o_handler_t super; /* Must be first member for safe casting */
-  int (*on_req)(clj_req_ctx_t *);
-  void (*on_cleanup)(clj_req_ctx_t *);
+  int (*on_request)(clj_req_ctx_t *);
+  void (*on_request_cleanup)(clj_req_ctx_t *);
   int shutting_down;
 } clj_h2o_handler_t;
 

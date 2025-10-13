@@ -106,48 +106,7 @@ size_t clj_h2o_context_get_shutdown_conns(h2o_context_t *ctx) {
   return ctx->_conns.num_conns.shutdown;
 }
 
-static void clj_req_meta_print_offsets(void) {
-  fprintf(stderr, "clj_req_meta_t field offsets:\n");
-  fprintf(stderr, "  sizeof(clj_req_meta_t) = %zu\n", sizeof(clj_req_meta_t));
-  fprintf(stderr, "  authority = %zu\n", offsetof(clj_req_meta_t, authority));
-  fprintf(stderr, "  charset = %zu\n", offsetof(clj_req_meta_t, charset));
-  fprintf(stderr, "  method = %zu\n", offsetof(clj_req_meta_t, method));
-  fprintf(stderr, "  path = %zu\n", offsetof(clj_req_meta_t, path));
-  fprintf(stderr, "  remote_addr = %zu\n",
-          offsetof(clj_req_meta_t, remote_addr));
-  fprintf(stderr, "  scheme = %zu\n", offsetof(clj_req_meta_t, scheme));
-  fprintf(stderr, "  headers = %zu\n", offsetof(clj_req_meta_t, headers));
-  fprintf(stderr, "  authority_len = %zu\n",
-          offsetof(clj_req_meta_t, authority_len));
-  fprintf(stderr, "  charset_len = %zu\n",
-          offsetof(clj_req_meta_t, charset_len));
-  fprintf(stderr, "  method_len = %zu\n", offsetof(clj_req_meta_t, method_len));
-  fprintf(stderr, "  path_len = %zu\n", offsetof(clj_req_meta_t, path_len));
-  fprintf(stderr, "  remote_addr_len = %zu\n",
-          offsetof(clj_req_meta_t, remote_addr_len));
-  fprintf(stderr, "  scheme_len = %zu\n", offsetof(clj_req_meta_t, scheme_len));
-  fprintf(stderr, "  headers_len = %zu\n",
-          offsetof(clj_req_meta_t, headers_len));
-  fprintf(stderr, "  http_version = %zu\n",
-          offsetof(clj_req_meta_t, http_version));
-  fprintf(stderr, "  has_body = %zu\n", offsetof(clj_req_meta_t, has_body));
-}
-static void clj_req_ctx_print_offsets(void) {
-  fprintf(stderr, "clj_req_ctx_t field offsets:\n");
-  fprintf(stderr, "  sizeof(clj_req_ctx_t) = %zu\n", sizeof(clj_req_ctx_t));
-  fprintf(stderr, "  req = %zu\n", offsetof(clj_req_ctx_t, req));
-  fprintf(stderr, "  meta = %zu\n", offsetof(clj_req_ctx_t, meta));
-  fprintf(stderr, "  cleanup = %zu\n", offsetof(clj_req_ctx_t, cleanup));
-  fprintf(stderr, "  on_cleanup = %zu\n", offsetof(clj_req_ctx_t, on_cleanup));
-  fprintf(stderr, "  generator = %zu\n", offsetof(clj_req_ctx_t, generator));
-
-  fprintf(stderr, "  generator = %zu\n", offsetof(clj_req_ctx_t, generator));
-}
-
 static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
-
-  clj_req_ctx_print_offsets();
-  clj_req_meta_print_offsets();
   meta->method = (const uint8_t *)req->method.base;
   meta->method_len = req->method.len;
   meta->path = (const uint8_t *)req->path.base;
@@ -278,8 +237,12 @@ void clj_stream_start_response(h2o_req_t *req, int status,
    */
 static void cleanup_request(void *ptr) {
   clj_req_ctx_t *const ctx = *(clj_req_ctx_t **)ptr;
+  if (!ctx)
+    return;
   ctx->cleanup = 1;
-  ctx->on_cleanup(ctx);
+  if (ctx->on_request_cleanup) {
+    ctx->on_request_cleanup(ctx);
+  }
 }
 
 /**
@@ -297,6 +260,7 @@ static int clj_body_write_callback(void *self, int is_end_stream) {
   if (!ctx || !ctx->req) {
     return 1;
   }
+
   if (ctx->on_request_body_chunk == 0) {
     return 1;
   }
@@ -314,7 +278,7 @@ static int clj_body_write_callback(void *self, int is_end_stream) {
   return 0;
 }
 
-static int on_request(h2o_handler_t *self, h2o_req_t *req) {
+static int request_handler(h2o_handler_t *self, h2o_req_t *req) {
   /* Cast self back to our custom handler type to access the server pointer */
   clj_h2o_handler_t *handler = (clj_h2o_handler_t *)self;
 
@@ -332,28 +296,36 @@ static int on_request(h2o_handler_t *self, h2o_req_t *req) {
     ctx->cleanup = 0;
     ctx->on_request_body_chunk = 0;
     clj_h2o_extract_req_meta(req, &ctx->meta);
-    handler->on_cleanup = handler->on_cleanup;
+    ctx->on_request_cleanup = 0;
+    if (handler->on_request_cleanup)
+      ctx->on_request_cleanup = handler->on_request_cleanup;
 
     // upcall to the jvm's on-request-callback
-    int ret = handler->on_req(ctx);
+    int ret = handler->on_request(ctx);
+
     if (ret == CLJ_HANDLER_OVERLOADED) {
       h2o_send_error_503(req, "Service Unavailable", "Server overloaded", 0);
       return 0;
     } else if (ret == CLJ_HANDLER_DECLINED) {
       return -1;
     }
-    if (ctx->meta.has_body) {
 
-      if (req->entity.base != NULL) {
-        if (ctx->on_request_body_chunk)
-          ctx->on_request_body_chunk(ctx, req->entity.base, req->entity.len, 1);
-      } else if (req->proceed_req != NULL) {
-        /* Set up our body write callback to receive chunks */
+    if (ctx->meta.has_body && ctx->on_request_body_chunk != 0) {
+      if (req->proceed_req != NULL) {
+        // Set up our body write callback to receive chunks
         req->write_req.cb = clj_body_write_callback;
         req->write_req.ctx = ctx;
-        /* Start receiving body chunks - this will trigger
-         * clj_body_write_callback when the first chunk arrives */
-        req->proceed_req(req, NULL);
+        if (req->entity.base != NULL && req->entity.len > 0) {
+          // Deliver the already-buffered chunk
+          ctx->on_request_body_chunk(ctx, req->entity.base, req->entity.len, 0);
+        } else {
+          // Nothing buffered: request the first chunk
+          req->proceed_req(req, NULL);
+        }
+      } else if (req->entity.base != NULL) {
+        // Small body - already buffered by h2o, deliver immediately
+        if (ctx->on_request_body_chunk)
+          ctx->on_request_body_chunk(ctx, req->entity.base, req->entity.len, 1);
       }
     }
   } else {
@@ -374,17 +346,17 @@ static void on_handler_dispose(h2o_handler_t *_self) {
 
 clj_h2o_handler_t *
 clj_h2o_create_handler(h2o_hostconf_t *hostconf,
-                       int (*on_req_callback)(clj_req_ctx_t *),
-                       void (*on_cleanup_callback)(clj_req_ctx_t *),
+                       int (*on_request)(clj_req_ctx_t *),
+                       void (*on_request_cleanup)(clj_req_ctx_t *),
                        int supports_request_streaming, int handles_expect) {
 
   h2o_pathconf_t *pathconf = h2o_config_register_path(hostconf, "/", 0);
   clj_h2o_handler_t *handler = (clj_h2o_handler_t *)h2o_create_handler(
       pathconf, sizeof(clj_h2o_handler_t));
-  handler->on_req = on_req_callback;
-  handler->on_cleanup = on_cleanup_callback;
+  handler->on_request = on_request;
+  handler->on_request_cleanup = on_request_cleanup;
   handler->shutting_down = 0;
-  handler->super.on_req = on_request;
+  handler->super.on_req = request_handler;
   handler->super.supports_request_streaming = 1;
   handler->super.on_context_init = on_context_init;
   handler->super.on_context_dispose = on_context_dispose;

@@ -181,7 +181,8 @@
    Returns: true if worker was found and message was queued"
   [system id msg]
   (when-let [^Worker w (.get ^ConcurrentHashMap (:workers system) id)]
-    (.offer ^ArrayBlockingQueue (:mailbox w) msg)))
+    (.offer ^ArrayBlockingQueue (:mailbox w) msg)
+    #_(println (first msg))))
 
 (defn broadcast!
   "Send a control message to all workers (bounded mailboxes).

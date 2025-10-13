@@ -2,6 +2,7 @@
   (:require
    [babashka.http-client :as http]
    [babashka.process :as p]
+   [clojure.string :as str]
    [clojure.java.io :as io]
    [clojure.test :as test :refer [deftest testing is]]
    [ol.h2o.server :as server]))
@@ -36,6 +37,9 @@
 
 (deftest test-simple-request
   (with-server [_server (test-server (fn [{:keys [request-method body] :as req}]
+                                       (let [b (slurp body)]
+                                         #p [(take 5 b) (count b) (take-last 3 b)])
+
                                        (cond
                                          (= :get request-method)
                                          {:status 200
@@ -45,7 +49,7 @@
                                          (= :post request-method)
                                          {:status 200
                                           :headers {"content-type" "text/plain"}
-                                          :body (if (= "payload" #p (slurp body))
+                                          :body (if (= "payload" nil)
                                                   "OK"
                                                   "NOTOK")}
 
@@ -56,7 +60,8 @@
           (is (re-find #"Hello, World" (:body response)))))
 
     (testing "simple post"
-      (let [response (req :post "/hello" :body "payload")]
+      (let [payload (str "START" (str/join "" (take 1000000 (cycle "abcdefghijklmnopqrstuvwxyz"))) "END")
+            response (req :post "/hello" :body payload)]
         (is (= 200 (:status response)))
         (is (= "OK" (:body response)))))))
 

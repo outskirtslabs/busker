@@ -360,6 +360,10 @@
 (def CLJ_HANDLER_DECLINED -1)
 (def CLJ_HANDLER_OK 0)
 
+(defn report-almost-fatal-error [msg e]
+  #p msg
+  #p e)
+
 (defcfn create-handler
   "Create and configure h2o handler with optional callbacks.
    Registers path '/', creates handler, and configures callbacks.
@@ -367,7 +371,7 @@
    Parameters:
    - hostconf-ptr: h2o_hostconf_t* pointer
    - on-req-callback: Clojure fn (req-ctx-ptr, clj_req_ctx map) (required)
-   - on-cleanup-callback: Clojure fn  (clj_req_ctx map) (required)
+   - on-cleanup-callback: Clojure fn  (req-ctx-ptr, clj_req_ctx map) (required)
    - supports-request-streaming: boolean
    - handles-expect: boolean
 
@@ -380,12 +384,16 @@
                                     (try
                                       (on-req-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t))
                                       (catch Exception e
-                                        #p e
+                                        (report-almost-fatal-error "The request handler errored with" e)
                                         CLJ_HANDLER_OVERLOADED)))
 
                                   [::ffi/fn [::mem/pointer] ::mem/int])
         on-cleanup-ptr (mem/serialize (fn [ctx-ptr]
-                                        (on-cleanup-callback (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t)))
+                                        (try
+                                          (on-cleanup-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t))
+                                          (catch Exception e
+                                            (report-almost-fatal-error "The request cleanup callback errored" e))))
+
                                       [::ffi/fn [::mem/pointer] ::mem/void])
         streaming-flag (if supports-request-streaming 1 0)
         expect-flag (if handles-expect 1 0)]

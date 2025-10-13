@@ -19,10 +19,20 @@
 
 (defrecord Request [req-ptr ring-req write-req])
 
+(defn proceed-request [req-ctx]
+  [:h2o/proceed-request req-ctx])
+
+(defn send-response [req resp]
+  [:h2o/send-response req resp])
+
 (defn evloop-msg-processor
   "Called by drain-mailbox! inside each worker thread for each message on the evloop"
   [op args]
   (case op
+    :h2o/proceed-request
+    (let [[req-ctx] args]
+      (h2o/proceed-req (:req req-ctx)))
+
     :h2o/send-response
     (let [[req ring-resp] args]
       (response/send-ring-response! (:req-ptr req) ring-resp))
@@ -45,22 +55,40 @@
              (try
                (let [ring-resp (ring-handler (:ring-req req))]
                  (evloop/send-msg! evloop-system worker-id
-                                   [:h2o/send-response req ring-resp]))
+                                   (send-response req ring-resp)))
                (catch Exception e
                  (println "Handler error:" (.getMessage e))
                  (.printStackTrace e)
                  (evloop/send-msg! evloop-system worker-id
-                                   [:h2o/send-response req {:status 500
-                                                            :headers {"content-type" "text/plain"}
-                                                            :body "Internal Server Error"}]))))))
+                                   (send-response req {:status 500
+                                                       :headers {"content-type" "text/plain"}
+                                                       :body "Internal Server Error"})))))))
 
-(defn on-request-callback
-  [ring-handler evloop-system req-ctx write-req]
+(defn set-req-body-channel [evloop-system worker-id req-ctx-ptr req-ctx]
+  (let [proceed-callback  (fn []
+                            (evloop/send-msg! evloop-system worker-id
+                                              (proceed-request req-ctx)))
+        write-req-channel  (streaming/create-write-req-channel proceed-callback)
+        on-req-body-chunk (mem/serialize (fn [_ chunk-seg chunk-len is-last]
+                                           #_#p{:chunk-len chunk-len :is-last is-last}
+                                           (streaming/add-chunk write-req-channel (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len) (if (= 1 is-last) true false)))
+                                         [::ffi/fn [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void])]
+    (h2o/set-on-request-body-chunk-callback req-ctx-ptr on-req-body-chunk)
+    write-req-channel))
+
+(defn on-request [ring-handler evloop-system req-ctx-ptr req-ctx]
   (let [worker (evloop/get-current-worker)
         worker-id (:id worker)
-        ring-req (h2o/build-ring-request (:meta req-ctx) (streaming/input-stream write-req))
-        req (Request. req-ctx ring-req write-req)]
-    (enqueue-request! worker-id req ring-handler evloop-system)))
+        write-req-channel (set-req-body-channel evloop-system worker-id req-ctx-ptr req-ctx)
+        ring-req (h2o/build-ring-request (:meta req-ctx) (streaming/input-stream write-req-channel))
+        req (Request. req-ctx ring-req write-req-channel)]
+
+    (enqueue-request! worker-id req ring-handler evloop-system)
+    ;; TODO: return CLJ_HANDLER_OVERLOADED if system cannot handle more requests
+    h2o/CLJ_HANDLER_OK))
+
+(defn on-request-cleanup [ring-handler evloop-system req-ctx-ptr req-ctx]
+  (println "CLEANUP!"))
 
 (defn create-ring-handler
   "Create an h2o handler that delegates to a Ring handler.
@@ -68,21 +96,8 @@
   [hostconf-ptr ring-handler evloop-system]
   (h2o/create-handler
    hostconf-ptr
-   (fn [req-ctx-ptr req-ctx]
-     (let [proceed-callback  (fn [] (h2o/proceed-req (:req req-ctx)))
-           write-req         (streaming/create-write-req-channel proceed-callback {:queue-capacity 1})
-           on-req-body-chunk (mem/serialize (fn [_ chunk-seg chunk-len is-last]
-                                              #p{:chunk-len chunk-len :is-last is-last}
-                                              (streaming/add-chunk write-req (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len) (if (= 1 is-last) true false)))
-                                            [::ffi/fn [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void])]
-       (h2o/set-on-request-body-chunk-callback req-ctx-ptr on-req-body-chunk)
-       (on-request-callback ring-handler evloop-system req-ctx write-req))
-
-     ;; TODO: return CLJ_HANDLER_OVERLOADED if system cannot handle more requests
-     h2o/CLJ_HANDLER_OK)
-   (fn [req-ctx]
-     (println "ON CLEANUP" req-ctx)
-     0)
+   (partial on-request ring-handler evloop-system)
+   (partial on-request-cleanup ring-handler evloop-system)
    true false))
 
 (defn create-connection-close-callback

@@ -1,7 +1,7 @@
 (ns ol.h2o.streaming-input
   (:import
    [java.nio ByteBuffer]
-   [java.nio.channels ReadableByteChannel Channels]
+   [java.nio.channels Channels ReadableByteChannel]
    [java.util.concurrent LinkedBlockingQueue]))
 (set! *warn-on-reflection* true)
 
@@ -14,20 +14,19 @@
 (defn create-write-req-channel
   "Creates a ReadableByteChannel + RequestBody for streaming request body.
    proceed-callback is called after each chunk is fully consumed."
-  [proceed-callback {:keys [queue-capacity]
-                     :or {queue-capacity 1}}]
-  (let [queue (LinkedBlockingQueue. queue-capacity)
+  [proceed-callback]
+  (let [queue (LinkedBlockingQueue. 1)
         eof-marker ::eof
         closed? (volatile! false)
         current-buf (volatile! nil)
-
         body-channel
         (reify
           WriteReq
           (add-chunk [_ chunk is-last]
             (when-not @closed?
+
               (when chunk
-                (.put queue #p chunk))
+                (.put queue chunk))
               (when is-last
                 (.put queue eof-marker))))
 
@@ -41,7 +40,7 @@
 
             ;; Load next chunk if current is exhausted
             (when (or (nil? @current-buf)
-                      (not (.hasRemaining @current-buf)))
+                      (not (.hasRemaining ^ByteBuffer @current-buf)))
               (let [chunk (.take queue)]
                 (if (identical? chunk eof-marker)
                   (vreset! closed? true)
@@ -50,7 +49,7 @@
             (if @closed?
               -1
               ;; Copy from current buffer to destination
-              (let [buf @current-buf
+              (let [buf ^ByteBuffer @current-buf
                     initial-pos (.position dst)
                     to-copy (min (.remaining dst) (.remaining buf))]
                 (when (pos? to-copy)
