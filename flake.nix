@@ -38,10 +38,9 @@
           javaVersion = "25";
           jdk = pkgs."jdk${javaVersion}";
           clojure = pkgs.clojure.override { inherit jdk; };
-
-          inherit (self.packages.${pkgs.system}) h2o-shared;
+          h2o-bundle = (self.packages.${pkgs.system}.h2o-bundle);
           libraries = [
-            h2o-shared
+            h2o-bundle
             #pkgs.llvmPackages.clangUseLLVM
             #pkgs.llvmPackages.llvm
             #pkgs.llvmPackages.libclang
@@ -87,7 +86,7 @@
             #pkgs.llvmPackages.clangUseLLVM
           ];
           env.LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libraries;
-          env.PKG_CONFIG_PATH = "${h2o-shared}/lib/pkgconfig";
+          env.PKG_CONFIG_PATH = "${h2o-bundle}/lib/pkgconfig";
         };
 
       flakelight.builtinFormatters = false;
