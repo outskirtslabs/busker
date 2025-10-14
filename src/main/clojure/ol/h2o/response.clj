@@ -12,38 +12,66 @@
    [java.io OutputStream]
    [java.lang.foreign Arena MemorySegment ValueLayout]
    [java.nio.channels Channels WritableByteChannel]
+   [java.nio ByteBuffer]
    [java.util.concurrent Semaphore]
    [ol.h2o.protocols Request]))
 
 (set! *warn-on-reflection* true)
 
+(def default-output-buffer-size
+  "How much body data in bytes accumulates before writing to the network"
+  32768)
+(def default-output-aggregation-size
+  "A per-write threshold in bytes. Writes <= this size are copied into the aggregation buffer; writes >= this size flush the buffer and are sent directly (bypass copy)"
+  8192)
+
 (defn create-write-res-channel
   "Creates a WritableByteChannel for streaming response body."
-  [req content-length evloop-system]
-  (let [proceed-sem          (Semaphore. 1 true)
-        close-complete-sem   (Semaphore. 0 true)
+  [req evloop-system {:keys [output-aggregation-size output-buffer-size]
+                      :or {output-buffer-size default-output-buffer-size
+                           output-aggregation-size default-output-aggregation-size}}]
+  (let [proceed-sem (Semaphore. 1 true)
+        close-complete-sem (Semaphore. 0 true)
         final-chunk-pending? (atom false)
-        closed?              (atom false)
-        content-sent         (atom 0)
-        final-sent?          (atom false)
-        error                (atom nil)
-        arena                (Arena/ofAuto)
-        ;; reuse a memory seg for the array container
-        send-vec-array-seg   (mem/alloc (mem/size-of ::h2o/h2o-sendvec-t) arena)
+        closed? (atom false)
+        final-sent? (atom false)
+        error (atom nil)
+        n-bytes-sent (atom 0)
+        arena (Arena/ofAuto)
+        ;; Array of sendvec structs for vectorized sends (max 2: buffer + large write)
+        send-vec-array-seg (mem/alloc (* 2 (mem/size-of ::h2o/h2o-sendvec-t)) arena)
+        aggregation-buffer (ByteBuffer/allocateDirect output-buffer-size)
+        ;; keep reference to native segments that are in flight so they
+        ;; aren't GCed until libh2o is finished with them (signaled by on-proceed)
+        in-flight-segments (atom [])
+        empty-seg (mem/alloc 0 arena)
         on-proceed-callback
         (mem/serialize
          (fn [_ctx-ptr]
            (try
+             (reset! in-flight-segments [])
              (.release proceed-sem)
              (when @final-chunk-pending?
-               (with-open [scratch (Arena/ofConfined)]
-                 (let [chunk-seg (mem/alloc 0 scratch)]
-                   (h2o/sendvec-init-raw send-vec-array-seg chunk-seg 0)
-                   (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg 1
-                                h2o/H2O_SEND_STATE_FINAL)
-                   (reset! final-sent? true)
-                   (reset! closed? true)
-                   (.release close-complete-sem))))
+               (let [agg-pos (.position aggregation-buffer)]
+                 (if (pos? agg-pos)
+                   (do
+                     (.flip aggregation-buffer)
+                     (let [stable-seg (mem/alloc agg-pos arena)]
+                       (MemorySegment/copy (MemorySegment/ofBuffer aggregation-buffer) 0
+                                           stable-seg 0 agg-pos)
+                       (swap! in-flight-segments conj [{:seg stable-seg :len agg-pos}])
+                       (h2o/sendvec-init-raw send-vec-array-seg stable-seg agg-pos)
+                       (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg 1
+                                    h2o/H2O_SEND_STATE_FINAL))
+                     (.clear aggregation-buffer))
+                   ;; No buffered data - send empty final
+                   (do
+                     (h2o/sendvec-init-raw send-vec-array-seg empty-seg 0)
+                     (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg 1
+                                  h2o/H2O_SEND_STATE_FINAL))))
+               (reset! final-sent? true)
+               (reset! closed? true)
+               (.release close-complete-sem))
              (catch Exception e
                (println "Error in on-proceed callback" e)
                (reset! error e)
@@ -62,28 +90,44 @@
                (reset! error e))))
          [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])
 
-        send-chunk-internal!
-        (fn [^bytes chunk is-final]
-          (let [len (alength chunk)]
-            (evloop/send-msg! evloop-system
-                              [:h2o/sendvec
-                               (fn []
-                                 (with-open [scratch (Arena/ofConfined)]
-                                   (let [chunk-seg (mem/alloc len scratch)]
-                                     (when (pos? len)
-                                       (MemorySegment/copy chunk 0 chunk-seg ValueLayout/JAVA_BYTE 0 len))
-                                     (try
-                                       (h2o/sendvec-init-raw send-vec-array-seg chunk-seg len)
-                                       (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg 1
-                                                    (if is-final
-                                                      h2o/H2O_SEND_STATE_FINAL
-                                                      h2o/H2O_SEND_STATE_IN_PROGRESS))
-                                       (when is-final
-                                         (reset! closed? true))
-                                       (catch Exception e
-                                         (println e)
-                                         (.release proceed-sem)
-                                         (reset! error e))))))])))
+        send-vecs-internal!
+        (fn [vecs vec-count is-final]
+
+          (swap! in-flight-segments conj vecs)
+          (evloop/send-msg! evloop-system
+                            [:h2o/sendvec
+                             (fn []
+                               (doseq [[idx {:keys [seg len]}] (map-indexed vector vecs)]
+                                 (let [offset (* idx (mem/size-of ::h2o/h2o-sendvec-t))
+                                       vec-seg (mem/slice send-vec-array-seg offset (mem/size-of ::h2o/h2o-sendvec-t))]
+                                   (h2o/sendvec-init-raw vec-seg seg len)))
+                               (try
+                                 (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg vec-count
+                                              (if is-final
+                                                h2o/H2O_SEND_STATE_FINAL
+                                                h2o/H2O_SEND_STATE_IN_PROGRESS))
+                                 (when is-final
+                                   (reset! closed? true))
+                                 (catch Exception e
+                                   (println e)
+                                   (.release proceed-sem)
+                                   (reset! error e))))]))
+
+        flush-buffer!
+        (fn [is-final]
+          (let [pos (.position aggregation-buffer)]
+            (if (pos? pos)
+              ;; Buffer has data: copy to stable segment and send
+              (do
+                (.flip aggregation-buffer)
+                (let [stable-seg (mem/alloc pos arena)]
+                  (MemorySegment/copy (MemorySegment/ofBuffer aggregation-buffer) 0
+                                      stable-seg 0 pos)
+                  (send-vecs-internal! [{:seg stable-seg :len pos}] 1 is-final))
+                (.clear aggregation-buffer))
+              ;; Buffer is empty but we need to send final marker
+              (when is-final
+                (send-vecs-internal! [{:seg empty-seg :len 0}] 1 true)))))
 
         body-channel
         (reify
@@ -91,28 +135,60 @@
           (write [_ src]
             (when @closed? (throw (java.nio.channels.ClosedChannelException.)))
             (when @error (throw @error))
-            (let [remaining (.remaining src)]
-              (if (zero? remaining)
+            (let [chunk-size (.remaining src)]
+              (if (zero? chunk-size)
                 0
-                (do
-                  (.acquire proceed-sem)
-                  (let [chunk     (byte-array remaining)
-                        is-final? (and (not= -1 content-length)
-                                       (>= (+ (count chunk) @content-sent) content-length))]
-                    (.get src chunk)
-                    (send-chunk-internal! chunk is-final?)
-                    (swap! content-sent + (count chunk))
-                    remaining)))))
+                (if (>= chunk-size output-aggregation-size)
+                  ;; Large write: send buffer + large write in one vectorized call
+                  (do
+                    (.acquire proceed-sem)
+                    (let [agg-buffer-pos (.position aggregation-buffer)
+                          chunk (byte-array chunk-size)
+                          chunk-seg (mem/alloc chunk-size arena)]
+                      (.get src chunk)
+                      (MemorySegment/copy chunk 0 chunk-seg ValueLayout/JAVA_BYTE 0 chunk-size)
+                      (if (pos? agg-buffer-pos)
+                        ;; Send both buffer and large write as 2-vec array using stable copy
+                        (do
+                          (.flip aggregation-buffer)
+                          (let [buffer-stable-seg (mem/alloc agg-buffer-pos arena)]
+                            (MemorySegment/copy (MemorySegment/ofBuffer aggregation-buffer) 0
+                                                buffer-stable-seg 0 agg-buffer-pos)
+                            (send-vecs-internal! [{:seg buffer-stable-seg :len agg-buffer-pos}
+                                                  {:seg chunk-seg :len chunk-size}]
+                                                 2 false))
+                          (.clear aggregation-buffer)
+                          (swap! n-bytes-sent + agg-buffer-pos))
+                        ;; Only large write, no buffer data
+                        (send-vecs-internal! [{:seg chunk-seg :len chunk-size}
+                                              {:seg empty-seg :len 0}] 1 false))
+                      (swap! n-bytes-sent + chunk-size)
+                      chunk-size))
+                  ;; Small write: accumulate in buffer
+                  (let [pos (.position aggregation-buffer)
+                        new-pos (+ pos chunk-size)]
+                    (if (>= new-pos output-buffer-size)
+                      ;; Buffer would overflow: flush first, then buffer this write
+                      (do
+                        (.acquire proceed-sem)
+                        (flush-buffer! false)
+                        (.put aggregation-buffer src)
+                        (swap! n-bytes-sent + chunk-size)
+                        chunk-size)
+                      ;; Room in buffer: accumulate
+                      (do
+                        (.put aggregation-buffer src)
+                        (swap! n-bytes-sent + chunk-size)
+                        chunk-size)))))))
 
-          (isOpen [_]
-            (not @closed?))
+          (isOpen [_] (not @closed?))
 
           (close [_]
             (when-not @closed?
               (when-not @final-sent?
                 (if (.tryAcquire proceed-sem)
                   (do
-                    (send-chunk-internal! (byte-array 0) true)
+                    (flush-buffer! true)
                     (reset! closed? true))
                   (do
                     (reset! final-chunk-pending? true)
@@ -120,15 +196,15 @@
               (when-not @closed?
                 (reset! closed? true)))))]
 
-    {:channel    body-channel
+    {:channel body-channel
      :on-proceed on-proceed-callback
      :to-output-stream (fn [] (Channels/newOutputStream body-channel))
-     :on-stop    on-stop-callback}))
+     :on-stop on-stop-callback}))
 
 (defn dissoc-header
   "Remove all case variations of a header by name (case-insensitive)."
   [headers ^String header-name]
-  (let [target-lower  (.toLowerCase header-name java.util.Locale/ROOT)]
+  (let [target-lower (.toLowerCase header-name java.util.Locale/ROOT)]
     (into {}
           (remove (fn [[k _]]
                     (= (.toLowerCase (str k) java.util.Locale/ROOT) target-lower))
@@ -152,7 +228,7 @@
         content-length (if content-length-val
                          (coerce-content-length content-length-val)
                          -1)
-        filtered-headers (if  content-length-val
+        filtered-headers (if content-length-val
                            (dissoc-header headers "content-length")
                            headers)
         header-pairs (vec filtered-headers)
@@ -194,7 +270,7 @@
          :as ring-resp} (with-cl-or-te ring-resp)
         [headers headers-len content-length] (build-headers ring-resp)
         req-ctx-ptr (:req-ctx-ptr req)
-        {:keys [to-output-stream on-proceed on-stop]} (create-write-res-channel req content-length evloop-system)]
+        {:keys [to-output-stream on-proceed on-stop]} (create-write-res-channel req evloop-system {})]
     (h2o/start-response req-ctx-ptr status headers headers-len content-length on-proceed on-stop)
     (let [out-stream ^OutputStream (to-output-stream)]
       (if body

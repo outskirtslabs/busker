@@ -91,16 +91,6 @@ typedef struct {
   int shutting_down;
 } clj_h2o_handler_t;
 
-/* A descriptor for a single vector of memory to be sent */
-typedef struct {
-  const char *data;
-  size_t len;
-  /* If non-NULL, the releaser will be called by the native layer
-   * exactly once after the data has been consumed by the transport. */
-  void (*releaser)(void *jvm_handle);
-  void *jvm_handle;
-} clj_send_vec_t;
-
 /* 1 if socket has a read callback (i.e. currently reading), else 0 */
 int clj_h2o_socket_is_reading(h2o_socket_t *sock);
 
