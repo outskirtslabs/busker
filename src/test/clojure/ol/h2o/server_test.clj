@@ -342,3 +342,102 @@
           (let [response (req :get "/no-body")]
             (is (= 204 (:status response)))
             (is (= "" (:body response))))))))
+
+(def gib (* 1024 1024 1024))
+(def mib (* 1024 1024))
+(def kib 1024)
+
+(defn repeat-input-stream ^java.io.InputStream
+  [n b]
+  (let [b   (bit-and (int b) 0xFF)                  ; 0..255
+        bb  (unchecked-byte b)
+        cnt (java.util.concurrent.atomic.AtomicLong. n)]
+    (proxy [java.io.InputStream] []
+      (read
+        ([] (let [r (.get cnt)]
+              (if (pos? r)
+                (do (.decrementAndGet cnt) b)       ; returns 0..255
+                -1)))
+        ([buf]
+         (let [r (.get cnt)]
+           (if (zero? r)
+             -1
+             (let [k (int (min r (alength buf)))]
+               (java.util.Arrays/fill buf 0 k bb)
+               (.addAndGet cnt (- k))
+               k))))
+        ([buf  off  len]
+         (let [r (.get cnt)]
+           (if (zero? r)
+             -1
+             (let [k (int (min r len))]
+               (java.util.Arrays/fill buf off (+ off k) bb)
+               (.addAndGet cnt (- k))
+               k))))))))
+
+(defn sha256-hex [^java.io.InputStream is]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")
+        buf (byte-array 65536)]
+    (loop [n (.read is buf)]
+      (when (pos? n)
+        (.update md buf 0 n)
+        (recur (.read is buf))))
+    (format "%064x" (BigInteger. 1 (.digest md)))))
+
+(defn sha256-hex-progress [^java.io.InputStream is]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")
+        buf (byte-array 65536)
+        step (* 500 mib)]
+    (loop [n (.read is buf)
+           total 0
+           next-step step]
+      (if (pos? n)
+        (let [new-total (+ total n)]
+          (.update md buf 0 n)
+          (when (>= new-total next-step)
+            (printf "Read %,d MB%n" (quot new-total 1048576))
+            (flush))
+          (recur (.read is buf) new-total next-step))
+        (do
+          (printf "Total read: %,d MB%n" (quot total 1048576))
+          (flush)
+          (format "%064x" (BigInteger. 1 (.digest md))))))))
+
+(deftest large-payloads
+  (with-server [_server
+                (test-server
+                 (fn [{:keys [uri body]}]
+                   (case uri
+                     "/sink"  (let [sha (with-open [^java.io.InputStream is body]
+                                          (sha256-hex is))]
+                                {:status 200
+                                 :headers {"x-len" (str (* 3 mib))
+                                           "x-sha256" sha}})
+                     "/source" (let [n (* 3 mib)
+                                     b (byte \b)
+                                     sha (with-open [is (repeat-input-stream n b)]
+                                           (sha256-hex is))
+                                     _ (println "large respone generated")]
+                                 {:status 200
+                                  :headers {"content-type" "application/octet-stream"
+                                            "x-len" (str n)
+                                            "x-sha256" sha}
+                                  :body (repeat-input-stream n b)})
+                     {:status 404})))]
+    #_(testing "body"
+        (let [n (* 3 gib)
+              b (byte \a)
+              resp (req :post "/sink"
+                        :headers {"content-type" "application/octet-stream"}
+                        :body (repeat-input-stream n b))]
+          (is (= 200 (:status resp)))
+          (is (= (str n) (get-in resp [:headers "x-len"])))))
+    (testing "responses"
+      (let [resp (req :get "/source" :as :stream)
+            is (:body resp)
+            _ (println "got type is " (type is))
+            sha (sha256-hex-progress is)
+            _ (println " got sha " sha)]
+        (is (= 200 (:status resp)))
+        (is (= (get-in resp [:headers "x-sha256"]) sha))
+        (is (= (str (* 3 gib)) (get-in resp [:headers "x-len"])))))))
