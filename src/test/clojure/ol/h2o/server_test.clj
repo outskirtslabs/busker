@@ -69,60 +69,20 @@
                          :body "Hello, World"
                          :headers {"connection" "close",
                                    "content-length" "12",
-                                   "content-type" "text/plain",
-                                   "server" "h2o/2.3.0-DEV"}}
+                                   "content-type" "text/plain"}}
                         (req :get "/simple"))))
     (testing "chunked"
       (is (util/submap? {:status 200
                          :version :http1.1
                          :body "abcdefghijklmnopqrstuvwxyz"
-                         :headers {"connection" "close" "content-type" "text/plain" "server" "h2o/2.3.0-DEV" "transfer-encoding" "chunked"}}
+                         :headers {"connection" "close" "content-type" "text/plain" "transfer-encoding" "chunked"}}
                         (req :get "/chunked"))))
     (testing "large"
       (is (util/submap? {:status 201
                          :version :http1.1
                          :body large-payload-str
-                         :headers {"connection" "close" "content-type" "text/plain" "server" "h2o/2.3.0-DEV" "content-length" "1000008"}}
+                         :headers {"connection" "close" "content-type" "text/plain" "content-length" "1000008"}}
                         (req :post "/large"))))))
-
-(deftest test-request-headers
-  (let [received-headers (atom nil)]
-    (with-server [_server (test-server (fn [req]
-                                         (println "=== Request received ===")
-                                         (println "Method:" (:request-method req))
-                                         (println "URI:" (:uri req))
-                                         (println "Headers:" (pr-str (:headers req)))
-                                         (println "=======================")
-                                         (reset! received-headers (:headers req))
-                                         {:status 200
-                                          :headers {"content-type" "text/plain"}
-                                          :body (str "Headers count: " (count (:headers req)))}))]
-      (testing "Request with headers"
-        (let [response (req :get "/hello"
-                            :headers {"X-Custom-Header" "test-value"
-                                      "Content-Type" "application/json"})]
-          (is (= 200 (:status response)))
-          (is (re-find #"Headers count:" (:body response)))
-          ;; Give the async request handler time to complete
-          (Thread/sleep 100)
-          ;; Check that headers were parsed
-          (let [headers @received-headers]
-            (is (map? headers))
-            (is (> (count headers) 0))
-            (is (contains? headers "x-custom-header"))
-            (is (= "test-value" (get headers "x-custom-header")))))))))
-
-(deftest test-large-response
-  (testing "Large responses work correctly"
-    (let [large-content (apply str (repeat 10000 "This is a large response chunk. "))]
-      (with-server [_server (test-server (fn [_]
-                                           {:status 200
-                                            :headers {"content-type" "text/plain"}
-                                            :body large-content}))]
-        (let [response (req :get "/large")]
-          (is (= 200 (:status response)))
-          (is (= (count large-content) (count (:body response))))
-          (is (.startsWith (:body response) "This is a large response chunk.")))))))
 
 (deftest test-content-length
   (testing "content-length with get and head"

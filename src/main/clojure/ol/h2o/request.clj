@@ -2,11 +2,12 @@
   (:require
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]
-   [ol.h2o.response :as response]
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
-   [ol.h2o.protocols :as protocols :refer [WriteReq]])
+   [ol.h2o.protocols]
+   [ol.h2o.response :as response])
   (:import
+   [java.io InputStream]
    [java.nio ByteBuffer]
    [java.nio.channels Channels ReadableByteChannel]
    [java.util.concurrent LinkedBlockingQueue]
@@ -28,18 +29,6 @@
         current-buf (volatile! nil)
         body-channel
         (reify
-          WriteReq
-          (add-chunk [_ chunk is-last]
-            (when-not @closed?
-
-              (when chunk
-                (.put queue chunk))
-              (when is-last
-                (.put queue eof-marker))))
-
-          (input-stream [this]
-            (Channels/newInputStream this))
-
           ReadableByteChannel
           (read [_ dst]
             (when @closed?
@@ -82,10 +71,15 @@
             (.offer queue eof-marker)
             (vreset! current-buf nil)))]
 
-    body-channel))
-
-(defn proceed-request [req-ctx]
-  [:h2o/proceed-request req-ctx])
+    {:channel body-channel
+     :write-chunk (fn [chunk is-last]
+                    (when-not @closed?
+                      (when chunk
+                        (.put queue chunk))
+                      (when is-last
+                        (.put queue eof-marker))))
+     :to-input-stream (fn  []
+                        (Channels/newInputStream body-channel))}))
 
 (defn enqueue-request
   "Process request asynchronously on virtual thread.
@@ -109,27 +103,25 @@
                          (catch Exception e
                            (println "Handler error:" (.getMessage e))
                            (.printStackTrace e)
-                           ;; TODO
-                           #_(evloop/send-msg! evloop-system worker-id
-                                               (send-response req {:status 500
-                                                                   :headers {"content-type" "text/plain"}
-                                                                   :body "Internal Server Error"})))))))
+                           (response/send-ring-response! req {:status 500
+                                                              :headers {"content-type" "text/plain"}
+                                                              :body "Internal Server Error"} evloop-system))))))
 (defn set-req-body-channel [evloop-system req-ctx-ptr req-ctx]
   (let [proceed-callback  (fn []
                             (evloop/send-msg! evloop-system
-                                              (proceed-request req-ctx)))
-        write-req-channel  (create-write-req-channel proceed-callback)
+                                              [:h2o/proceed-request req-ctx]))
+        {:keys [write-chunk] :as write-req} (create-write-req-channel proceed-callback)
         on-req-body-chunk (mem/serialize (fn [_ chunk-seg ^long chunk-len ^long is-last]
-                                           #_#p{:chunk-len chunk-len :is-last is-last}
-                                           (protocols/add-chunk write-req-channel (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len) (if (= 1 is-last) true false)))
+                                           (write-chunk (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len) (if (= 1 is-last) true false)))
                                          [::ffi/fn [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void])]
     (h2o/set-on-request-body-chunk-callback req-ctx-ptr on-req-body-chunk)
-    write-req-channel))
+    write-req))
+
 (defn on-request [ring-handler evloop-system req-ctx-ptr req-ctx]
   (let [evloop-system (assoc evloop-system :worker-id (:id (evloop/get-current-worker)))
-        write-req-channel (set-req-body-channel evloop-system req-ctx-ptr req-ctx)
-        ring-req (h2o/build-ring-request (:meta req-ctx) (protocols/input-stream write-req-channel))
-        req (Request. req-ctx-ptr req-ctx ring-req write-req-channel)]
+        {:keys [to-input-stream] :as write-req} (set-req-body-channel evloop-system req-ctx-ptr req-ctx)
+        ring-req (h2o/build-ring-request (:meta req-ctx) (to-input-stream))
+        req (Request. req-ctx-ptr req-ctx ring-req write-req)]
 
     (enqueue-request req ring-handler evloop-system)
     ;; TODO: return CLJ_HANDLER_OVERLOADED if system cannot handle more requests

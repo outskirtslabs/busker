@@ -1,4 +1,6 @@
 (ns ol.h2o.native
+  (:import
+   [java.io InputStream])
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]
@@ -625,7 +627,7 @@
            http_version headers headers_len has_body
            scheme scheme_len remote_addr remote_addr_len
            #_#_charset charset_len]}
-   input-stream]
+   ^InputStream input-stream]
   (let [method-str         (->string method method_len)
         path-str           (->string path path_len)
         authority-str      (->string authority authority_len)

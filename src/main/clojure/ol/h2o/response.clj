@@ -5,12 +5,11 @@
    [coffi.mem :as mem]
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
-   [ol.h2o.protocols :as protocols :refer [WriteRes]]
    [ol.h2o.protocols.content-length :as content-length]
-   #_[ol.h2o.streaming-output :as streaming]
    [ol.h2o.util :as util]
    [ring.core.protocols :as ring-protocols])
   (:import
+   [java.io OutputStream]
    [java.lang.foreign Arena MemorySegment ValueLayout]
    [java.nio.channels Channels WritableByteChannel]
    [java.util.concurrent Semaphore]
@@ -88,10 +87,6 @@
 
         body-channel
         (reify
-          WriteRes
-          (output-stream [this]
-            (Channels/newOutputStream this))
-
           WritableByteChannel
           (write [_ src]
             (when @closed? (throw (java.nio.channels.ClosedChannelException.)))
@@ -127,6 +122,7 @@
 
     {:channel    body-channel
      :on-proceed on-proceed-callback
+     :to-output-stream (fn [] (Channels/newOutputStream body-channel))
      :on-stop    on-stop-callback}))
 
 (defn dissoc-header
@@ -198,32 +194,9 @@
          :as ring-resp} (with-cl-or-te ring-resp)
         [headers headers-len content-length] (build-headers ring-resp)
         req-ctx-ptr (:req-ctx-ptr req)
-        {:keys [channel on-proceed on-stop]} (create-write-res-channel req content-length evloop-system)]
+        {:keys [to-output-stream on-proceed on-stop]} (create-write-res-channel req content-length evloop-system)]
     (h2o/start-response req-ctx-ptr status headers headers-len content-length on-proceed on-stop)
-    (let [out-stream (protocols/output-stream channel)]
+    (let [out-stream ^OutputStream (to-output-stream)]
       (if body
         (ring-protocols/write-body-to-stream body ring-resp out-stream)
         (.close out-stream)))))
-
-(comment
-  ;; keep around old code
-  #_(try
-      (let [len (alength bytes)]
-        (with-open [scratch (Arena/ofConfined)]
-          (let [chunk-seg (mem/alloc len scratch)]
-            (when (pos? len)
-              (MemorySegment/copy bytes 0 chunk-seg ^ValueLayout$OfByte ValueLayout/JAVA_BYTE 0 len))
-            (acquire-permit)
-            (when @closed? (println "send chunk got permit but closed"))
-            (when (not @closed?)
-              (println "sendvec!" (-> req :req-ctx :req))
-              (h2o/sendvec-init-raw send-vec-array-seg chunk-seg len)
-              (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg 1  (if #p is-final
-                                                                          h2o/H2O_SEND_STATE_FINAL
-                                                                          h2o/H2O_SEND_STATE_IN_PROGRESS))
-              (when is-final
-                (reset! closed? true))))))
-
-      (catch Exception e
-        (println e)
-        (throw (ex-info "Failed to send response chunk" {} e)))))
