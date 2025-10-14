@@ -37,6 +37,14 @@
 
 (def abcs (cycle "abcdefghijklmnopqrstuvwxyz"))
 (def large-payload-str (str "START" (str/join "" (take 1000000 (cycle "abcdefghijklmnopqrstuvwxyz"))) "END"))
+(defn lazy-abcs [n] ((fn step [s]
+                       (lazy-seq
+                        (Thread/sleep 100)
+                        (when (seq s)
+                          (let [n 2
+                                chunk (apply str (take n s))]
+                            (cons chunk (step (drop n s)))))))
+                     (take n abcs)))
 
 (deftest test-simple-request
   (with-server [_server (test-server (fn [{:keys [uri]}]
@@ -49,15 +57,7 @@
                                          (= "/chunked" uri)
                                          {:status 200
                                           :headers {"content-type" "text/plain"}
-                                          :body #_(str "START" (str/join "" (take 100000 abcs)) "END")
-                                          ((fn step [s]
-                                             (lazy-seq
-                                              (Thread/sleep 100)
-                                              (when (seq s)
-                                                (let [n 2
-                                                      chunk (apply str (take n s))]
-                                                  (cons chunk (step (drop n s)))))))
-                                           (take 26 abcs))}
+                                          :body (lazy-abcs 26)}
                                          (= "/large" uri)
                                          {:status 201
                                           :headers {"content-type" "text/plain"}
@@ -208,7 +208,7 @@
 
                                            "/seq" {:status 200
                                                    :headers {"content-type" "text/plain"}
-                                                   :body (seq ["Hello " "from " "sequence"])}
+                                                   :body (lazy-abcs 27)}
 
                                            "/file" (let [temp-file (java.io.File/createTempFile "test" ".txt")]
                                                      (.deleteOnExit temp-file)
@@ -244,7 +244,7 @@
       (testing "Sequence body"
         (let [response (req :get "/seq")]
           (is (= 200 (:status response)))
-          (is (= "Hello from sequence" (:body response)))))
+          (is (= "abcdefghijklmnopqrstuvwxyza" (:body response)))))
 
       (testing "File body"
         (let [response (req :get "/file")]

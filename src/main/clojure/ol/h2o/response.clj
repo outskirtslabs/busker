@@ -115,14 +115,13 @@
           (close [_]
             (when-not @closed?
               (when-not @final-sent?
-                (when (or (= -1 content-length) (< @content-sent content-length))
-                  (if (.tryAcquire proceed-sem)
-                    (do
-                      (send-chunk-internal! (byte-array 0) true)
-                      (reset! closed? true))
-                    (do
-                      (reset! final-chunk-pending? true)
-                      (.acquire close-complete-sem)))))
+                (if (.tryAcquire proceed-sem)
+                  (do
+                    (send-chunk-internal! (byte-array 0) true)
+                    (reset! closed? true))
+                  (do
+                    (reset! final-chunk-pending? true)
+                    (.acquire close-complete-sem))))
               (when-not @closed?
                 (reset! closed? true)))))]
 
@@ -202,8 +201,9 @@
         {:keys [channel on-proceed on-stop]} (create-write-res-channel req content-length evloop-system)]
     (h2o/start-response req-ctx-ptr status headers headers-len content-length on-proceed on-stop)
     (let [out-stream (protocols/output-stream channel)]
-      (ring-protocols/write-body-to-stream body ring-resp out-stream)
-      (.close out-stream))))
+      (if body
+        (ring-protocols/write-body-to-stream body ring-resp out-stream)
+        (.close out-stream)))))
 
 (comment
   ;; keep around old code
