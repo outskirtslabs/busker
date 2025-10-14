@@ -52,7 +52,7 @@
   
   Returns:
     The extracted field value as a long"
-  [value {:keys [pos width mask]}]
+  [value {:keys [pos _width mask]}]
   (let [v (long value)]
     (bit-shift-right (bit-and v mask) pos)))
 

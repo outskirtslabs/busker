@@ -5,27 +5,14 @@
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
    [ol.h2o.native.socket :as socket]
-   [ol.h2o.streaming-input :as streaming]
-   [ol.h2o.response :as response])
+   [ol.h2o.request :as request])
   (:import
-   [java.util.concurrent Executors ExecutorService]
    [java.util.concurrent.atomic AtomicBoolean AtomicLong]))
 
 (set! *warn-on-reflection* true)
 
 (def ^:const default-max-connections 1024)
 (def ^:const H2O_SOCKET_FLAG_DONT_READ 0x20)
-
-(defonce vthread-executor
-  (delay (Executors/newVirtualThreadPerTaskExecutor)))
-
-(defrecord Request [req-ptr ring-req write-req])
-
-(defn proceed-request [req-ctx]
-  [:h2o/proceed-request req-ctx])
-
-(defn send-response [req resp]
-  [:h2o/send-response req resp])
 
 (defn evloop-msg-processor
   "Called by drain-mailbox! inside each worker thread for each message on the evloop"
@@ -35,62 +22,14 @@
     (let [[req-ctx] args]
       (h2o/proceed-req (:req req-ctx)))
 
-    :h2o/send-response
-    (let [[req ring-resp] args]
-      (response/send-ring-response! (:req-ptr req) ring-resp))
+    :h2o/sendvec
+    (let [[send-vecs] args]
+      (send-vecs))
+
+    #_#_:h2o/send-response
+      (let [[req ring-resp] args]
+        (response/send-ring-response! req ring-resp))
     nil))
-
-(defn enqueue-request!
-  "Process request asynchronously on virtual thread.
-
-   The handler runs on a vthread and when complete, the response
-   is enqueued back to the same worker thread that received the request.
-
-   Parameters:
-   - worker-id: ID of the worker thread that received this request
-   - req: The Request
-   - ring-handler: Ring handler function (request-map -> response-map)
-   - evloop-system: Event loop system for sending messages back to worker"
-  [worker-id ^Request req ring-handler evloop-system]
-  (.submit ^ExecutorService @vthread-executor
-           ^Runnable (fn []
-                       (try
-                         (let [ring-resp (ring-handler (:ring-req req))]
-                           (evloop/send-msg! evloop-system worker-id
-                                             (send-response req ring-resp)))
-                         (catch Exception e
-                           (println "Handler error:" (.getMessage e))
-                           (.printStackTrace e)
-                           (evloop/send-msg! evloop-system worker-id
-                                             (send-response req {:status 500
-                                                                 :headers {"content-type" "text/plain"}
-                                                                 :body "Internal Server Error"})))))))
-
-(defn set-req-body-channel [evloop-system worker-id req-ctx-ptr req-ctx]
-  (let [proceed-callback  (fn []
-                            (evloop/send-msg! evloop-system worker-id
-                                              (proceed-request req-ctx)))
-        write-req-channel  (streaming/create-write-req-channel proceed-callback)
-        on-req-body-chunk (mem/serialize (fn [_ chunk-seg ^long chunk-len ^long is-last]
-                                           #_#p{:chunk-len chunk-len :is-last is-last}
-                                           (streaming/add-chunk write-req-channel (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len) (if (= 1 is-last) true false)))
-                                         [::ffi/fn [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void])]
-    (h2o/set-on-request-body-chunk-callback req-ctx-ptr on-req-body-chunk)
-    write-req-channel))
-
-(defn on-request [ring-handler evloop-system req-ctx-ptr req-ctx]
-  (let [worker (evloop/get-current-worker)
-        worker-id (:id worker)
-        write-req-channel (set-req-body-channel evloop-system worker-id req-ctx-ptr req-ctx)
-        ring-req (h2o/build-ring-request (:meta req-ctx) (streaming/input-stream write-req-channel))
-        req (Request. req-ctx ring-req write-req-channel)]
-
-    (enqueue-request! worker-id req ring-handler evloop-system)
-    ;; TODO: return CLJ_HANDLER_OVERLOADED if system cannot handle more requests
-    h2o/CLJ_HANDLER_OK))
-
-(defn on-request-cleanup [ring-handler evloop-system req-ctx-ptr req-ctx]
-  (println "CLEANUP!"))
 
 (defn create-ring-handler
   "Create an h2o handler that delegates to a Ring handler.
@@ -98,9 +37,9 @@
   [hostconf-ptr ring-handler evloop-system]
   (h2o/create-handler
    hostconf-ptr
-   (partial on-request ring-handler evloop-system)
-   (partial on-request-cleanup ring-handler evloop-system)
-   true false))
+   (partial request/on-request ring-handler evloop-system)
+   (partial request/on-request-cleanup ring-handler evloop-system)
+   true true))
 
 (defn create-connection-close-callback
   "Create callback for socket close events to track connection count.
@@ -144,6 +83,7 @@
 
     (doseq [listener-idx (range n-listeners)]
       (let [sock-ptr (nth listener-socks listener-idx)]
+        #_{:clj-kondo/ignore [:type-mismatch]}
         (when-not (mem/null? sock-ptr)
           ;; TODO: Skip QUIC listeners when implemented (check listener config)
           (if should-accept?
@@ -163,6 +103,7 @@
   (doseq [listener-idx (range n-listeners)]
     (let [sock-ptr (nth listener-socks listener-idx)]
       (when (and (not (mem/null? sock-ptr))
+                 #_{:clj-kondo/ignore [:type-mismatch]}
                  (not (zero? (h2o/socket-reading? sock-ptr))))
         (h2o/socket-read-stop sock-ptr))))
 
@@ -181,6 +122,8 @@
 (defn- all-connections-drained?
   "Check if all connections for this context are closed"
   [ctx-ptr]
+
+  #_{:clj-kondo/ignore [:type-mismatch]}
   (and (zero? (h2o/context-get-active-conns ctx-ptr))
        (zero? (h2o/context-get-shutdown-conns ctx-ptr))))
 
@@ -210,10 +153,11 @@
       (when-not shutdown-initiated?
         (update-listener-state! server thread-idx))
 
-      ;; Responsive during shutdown: cap wait at 100ms
       (let [wait-ms (if shutdown-initiated?
-                      100
+                      100 ;; Responsive during shutdown: cap wait at 100ms
+                      #_{:clj-kondo/ignore [:type-mismatch]}
                       (min max-wait 100))]
+        #_(println "tick " (:id (evloop/get-current-worker)))
         (h2o/evloop-run loop-ptr wait-ms)))
     {:shutdown-initiated? shutdown-initiated?}))
 
@@ -222,11 +166,11 @@
    
    Options:
    - :handler      Ring handler function (fn [request-map] response-map) (required)
-   - :n-workers    Number of worker threads (default: 2)
+   - :n-workers    Number of worker threads (default: 1)
    - :listeners    Vector of listener configs [{:port 8080}]
    - :max-connections Maximum concurrent connections (default: 1024)"
   [{:keys [handler n-workers listeners max-connections]
-    :or {n-workers 2
+    :or {n-workers 1
          listeners [{:port 8080}]
          max-connections default-max-connections}}]
   (when-not handler
@@ -274,8 +218,7 @@
         dup-fds (vec (for [master-fd listener-fds]
                        (socket/dup-for-threads master-fd n-workers)))
 
-        accept-ctxs (vec (for [thread-idx (range n-workers)
-                               listener-idx (range (count listeners))]
+        accept-ctxs (vec (for [thread-idx (range n-workers)]
                            (h2o/create-accept-ctx
                             arena
                             (nth contexts thread-idx)

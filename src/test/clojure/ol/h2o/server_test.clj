@@ -1,11 +1,10 @@
 (ns ol.h2o.server-test
   (:require
    [babashka.http-client :as http]
-   [babashka.process :as p]
+   [clojure.test :as test :refer [deftest is testing]]
    [clojure.string :as str]
-   [clojure.java.io :as io]
-   [clojure.test :as test :refer [deftest testing is]]
-   [ol.h2o.server :as server]))
+   [ol.h2o.server :as server]
+   [ol.h2o.test-utils :as util]))
 
 (def plain-port 7890)
 
@@ -13,7 +12,6 @@
 
 (defn test-server [handler & {:as opts}]
   (let [config (merge {:handler handler
-                       :n-workers 2
                        :listeners [{:port plain-port}]
                        :max-connections 1024}
                       opts)]
@@ -21,10 +19,12 @@
         (server/start-server))))
 
 (defn req [method path & {:as opts}]
-  (http/request (merge {:timeout 5000 :throw false}
-                       opts
-                       {:uri (str base path)
-                        :method method})))
+  (->
+   (http/request (merge {:timeout 5000 :throw false}
+                        opts
+                        {:uri (str base path)
+                         :method method}))
+   (dissoc :request)))
 
 (defmacro with-server
   {:clj-kondo/lint-as 'clojure.core/with-open}
@@ -35,35 +35,55 @@
        (finally
          (server/stop-server ~server-sym)))))
 
-(deftest test-simple-request
-  (with-server [_server (test-server (fn [{:keys [request-method body] :as req}]
-                                       (let [b (slurp body)]
-                                         #p [(take 5 b) (count b) (take-last 3 b)])
+(def abcs (cycle "abcdefghijklmnopqrstuvwxyz"))
+(def large-payload-str (str "START" (str/join "" (take 1000000 (cycle "abcdefghijklmnopqrstuvwxyz"))) "END"))
 
+(deftest test-simple-request
+  (with-server [_server (test-server (fn [{:keys [uri]}]
                                        (cond
-                                         (= :get request-method)
+                                         (= "/simple" uri)
                                          {:status 200
                                           :headers {"content-type" "text/plain"}
                                           :body "Hello, World"}
 
-                                         (= :post request-method)
+                                         (= "/chunked" uri)
                                          {:status 200
                                           :headers {"content-type" "text/plain"}
-                                          :body (if (= "payload" nil)
-                                                  "OK"
-                                                  "NOTOK")}
-
+                                          :body #_(str "START" (str/join "" (take 100000 abcs)) "END")
+                                          ((fn step [s]
+                                             (lazy-seq
+                                              (Thread/sleep 100)
+                                              (when (seq s)
+                                                (let [n 2
+                                                      chunk (apply str (take n s))]
+                                                  (cons chunk (step (drop n s)))))))
+                                           (take 26 abcs))}
+                                         (= "/large" uri)
+                                         {:status 201
+                                          :headers {"content-type" "text/plain"}
+                                          :body large-payload-str}
                                          :else {:status 400})))]
-    #_(testing "simple get"
-        (let [response (req :get "/hello")]
-          (is (= 200 (:status response)))
-          (is (re-find #"Hello, World" (:body response)))))
-
-    (testing "simple post"
-      (let [payload (str "START" (str/join "" (take 1000000 (cycle "abcdefghijklmnopqrstuvwxyz"))) "END")
-            response (req :post "/hello" :body payload)]
-        (is (= 200 (:status response)))
-        (is (= "OK" (:body response)))))))
+    (testing "simple"
+      (is (util/submap? {:status 200
+                         :version :http1.1
+                         :body "Hello, World"
+                         :headers {"connection" "close",
+                                   "content-length" "12",
+                                   "content-type" "text/plain",
+                                   "server" "h2o/2.3.0-DEV"}}
+                        (req :get "/simple"))))
+    (testing "chunked"
+      (is (util/submap? {:status 200
+                         :version :http1.1
+                         :body "abcdefghijklmnopqrstuvwxyz"
+                         :headers {"connection" "close" "content-type" "text/plain" "server" "h2o/2.3.0-DEV" "transfer-encoding" "chunked"}}
+                        (req :get "/chunked"))))
+    (testing "large"
+      (is (util/submap? {:status 201
+                         :version :http1.1
+                         :body large-payload-str
+                         :headers {"connection" "close" "content-type" "text/plain" "server" "h2o/2.3.0-DEV" "content-length" "1000008"}}
+                        (req :post "/large"))))))
 
 (deftest test-request-headers
   (let [received-headers (atom nil)]

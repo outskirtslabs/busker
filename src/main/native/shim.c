@@ -106,6 +106,96 @@ size_t clj_h2o_context_get_shutdown_conns(h2o_context_t *ctx) {
   return ctx->_conns.num_conns.shutdown;
 }
 
+static void clj_generator_proceed(h2o_generator_t *gen, h2o_req_t *req) {
+  (void)req; /* unused parameter */
+  /* gen points to the generator member inside clj_stream_ctx_t, not the start
+   * of the struct. */
+  clj_req_ctx_t *ctx = H2O_STRUCT_FROM_MEMBER(clj_req_ctx_t, generator, gen);
+
+  /* Defensive guard: drop callback if slot is not in use */
+  if (!ctx) {
+    return;
+  }
+  ctx->send_inflight = 0;
+  if (ctx->on_response_generator_proceed) {
+    ctx->on_response_generator_proceed(ctx);
+  }
+}
+
+static void clj_generator_stop(h2o_generator_t *gen, h2o_req_t *req) {
+  (void)req; /* unused parameter */
+  clj_req_ctx_t *ctx = H2O_STRUCT_FROM_MEMBER(clj_req_ctx_t, generator, gen);
+
+  /* Defensive guard: drop callback if slot is not in use */
+  if (!ctx) {
+    return;
+  }
+
+  if (ctx->on_response_generator_stop) {
+    ctx->on_response_generator_stop(ctx, CLJ_COMPLETE_RESET);
+  }
+
+  ctx->generator_active = 0;
+  ctx->send_inflight = 0;
+
+  /* Complete deferred deallocation if closing flag is set */
+  if (ctx->closing) {
+    //???
+  }
+}
+
+void clj_h2o_start_response(
+    clj_req_ctx_t *ctx, int status, const clj_header_t *headers,
+    size_t headers_len, size_t content_length,
+    void (*on_response_generator_proceed)(clj_req_ctx_t *ctx),
+    void (*on_response_generator_stop)(clj_req_ctx_t *ctx,
+                                       clj_complete_reason_t reason)) {
+  if (!ctx || !ctx->req)
+    return;
+
+  h2o_req_t *req = ctx->req;
+
+  req->res.status = status;
+  req->res.reason = "OK";
+
+  req->res.content_length = SIZE_MAX;
+  if (content_length != SIZE_MAX) {
+    req->res.content_length = content_length;
+  }
+
+  for (uint32_t i = 0; i < headers_len; i++) {
+    const char *name_data = headers[i].name;
+    const char *value_data = headers[i].value;
+    size_t name_len = headers[i].name_len;
+    size_t value_len = headers[i].value_len;
+
+    char *pool_name = h2o_mem_alloc_pool(&req->pool, char, name_len + 1);
+    char *pool_value = h2o_mem_alloc_pool(&req->pool, char, value_len + 1);
+
+    memcpy(pool_name, name_data, name_len);
+    pool_name[name_len] = '\0';
+
+    memcpy(pool_value, value_data, value_len);
+    pool_value[value_len] = '\0';
+
+    // DEBUG_LOG("copied header %s (%d) = %s (%d)", pool_name, name_len,
+    //           pool_value, value_len);
+
+    h2o_add_header_by_str(&req->pool, &req->res.headers, pool_name, name_len, 0,
+                          pool_name, pool_value, value_len);
+  }
+
+  ctx->generator.proceed = clj_generator_proceed;
+  ctx->generator.stop = clj_generator_stop;
+  ctx->on_response_generator_proceed = on_response_generator_proceed;
+  ctx->on_response_generator_stop = on_response_generator_stop;
+  ctx->generator_active = 1;
+  ctx->response_started = 1;
+  ctx->send_inflight = 0;
+
+  h2o_start_response(req, &ctx->generator);
+}
+
 static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
   meta->method = (const uint8_t *)req->method.base;
   meta->method_len = req->method.len;
@@ -192,42 +282,6 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
     meta->charset = NULL;
     meta->charset_len = 0;
   }
-}
-
-void clj_stream_start_response(h2o_req_t *req, int status,
-                               const clj_header_t *headers,
-                               uint32_t headers_len, size_t content_length,
-                               const clj_generator_callbacks_t *generator_cb) {
-
-  req->res.status = status;
-  req->res.reason = "OK";
-
-  if (content_length != SIZE_MAX) {
-    req->res.content_length = content_length;
-  }
-
-  for (uint32_t i = 0; i < headers_len; i++) {
-    const uint8_t *name_data = headers[i].name;
-    const uint8_t *value_data = headers[i].value;
-    uint32_t name_len = headers[i].name_len;
-    uint32_t value_len = headers[i].value_len;
-
-    /* TODO: do we need to allocate mem for headers again? */
-    char *pool_name = h2o_mem_alloc_pool(&req->pool, char, name_len + 1);
-    char *pool_value = h2o_mem_alloc_pool(&req->pool, char, value_len + 1);
-
-    /* Copy header data into h2o pool memory */
-    memcpy(pool_name, name_data, name_len);
-    pool_name[name_len] = '\0'; /* null terminate */
-
-    memcpy(pool_value, value_data, value_len);
-    pool_value[value_len] = '\0'; /* null terminate */
-
-    h2o_add_header_by_str(&req->pool, &req->res.headers, pool_name, name_len, 0,
-                          pool_name, pool_value, value_len);
-  }
-
-  /* TODO: GENREATOR?*/
 }
 
 /* Completion cleanup callback - this is called by h2o when our request dies
@@ -336,12 +390,15 @@ static int request_handler(h2o_handler_t *self, h2o_req_t *req) {
 
 static void on_context_init(h2o_handler_t *_self, h2o_context_t *ctx) {
   struct clj_h2o_handler_t *self = (void *)_self;
+  DEBUG_LOG("on_context_init");
 }
 static void on_context_dispose(h2o_handler_t *_self, h2o_context_t *ctx) {
   struct clj_h2o_handler_t *self = (void *)_self;
+  DEBUG_LOG("on_context_dispose");
 }
 static void on_handler_dispose(h2o_handler_t *_self) {
   struct clj_h2o_handler_t *self = (void *)_self;
+  DEBUG_LOG("on_handler_dispose");
 }
 
 clj_h2o_handler_t *
@@ -357,13 +414,12 @@ clj_h2o_create_handler(h2o_hostconf_t *hostconf,
   handler->on_request_cleanup = on_request_cleanup;
   handler->shutting_down = 0;
   handler->super.on_req = request_handler;
-  handler->super.supports_request_streaming = 1;
-  handler->super.on_context_init = on_context_init;
-  handler->super.on_context_dispose = on_context_dispose;
-  handler->super.dispose = on_handler_dispose;
   handler->super.supports_request_streaming =
       supports_request_streaming ? 1 : 0;
-  handler->super.handles_expect = handles_expect ? 1 : 0;
+  // handler->super.on_context_init = on_context_init;
+  // handler->super.on_context_dispose = on_context_dispose;
+  // handler->super.dispose = on_handler_dispose;
+  // handler->super.handles_expect = handles_expect ? 1 : 0;
   return handler;
 }
 
@@ -379,4 +435,111 @@ void clj_h2o_set_on_request_body_chunk(
 void clj_h2o_proceed_req(h2o_req_t *req) {
   if (req && req->proceed_req)
     req->proceed_req(req, NULL);
+}
+
+typedef struct {
+  void (*releaser)(void *jvm_handle);
+  void *jvm_handle;
+} clj_releaser_info_t;
+
+typedef struct {
+  size_t num_releasers;
+  clj_releaser_info_t releasers[]; /* Flexible array member */
+} clj_send_batch_cleanup_ctx_t;
+
+/* Batch cleanup callback - calls all releasers when h2o is done */
+static void cleanup_batch(void *ptr) {
+  clj_send_batch_cleanup_ctx_t *ctx = (clj_send_batch_cleanup_ctx_t *)ptr;
+  for (size_t i = 0; i < ctx->num_releasers; ++i) {
+    ctx->releasers[i].releaser(ctx->releasers[i].jvm_handle);
+  }
+}
+
+clj_stream_status_t clj_h2o_stream_send_vecs(clj_req_ctx_t *ctx,
+                                             const clj_send_vec_t *vecs,
+                                             size_t num_vecs, int is_final) {
+
+  if (!ctx || !vecs || !ctx->req || ctx->req->_generator == NULL)
+    return CLJ_STREAM_CLOSED;
+
+  if (ctx->send_inflight)
+    return CLJ_STREAM_AGAIN;
+
+  h2o_req_t *req = ctx->req;
+
+  /* Count borrowed vectors that need cleanup */
+  size_t num_releasers = 0;
+  for (size_t i = 0; i < num_vecs; i++) {
+    if (vecs[i].releaser != NULL) {
+      num_releasers++;
+    }
+  }
+
+  /* Allocate cleanup context if we have borrowed memory */
+  clj_send_batch_cleanup_ctx_t *cleanup_ctx = NULL;
+  if (num_releasers > 0) {
+    size_t cleanup_size = sizeof(clj_send_batch_cleanup_ctx_t) +
+                          num_releasers * sizeof(clj_releaser_info_t);
+    cleanup_ctx = h2o_mem_alloc_shared(&req->pool, cleanup_size, cleanup_batch);
+    if (!cleanup_ctx) {
+      /* Call all releasers on allocation failure */
+      for (size_t i = 0; i < num_vecs; i++) {
+        if (vecs[i].releaser) {
+          vecs[i].releaser(vecs[i].jvm_handle);
+        }
+      }
+      return CLJ_STREAM_NOMEM;
+    }
+    cleanup_ctx->num_releasers = 0; /* Will increment as we process vectors */
+  }
+
+  /* Allocate h2o_sendvec_t array */
+  h2o_sendvec_t *sendvecs =
+      h2o_mem_alloc_shared(&req->pool, sizeof(h2o_sendvec_t) * num_vecs, NULL);
+  if (!sendvecs) {
+    /* Call all releasers on allocation failure */
+    for (size_t i = 0; i < num_vecs; i++) {
+      if (vecs[i].releaser) {
+        vecs[i].releaser(vecs[i].jvm_handle);
+      }
+    }
+    return CLJ_STREAM_NOMEM;
+  }
+
+  for (uint32_t i = 0; i < num_vecs; i++) {
+    if (vecs[i].releaser == NULL) {
+      /* Copy mode: allocate h2o pool memory and copy */
+      char *data_copy = h2o_mem_alloc_shared(&req->pool, vecs[i].len, NULL);
+      if (!data_copy) {
+        /* Call releasers for any remaining borrowed vectors */
+        for (uint32_t j = i; j < num_vecs; j++) {
+          if (vecs[j].releaser) {
+            vecs[j].releaser(vecs[j].jvm_handle);
+          }
+        }
+        return CLJ_STREAM_NOMEM;
+      }
+      memcpy(data_copy, vecs[i].data, vecs[i].len);
+      h2o_sendvec_init_raw(&sendvecs[i], data_copy, vecs[i].len);
+    } else {
+      /* zero-copy mode: point directly at JVM memory */
+      h2o_sendvec_init_raw(&sendvecs[i], vecs[i].data, vecs[i].len);
+
+      /* Store releaser info in cleanup context */
+      uint32_t releaser_idx = cleanup_ctx->num_releasers++;
+      cleanup_ctx->releasers[releaser_idx].releaser = vecs[i].releaser;
+      cleanup_ctx->releasers[releaser_idx].jvm_handle = vecs[i].jvm_handle;
+    }
+  }
+
+  if (is_final) {
+    h2o_sendvec(req, sendvecs, num_vecs, H2O_SEND_STATE_FINAL);
+    ctx->generator_active = 0;
+    ctx->send_inflight = 0;
+  } else {
+    h2o_sendvec(req, sendvecs, num_vecs, H2O_SEND_STATE_IN_PROGRESS);
+    ctx->send_inflight = 1;
+  }
+
+  return CLJ_STREAM_OK;
 }

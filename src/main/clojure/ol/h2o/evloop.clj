@@ -9,10 +9,6 @@
 ;; ------------------------------
 ;; Worker control-plane primitives
 ;; ------------------------------
-
-(def ^:private default-worker-count
-  (max 1 (.availableProcessors (Runtime/getRuntime))))
-
 (defrecord Worker
            [id ;; int
             thread ;; java.lang.Thread (platform)
@@ -83,7 +79,8 @@
     (catch InterruptedException _
       (.set ^AtomicBoolean (:running? w) false))
     (catch Throwable t
-      (println "[evloop] worker crashed:" (.getMessage t)))
+      (println "[evloop] worker crashed:" (.getMessage t))
+      (println t))
     (finally
       (.remove worker-context))))
 
@@ -179,10 +176,12 @@
    - msg: message to send
    
    Returns: true if worker was found and message was queued"
-  [system id msg]
-  (when-let [^Worker w (.get ^ConcurrentHashMap (:workers system) id)]
-    (.offer ^ArrayBlockingQueue (:mailbox w) msg)
-    #_(println (first msg))))
+  ([system msg]
+   (send-msg! system (:worker-id system) msg))
+  ([system id msg]
+   (when-let [^Worker w (.get ^ConcurrentHashMap (:workers system) id)]
+     (.offer ^ArrayBlockingQueue (:mailbox w) msg)
+     #_(println (first msg)))))
 
 (defn broadcast!
   "Send a control message to all workers (bounded mailboxes).

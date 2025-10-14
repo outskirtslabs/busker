@@ -9,6 +9,7 @@
   (when-let [body (:body req)]
     (slurp body)))
 
+(def abcs (cycle "abcdefghijklmnopqrstuvwxyz"))
 (defn echo-handler
   "Echo back the request body"
   [req]
@@ -16,7 +17,17 @@
     (println "Echo handler - Method:" (:request-method req) "Body length:" (count (or body-str "")))
     {:status 200
      :headers {"content-type" (get-in req [:headers "content-type"] "text/plain")}
-     :body (or body-str "No body provided")}))
+     :body  ((fn step [s]
+               (lazy-seq
+                (println "STEP")
+                (Thread/sleep 100)
+                (when (seq s)
+                  (let [n 2
+                        chunk (apply str (take n s))]
+                    (cons chunk (step (drop n s)))))))
+             (take 26 abcs))
+
+     #_#_:body (or body-str "No body provided")}))
 
 (defn json-handler
   "Parse JSON request and return JSON response"
@@ -29,7 +40,7 @@
 
 (defn large-response-handler
   "Return a large response body"
-  [req]
+  [_req]
   (println "Large response handler")
   (let [size (* 100 1024) ; 100 KB
         body (apply str (repeat size "X"))]
@@ -112,7 +123,8 @@
     (println "  GET  /query?foo=bar - Query string parsing")
     (println "  GET  /headers       - Show all headers")
     (println "  GET  /status/404    - Custom status codes")
-    (Thread/sleep 10000)
+    @(promise)
+    #_(Thread/sleep 10000)
     (println "Shutting down...")
     (server/stop-server s)
     (println "Server stopped")))

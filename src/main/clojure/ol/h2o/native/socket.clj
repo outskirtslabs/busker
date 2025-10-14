@@ -76,6 +76,7 @@
 ;; helpers
 ;; ------------------------------------------------------------
 
+#_{:clj-kondo/ignore [:type-mismatch]}
 (defn- set-nonblocking! [fd]
   (let [flags (fcntl fd F_GETFL 0)]
     (when (neg? flags)
@@ -83,10 +84,12 @@
     (when (neg? (fcntl fd F_SETFL (bit-or flags O_NONBLOCK)))
       (throw (ex-info "fcntl(F_SETFL,O_NONBLOCK) failed" {:fd fd})))))
 
+#_{:clj-kondo/ignore [:type-mismatch]}
 (defn- set-cloexec! [fd]
   (when (neg? (fcntl fd F_SETFD FD_CLOEXEC))
     (throw (ex-info "fcntl(F_SETFD,FD_CLOEXEC) failed" {:fd fd}))))
 
+#_{:clj-kondo/ignore [:type-mismatch]}
 (defn- set-bool-sockopt! [fd level opt on?]
   (with-open [arena (mem/confined-arena)]
     (let [v (if on? 1 0)
@@ -102,6 +105,7 @@
   (let [s_addr (if (or (nil? host) (= host "0.0.0.0"))
                  INADDR_ANY
                  (with-open [tmp-arena (mem/confined-arena)]
+                   #_{:clj-kondo/ignore [:type-mismatch]}
                    (let [dst (mem/alloc ::in_addr tmp-arena)
                          r (inet_pton AF_INET host dst)]
                      (when (neg? r)
@@ -135,6 +139,7 @@
   (when-not (int? port)
     (throw (ex-info "port must be int" {:port port})))
   (let [fd (socket AF_INET SOCK_STREAM 0)]
+    #_{:clj-kondo/ignore [:type-mismatch]}
     (when (neg? fd)
       (throw (ex-info "socket() failed" {:errno :check-errno})))
     (try
@@ -143,7 +148,8 @@
       (when reuseaddr? (set-bool-sockopt! fd SOL_SOCKET SO_REUSEADDR true))
       (when reuseport? (set-bool-sockopt! fd SOL_SOCKET SO_REUSEPORT true))
       (with-open [arena (mem/confined-arena)]
-        (let [addr (sockaddr-in {:host host :port port} arena)
+        #_{:clj-kondo/ignore [:type-mismatch]}
+        (let [addr    (sockaddr-in {:host host :port port} arena)
               addrlen (int (mem/size-of ::sockaddr_in))]
           (when (neg? (bind fd addr addrlen))
             (throw (ex-info "bind() failed" {:host host :port port :errno :check-errno})))
@@ -164,6 +170,7 @@
     (throw (ex-info "n must be >= 0" {:n n})))
   (vec
    (for [_ (range n)]
+     #_{:clj-kondo/ignore [:type-mismatch]}
      (let [d (dup master-fd)]
        (when (neg? d)
          (throw (ex-info "dup() failed" {:master-fd master-fd :errno :check-errno})))

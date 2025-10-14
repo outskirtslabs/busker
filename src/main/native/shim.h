@@ -39,11 +39,12 @@ typedef enum {
   CLJ_HANDLER_OVERLOADED = -2 /* System overloaded; send 503 immediately */
 } clj_handler_status_t;
 
-/* Per-request generator upcalls for streaming HTTP responses */
-typedef struct {
-  void (*on_proceed)(void *jvm_handle);
-  void (*on_stop)(void *jvm_handle, clj_complete_reason_t reason);
-} clj_generator_callbacks_t;
+typedef enum {
+  CLJ_STREAM_OK = 0,
+  CLJ_STREAM_AGAIN = 1,
+  CLJ_STREAM_NOMEM = 2,
+  CLJ_STREAM_CLOSED = 3
+} clj_stream_status_t;
 
 typedef struct clj_stream_ctx {
   uint16_t generation; /* Incremented each time this slot is reused */
@@ -55,15 +56,15 @@ typedef struct clj_stream_ctx {
   uint8_t _padding[2]; /* Explicit padding for alignment */
   h2o_req_t *h2o_req;
   h2o_generator_t generator;
-  clj_generator_callbacks_t callbacks;
+  //  clj_generator_callbacks_t callbacks;
   void *jvm_handle;
   atomic_uint_fast8_t send_inflight;
-} clj_stream_ctx_t;
+} __clj_stream_ctx_t;
 
 typedef struct {
-  const uint8_t *name;
+  const char *name;
   size_t name_len;
-  const uint8_t *value;
+  const char *value;
   size_t value_len;
 } clj_header_t;
 
@@ -89,6 +90,7 @@ typedef struct {
 } clj_req_meta_t;
 
 typedef struct clj_req_ctx_t clj_req_ctx_t;
+
 struct clj_req_ctx_t {
   h2o_req_t *req;
   clj_req_meta_t meta;
@@ -96,7 +98,14 @@ struct clj_req_ctx_t {
   void (*on_request_body_chunk)(clj_req_ctx_t *ctx, char *chunk,
                                 size_t chunk_len, int is_end_stream);
   h2o_generator_t generator;
+  void (*on_response_generator_proceed)(clj_req_ctx_t *ctx);
+  void (*on_response_generator_stop)(clj_req_ctx_t *ctx,
+                                     clj_complete_reason_t reason);
   int cleanup;
+  int send_inflight;
+  int generator_active;
+  int closing;
+  int response_started;
 };
 
 typedef struct {
@@ -105,6 +114,16 @@ typedef struct {
   void (*on_request_cleanup)(clj_req_ctx_t *);
   int shutting_down;
 } clj_h2o_handler_t;
+
+/* A descriptor for a single vector of memory to be sent */
+typedef struct {
+  const char *data;
+  size_t len;
+  /* If non-NULL, the releaser will be called by the native layer
+   * exactly once after the data has been consumed by the transport. */
+  void (*releaser)(void *jvm_handle);
+  void *jvm_handle;
+} clj_send_vec_t;
 
 /* 1 if socket has a read callback (i.e. currently reading), else 0 */
 int clj_h2o_socket_is_reading(h2o_socket_t *sock);
@@ -151,10 +170,12 @@ size_t clj_h2o_context_get_active_conns(h2o_context_t *ctx);
 size_t clj_h2o_context_get_idle_conns(h2o_context_t *ctx);
 size_t clj_h2o_context_get_shutdown_conns(h2o_context_t *ctx);
 
-void clj_stream_start_response(h2o_req_t *req, int status,
-                               const clj_header_t *headers,
-                               uint32_t headers_len, size_t content_length,
-                               const clj_generator_callbacks_t *generator_cb);
+void clj_h2o_start_response(
+    clj_req_ctx_t *ctx, int status, const clj_header_t *headers,
+    size_t headers_len, size_t content_length,
+    void (*on_response_generator_proceed)(clj_req_ctx_t *ctx),
+    void (*on_response_generator_stop)(clj_req_ctx_t *ctx,
+                                       clj_complete_reason_t reason));
 
 /* Create and configure h2o handler with optional callbacks.
  * All callback parameters can be NULL except on_req_callback.
@@ -172,5 +193,9 @@ void clj_h2o_set_on_request_body_chunk(
     void (*on_request_body_chunk)(clj_req_ctx_t *ctx, char *chunk,
                                   size_t chunk_len, int is_end_stream));
 void clj_h2o_proceed_req(h2o_req_t *req);
+
+clj_stream_status_t clj_h2o_stream_send_vecs(clj_req_ctx_t *ctx,
+                                             const clj_send_vec_t *vecs,
+                                             size_t num_vecs, int is_final);
 
 #endif /* CLJ_H2O_SHIM_H */

@@ -8,6 +8,10 @@
 
 (set! *warn-on-reflection* true)
 
+(def ^:const H2O_SEND_STATE_IN_PROGRESS 0)
+(def ^:const H2O_SEND_STATE_FINAL 1)
+(def ^:const H2O_SEND_STATE_ERROR 2)
+
 (import 'java.lang.foreign.MemoryLayout)
 (import 'java.lang.foreign.MemoryLayout$PathElement)
 
@@ -60,7 +64,8 @@
 #_(defn load-system-library []
     (ffi/load-system-library "libh2o"))
 
-(ffi/load-system-library "h2o-evloop")
+;; (ffi/load-system-library "h2o-evloop")
+(ffi/load-library "result/lib/libh2o-evloop.so")
 (ffi/load-library (System/getProperty "ol.libh2o.path"))
 
 (mem/defalias ::clj-header-t
@@ -188,7 +193,13 @@
       [:on-cleanup ::mem/pointer]
       [:on-request-body-chunk ::mem/pointer]
       [:generator ::h2o-generator-t]
-      [:cleanup ::mem/int]]]))
+      [:on-response-generator-stop ::mem/pointer]
+      [:on-response-generator-proceed ::mem/pointer]
+      [:cleanup ::mem/int]
+      [:send_inflight ::mem/int]
+      [:generator_active ::mem/int]
+      [:closing ::mem/int]
+      [:response_started ::mem/int]]]))
 
 #_(print-offsets-for
    (layout/with-c-layout
@@ -338,10 +349,6 @@
   h2o_accept
   [::mem/pointer ::mem/pointer] ::mem/void)
 
-(def ^:const H2O_SEND_STATE_IN_PROGRESS 0)
-(def ^:const H2O_SEND_STATE_FINAL 1)
-(def ^:const H2O_SEND_STATE_ERROR 2)
-
 (defcfn sendvec-init-raw
   "Initialize a sendvec with raw bytes"
   h2o_sendvec_init_raw
@@ -354,8 +361,18 @@
 
 (defcfn start-response
   "Start sending HTTP response"
-  h2o_start_response
-  [::mem/pointer ::mem/pointer] ::mem/void)
+  clj_h2o_start_response
+  [::mem/pointer ::mem/int ::mem/pointer ::mem/long ::mem/long ::mem/pointer ::mem/pointer] ::mem/void)
+
+(def CLJ_STREAM_OK 0)
+(def CLJ_STREAM_AGAIN 1)
+(def CLJ_STREAM_NOMEM 2)
+(def CLJ_STREAM_CLOSED 3)
+
+(defcfn stream_send_vecs
+  "Stream vecs as part of response"
+  clj_h2o_stream_send_vecs
+  [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/int)
 
 (def CLJ_HANDLER_OVERLOADED -2)
 (def CLJ_HANDLER_DECLINED -1)
@@ -395,14 +412,12 @@
                                           (catch Exception e
                                             (report-almost-fatal-error "The request cleanup callback errored" e))))
 
-                                      [::ffi/fn [::mem/pointer] ::mem/void])
-        streaming-flag (if supports-request-streaming 1 0)
-        expect-flag (if handles-expect 1 0)]
+                                      [::ffi/fn [::mem/pointer] ::mem/void])]
     (native-fn hostconf-ptr
                on-req-ptr
                on-cleanup-ptr
-               streaming-flag
-               expect-flag)))
+               (if supports-request-streaming 1 0)
+               (if handles-expect 1 0))))
 (defcfn proceed-req
   "Call req->proceed_req to signal readiness for next request body chunk"
   clj_h2o_proceed_req
@@ -457,6 +472,11 @@
 (defcfn context-get-active-conns
   "Get count of active connections for this context"
   clj_h2o_context_get_active_conns
+  [::mem/pointer] ::mem/long)
+
+(defcfn context-get-idle-conns
+  "Get count of idle connections for this context"
+  clj_h2o_context_get_idle_conns
   [::mem/pointer] ::mem/long)
 
 (defcfn context-get-shutdown-conns
@@ -558,21 +578,6 @@
          (socket-set-on-close sock-ptr on-close-callback (mem/as-segment 0))
          (h2o-accept accept-ctx-ptr sock-ptr))))
    [::ffi/fn [::mem/pointer ::mem/c-string] ::mem/void]))
-
-#_(defn create-request-callback
-    "Create the on-req upcall callback for h2o.
-   This is called by native code when a request arrives."
-    [callback]
-    (mem/serialize
-     (fn [_self-ptr req-ptr]
-       (try
-         (callback req-ptr)
-         0
-         (catch Exception e
-           (println "Error enqueuing request:" (.getMessage e))
-           (.printStackTrace e)
-           -1)))
-     [::ffi/fn [::mem/pointer ::mem/pointer] ::mem/int]))
 
 (defn create-accept-ctx
   "Create h2o_accept_ctx_t for accepting connections.
