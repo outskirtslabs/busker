@@ -39,28 +39,6 @@ typedef enum {
   CLJ_HANDLER_OVERLOADED = -2 /* System overloaded; send 503 immediately */
 } clj_handler_status_t;
 
-typedef enum {
-  CLJ_STREAM_OK = 0,
-  CLJ_STREAM_AGAIN = 1,
-  CLJ_STREAM_NOMEM = 2,
-  CLJ_STREAM_CLOSED = 3
-} clj_stream_status_t;
-
-typedef struct clj_stream_ctx {
-  uint16_t generation; /* Incremented each time this slot is reused */
-  uint8_t in_use;      /* Whether this slot is currently allocated */
-  uint8_t generator_active;
-  uint8_t response_started;
-  uint8_t closing;     /* Set when completion cleanup wants to deallocate but
-                          generator is still active */
-  uint8_t _padding[2]; /* Explicit padding for alignment */
-  h2o_req_t *h2o_req;
-  h2o_generator_t generator;
-  //  clj_generator_callbacks_t callbacks;
-  void *jvm_handle;
-  atomic_uint_fast8_t send_inflight;
-} __clj_stream_ctx_t;
-
 typedef struct {
   const char *name;
   size_t name_len;
@@ -102,8 +80,6 @@ struct clj_req_ctx_t {
   void (*on_response_generator_stop)(clj_req_ctx_t *ctx,
                                      clj_complete_reason_t reason);
   int cleanup;
-  int send_inflight;
-  int generator_active;
   int closing;
   int response_started;
 };
@@ -192,10 +168,9 @@ void clj_h2o_set_on_request_body_chunk(
     clj_req_ctx_t *ctx,
     void (*on_request_body_chunk)(clj_req_ctx_t *ctx, char *chunk,
                                   size_t chunk_len, int is_end_stream));
+
 void clj_h2o_proceed_req(h2o_req_t *req);
 
-clj_stream_status_t clj_h2o_stream_send_vecs(clj_req_ctx_t *ctx,
-                                             const clj_send_vec_t *vecs,
-                                             size_t num_vecs, int is_final);
+int clj_h2o_cancel_request(clj_req_ctx_t *ctx);
 
 #endif /* CLJ_H2O_SHIM_H */

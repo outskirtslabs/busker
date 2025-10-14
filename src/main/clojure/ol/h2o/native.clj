@@ -198,8 +198,6 @@
       [:on-response-generator-stop ::mem/pointer]
       [:on-response-generator-proceed ::mem/pointer]
       [:cleanup ::mem/int]
-      [:send_inflight ::mem/int]
-      [:generator_active ::mem/int]
       [:closing ::mem/int]
       [:response_started ::mem/int]]]))
 
@@ -366,15 +364,10 @@
   clj_h2o_start_response
   [::mem/pointer ::mem/int ::mem/pointer ::mem/long ::mem/long ::mem/pointer ::mem/pointer] ::mem/void)
 
-(def CLJ_STREAM_OK 0)
-(def CLJ_STREAM_AGAIN 1)
-(def CLJ_STREAM_NOMEM 2)
-(def CLJ_STREAM_CLOSED 3)
-
-(defcfn stream_send_vecs
-  "Stream vecs as part of response"
-  clj_h2o_stream_send_vecs
-  [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/int)
+(defcfn cancel-request
+  "Cancel a request after the response has started"
+  clj_h2o_cancel_request
+  [::mem/pointer] ::mem/int)
 
 (def CLJ_HANDLER_OVERLOADED -2)
 (def CLJ_HANDLER_DECLINED -1)
@@ -430,42 +423,6 @@
   clj_h2o_set_on_request_body_chunk
   [::mem/pointer ::mem/pointer] ::mem/void)
 
-(defcfn add-header-by-str
-  "Add response header by string.
-   Parameters:
-   - pool: memory pool pointer
-   - headers: headers structure pointer
-   - lowercase_name: lowercase header name (raw char pointer)
-   - lowercase_name_len: length of header name
-   - maybe_token: whether to check for token (0=no, 1=yes)
-   - orig_name: original case header name (raw char pointer)
-   - value: header value (raw char pointer)
-   - value_len: length of header value
-   Returns: ssize_t (header index or -1 on error)"
-  h2o_add_header_by_str
-  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/long ::mem/int ::mem/pointer ::mem/pointer ::mem/long] ::mem/long)
-
-#_(defcfn get-content-type-token
-    "Get H2O_TOKEN_CONTENT_TYPE pointer"
-    clj_h2o_get_content_type_token
-    [] ::mem/pointer)
-
-#_(defcfn get-static-generator
-    "Get static h2o_generator_t pointer"
-    clj_h2o_get_static_generator
-    [] ::mem/pointer)
-
-#_(defcfn create-streaming-generator
-    "Create a streaming generator with proceed/stop callbacks for backpressure.
-   Returns h2o_generator_t* pointer."
-    clj_create_streaming_generator
-    [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer] ::mem/pointer)
-
-(defcfn req-get-res-headers
-  "Get response headers pointer"
-  clj_h2o_req_get_res_headers
-  [::mem/pointer] ::mem/pointer)
-
 (defcfn evloop-now
   "Get current time in milliseconds from event loop"
   clj_h2o_evloop_now
@@ -500,11 +457,6 @@
     "Debug helper: print h2o_req_t field offsets to stderr for struct layout verification"
     clj_h2o_req_print_offsets
     [] ::mem/void)
-
-(defcfn mem-alloc-shared
-  "Allocate memory from h2o pool. Returns pointer to allocated memory."
-  h2o_mem_alloc_shared
-  [::mem/pointer ::mem/long ::mem/pointer] ::mem/pointer)
 
 (defn create-iovec
   "Create an h2o_iovec_t from a string.

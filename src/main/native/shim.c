@@ -116,7 +116,6 @@ static void clj_generator_proceed(h2o_generator_t *gen, h2o_req_t *req) {
   if (!ctx) {
     return;
   }
-  ctx->send_inflight = 0;
   if (ctx->on_response_generator_proceed) {
     ctx->on_response_generator_proceed(ctx);
   }
@@ -135,12 +134,9 @@ static void clj_generator_stop(h2o_generator_t *gen, h2o_req_t *req) {
     ctx->on_response_generator_stop(ctx, CLJ_COMPLETE_RESET);
   }
 
-  ctx->generator_active = 0;
-  ctx->send_inflight = 0;
-
   /* Complete deferred deallocation if closing flag is set */
   if (ctx->closing) {
-    //???
+    //??? TODO
   }
 }
 
@@ -189,10 +185,7 @@ void clj_h2o_start_response(
   ctx->generator.stop = clj_generator_stop;
   ctx->on_response_generator_proceed = on_response_generator_proceed;
   ctx->on_response_generator_stop = on_response_generator_stop;
-  ctx->generator_active = 1;
   ctx->response_started = 1;
-  ctx->send_inflight = 0;
-
   h2o_start_response(req, &ctx->generator);
 }
 
@@ -437,109 +430,11 @@ void clj_h2o_proceed_req(h2o_req_t *req) {
     req->proceed_req(req, NULL);
 }
 
-typedef struct {
-  void (*releaser)(void *jvm_handle);
-  void *jvm_handle;
-} clj_releaser_info_t;
-
-typedef struct {
-  size_t num_releasers;
-  clj_releaser_info_t releasers[]; /* Flexible array member */
-} clj_send_batch_cleanup_ctx_t;
-
-/* Batch cleanup callback - calls all releasers when h2o is done */
-static void cleanup_batch(void *ptr) {
-  clj_send_batch_cleanup_ctx_t *ctx = (clj_send_batch_cleanup_ctx_t *)ptr;
-  for (size_t i = 0; i < ctx->num_releasers; ++i) {
-    ctx->releasers[i].releaser(ctx->releasers[i].jvm_handle);
+int clj_h2o_cancel_request(clj_req_ctx_t *ctx) {
+  if (!ctx || !ctx->req)
+    return 0;
+  if (ctx->req->_generator != NULL) {
+    h2o_send(ctx->req, NULL, 0, H2O_SEND_STATE_ERROR);
   }
-}
-
-clj_stream_status_t clj_h2o_stream_send_vecs(clj_req_ctx_t *ctx,
-                                             const clj_send_vec_t *vecs,
-                                             size_t num_vecs, int is_final) {
-
-  if (!ctx || !vecs || !ctx->req || ctx->req->_generator == NULL)
-    return CLJ_STREAM_CLOSED;
-
-  if (ctx->send_inflight)
-    return CLJ_STREAM_AGAIN;
-
-  h2o_req_t *req = ctx->req;
-
-  /* Count borrowed vectors that need cleanup */
-  size_t num_releasers = 0;
-  for (size_t i = 0; i < num_vecs; i++) {
-    if (vecs[i].releaser != NULL) {
-      num_releasers++;
-    }
-  }
-
-  /* Allocate cleanup context if we have borrowed memory */
-  clj_send_batch_cleanup_ctx_t *cleanup_ctx = NULL;
-  if (num_releasers > 0) {
-    size_t cleanup_size = sizeof(clj_send_batch_cleanup_ctx_t) +
-                          num_releasers * sizeof(clj_releaser_info_t);
-    cleanup_ctx = h2o_mem_alloc_shared(&req->pool, cleanup_size, cleanup_batch);
-    if (!cleanup_ctx) {
-      /* Call all releasers on allocation failure */
-      for (size_t i = 0; i < num_vecs; i++) {
-        if (vecs[i].releaser) {
-          vecs[i].releaser(vecs[i].jvm_handle);
-        }
-      }
-      return CLJ_STREAM_NOMEM;
-    }
-    cleanup_ctx->num_releasers = 0; /* Will increment as we process vectors */
-  }
-
-  /* Allocate h2o_sendvec_t array */
-  h2o_sendvec_t *sendvecs =
-      h2o_mem_alloc_shared(&req->pool, sizeof(h2o_sendvec_t) * num_vecs, NULL);
-  if (!sendvecs) {
-    /* Call all releasers on allocation failure */
-    for (size_t i = 0; i < num_vecs; i++) {
-      if (vecs[i].releaser) {
-        vecs[i].releaser(vecs[i].jvm_handle);
-      }
-    }
-    return CLJ_STREAM_NOMEM;
-  }
-
-  for (uint32_t i = 0; i < num_vecs; i++) {
-    if (vecs[i].releaser == NULL) {
-      /* Copy mode: allocate h2o pool memory and copy */
-      char *data_copy = h2o_mem_alloc_shared(&req->pool, vecs[i].len, NULL);
-      if (!data_copy) {
-        /* Call releasers for any remaining borrowed vectors */
-        for (uint32_t j = i; j < num_vecs; j++) {
-          if (vecs[j].releaser) {
-            vecs[j].releaser(vecs[j].jvm_handle);
-          }
-        }
-        return CLJ_STREAM_NOMEM;
-      }
-      memcpy(data_copy, vecs[i].data, vecs[i].len);
-      h2o_sendvec_init_raw(&sendvecs[i], data_copy, vecs[i].len);
-    } else {
-      /* zero-copy mode: point directly at JVM memory */
-      h2o_sendvec_init_raw(&sendvecs[i], vecs[i].data, vecs[i].len);
-
-      /* Store releaser info in cleanup context */
-      uint32_t releaser_idx = cleanup_ctx->num_releasers++;
-      cleanup_ctx->releasers[releaser_idx].releaser = vecs[i].releaser;
-      cleanup_ctx->releasers[releaser_idx].jvm_handle = vecs[i].jvm_handle;
-    }
-  }
-
-  if (is_final) {
-    h2o_sendvec(req, sendvecs, num_vecs, H2O_SEND_STATE_FINAL);
-    ctx->generator_active = 0;
-    ctx->send_inflight = 0;
-  } else {
-    h2o_sendvec(req, sendvecs, num_vecs, H2O_SEND_STATE_IN_PROGRESS);
-    ctx->send_inflight = 1;
-  }
-
-  return CLJ_STREAM_OK;
+  return 1;
 }
