@@ -29,7 +29,11 @@
       legacyPackages = pkgs: pkgs;
       packages = {
         h2o-shared = pkgs: pkgs.callPackage ./pkgs/h2o.nix { };
-        h2o-bundle = pkgs: pkgs.callPackage ./pkgs/h2o-bundle.nix { };
+        h2o-bundle =
+          pkgs:
+          pkgs.callPackage ./pkgs/h2o-bundle.nix {
+            #            h2oSrc = /home/ramblurr/src/ol/http-clj/extra/h2o;
+          };
       };
 
       devShell =

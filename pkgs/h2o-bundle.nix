@@ -12,15 +12,23 @@
   bison,
   ruby,
   nixosTests ? null,
+  h2oSrc ? null,
 }:
-
 let
   # Use static versions of dependencies
-  staticDeps = with pkgsStatic; {
-    inherit brotli openssl zlib wslay;
-  } // lib.optionalAttrs stdenv.hostPlatform.isLinux {
-    inherit libcap liburing;
-  };
+  staticDeps =
+    with pkgsStatic;
+    {
+      inherit
+        brotli
+        openssl
+        zlib
+        wslay
+        ;
+    }
+    // lib.optionalAttrs stdenv.hostPlatform.isLinux {
+      inherit libcap liburing;
+    };
 
   isDarwin = stdenv.hostPlatform.isDarwin;
   isLinux = stdenv.hostPlatform.isLinux;
@@ -30,12 +38,16 @@ stdenv.mkDerivation (finalAttrs: {
   pname = "h2o-bundle";
   version = "2.3.0-rolling-2025-09-24";
 
-  src = fetchFromGitHub {
-    owner = "h2o";
-    repo = "h2o";
-    rev = "74012bb501f14e61e5ecc1e9860bd66ba6789e0d";
-    hash = "sha256-zEibiI3BdhaTty5vZ3PPXTbHIRLsE2iUiwI6hRZfy8A=";
-  };
+  src =
+    if h2oSrc != null then
+      h2oSrc
+    else
+      fetchFromGitHub {
+        owner = "h2o";
+        repo = "h2o";
+        rev = "74012bb501f14e61e5ecc1e9860bd66ba6789e0d";
+        hash = "sha256-zEibiI3BdhaTty5vZ3PPXTbHIRLsE2iUiwI6hRZfy8A=";
+      };
 
   outputs = [ "out" ];
 
