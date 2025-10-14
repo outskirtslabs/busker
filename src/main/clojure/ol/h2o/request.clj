@@ -7,7 +7,6 @@
    [ol.h2o.protocols]
    [ol.h2o.response :as response])
   (:import
-   [java.io InputStream]
    [java.nio ByteBuffer]
    [java.nio.channels Channels ReadableByteChannel]
    [java.util.concurrent LinkedBlockingQueue]
@@ -127,6 +126,10 @@
     ;; TODO: return CLJ_HANDLER_OVERLOADED if system cannot handle more requests
     h2o/CLJ_HANDLER_OK))
 
-(defn on-request-cleanup [ring-handler evloop-system req-ctx-ptr req-ctx]
+(defn on-request-cleanup
+  "Completion cleanup callback - this is called by h2o when our request dies
+   such as when the client disconnects abruptly
+   ref: https://github.com/h2o/h2o/issues/1894#issuecomment-437231273"
+  [ring-handler evloop-system req-ctx-ptr req-ctx]
   ;; TODO
   #_(println "CLEANUP!"))

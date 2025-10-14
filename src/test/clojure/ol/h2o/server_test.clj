@@ -349,14 +349,14 @@
 
 (defn repeat-input-stream ^java.io.InputStream
   [n b]
-  (let [b   (bit-and (int b) 0xFF)                  ; 0..255
+  (let [b   (bit-and (int b) 0xFF)        ; 0..255
         bb  (unchecked-byte b)
         cnt (java.util.concurrent.atomic.AtomicLong. n)]
     (proxy [java.io.InputStream] []
       (read
         ([] (let [r (.get cnt)]
               (if (pos? r)
-                (do (.decrementAndGet cnt) b)       ; returns 0..255
+                (do (.decrementAndGet cnt) b) ; returns 0..255
                 -1)))
         ([buf]
          (let [r (.get cnt)]
@@ -366,7 +366,7 @@
                (java.util.Arrays/fill buf 0 k bb)
                (.addAndGet cnt (- k))
                k))))
-        ([buf  off  len]
+        ([buf off len]
          (let [r (.get cnt)]
            (if (zero? r)
              -1
@@ -376,7 +376,7 @@
                k))))))))
 
 (defn sha256-hex [^java.io.InputStream is]
-  (let [md (java.security.MessageDigest/getInstance "SHA-256")
+  (let [md  (java.security.MessageDigest/getInstance "SHA-256")
         buf (byte-array 65536)]
     (loop [n (.read is buf)]
       (when (pos? n)
@@ -385,11 +385,11 @@
     (format "%064x" (BigInteger. 1 (.digest md)))))
 
 (defn sha256-hex-progress [^java.io.InputStream is]
-  (let [md (java.security.MessageDigest/getInstance "SHA-256")
-        buf (byte-array 65536)
+  (let [md   (java.security.MessageDigest/getInstance "SHA-256")
+        buf  (byte-array 65536)
         step (* 500 mib)]
-    (loop [n (.read is buf)
-           total 0
+    (loop [n         (.read is buf)
+           total     0
            next-step step]
       (if (pos? n)
         (let [new-total (+ total n)]
@@ -407,37 +407,36 @@
   (with-server [_server
                 (test-server
                  (fn [{:keys [uri body]}]
+
                    (case uri
-                     "/sink"  (let [sha (with-open [^java.io.InputStream is body]
-                                          (sha256-hex is))]
-                                {:status 200
-                                 :headers {"x-len" (str (* 3 mib))
-                                           "x-sha256" sha}})
-                     "/source" (let [n (* 3 mib)
-                                     b (byte \b)
+                     "/sink"   (let [sha (with-open [^java.io.InputStream input-stream body]
+                                           (sha256-hex input-stream))]
+                                 {:status  200
+                                  :headers {"x-len"    (str (* 3 mib))
+                                            "x-sha256" sha}})
+                     "/source" (let [n   (* 3 mib)
+                                     b   (byte \b)
                                      sha (with-open [is (repeat-input-stream n b)]
                                            (sha256-hex is))
-                                     _ (println "large respone generated")]
-                                 {:status 200
+                                     _   (println "large respone generated")]
+                                 {:status  200
                                   :headers {"content-type" "application/octet-stream"
-                                            "x-len" (str n)
-                                            "x-sha256" sha}
-                                  :body (repeat-input-stream n b)})
+                                            "x-len"        (str n)
+                                            "x-sha256"     sha}
+                                  :body    (repeat-input-stream n b)})
                      {:status 404})))]
-    #_(testing "body"
-        (let [n (* 3 gib)
-              b (byte \a)
-              resp (req :post "/sink"
-                        :headers {"content-type" "application/octet-stream"}
-                        :body (repeat-input-stream n b))]
-          (is (= 200 (:status resp)))
-          (is (= (str n) (get-in resp [:headers "x-len"])))))
+    (testing "body"
+      (let [n    (* 3 mib)
+            b    (byte \a)
+            resp (req :post "/sink"
+                      :headers {"content-type" "application/octet-stream"}
+                      :body (repeat-input-stream n b))]
+        (is (= 200 (:status resp)))
+        (is (= (str n) (get-in resp [:headers "x-len"])))))
     (testing "responses"
       (let [resp (req :get "/source" :as :stream)
-            is (:body resp)
-            _ (println "got type is " (type is))
-            sha (sha256-hex-progress is)
-            _ (println " got sha " sha)]
+            sha  (with-open [^java.io.InputStream input-stream (:body resp)] (sha256-hex-progress input-stream))
+            _    (println " got sha " sha)]
         (is (= 200 (:status resp)))
         (is (= (get-in resp [:headers "x-sha256"]) sha))
-        (is (= (str (* 3 gib)) (get-in resp [:headers "x-len"])))))))
+        (is (= (str (* 3 mib)) (get-in resp [:headers "x-len"])))))))
