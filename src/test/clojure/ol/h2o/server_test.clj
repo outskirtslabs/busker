@@ -50,37 +50,37 @@
   (with-server [_server (test-server (fn [{:keys [uri]}]
                                        (cond
                                          (= "/simple" uri)
-                                         {:status 200
+                                         {:status  200
                                           :headers {"content-type" "text/plain"}
-                                          :body "Hello, World"}
+                                          :body    "Hello, World"}
 
                                          (= "/chunked" uri)
-                                         {:status 200
+                                         {:status  200
                                           :headers {"content-type" "text/plain"}
-                                          :body (lazy-abcs 26)}
+                                          :body    (lazy-abcs 26)}
                                          (= "/large" uri)
-                                         {:status 201
+                                         {:status  201
                                           :headers {"content-type" "text/plain"}
-                                          :body large-payload-str}
+                                          :body    large-payload-str}
                                          :else {:status 400})))]
     (testing "simple"
-      (is (util/submap? {:status 200
+      (is (util/submap? {:status  200
                          :version :http1.1
-                         :body "Hello, World"
-                         :headers {"connection" "close",
+                         :body    "Hello, World"
+                         :headers {"connection"     "close",
                                    "content-length" "12",
-                                   "content-type" "text/plain"}}
+                                   "content-type"   "text/plain"}}
                         (req :get "/simple"))))
     (testing "chunked"
-      (is (util/submap? {:status 200
+      (is (util/submap? {:status  200
                          :version :http1.1
-                         :body "abcdefghijklmnopqrstuvwxyz"
+                         :body    "abcdefghijklmnopqrstuvwxyz"
                          :headers {"connection" "close" "content-type" "text/plain" "transfer-encoding" "chunked"}}
                         (req :get "/chunked"))))
     (testing "large"
-      (is (util/submap? {:status 201
+      (is (util/submap? {:status  201
                          :version :http1.1
-                         :body large-payload-str
+                         :body    large-payload-str
                          :headers {"connection" "close" "content-type" "text/plain" "content-length" "1000008"}}
                         (req :post "/large"))))))
 
@@ -264,166 +264,9 @@
     (testing "Throwing an exception in the middle of writing StreamableResponseBody cannot turn a 200 into a 500"
       (with-server [_server (test-server (fn [_]
                                            {:status 200
-                                            :body (take 5 (concat ["chunk1" "chunk2" "chunk3"]
-                                                                  (lazy-seq (throw (Exception. "Failed after 3 chunks")))))}))]
+                                            :body   (take 5 (concat ["chunk1" "chunk2" "chunk3"]
+                                                                    (lazy-seq (throw (Exception. "Failed after 3 chunks")))))}))]
         (let [response (req :get "/")]
           (println (:body response))
           (is (= 200 (:status response)))))))
 
-#_(deftest test-ring-body-types
-    (testing "All Ring StreamableResponseBody types work correctly"
-      (with-server [_server (test-server (fn [{:keys [uri] :as req}]
-                                           (println req)
-                                           (case uri
-                                             "/string" {:status 200
-                                                        :headers {"content-type" "text/plain"}
-                                                        :body "Hello String"}
-
-                                             "/bytes" {:status 200
-                                                       :headers {"content-type" "application/octet-stream"}
-                                                       :body (.getBytes "Hello Bytes" "UTF-8")}
-
-                                             "/seq" {:status 200
-                                                     :headers {"content-type" "text/plain"}
-                                                     :body (seq ["Hello " "from " "sequence"])}
-
-                                             "/file" (let [temp-file (java.io.File/createTempFile "test" ".txt")]
-                                                       (.deleteOnExit temp-file)
-                                                       (spit temp-file "Hello from file")
-                                                       {:status 200
-                                                        :headers {"content-type" "text/plain"}
-                                                        :body temp-file})
-
-                                             "/stream" (let [data "Hello from stream"
-                                                             input-stream (java.io.ByteArrayInputStream. (.getBytes data "UTF-8"))]
-                                                         {:status 200
-                                                          :headers {"content-type" "text/plain"}
-                                                          :body input-stream})
-
-                                             "/nil-body" {:status 200
-                                                          :headers {"content-type" "text/plain"}
-                                                          :body nil}
-
-                                             "/no-body" {:status 204
-                                                         :headers {}}
-
-                                             {:status 404})))]
-        (testing "String body"
-          (let [response (req :get "/string")]
-            (is (= 200 (:status response)))
-            (is (= "Hello String" (:body response)))))
-
-        (testing "Byte array body"
-          (let [response (req :get "/bytes")]
-            (is (= 200 (:status response)))
-            (is (= "Hello Bytes" (:body response)))))
-
-        (testing "Sequence body"
-          (let [response (req :get "/seq")]
-            (is (= 200 (:status response)))
-            (is (= "Hello from sequence" (:body response)))))
-
-        (testing "File body"
-          (let [response (req :get "/file")]
-            (is (= 200 (:status response)))
-            (is (= "Hello from file" (:body response)))))
-
-        (testing "InputStream body"
-          (let [response (req :get "/stream")]
-            (is (= 200 (:status response)))
-            (is (= "Hello from stream" (:body response)))))
-
-        (testing "Nil body"
-          (let [response (req :get "/nil-body")]
-            (is (= 200 (:status response)))
-            (is (= "" (:body response)))))
-
-        (testing "No body (204)"
-          (let [response (req :get "/no-body")]
-            (is (= 204 (:status response)))
-            (is (= "" (:body response))))))))
-
-(def gib (* 1024 1024 1024))
-(def mib (* 1024 1024))
-(def kib 1024)
-
-(defn repeat-input-stream ^java.io.InputStream
-  [n b]
-  (let [b   (bit-and (int b) 0xFF)        ; 0..255
-        bb  (unchecked-byte b)
-        cnt (java.util.concurrent.atomic.AtomicLong. n)]
-    (proxy [java.io.InputStream] []
-      (read
-        ([] (let [r (.get cnt)]
-              (if (pos? r)
-                (do (.decrementAndGet cnt) b) ; returns 0..255
-                -1)))
-        ([buf]
-         (let [r (.get cnt)]
-           (if (zero? r)
-             -1
-             (let [k (int (min r (alength buf)))]
-               (java.util.Arrays/fill buf 0 k bb)
-               (.addAndGet cnt (- k))
-               k))))
-        ([buf off len]
-         (let [r (.get cnt)]
-           (if (zero? r)
-             -1
-             (let [k (int (min r len))]
-               (java.util.Arrays/fill buf off (+ off k) bb)
-               (.addAndGet cnt (- k))
-               k))))))))
-
-(defn sha256-hex [^java.io.InputStream is]
-  (let [md  (java.security.MessageDigest/getInstance "SHA-256")
-        buf (byte-array 65536)
-        total (loop [n (.read is buf)
-                     total 0]
-                (if (pos? n)
-                  (do
-                    (.update md buf 0 n)
-                    (recur (.read is buf)
-                           (+ total n)))
-                  total))]
-    [(format "%064x" (BigInteger. 1 (.digest md)))
-     total]))
-
-(deftest test-large-payloads
-  (let [payload-size (* 3 mib)
-        value        (byte \b)
-
-        [sha total] (with-open [is (repeat-input-stream payload-size value)] (sha256-hex is))]
-
-    (println "\nBASE LINE sha" sha " total " total)
-    (with-server [_server
-                  (test-server
-                   (fn [{:keys [uri body]}]
-                     (case uri
-                       "/sink"   {:status  200
-                                  :headers {"x-len"    (str payload-size)
-                                            "x-sha256" (with-open [input-stream body] (first (sha256-hex input-stream)))}}
-                       "/source" {:status  200
-                                  :headers {"content-type" "application/octet-stream"
-                                            "x-len"        (str payload-size)
-                                            "x-sha256"     sha}
-                                  :body    (repeat-input-stream payload-size value)}
-                       {:status 404})))]
-      (try
-        (testing "large body"
-          (let [resp (req :post "/sink"
-                          :headers {"content-type" "application/octet-stream"}
-                          :timeout 120000
-                          :body (repeat-input-stream payload-size value))]
-            (is (= 200 (:status resp)))
-            (is (= (str payload-size) (get-in resp [:headers "x-len"])))))
-        (testing "large response"
-          (let [resp (req :get "/source" :as :stream :timeout 120000)
-
-                [sha total] (with-open [input-stream (:body resp)] (sha256-hex input-stream))]
-            (println "\nRESPONE sha " sha " total " total)
-            (is (= 200 (:status resp)))
-            (is (= (get-in resp [:headers "x-sha256"]) sha))
-            (is (= (str payload-size) (get-in resp [:headers "x-len"])))))
-        (catch Exception e
-          (println e))))))
