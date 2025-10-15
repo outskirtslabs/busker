@@ -85,42 +85,60 @@
 ;; the worker thread is the only one allowed to call native functions
 ;; ref ol.h2o.evloop
 
+;; the scheduled?_ flag:
+;;
+;; The scheduled?_ AtomicBoolean ensures only one drain task is pending/in-flight at a time,
+;; enforcing h2o's strict "one sendvec in flight" contract: sendvec → on-proceed → sendvec.
+;;
+;; State transitions:
+;;   false → true:  Writer calls schedule-drain! and successfully posts :h2o/sendvec message
+;;   true → false:  Either (1) on-proceed clears it before scheduling next drain, OR
+;;                        (2) send-vecs clears it when queue is empty (no work to do)
+;;
+;; Semantics:
+;;   scheduled?_=true means one of:
+;;     - A drain task is in the evloop mailbox (not yet executed)
+;;     - send-vecs is currently executing on the worker thread
+;;     - h2o_sendvec call is in-flight waiting for on-proceed callback
+;;
+;; Guarantees:
+;;   - Prevents duplicate drain messages in the evloop mailbox (CAS gate in schedule-drain!)
+;;   - Ensures on-proceed sees no concurrent drains (cleared before next schedule)
+;;   - Writer can safely enqueue chunks and post drain without blocking on semaphores
+;;
+;; Key functions:
+;;   schedule-drain!: CAS false→true, posts mailbox message if successful
+;;   send-vecs:       Keeps true while sendvec in-flight; clears to false only if queue empty
+;;   on-proceed:      Clears to false, releases buffers, schedules next drain if not stopped
+
 (defn package-chunks
   "Build a contiguous array of h2o_sendvec_t descriptors from a vector of Chunks.
-
-  Input:
-  - chunks: vector of Chunk, where each Chunk has:
-      :bufs   => vector of sealed (position/limit set) direct ByteBuffers
-      :bytes  => total bytes across bufs (not used here except for sanity)
-      :final? => whether this chunk closes the response
-  - arena: java.lang.foreign.Arena to own the descriptor array.
-
-  Output (map):
-  - :seg     => MemorySegment of the descriptor array (length = veccnt * sizeof(sendvec))
-  - :veccnt  => total number of vectors (sum of (count bufs) across chunks)
-  - :final?  => true iff the LAST chunk is final
-
-  Notes:
-  - Keeps NO additional references; the caller must retain the drained `chunks`
-  - If veccnt == 0 (e.g., empty-final), we return a 0-sized segment and veccnt 0."
+   Copies ByteBuffer data to arena-allocated stable segments for safe native access.
+   Returns map with :seg (sendvec array), :veccnt, :final?, and :stable-segs (to prevent GC)."
   [chunks arena]
   (let [last-final? (boolean (when-let [c (peek chunks)] (:final? c)))
-        bufs-flat (vec (mapcat :bufs chunks))
-        veccnt (count bufs-flat)]
+        bufs-flat   (vec (mapcat :bufs chunks))
+        veccnt      (count bufs-flat)]
     (if (zero? veccnt)
-      {:seg (mem/alloc 0 arena) :veccnt 0 :final? last-final?}
-      (let [elem-size h2o/size-of-h2o-sendvec-t
-            total-size (* veccnt elem-size)
+      {:seg (mem/alloc 0 arena) :veccnt 0 :final? last-final? :stable-segs []}
+      (let [elem-size     h2o/size-of-h2o-sendvec-t
+            total-size    (* veccnt elem-size)
             sendvec-array (mem/alloc total-size arena)]
-        (dotimes [i veccnt]
-          (let [^ByteBuffer b (nth bufs-flat i)]
-            (when-not (.isDirect b) (throw (ex-info "Non-direct ByteBuffer in Chunk bufs; must be direct" {:index i})))
-            (let [slot-off (* i elem-size)
-                  slot (mem/slice sendvec-array slot-off elem-size)
-                  seg (MemorySegment/ofBuffer b)
-                  len (.remaining b)]
-              (h2o/sendvec-init-raw slot seg len))))
-        {:seg sendvec-array :veccnt veccnt :final? last-final?}))))
+        (loop [i           0
+               stable-segs (transient [])]
+          (if (< i veccnt)
+            (let [^ByteBuffer b (nth bufs-flat i)]
+              (when-not (.isDirect b) (throw (ex-info "Non-direct ByteBuffer in Chunk bufs; must be direct" {:index i})))
+              (let [slot-off   (* i elem-size)
+                    slot       (mem/slice sendvec-array slot-off elem-size)
+                    len        (.remaining b)
+                    byte-arr   (byte-array len)
+                    stable-seg (mem/alloc len arena)]
+                (.get ^ByteBuffer b byte-arr)
+                (MemorySegment/copy byte-arr 0 stable-seg java.lang.foreign.ValueLayout/JAVA_BYTE 0 len)
+                (h2o/sendvec-init-raw slot stable-seg len)
+                (recur (inc i) (conj! stable-segs stable-seg))))
+            {:seg sendvec-array :veccnt veccnt :final? last-final? :stable-segs (persistent! stable-segs)}))))))
 
 (defn drain-chunks
   "Worker thread. Called after proceed indicates we can send more chunks to native, returns true if final was sent"
@@ -128,48 +146,34 @@
   ;; st must hold an :in-flight ref you set to `chunks` to keep ByteBuffers alive
   (let [chunks (bbq/drain bbq preferred-chunk-size)]
     (when (seq chunks)
-      (let [{:keys [seg veccnt final?]} (package-chunks chunks arena)]
+      (let [{:keys [seg veccnt final? stable-segs]} (package-chunks chunks arena)]
         (h2o/sendvec (-> req :req-ctx :req) seg veccnt (if final? h2o/H2O_SEND_STATE_FINAL h2o/H2O_SEND_STATE_IN_PROGRESS))
-        [final? chunks]))))
+        [final? chunks stable-segs]))))
 
 (defn release-chunks
-  "Worker thread. Release the Chunks that were in-flight back to the pool"
+  "Worker thread. Release the Chunks that were in-flight back to the pool.
+   Note: Arena/ofAuto arenas are GC-managed and should NOT be manually closed."
   [pool ^AtomicReference in-flight_]
-  (assert pool)
-  (assert in-flight_)
   (let [in-flight-val (.get in-flight_)]
-    (println "release-chunks: in-flight-val=" (pr-str (when in-flight-val [(first in-flight-val) (System/identityHashCode (second in-flight-val))])))
-    (when-some [[chunks ^Arena arena] in-flight-val]
-      (let [arena-id (System/identityHashCode arena)]
-        (println "release-chunks: closing arena" arena-id)
-        (.close arena)
-        (println "release-chunks: arena closed" arena-id)
-        (when chunks
-          (println "release-chunks: releasing" (count chunks) "chunks")
-          (release-chunk pool chunks)))))
-  (println "release-chunks: clearing in-flight_")
+    (when-some [[chunks _arena _stable-segs] in-flight-val]
+      (when (seq chunks)
+        (doseq [chunk chunks]
+          (release-chunk pool chunk)))))
   (.set in-flight_ nil))
 
 (defn send-vecs
-  "Worker thread. Called in the evloop to drain chunks."
+  "Evloop worker thread: drain chunks and send to native when ready."
   [^ResponseState st]
   (when-not (.get ^AtomicBoolean (:stopped?_ st))
-    (let [arena (Arena/ofConfined)
-          arena-id (System/identityHashCode arena)]
-      (println "send-vecs: created arena" arena-id)
-      (try
-        (println "send-vecs: draining chunks")
-        (let [[final? chunks] (drain-chunks (:req st) (:bbq st) (get-in st [:config :preferred-chunk-size] Long/MAX_VALUE)
-                                            arena)]
-          (println "send-vecs: got chunks=" (count chunks) "final?=" final? "arena-id=" arena-id)
-          (.set ^AtomicReference (:in-flight_ st) [chunks arena])
-          (println "send-vecs: stored in-flight [chunks arena-id=" arena-id "]")
+    (let [arena  (Arena/ofAuto)
+          result (drain-chunks (:req st) (:bbq st) (get-in st [:config :preferred-chunk-size] Long/MAX_VALUE)
+                               arena)]
+      (if result
+        (let [[final? chunks stable-segs] result]
+          (.set ^AtomicReference (:in-flight_ st) [chunks arena stable-segs])
           (when final?
-            (println "send-vecs: stopping (final chunk)")
             (.set ^AtomicBoolean (:stopped?_ st) true)))
-        (finally
-          (println "send-vecs: clearing scheduled?_")
-          (.set ^AtomicBoolean (:scheduled?_ st) false))))))
+        (.set ^AtomicBoolean (:scheduled?_ st) false)))))
 
 (defn schedule-drain!
   "Try to schedule a drain task on the event loop.
@@ -186,22 +190,18 @@
 (defn on-proceed
   "Worker thread. Called by libh2o to progress the response generator"
   [^ResponseState st]
-  (println "on-proceed: called")
   (try
+    (.set ^AtomicBoolean (:scheduled?_ st) false)
     (release-chunks (:buffer-pool st) (:in-flight_ st))
-    (println "on-proceed: released chunks, stopped?=" (.get ^AtomicBoolean (:stopped?_ st)))
     (when-not (.get ^AtomicBoolean (:stopped?_ st))
-      (println "on-proceed: scheduling next drain")
       (schedule-drain! st))
     (catch Exception e
-      (println "on-proceed: ERROR" e)
       (report-error e))))
 
 (defn on-stop
   "Worker thread. Called by libh2o to cancel the request (because client hung up etc)"
-  [^ResponseState st reason]
+  [^ResponseState st _reason]
   (try
-    (println "response sending aborted, reason=" reason)
     (.set ^AtomicBoolean (:stopped?_ st) true)
     (catch Exception e
       (report-error e))))
@@ -249,8 +249,7 @@
                 ;; If aggregation buffer is full, seal it into a Chunk and enqueue
                 (when (zero? (.remaining buf))
                   (.flip buf)
-                  (let [read-view (.duplicate buf)
-                        chunk (make-chunk [read-view] false)]
+                  (let [chunk (make-chunk [buf] false)]
                     (.set cur-ref nil)
                     (bbq/put (:bbq st) chunk)
                     (schedule-drain! st)))
@@ -273,9 +272,8 @@
                 final-chunk (if (and buf (pos? (.position buf)))
                               (do
                                 (.flip buf)
-                                (let [read-view (.duplicate buf)]
-                                  (.set cur-ref nil)
-                                  (make-chunk [read-view] true)))
+                                (.set cur-ref nil)
+                                (make-chunk [buf] true))
                               (make-chunk [] true))]
             ;; Enqueue final (empty or with remaining data)
             (bbq/put (:bbq st) final-chunk)
@@ -286,7 +284,7 @@
 
 (defn create-response-queue [req evloop-system _opts]
   (let [st (new-response-state req evloop-system)]
-    {:state st
+    {:state            st
      :to-output-stream (fn [] (Channels/newOutputStream (output-stream st)))
-     :on-proceed (mem/serialize (fn [_ctx-ptr] (on-proceed st)) [::ffi/fn [::mem/pointer] ::mem/void])
-     :on-stop (mem/serialize (fn [_ctx-ptr reason] (on-stop st reason)) [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])}))
+     :on-proceed       (mem/serialize (fn [_ctx-ptr] (on-proceed st)) [::ffi/fn [::mem/pointer] ::mem/void])
+     :on-stop          (mem/serialize (fn [_ctx-ptr reason] (on-stop st reason)) [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])}))
