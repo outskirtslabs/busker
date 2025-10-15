@@ -57,7 +57,8 @@
                        (h2o/sendvec-init-raw send-vec-array-seg stable-seg agg-pos)
                        (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg 1
                                     h2o/H2O_SEND_STATE_FINAL))
-                     (.clear aggregation-buffer))
+                     (.clear aggregation-buffer)
+                     (swap! n-bytes-sent + agg-pos))
                    ;; No buffered data - send empty final
                    (do
                      (h2o/sendvec-init-raw send-vec-array-seg empty-seg 0)
@@ -96,7 +97,7 @@
                                        vec-seg (mem/slice send-vec-array-seg offset (mem/size-of ::h2o/h2o-sendvec-t))]
                                    (h2o/sendvec-init-raw vec-seg seg len)))
                                (try
-                                 (println "send vec")
+                                 #_(println "send vec")
                                  (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg vec-count
                                               (if is-final
                                                 h2o/H2O_SEND_STATE_FINAL
@@ -119,10 +120,13 @@
                   (MemorySegment/copy (MemorySegment/ofBuffer aggregation-buffer) 0
                                       stable-seg 0 pos)
                   (send-vecs-internal! [{:seg stable-seg :len pos}] 1 is-final))
-                (.clear aggregation-buffer))
+                (.clear aggregation-buffer)
+                pos)
               ;; Buffer is empty but we need to send final marker
-              (when is-final
-                (send-vecs-internal! [{:seg empty-seg :len 0}] 1 true)))))
+              (do
+                (when is-final
+                  (send-vecs-internal! [{:seg empty-seg :len 0}] 1 true))
+                0))))
 
         body-channel
         (reify
@@ -155,18 +159,18 @@
                           (.clear aggregation-buffer)
                           (swap! n-bytes-sent + agg-buffer-pos))
                         ;; Only large write, no buffer data
-                        (send-vecs-internal! [{:seg chunk-seg :len chunk-size}
-                                              {:seg empty-seg :len 0}] 1 false))
+                        (send-vecs-internal! [{:seg chunk-seg :len chunk-size}] 1 false))
                       (swap! n-bytes-sent + chunk-size)
                       chunk-size))
                   ;; Small write: accumulate in buffer
                   (let [pos (.position aggregation-buffer)
                         new-pos (+ pos chunk-size)]
                     (if (>= new-pos output-buffer-size)
-                      ;; Buffer would overflow: flush first, then buffer this write
+;; Buffer would overflow: flush first, then buffer this write
                       (do
                         (.acquire proceed-sem)
-                        (flush-buffer! false)
+                        (let [flushed-bytes (flush-buffer! false)]
+                          (swap! n-bytes-sent + flushed-bytes))
                         (.put aggregation-buffer src)
                         (swap! n-bytes-sent + chunk-size)
                         chunk-size)
