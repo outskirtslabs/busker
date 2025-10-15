@@ -119,6 +119,8 @@
       [:len ::mem/long]
       [:raw ::mem/pointer]]]))
 
+(def size-of-h2o-sendvec-t (mem/size-of ::h2o-sendvec-t))
+
 ;; h2o_header_t structure
 ;; typedef struct {
 ;;     h2o_iovec_t *name;

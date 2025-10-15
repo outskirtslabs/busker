@@ -25,4 +25,5 @@
                                   org.babashka/http-client       {:mvn/version "0.4.22"}
                                   com.cnuernber/charred          {:mvn/version "1.034"}
                                   org.clojure/clojure            {:mvn/version "1.12.1"}
+                                  io.github.tonsky/clj-reload {:mvn/version "1.0.0"}
                                   org.clojure/tools.deps         {:mvn/version "0.24.1523"}}}}}
