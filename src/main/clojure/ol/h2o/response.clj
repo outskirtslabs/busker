@@ -9,6 +9,7 @@
    [ring.core.protocols :as ring-protocols])
   (:import
    [java.io OutputStream]
+   [java.lang.foreign MemorySegment]
    [ol.h2o.protocols Request]))
 
 (set! *warn-on-reflection* true)
@@ -26,6 +27,8 @@
   [val]
   (if (number? val) (long val)
       (Long/parseLong val)))
+
+;; TODO intern common header names?
 
 (defn build-headers
   "Return a tuple [headers headers-len content-length]
@@ -57,12 +60,12 @@
           (let [offset (* idx header-size)
                 name-str (if (string? name-key) name-key (str name-key))
                 value-str (if (string? value-val) value-val (str value-val))
-                name-ptr (mem/serialize name-str ::mem/c-string)
-                value-ptr (mem/serialize value-str ::mem/c-string)
+                name-ptr ^MemorySegment (mem/serialize name-str ::mem/c-string)
+                value-ptr ^MemorySegment (mem/serialize value-str ::mem/c-string)
                 header-data {:name name-ptr
-                             :name_len (count name-str)
+                             :name_len (dec (.byteSize name-ptr))
                              :value value-ptr
-                             :value_len (count value-str)}
+                             :value_len (dec (.byteSize value-ptr))}
                 header-seg (mem/serialize header-data ::h2o/clj-header-t)
                 dest-seg (mem/slice headers-seg offset header-size)]
             (mem/copy-segment dest-seg header-seg)))
