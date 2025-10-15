@@ -1,24 +1,34 @@
 (ns ol.h2o.evloop
+  (:require [ol.h2o.native :as h2o])
   (:import
    [java.util.concurrent.atomic AtomicBoolean]
-   [java.util.concurrent
-    ArrayBlockingQueue ConcurrentHashMap]))
+   [java.util.concurrent ArrayBlockingQueue]))
 
 (set! *warn-on-reflection* true)
-
 ;; ------------------------------
 ;; Worker control-plane primitives
 ;; ------------------------------
+
+(defprotocol WorkerWut
+  (send-msg [_ msg] "Send a message to the worker")
+  (wake [_] "Wake up the worker"))
+
 (defrecord Worker
-           [id ;; int
-            thread ;; java.lang.Thread (platform)
-            running? ;; AtomicBoolean
-            mailbox ;; ArrayBlockingQueue of control messages
-            evloop ;; opaque: native pointer/handle when interop lands
-            max-wait-ms ;; int, passed to h2o_evloop_run(loop, max_wait)
-            loop-fn ;; fn: (worker, max-wait-ms) -> void, the loop iteration body
+           [id                 ;; int
+            thread             ;; java.lang.Thread (platform)
+            running?           ;; AtomicBoolean
+            mailbox            ;; ArrayBlockingQueue of control messages
+            evloop             ;; opaque: native pointer/handle when interop lands
+            loop-fn ;;  the loop iteration body
             message-handler ;; fn: (op, args) -> void, handles custom messages
-            args])
+            wakeup-receiver
+            args]
+  WorkerWut
+  (send-msg [this msg]
+    (.offer ^ArrayBlockingQueue mailbox msg)
+    (wake this))
+  (wake [_]
+    (h2o/mt-wakeup wakeup-receiver)))
 
 (defonce ^:private next-id_ (atom 0))
 
@@ -35,7 +45,6 @@
 ;; Control messages
 ;; ------------------------------
 
-(defn set-max-wait [millis] [::set-max-wait (int millis)])
 (def stop-msg [::stop])
 
 ;; ------------------------------
@@ -45,24 +54,21 @@
 (defn- drain-mailbox!
   "Non-blocking drain. Returns a possibly updated worker state map."
   [^Worker w]
-  (loop [max-wait (:max-wait-ms w)
-         stop-requested? false]
+  (loop [stop-requested? false]
     (let [msg (.poll ^ArrayBlockingQueue (:mailbox w))]
       (if (nil? msg)
         (do
           (when stop-requested?
             (.set ^AtomicBoolean (:running? w) false))
-          (assoc w :max-wait-ms max-wait))
+          w)
         (let [[op & args] msg]
           (case op
-            ::set-max-wait
-            (recur (max 0 (int (first args))) stop-requested?)
             ::stop
-            (recur max-wait true)
+            (recur true)
             (do
               (when-let [handler (:message-handler w)]
                 (handler op args))
-              (recur max-wait stop-requested?))))))))
+              (recur stop-requested?))))))))
 
 (defn- run-evloop-on-thread!
   "Owns the OS thread and drives the event loop until stopped.
@@ -88,130 +94,70 @@
 ;; Public API
 ;; ------------------------------
 
-(defn create-system
-  []
-  {:workers (ConcurrentHashMap.)})
-
 (defn start-worker!
-  "Create and start one event-loop worker on a platform thread (daemon).
+  "Start a worker on a platform thread (daemon).
    
    Parameters:
-   - system: the system context returned by create-system
-   
-   Options:
-   - :max-wait-ms - maximum time to wait in each loop iteration (default 10ms)
-   - :thread-name-prefix - prefix for thread name (default 'h2o-evloop')
-   - :loop-fn - function called for each loop iteration: (worker, max-wait-ms) -> void
-   - :message-handler - function to handle custom messages: (op, args) -> void
+   - loop-fn: function called for each loop iteration: (worker, state) -> state
+   - message-handler
+   - wakeup-receiver
 
-   Returns: worker id"
-  ([system loop-fn args]
-   (start-worker! system loop-fn args nil))
-  ([system loop-fn args
-    {:keys [max-wait-ms thread-name-prefix message-handler]
-     :or {max-wait-ms 10
-          thread-name-prefix "h2o-evloop"}}]
-   (let [id (swap! next-id_ inc)
-         running? (AtomicBoolean. true)
-         mailbox (ArrayBlockingQueue. 256)
-         ;; TODO evloop: will be a native handle after FFM init (nil for now)
-         evloop nil
-         w (->Worker id nil running? mailbox evloop (int max-wait-ms) loop-fn message-handler args)
-         t (Thread. #(run-evloop-on-thread! w) (format "%s-%d" thread-name-prefix id))
-         w (assoc w :thread t)]
-     (.put ^ConcurrentHashMap (:workers system) id w)
-     (.start t)
-     id)))
+   Options:
+   - :thread-name-prefix - prefix for thread name (default 'h2o-evloop')
+
+   Returns: worker"
+
+  [loop-fn message-handler wakeup-receiver & {:keys [thread-name-prefix]
+                                              :or {thread-name-prefix "h2o-evloop"}}]
+  (let [id (swap! next-id_ inc)
+        w (map->Worker {:id id
+                        :thread nil
+                        :running? (AtomicBoolean. true)
+                        :mailbox (ArrayBlockingQueue. 256)
+                        :evloop nil
+                        :loop-fn loop-fn
+                        :message-handler message-handler
+                        :wakeup-receiver wakeup-receiver})
+        t (Thread. #(run-evloop-on-thread! (assoc w :thread (Thread/currentThread))) (format "%s-%d" thread-name-prefix id))
+        w (assoc w :thread t)]
+    (.start t)
+    w))
 
 (defn stop-worker!
   "Stop a specific worker by id. Blocks until worker thread terminates.
    
    Parameters:
-   - system: the system context
-   - id: worker id to stop
-   
-   Returns: true if worker was found and stopped"
-  [system id]
-  (when-let [^Worker w (.get ^ConcurrentHashMap (:workers system) id)]
-    (.offer ^ArrayBlockingQueue (:mailbox w) stop-msg)
-    ;; Wait for thread to fully terminate before returning
-    (when-let [^Thread t (:thread w)]
-      (.interrupt t)
-      (.join t))
-    (.remove ^ConcurrentHashMap (:workers system) id)
-    true))
+   - worker: the workder to stop "
+  [worker]
+  (send-msg worker stop-msg)
+  (when-let [^Thread t (:thread worker)]
+    (.interrupt t)
+    (.join t)))
 
 (defn stop-all!
   "Stop all workers in the system.
    
    Parameters:
-   - system: the system context
-   
-   Returns: true"
-  [system]
-  (doseq [id (vec (.keySet ^ConcurrentHashMap (:workers system)))]
-    (stop-worker! system id))
-  true)
-
-(defn set-worker-wait!
-  "Adjust the max_wait for a specific worker.
-   
-   Parameters:
-   - system: the system context
-   - id: worker id
-   - millis: new max wait time in milliseconds
-   
-   Returns: true if worker was found"
-  [system id millis]
-  (when-let [^Worker w (.get ^ConcurrentHashMap (:workers system) id)]
-    (.offer ^ArrayBlockingQueue (:mailbox w) (set-max-wait millis))
-    true))
-
-(defn send-msg!
-  "Send a control message to a specific worker.
-   
-   Parameters:
-   - system: the system context
-   - id: worker id
-   - msg: message to send
-   
-   Returns: true if worker was found and message was queued"
-  ([system msg]
-   (send-msg! system (:worker-id system) msg))
-  ([system id msg]
-   (when-let [^Worker w (.get ^ConcurrentHashMap (:workers system) id)]
-     (.offer ^ArrayBlockingQueue (:mailbox w) msg)
-     #_(println (first msg)))))
+   - workers: a seq of workers "
+  [workers]
+  (doseq [w workers]
+    (stop-worker! w)))
 
 (defn broadcast!
-  "Send a control message to all workers (bounded mailboxes).
-   
-   Parameters:
-   - system: the system context
-   - msg: message to broadcast
-   
-   Returns: true"
-  [system msg]
-  (doseq [^Worker w (.values ^ConcurrentHashMap (:workers system))]
-    (.offer ^ArrayBlockingQueue (:mailbox w) msg))
-  true)
+  "Send a control message to all workers.
 
-(defn get-worker-ids
-  "Get all worker ids in the system.
-   
    Parameters:
-   - system: the system context
-   
-   Returns: vector of worker ids"
-  [system]
-  (vec (.keySet ^ConcurrentHashMap (:workers system))))
+   - workers: a seq of workers
+   - msg: message to broadcast "
+  [workers msg]
+  (doseq [^Worker w workers]
+    (send-msg w msg)))
 
-(defn get-worker-count
-  "Get the number of active workers.
+(defn broadcast-wake!
+  "Wake all workers.
    
    Parameters:
-   - system: the system context
-   
-   Returns: count of workers"
-  [system]
-  (.size ^ConcurrentHashMap (:workers system)))
+   - workers: a seq of workers "
+  [workers]
+  (doseq [^Worker w workers]
+    (wake w)))

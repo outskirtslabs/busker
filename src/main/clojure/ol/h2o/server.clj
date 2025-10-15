@@ -34,11 +34,11 @@
 (defn create-ring-handler
   "Create an h2o handler that delegates to a Ring handler.
    Returns handler pointer that must be kept alive."
-  [hostconf-ptr ring-handler evloop-system]
+  [hostconf-ptr ring-handler]
   (h2o/create-handler
    hostconf-ptr
-   (partial request/on-request ring-handler evloop-system)
-   (partial request/on-request-cleanup ring-handler evloop-system)
+   (partial request/on-request ring-handler)
+   (partial request/on-request-cleanup ring-handler)
    true true))
 
 (defn create-connection-close-callback
@@ -54,14 +54,14 @@
   "Create and initialize h2o global configuration with a default host and Ring handler.
    Uses provided arena for server lifetime resources.
    Returns map with ::config-ptr, ::hostconf-ptr, ::handler-ptr"
-  [arena ring-handler evloop-system]
+  [arena ring-handler]
   (let [size (h2o/globalconf-size)
         config-ptr (mem/alloc size arena)]
     (h2o/config-init config-ptr)
     (let [host-iovec-seg (h2o/create-iovec "default" arena)
           host-iovec-data (mem/deserialize host-iovec-seg ::h2o/h2o-iovec-t)
           hostconf-ptr (h2o/config-register-host config-ptr host-iovec-data 65535)
-          handler-ptr (create-ring-handler hostconf-ptr ring-handler evloop-system)]
+          handler-ptr (create-ring-handler hostconf-ptr ring-handler)]
       {::config-ptr config-ptr
        ::hostconf-ptr hostconf-ptr
        ::handler-ptr handler-ptr})))
@@ -72,35 +72,28 @@
    
    QUIC listeners (when supported) must remain active as their UDP socket handles
    all connections; only TCP listeners are throttled here."
-  [server thread-idx]
-  (let [active (.get ^AtomicLong (::active-connections server))
-        max-conns (::max-connections server)
-        should-accept? (< active max-conns)
-        listeners (::listeners server)
-        n-listeners (count listeners)
-        listener-socks (nth (::listener-sockets server) thread-idx)
-        accept-callbacks (::accept-callbacks server)]
-
-    (doseq [listener-idx (range n-listeners)]
-      (let [sock-ptr (nth listener-socks listener-idx)]
+  [listener-socks accept-callbacks]
+  (let [;; TODO implement connection limit
+        should-accept? true]
+    (doseq [listener-idx (range (count listener-socks))]
+      (let [sock-ptr        (nth listener-socks listener-idx)
+            accept-callback (nth accept-callbacks listener-idx)]
         #_{:clj-kondo/ignore [:type-mismatch]}
         (when-not (mem/null? sock-ptr)
           ;; TODO: Skip QUIC listeners when implemented (check listener config)
           (if should-accept?
             ;; Below limit: ensure TCP listeners are accepting
             (when (zero? (h2o/socket-reading? sock-ptr))
-              (let [cb-idx (+ (* thread-idx n-listeners) listener-idx)
-                    callback (nth accept-callbacks cb-idx)]
-                (h2o/socket-read-start sock-ptr callback)))
+              (h2o/socket-read-start sock-ptr accept-callback))
             ;; At/over limit: stop accepting new connections
             (when-not (zero? (h2o/socket-reading? sock-ptr))
               (h2o/socket-read-stop sock-ptr))))))))
 
 (defn- initiate-worker-shutdown!
   "Phase 1-3 of graceful shutdown: stop accepting, close listeners, request context shutdown"
-  [listener-socks n-listeners loop-ptr ctx-ptr]
+  [{:keys [listener-socks loop-ptr ctx-ptr]}]
   ;; Phase 1: Stop accepting new connections
-  (doseq [listener-idx (range n-listeners)]
+  (doseq [listener-idx (range (count listener-socks))]
     (let [sock-ptr (nth listener-socks listener-idx)]
       (when (and (not (mem/null? sock-ptr))
                  #_{:clj-kondo/ignore [:type-mismatch]}
@@ -111,7 +104,7 @@
   (h2o/evloop-run loop-ptr 0)
 
   ;; Phase 2: Close listener sockets
-  (doseq [listener-idx (range n-listeners)]
+  (doseq [listener-idx (range (count listener-socks))]
     (let [sock-ptr (nth listener-socks listener-idx)]
       (when-not (mem/null? sock-ptr)
         (h2o/socket-close sock-ptr))))
@@ -130,35 +123,28 @@
 (defn- check-and-initiate-shutdown!
   "Check shutdown flag and initiate shutdown phases if needed.
    Returns true if shutdown is active (either just initiated or already in progress)."
-  [shutdown-initiated? shutting-down? listener-socks n-listeners loop-ptr ctx-ptr]
+  [{:keys [shutdown-initiated? shutting-down?] :as state}]
   (let [should-shutdown? (.get ^AtomicBoolean shutting-down?)]
     (when (and should-shutdown? (not shutdown-initiated?))
-      (initiate-worker-shutdown! listener-socks n-listeners loop-ptr ctx-ptr))
+      (initiate-worker-shutdown! state))
     should-shutdown?))
 
-(defn worker-loop [server thread-idx shutting-down? loop-ptr ctx-ptr listener-socks worker {:keys [shutdown-initiated?]}]
-  (let [n-listeners (count (::listeners server))
-        shutdown-initiated? (check-and-initiate-shutdown! shutdown-initiated? shutting-down? listener-socks n-listeners loop-ptr ctx-ptr)]
+;; TODO this fn call is a tragedy
+(defn worker-loop [worker {:keys [shutdown-initiated?] :as _loop-state} {:keys [loop-ptr ctx-ptr listener-socks accept-callbacks] :as state}]
+  (let [shutdown-initiated? (check-and-initiate-shutdown! (assoc state :shutdown-initiated? shutdown-initiated?))]
 
     ;; Exit condition: shutdown initiated AND all connections drained
     ;; this will stop the thread on the next iteration
     (when (and shutdown-initiated? (all-connections-drained? ctx-ptr))
-      (evloop/send-msg! (::evloop-system server) (:id worker) evloop/stop-msg))
+      (evloop/send-msg worker evloop/stop-msg))
 
     ;; Perform periodic cleanup tasks
     (let [now (h2o/evloop-now loop-ptr)
           max-wait (h2o/cleanup-thread now ctx-ptr)]
-
       ;; Throttle listeners based on connection count (only if not shutting down)
       (when-not shutdown-initiated?
-        (update-listener-state! server thread-idx))
-
-      (let [wait-ms (if shutdown-initiated?
-                      100 ;; Responsive during shutdown: cap wait at 100ms
-                      #_{:clj-kondo/ignore [:type-mismatch]}
-                      (min max-wait 100))]
-        #_(println "tick " (:id (evloop/get-current-worker)))
-        (h2o/evloop-run loop-ptr wait-ms)))
+        (update-listener-state! listener-socks accept-callbacks))
+      (h2o/evloop-run loop-ptr max-wait))
     {:shutdown-initiated? shutdown-initiated?}))
 
 (defn create-server
@@ -176,8 +162,7 @@
   (when-not handler
     (throw (ex-info "Handler is required" {:handler handler})))
   (let [arena (mem/shared-arena)
-        evloop-system (evloop/create-system)
-        config (create-server-config arena handler evloop-system)]
+        config (create-server-config arena handler)]
     (merge config
            {::arena arena
             ::handler handler
@@ -189,7 +174,6 @@
             ::shutting-down? (AtomicBoolean. false)
             ::loops []
             ::contexts []
-            ::evloop-system evloop-system
             ::worker-ids []})))
 
 (defn start-server
@@ -198,17 +182,19 @@
   (when (.get ^AtomicBoolean (::started? server))
     (throw (ex-info "Server already started" {:server server})))
 
-  (let [config-ptr (::config-ptr server)
-        arena (::arena server)
-        n-workers (::n-workers server)
-        listeners (::listeners server)
-        shutting-down? (::shutting-down? server)
-        evloop-system (::evloop-system server)
+  (let [config-ptr         (::config-ptr server)
+        arena              (::arena server)
+        n-workers          (::n-workers server)
+        listeners          (::listeners server)
+        shutting-down?     (::shutting-down? server)
         active-connections (::active-connections server)
-        message-handler evloop-msg-processor
+        message-handler    evloop-msg-processor
 
-        loops (h2o/create-loops n-workers)
+        loops    (h2o/create-loops n-workers)
         contexts (h2o/create-contexts arena loops config-ptr)
+
+        wakeup-receivers (vec (for [ctx-ptr contexts]
+                                (h2o/mt-create-wakeup-receiver ctx-ptr)))
 
         on-close-callback (create-connection-close-callback active-connections)
 
@@ -229,31 +215,34 @@
 
         listener-sockets (vec (for [thread-idx (range n-workers)]
                                 (vec (for [listener-idx (range (count listeners))]
-                                       (let [fd (nth (nth dup-fds listener-idx) thread-idx)
+                                       (let [fd       (nth (nth dup-fds listener-idx) thread-idx)
                                              sock-ptr (h2o/create-socket-for-loop
                                                        (nth loops thread-idx)
                                                        fd
                                                        H2O_SOCKET_FLAG_DONT_READ)
-                                             cb-idx (+ (* thread-idx (count listeners)) listener-idx)
+                                             cb-idx   (+ (* thread-idx (count listeners)) listener-idx)
                                              callback (nth accept-callbacks cb-idx)]
                                          (h2o/socket-read-start sock-ptr callback)
                                          sock-ptr)))))
 
-        worker-ids (vec (for [thread-idx (range n-workers)]
-                          (let [loop-ptr (nth loops thread-idx)
-                                ctx-ptr (nth contexts thread-idx)
-                                listener-socks-for-thread (nth listener-sockets thread-idx)]
-                            (evloop/start-worker!
-                             evloop-system
-                             (fn [worker loop-state] (worker-loop server thread-idx shutting-down? loop-ptr ctx-ptr listener-socks-for-thread worker loop-state))
-                             {:loop-ptr loop-ptr
-                              :thread-idx thread-idx}
-                             {:thread-name-prefix "h2o-worker"
-                              :max-wait-ms 100
-                              :message-handler message-handler}))))]
+        workers (vec (for [thread-idx (range n-workers)]
+                       (let [loop-ptr                  (nth loops thread-idx)
+                             ctx-ptr                   (nth contexts thread-idx)
+                             listener-socks-for-thread (nth listener-sockets thread-idx)
+                             thread-accept-callback     (nth accept-callbacks thread-idx)
+                             accept-callbacks-for-thread (vec (repeat (count listener-socks-for-thread)
+                                                                      thread-accept-callback))]
 
-    (.set ^AtomicBoolean (::started? server) true)
+                         (evloop/start-worker!
+                          (fn [worker loop-state] (worker-loop worker loop-state {:listener-socks listener-socks-for-thread
+                                                                                  :accept-callbacks   accept-callbacks-for-thread
+                                                                                  :loop-ptr loop-ptr
+                                                                                  :ctx-ptr ctx-ptr
+                                                                                  :shutting-down? shutting-down?}))
+                          message-handler
+                          (nth wakeup-receivers thread-idx)))))
 
+        _ (.set ^AtomicBoolean (::started? server) true)]
     (assoc server
            ::loops loops
            ::contexts contexts
@@ -261,10 +250,10 @@
            ::accept-callbacks accept-callbacks
            ::on-close-callback on-close-callback
            ::listener-fds listener-fds
+           ::wakeup-receivers wakeup-receivers
            ::dup-fds dup-fds
            ::listener-sockets listener-sockets
-           ::evloop-system evloop-system
-           ::worker-ids worker-ids)))
+           ::workers workers)))
 
 (defn stop-server
   "Stop the h2o server and clean up resources.
@@ -277,6 +266,7 @@
    6. Dispose h2o config
    7. Close arena (frees all server-scoped memory)"
   [server]
+  (assert server)
   (when-not (.get ^AtomicBoolean (::started? server))
     (throw (ex-info "Server not started" {:server server})))
 
@@ -284,10 +274,13 @@
   (.set ^AtomicBoolean (::shutting-down? server) true)
 
   ;; Wake up all workers so they see the shutdown signal (send dummy message)
-  (evloop/broadcast! (::evloop-system server) [:h2o/wake-up])
+  (evloop/broadcast-wake! (::workers server))
 
   ;; Wait for all workers to stop themselves after draining connections
-  (evloop/stop-all! (::evloop-system server))
+  (evloop/stop-all! (::workers server))
+  ;; (Thread/sleep 1000) ;; Give some time for connections to drain
+  (doseq [wr (::wakeup-receivers server)]
+    (h2o/mt-destroy-wakeup-receiver wr))
 
   ;; All workers have exited; clean up h2o resources
   (h2o/dispose-contexts (::contexts server))

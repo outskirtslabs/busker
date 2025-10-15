@@ -9,6 +9,7 @@
    [ol.h2o.pool :as pool])
   (:import
    [java.lang.foreign Arena MemorySegment]
+   [java.io OutputStream]
    [java.nio ByteBuffer]
    [java.nio.channels Channels WritableByteChannel]
    [java.util.concurrent.atomic AtomicBoolean AtomicReference]
@@ -35,7 +36,7 @@
     (pool/release p b)))
 
 (defrecord
- ^{:doc "Per-request state for the queue-based sender.
+    ^{:doc "Per-request state for the queue-based sender.
    Fields:
    - req: the Request
    - bbq: SPSC ByteBoundedQueue of Chunk (writer enqueues, worker drains).
@@ -46,29 +47,27 @@
    - final-enqueued: AtomicBoolean; tracks whether a final chunk has been enqueued.
    - buffer-pool: reference to pooled direct ByteBuffers (opaque here).
    - current-buffer: AtomicReference<ByteBuffer>; writer-owned aggregation buffer (rotated on seal).
-   - evloop-system: the evloop handle
    - config: IPersistentMap of tuning knobs, e.g.:
        {:aggregation-size int
         :large-threshold  int
         :max-buffered-bytes long
         :max-vecs-per-send int}"}
- ResponseState
- [req bbq
-  ^AtomicBoolean scheduled?_
-  ^AtomicReference in-flight_
-  ^AtomicBoolean closing?_
-  ^AtomicBoolean stopped?_
-  ^AtomicBoolean final-enqueued?_
-  ^AtomicReference current-buffer_
-  ^FixedPool buffer-pool
-  evloop-system
-  ^clojure.lang.IPersistentMap config])
+    ResponseState
+    [req bbq
+     ^AtomicBoolean scheduled?_
+     ^AtomicReference in-flight_
+     ^AtomicBoolean closing?_
+     ^AtomicBoolean stopped?_
+     ^AtomicBoolean final-enqueued?_
+     ^AtomicReference current-buffer_
+     ^FixedPool buffer-pool
+     ^clojure.lang.IPersistentMap config])
 
 (def default-output-buffer-size
   "How much body data in bytes accumulates before writing to the network"
   32768)
 
-(defn new-response-state [req evloop-system]
+(defn new-response-state [req]
   (->ResponseState req
                    (bbq/byte-bounded-spsc-queue default-output-buffer-size)
                    (AtomicBoolean. false)
@@ -78,7 +77,6 @@
                    (AtomicBoolean. false)
                    (AtomicReference. nil)
                    (bp/make-bytebuffer-pool {:buf-size 8192})
-                   evloop-system
                    {}))
 
 ;; ----- Worker side functions
@@ -144,7 +142,8 @@
   "Worker thread. Called after proceed indicates we can send more chunks to native, returns true if final was sent"
   [req bbq preferred-chunk-size arena]
   ;; st must hold an :in-flight ref you set to `chunks` to keep ByteBuffers alive
-  (let [chunks (bbq/drain bbq preferred-chunk-size)]
+  (let [chunks         (bbq/drain bbq preferred-chunk-size)
+        #_#_total-size (reduce + (map :bytes chunks))]
     (when (seq chunks)
       (let [{:keys [seg veccnt final? stable-segs]} (package-chunks chunks arena)]
         (h2o/sendvec (-> req :req-ctx :req) seg veccnt (if final? h2o/H2O_SEND_STATE_FINAL h2o/H2O_SEND_STATE_IN_PROGRESS))
@@ -181,7 +180,7 @@
    Returns true if a new drain was scheduled, false if one was already pending."
   [^ResponseState st]
   (when (.compareAndSet ^AtomicBoolean (:scheduled?_ st) false true)
-    (evloop/send-msg! (:evloop-system st) [:h2o/sendvec (fn [] (send-vecs st))])
+    (evloop/send-msg (:worker (:req st)) [:h2o/sendvec (fn [] (send-vecs st))])
     true))
 
 (defn report-error [e]
@@ -210,7 +209,7 @@
 ;; the request thread is the virtualthread spawned to handle the request. It writes responses
 ;; ref: ol.h2o.request/enqueue-request
 
-(defn make-chunk
+(defn seal-chunk
   "Build a sealed Chunk from a seq of ByteBuffers and a final? flag.
    Each buffer should already have position/limit set for reading."
   ^Chunk [bufs final?]
@@ -218,73 +217,74 @@
         total (long (reduce (fn [^long acc ^ByteBuffer b] (+ acc (.remaining b))) 0 vbufs))]
     (->Chunk vbufs total (boolean final?))))
 
-(defn output-stream [st]
-  (reify
-    WritableByteChannel
-    (write [_ src]
-      ;; If stopped? is true, the channel is closed regardless of closing?
-      (when (or (.get ^AtomicBoolean (:stopped?_ st))
-                (.get ^AtomicBoolean (:closing?_ st)))
-        (throw (java.nio.channels.ClosedChannelException.)))
-      (let [^AtomicReference cur-ref (:current-buffer_ st)
-            ^FixedPool pool (:buffer-pool st)
-            total (long (.remaining src))]
-        (when (pos? total)
-          (loop [left total]
-            (if (zero? left)
-              total
-              (let [^ByteBuffer buf (or (.get cur-ref)
-                                        (let [b (pool/borrow pool)]
-                                          (when (nil? b) (throw (ex-info "Buffer pool exhausted" {})))
-                                          (.clear ^ByteBuffer b)
-                                          (.set cur-ref b)
-                                          b))
-                    can-copy (min left (.remaining buf))
-                    pos (.position src)
-                    lim (.limit src)]
-                ;; Copy exactly can-copy bytes from src to buf
-                (.limit src (+ pos can-copy))
-                (.put buf src)
-                (.limit src lim)
-                ;; If aggregation buffer is full, seal it into a Chunk and enqueue
-                (when (zero? (.remaining buf))
-                  (.flip buf)
-                  (let [chunk (make-chunk [buf] false)]
-                    (.set cur-ref nil)
-                    (bbq/put (:bbq st) chunk)
-                    (schedule-drain! st)))
-                (recur (- left can-copy))))))))
-    (isOpen [_]
-      (not (or (.get ^AtomicBoolean (:stopped?_ st))
-               (.get ^AtomicBoolean (:closing?_ st)))))
-    (close [_]
-      (if (.get ^AtomicBoolean (:stopped?_ st))
-        (do
-          ;; Best-effort: release any borrowed current buffer back to the pool.
-          (when-some [^ByteBuffer buf (.get ^AtomicReference (:current-buffer_ st))]
-            (pool/release (:buffer-pool st) buf)
-            (.set ^AtomicReference (:current-buffer_ st) nil))
-          (.set ^AtomicBoolean (:closing?_ st) true)
-          nil)
-        (if (.compareAndSet ^AtomicBoolean (:closing?_ st) false true)
-          (let [^AtomicReference cur-ref (:current-buffer_ st)
-                ^ByteBuffer buf (.get cur-ref)
-                final-chunk (if (and buf (pos? (.position buf)))
-                              (do
-                                (.flip buf)
-                                (.set cur-ref nil)
-                                (make-chunk [buf] true))
-                              (make-chunk [] true))]
-            ;; Enqueue final (empty or with remaining data)
-            (bbq/put (:bbq st) final-chunk)
-            (.set ^AtomicBoolean (:final-enqueued?_ st) true)
-            (schedule-drain! st)
-            nil)
-          nil)))))
+(defn output-stream ^OutputStream [st]
+  (Channels/newOutputStream
+   (reify
+     WritableByteChannel
+     (write [_ src]
+       ;; If stopped? is true, the channel is closed regardless of closing?
+       (when (or (.get ^AtomicBoolean (:stopped?_ st))
+                 (.get ^AtomicBoolean (:closing?_ st)))
+         (throw (java.nio.channels.ClosedChannelException.)))
+       (let [^AtomicReference cur-ref (:current-buffer_ st)
+             ^FixedPool pool          (:buffer-pool st)
+             total                    (long (.remaining src))]
+         (when (pos? total)
+           (loop [left total]
+             (if (zero? left)
+               total
+               (let [^ByteBuffer buf (or (.get cur-ref)
+                                         (let [b (pool/borrow pool)]
+                                           (when (nil? b) (throw (ex-info "Buffer pool exhausted" {})))
+                                           (.clear ^ByteBuffer b)
+                                           (.set cur-ref b)
+                                           b))
+                     can-copy        (min left (.remaining buf))
+                     pos             (.position src)
+                     lim             (.limit src)]
+                 ;; Copy exactly can-copy bytes from src to buf
+                 (.limit src (+ pos can-copy))
+                 (.put buf src)
+                 (.limit src lim)
+                 ;; If aggregation buffer is full, seal it into a Chunk and enqueue
+                 (when (zero? (.remaining buf))
+                   (.flip buf)
+                   (let [chunk (seal-chunk [buf] false)]
+                     (.set cur-ref nil)
+                     (bbq/put (:bbq st) chunk)
+                     (schedule-drain! st)))
+                 (recur (- left can-copy))))))))
+     (isOpen [_]
+       (not (or (.get ^AtomicBoolean (:stopped?_ st))
+                (.get ^AtomicBoolean (:closing?_ st)))))
+     (close [_]
+       (if (.get ^AtomicBoolean (:stopped?_ st))
+         (do
+           ;; Best-effort: release any borrowed current buffer back to the pool.
+           (when-some [^ByteBuffer buf (.get ^AtomicReference (:current-buffer_ st))]
+             (pool/release (:buffer-pool st) buf)
+             (.set ^AtomicReference (:current-buffer_ st) nil))
+           (.set ^AtomicBoolean (:closing?_ st) true)
+           nil)
+         (if (.compareAndSet ^AtomicBoolean (:closing?_ st) false true)
+           (let [^AtomicReference cur-ref (:current-buffer_ st)
+                 ^ByteBuffer buf          (.get cur-ref)
+                 final-chunk              (if (and buf (pos? (.position buf)))
+                                            (do
+                                              (.flip buf)
+                                              (.set cur-ref nil)
+                                              (seal-chunk [buf] true))
+                                            (seal-chunk [] true))]
+             ;; Enqueue final (empty or with remaining data)
+             (bbq/put (:bbq st) final-chunk)
+             (.set ^AtomicBoolean (:final-enqueued?_ st) true)
+             (schedule-drain! st)
+             nil)
+           nil))))))
 
-(defn create-response-queue [req evloop-system _opts]
-  (let [st (new-response-state req evloop-system)]
-    {:state            st
-     :to-output-stream (fn [] (Channels/newOutputStream (output-stream st)))
-     :on-proceed       (mem/serialize (fn [_ctx-ptr] (on-proceed st)) [::ffi/fn [::mem/pointer] ::mem/void])
-     :on-stop          (mem/serialize (fn [_ctx-ptr reason] (on-stop st reason)) [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])}))
+(defn create-response-queue [req _opts]
+  (let [st (new-response-state req)]
+    {:state      st
+     :out-stream (output-stream st)
+     :on-proceed (mem/serialize (fn [_ctx-ptr] (on-proceed st)) [::ffi/fn [::mem/pointer] ::mem/void])
+     :on-stop    (mem/serialize (fn [_ctx-ptr reason] (on-stop st reason)) [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])}))

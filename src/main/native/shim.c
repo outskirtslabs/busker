@@ -1,8 +1,18 @@
 // Minimal exported helpers for libh2o interop
 // Intended for FFI use from Clojure (coffi/FFM).
 #include "shim.h"
+#include "h2o/multithread.h"
 
 #define REQ_ERROR "request error\n"
+
+typedef struct {
+  h2o_multithread_message_t super; /* must be first */
+} clj_mt_msg_t;
+
+struct clj_mt_receiver_t {
+  h2o_multithread_receiver_t receiver;
+  h2o_multithread_queue_t *queue; /* store queue for unregister */
+};
 
 typedef enum {
   OK = 200,
@@ -439,4 +449,44 @@ int clj_h2o_cancel_request(clj_req_ctx_t *ctx) {
     h2o_send(ctx->req, NULL, 0, H2O_SEND_STATE_ERROR);
   }
   return 1;
+}
+
+static void clj_mt_dispose(void *unused, h2o_linklist_t *messages) {
+  (void)unused;
+  while (!h2o_linklist_is_empty(messages)) {
+    clj_mt_msg_t *m =
+        H2O_STRUCT_FROM_MEMBER(clj_mt_msg_t, super.link, messages->next);
+    h2o_linklist_unlink(&m->super.link);
+    free(m);
+  }
+}
+
+static void clj_mt_on_recv(h2o_multithread_receiver_t *receiver,
+                           h2o_linklist_t *messages) {
+  (void)receiver;
+  /* We only use this receiver to wake the loop; just drain and free messages */
+  clj_mt_dispose(NULL, messages);
+}
+
+clj_mt_receiver_t *clj_h2o_mt_create_wakeup_receiver(h2o_context_t *ctx) {
+  clj_mt_receiver_t *wr = calloc(1, sizeof(*wr));
+  if (wr == NULL)
+    return NULL;
+  wr->queue = ctx->queue;
+  h2o_multithread_register_receiver(wr->queue, &wr->receiver, clj_mt_on_recv);
+  return wr;
+}
+
+void clj_h2o_mt_destroy_wakeup_receiver(clj_mt_receiver_t *wr) {
+  if (wr == NULL)
+    return;
+  h2o_multithread_unregister_receiver(wr->queue, &wr->receiver);
+  free(wr);
+}
+
+void clj_h2o_mt_wakeup(clj_mt_receiver_t *wr) {
+  if (wr == NULL)
+    return;
+  /* just wake the loop; no message allocation necessary */
+  h2o_multithread_send_message(&wr->receiver, NULL);
 }

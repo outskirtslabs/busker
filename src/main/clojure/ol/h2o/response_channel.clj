@@ -21,9 +21,9 @@
 
 (defn create-write-res-channel
   "Creates a WritableByteChannel for streaming response body."
-  [req evloop-system {:keys [output-aggregation-size output-buffer-size]
-                      :or {output-buffer-size default-output-buffer-size
-                           output-aggregation-size default-output-aggregation-size}}]
+  [req {:keys [output-aggregation-size output-buffer-size]
+        :or {output-buffer-size default-output-buffer-size
+             output-aggregation-size default-output-aggregation-size}}]
   (let [proceed-sem (Semaphore. 1 true)
         close-complete-sem (Semaphore. 0 true)
         final-chunk-pending? (atom false)
@@ -101,23 +101,23 @@
         (fn [vecs vec-count is-final]
 
           (swap! in-flight-segments conj vecs)
-          (evloop/send-msg! evloop-system
-                            [:h2o/sendvec
-                             (fn []
-                               (doseq [[idx {:keys [seg len]}] (map-indexed vector vecs)]
-                                 (let [offset (* idx (mem/size-of ::h2o/h2o-sendvec-t))
-                                       vec-seg (mem/slice send-vec-array-seg offset (mem/size-of ::h2o/h2o-sendvec-t))]
-                                   (h2o/sendvec-init-raw vec-seg seg len)))
-                               (try
-                                 #_(println "send vec")
-                                 (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg vec-count
-                                              (if is-final
-                                                h2o/H2O_SEND_STATE_FINAL
-                                                h2o/H2O_SEND_STATE_IN_PROGRESS))
-                                 (when is-final
-                                   (reset! closed? true))
-                                 (catch Exception e
-                                   (handle-error! e :release-proceed? true))))]))
+          (evloop/send-msg (:worker req)
+                           [:h2o/sendvec
+                            (fn []
+                              (doseq [[idx {:keys [seg len]}] (map-indexed vector vecs)]
+                                (let [offset (* idx (mem/size-of ::h2o/h2o-sendvec-t))
+                                      vec-seg (mem/slice send-vec-array-seg offset (mem/size-of ::h2o/h2o-sendvec-t))]
+                                  (h2o/sendvec-init-raw vec-seg seg len)))
+                              (try
+                                #_(println "send vec")
+                                (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg vec-count
+                                             (if is-final
+                                               h2o/H2O_SEND_STATE_FINAL
+                                               h2o/H2O_SEND_STATE_IN_PROGRESS))
+                                (when is-final
+                                  (reset! closed? true))
+                                (catch Exception e
+                                  (handle-error! e :release-proceed? true))))]))
 
         flush-buffer!
         (fn [is-final]
@@ -207,5 +207,5 @@
 
     {:channel body-channel
      :on-proceed on-proceed-callback
-     :to-output-stream (fn [] (Channels/newOutputStream body-channel))
+     :out-stream (Channels/newOutputStream body-channel)
      :on-stop on-stop-callback}))

@@ -77,8 +77,7 @@
                         (.put queue chunk))
                       (when is-last
                         (.put queue eof-marker))))
-     :to-input-stream (fn  []
-                        (Channels/newInputStream body-channel))}))
+     :input-stream (Channels/newInputStream body-channel)}))
 
 (defn enqueue-request
   "Process request asynchronously on virtual thread.
@@ -89,26 +88,22 @@
    Parameters:
    - worker-id: ID of the worker thread that received this request
    - req: The Request
-   - ring-handler: Ring handler function (request-map -> response-map)
-   - evloop-system: Event loop system for sending messages back to worker"
-  [^Request req ring-handler evloop-system]
+   - ring-handler: Ring handler function (request-map -> response-map) "
+  [^Request req ring-handler]
   (.submit ^ExecutorService @vthread-executor
            ^Runnable (fn []
                        (try
                          (let [ring-resp (ring-handler (:ring-req req))]
-                           (response/send-ring-response! req ring-resp evloop-system)
-                           #_(evloop/send-msg! evloop-system
-                                               (send-response req ring-resp)))
+                           (response/send-ring-response! req ring-resp))
                          (catch Exception e
                            (println "Handler error:" (.getMessage e))
                            (.printStackTrace e)
                            (response/send-ring-response! req {:status 500
                                                               :headers {"content-type" "text/plain"}
-                                                              :body "Internal Server Error"} evloop-system))))))
-(defn set-req-body-channel [evloop-system req-ctx-ptr req-ctx]
+                                                              :body "Internal Server Error"}))))))
+(defn set-req-body-channel [worker req-ctx-ptr req-ctx]
   (let [proceed-callback  (fn []
-                            (evloop/send-msg! evloop-system
-                                              [:h2o/proceed-request req-ctx]))
+                            (evloop/send-msg worker [:h2o/proceed-request req-ctx]))
         {:keys [write-chunk] :as write-req} (create-write-req-channel proceed-callback)
         on-req-body-chunk (mem/serialize (fn [_ chunk-seg ^long chunk-len ^long is-last]
                                            (write-chunk (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len) (if (= 1 is-last) true false)))
@@ -116,13 +111,13 @@
     (h2o/set-on-request-body-chunk-callback req-ctx-ptr on-req-body-chunk)
     write-req))
 
-(defn on-request [ring-handler evloop-system req-ctx-ptr req-ctx]
-  (let [evloop-system (assoc evloop-system :worker-id (:id (evloop/get-current-worker)))
-        {:keys [to-input-stream] :as write-req} (set-req-body-channel evloop-system req-ctx-ptr req-ctx)
-        ring-req (h2o/build-ring-request (:meta req-ctx) (to-input-stream))
-        req (Request. req-ctx-ptr req-ctx ring-req write-req)]
-
-    (enqueue-request req ring-handler evloop-system)
+(defn on-request [ring-handler req-ctx-ptr req-ctx]
+  (let [worker                                  (evloop/get-current-worker)
+        has-body?                                (:has_body (:meta req-ctx))
+        {:keys [input-stream] :as write-req}    (when has-body? (set-req-body-channel worker req-ctx-ptr req-ctx))
+        ring-req                                (h2o/build-ring-request (:meta req-ctx) (when has-body? input-stream))
+        req                                     (Request. worker req-ctx-ptr req-ctx ring-req (when has-body? write-req))]
+    (enqueue-request req ring-handler)
     ;; TODO: return CLJ_HANDLER_OVERLOADED if system cannot handle more requests
     h2o/CLJ_HANDLER_OK))
 
@@ -130,6 +125,6 @@
   "Completion cleanup callback - this is called by h2o when our request dies
    such as when the client disconnects abruptly
    ref: https://github.com/h2o/h2o/issues/1894#issuecomment-437231273"
-  [ring-handler evloop-system req-ctx-ptr req-ctx]
+  [ring-handler req-ctx-ptr req-ctx]
   ;; TODO
   #_(println "CLEANUP!"))

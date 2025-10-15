@@ -49,41 +49,52 @@
     [(format "%064x" (BigInteger. 1 (.digest md)))
      total]))
 
-(deftest test-large-payloads
-  (let [payload-size (* 3 mib)
-        value        (byte \b)
+(def payload-size (* 3 mib))
+(def value (byte \b))
+(let [[sha total] (with-open [is (repeat-input-stream payload-size value)] (sha256-hex is))]
+  (def sha sha)
+  (def total total))
 
-        [sha total] (with-open [is (repeat-input-stream payload-size value)] (sha256-hex is))]
+(println "\nBASE LINE sha" sha " total " total)
+(deftest request-body
+  (st/with-server [_server
+                   (st/test-server
+                    (fn [{:keys [uri body]}]
+                      (case uri
+                        "/sink"   {:status  200
+                                   :headers {"x-len"    (str payload-size)
+                                             "x-sha256" (with-open [input-stream body] (first (sha256-hex input-stream)))}}
+                        "/source" {:status  200
+                                   :headers {"content-type" "application/octet-stream"
+                                             "x-len"        (str payload-size)
+                                             "x-sha256"     sha}
+                                   :body    (repeat-input-stream payload-size value)}
+                        {:status 404})))]
+    (let [resp (st/req :post "/sink"
+                       :headers {"content-type" "application/octet-stream"}
+                       :timeout 120000
+                       :body (repeat-input-stream payload-size value))]
+      (is (= 200 (:status resp)))
+      (is (= (str payload-size) (get-in resp [:headers "x-len"]))))))
 
-    (println "\nBASE LINE sha" sha " total " total)
-    (st/with-server [_server
-                     (st/test-server
-                      (fn [{:keys [uri body]}]
-                        (case uri
-                          "/sink"   {:status  200
-                                     :headers {"x-len"    (str payload-size)
-                                               "x-sha256" (with-open [input-stream body] (first (sha256-hex input-stream)))}}
-                          "/source" {:status  200
-                                     :headers {"content-type" "application/octet-stream"
-                                               "x-len"        (str payload-size)
-                                               "x-sha256"     sha}
-                                     :body    (repeat-input-stream payload-size value)}
-                          {:status 404})))]
-      (try
-        (testing "large body"
-          (let [resp (st/req :post "/sink"
-                             :headers {"content-type" "application/octet-stream"}
-                             :timeout 120000
-                             :body (repeat-input-stream payload-size value))]
-            (is (= 200 (:status resp)))
-            (is (= (str payload-size) (get-in resp [:headers "x-len"])))))
-        (testing "large response"
-          (let [resp (st/req :get "/source" :as :stream :timeout 120000)
+(deftest response-body
+  (st/with-server [_server
+                   (st/test-server
+                    (fn [{:keys [uri body]}]
+                      (case uri
+                        "/sink"   {:status  200
+                                   :headers {"x-len"    (str payload-size)
+                                             "x-sha256" (with-open [input-stream body] (first (sha256-hex input-stream)))}}
+                        "/source" {:status  200
+                                   :headers {"content-type" "application/octet-stream"
+                                             "x-len"        (str payload-size)
+                                             "x-sha256"     sha}
+                                   :body    (repeat-input-stream payload-size value)}
+                        {:status 404})))]
+    (let [resp (st/req :get "/source" :as :stream :timeout 120000)
 
-                [sha total] (with-open [input-stream (:body resp)] (sha256-hex input-stream))]
-            (println "\nRESPONE sha " sha " total " total)
-            (is (= 200 (:status resp)))
-            (is (= (get-in resp [:headers "x-sha256"]) sha))
-            (is (= (str payload-size) (get-in resp [:headers "x-len"])))))
-        (catch Exception e
-          (println e))))))
+          [sha total] (with-open [input-stream (:body resp)] (sha256-hex input-stream))]
+      (println "\nRESPONE sha " sha " total " total)
+      (is (= 200 (:status resp)))
+      (is (= (get-in resp [:headers "x-sha256"]) sha))
+      (is (= (str payload-size) (get-in resp [:headers "x-len"]))))))

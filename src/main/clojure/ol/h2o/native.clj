@@ -458,6 +458,21 @@
   h2o_cleanup_thread
   [::mem/long ::mem/pointer] ::mem/int)
 
+(defcfn mt-create-wakeup-receiver
+  "Register a wakeup receiver on ctx->queue (returns opaque pointer)"
+  clj_h2o_mt_create_wakeup_receiver
+  [::mem/pointer] ::mem/pointer)
+
+(defcfn mt-destroy-wakeup-receiver
+  "Unregister and free the wakeup receiver"
+  clj_h2o_mt_destroy_wakeup_receiver
+  [::mem/pointer] ::mem/void)
+
+(defcfn mt-wakeup
+  "Send a wakeup message to the loop owning this receiver"
+  clj_h2o_mt_wakeup
+  [::mem/pointer] ::mem/void)
+
 #_(defcfn req-print-offsets
     "Debug helper: print h2o_req_t field offsets to stderr for struct layout verification"
     clj_h2o_req_print_offsets

@@ -92,6 +92,8 @@ typedef struct {
   int shutting_down;
 } clj_h2o_handler_t;
 
+typedef struct clj_mt_receiver_t clj_mt_receiver_t;
+
 /* 1 if socket has a read callback (i.e. currently reading), else 0 */
 int clj_h2o_socket_is_reading(h2o_socket_t *sock);
 
@@ -164,5 +166,14 @@ void clj_h2o_set_on_request_body_chunk(
 void clj_h2o_proceed_req(h2o_req_t *req);
 
 int clj_h2o_cancel_request(clj_req_ctx_t *ctx);
+
+/* Register a wakeup receiver on ctx->queue (one per h2o_context_t / worker) */
+clj_mt_receiver_t *clj_h2o_mt_create_wakeup_receiver(h2o_context_t *ctx);
+
+/* Unregister and free the wakeup receiver */
+void clj_h2o_mt_destroy_wakeup_receiver(clj_mt_receiver_t *wr);
+
+/* Send a wakeup message to the loop owning this receiver */
+void clj_h2o_mt_wakeup(clj_mt_receiver_t *wr);
 
 #endif /* CLJ_H2O_SHIM_H */
