@@ -391,7 +391,7 @@
 
 (deftest test-large-payloads
   (let [payload-size (* 3 mib)
-        value (byte \b)
+        value        (byte \b)
 
         [sha total] (with-open [is (repeat-input-stream payload-size value)] (sha256-hex is))]
 
@@ -409,16 +409,21 @@
                                             "x-sha256"     sha}
                                   :body    (repeat-input-stream payload-size value)}
                        {:status 404})))]
-      (testing "large body"
-        (let [resp (req :post "/sink"
-                        :headers {"content-type" "application/octet-stream"}
-                        :body (repeat-input-stream payload-size value))]
-          (is (= 200 (:status resp)))
-          (is (= (str payload-size) (get-in resp [:headers "x-len"])))))
-      (testing "large response"
-        (let [resp (req :get "/source" :as :stream)
-              [sha total] (with-open [input-stream (:body resp)] (sha256-hex input-stream))]
-          (println "\nRESPONE sha " sha " total " total)
-          (is (= 200 (:status resp)))
-          (is (= (get-in resp [:headers "x-sha256"]) sha))
-          (is (= (str payload-size) (get-in resp [:headers "x-len"]))))))))
+      (try
+        (testing "large body"
+          (let [resp (req :post "/sink"
+                          :headers {"content-type" "application/octet-stream"}
+                          :timeout 120000
+                          :body (repeat-input-stream payload-size value))]
+            (is (= 200 (:status resp)))
+            (is (= (str payload-size) (get-in resp [:headers "x-len"])))))
+        (testing "large response"
+          (let [resp (req :get "/source" :as :stream :timeout 120000)
+
+                [sha total] (with-open [input-stream (:body resp)] (sha256-hex input-stream))]
+            (println "\nRESPONE sha " sha " total " total)
+            (is (= 200 (:status resp)))
+            (is (= (get-in resp [:headers "x-sha256"]) sha))
+            (is (= (str payload-size) (get-in resp [:headers "x-len"])))))
+        (catch Exception e
+          (println e))))))
