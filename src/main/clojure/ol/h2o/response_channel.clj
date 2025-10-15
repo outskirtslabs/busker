@@ -39,6 +39,22 @@
         ;; aren't GCed until libh2o is finished with them (signaled by on-proceed)
         in-flight-segments (atom [])
         empty-seg (mem/alloc 0 arena)
+
+        signal-close-complete!
+        (fn []
+          (reset! final-sent? true)
+          (reset! closed? true)
+          (.release close-complete-sem))
+
+        handle-error!
+        (fn [e & {:keys [message release-proceed?]
+                  :or {message nil release-proceed? false}}]
+          (when message (println message e))
+          (when-not message (println e))
+          (reset! error e)
+          (when release-proceed? (.release proceed-sem))
+          (when @final-chunk-pending? (.release close-complete-sem)))
+
         on-proceed-callback
         (mem/serialize
          (fn [_ctx-ptr]
@@ -64,13 +80,9 @@
                      (h2o/sendvec-init-raw send-vec-array-seg empty-seg 0)
                      (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg 1
                                   h2o/H2O_SEND_STATE_FINAL))))
-               (reset! final-sent? true)
-               (reset! closed? true)
-               (.release close-complete-sem))
+               (signal-close-complete!))
              (catch Exception e
-               (println "Error in on-proceed callback" e)
-               (reset! error e)
-               (.release close-complete-sem))))
+               (handle-error! e :message "Error in on-proceed callback"))))
          [::ffi/fn [::mem/pointer] ::mem/void])
 
         on-stop-callback
@@ -80,9 +92,9 @@
              (reset! closed? true)
              (reset! error (ex-info "Response generator stopped" {:reason reason}))
              (.release proceed-sem)
+             (when @final-chunk-pending? (.release close-complete-sem))
              (catch Exception e
-               (println "on-stop callback error" e)
-               (reset! error e))))
+               (handle-error! e :message "on-stop callback error" :release-proceed? false))))
          [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])
 
         send-vecs-internal!
@@ -105,9 +117,7 @@
                                  (when is-final
                                    (reset! closed? true))
                                  (catch Exception e
-                                   (println e)
-                                   (.release proceed-sem)
-                                   (reset! error e))))]))
+                                   (handle-error! e :release-proceed? true))))]))
 
         flush-buffer!
         (fn [is-final]
