@@ -24,7 +24,7 @@ jobs:
           - name: x86_64-darwin
             runs-on: macos-15-intel
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: DeterminateSystems/nix-installer-action@main
         with:
           determinate: true
