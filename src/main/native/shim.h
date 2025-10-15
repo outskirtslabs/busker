@@ -79,6 +79,7 @@ struct clj_req_ctx_t {
   void (*on_response_generator_proceed)(clj_req_ctx_t *ctx);
   void (*on_response_generator_stop)(clj_req_ctx_t *ctx,
                                      clj_complete_reason_t reason);
+  size_t preferred_chunk_size;
   int cleanup;
   int closing;
   int response_started;

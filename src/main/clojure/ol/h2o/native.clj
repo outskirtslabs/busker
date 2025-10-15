@@ -197,6 +197,7 @@
       [:generator ::h2o-generator-t]
       [:on-response-generator-stop ::mem/pointer]
       [:on-response-generator-proceed ::mem/pointer]
+      [:preferred-chunk-size ::mem/int]
       [:cleanup ::mem/int]
       [:closing ::mem/int]
       [:response_started ::mem/int]]]))

@@ -340,6 +340,7 @@ static int request_handler(h2o_handler_t *self, h2o_req_t *req) {
         h2o_mem_alloc_shared(&req->pool, sizeof(*p), cleanup_request);
     *p = ctx;
     ctx->req = req;
+    ctx->preferred_chunk_size = req->preferred_chunk_size;
     ctx->cleanup = 0;
     ctx->on_request_body_chunk = 0;
     clj_h2o_extract_req_meta(req, &ctx->meta);
