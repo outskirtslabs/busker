@@ -140,14 +140,14 @@ static void clj_generator_stop(h2o_generator_t *gen, h2o_req_t *req) {
   }
 }
 
-void clj_h2o_start_response(
+size_t clj_h2o_start_response(
     clj_req_ctx_t *ctx, int status, const clj_header_t *headers,
     size_t headers_len, size_t content_length,
     void (*on_response_generator_proceed)(clj_req_ctx_t *ctx),
     void (*on_response_generator_stop)(clj_req_ctx_t *ctx,
                                        clj_complete_reason_t reason)) {
   if (!ctx || !ctx->req)
-    return;
+    return 0;
 
   h2o_req_t *req = ctx->req;
 
@@ -187,6 +187,7 @@ void clj_h2o_start_response(
   ctx->on_response_generator_stop = on_response_generator_stop;
   ctx->response_started = 1;
   h2o_start_response(req, &ctx->generator);
+  return req->preferred_chunk_size;
 }
 
 static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {

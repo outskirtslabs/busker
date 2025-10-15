@@ -82,12 +82,12 @@
   "Send a Ring response map using StreamableResponseBody protocol."
   [^Request req ring-resp evloop-system]
   (let [{:keys [status body]
-         :as ring-resp} (with-cl-or-te ring-resp)
-        [headers headers-len content-length] (build-headers ring-resp)
-        req-ctx-ptr (:req-ctx-ptr req)
-        {:keys [to-output-stream on-proceed on-stop]} (response-channel/create-write-res-channel req evloop-system {})]
-    (h2o/start-response req-ctx-ptr status headers headers-len content-length on-proceed on-stop)
-    (let [out-stream ^OutputStream (to-output-stream)]
-      (if body
-        (ring-protocols/write-body-to-stream body ring-resp out-stream)
-        (.close out-stream)))))
+         :as   ring-resp}                               (with-cl-or-te ring-resp)
+        [headers headers-len content-length]          (build-headers ring-resp)
+        req-ctx-ptr                                   (:req-ctx-ptr req)
+        {:keys [to-output-stream on-proceed on-stop]} (response-channel/create-write-res-channel req evloop-system {})
+        _preferred-chunk-size                         (h2o/start-response req-ctx-ptr status headers headers-len content-length on-proceed on-stop)
+        out-stream                                    ^OutputStream (to-output-stream)]
+    (if body
+      (ring-protocols/write-body-to-stream body ring-resp out-stream)
+      (.close out-stream))))

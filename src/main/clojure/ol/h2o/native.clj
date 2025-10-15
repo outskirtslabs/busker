@@ -363,7 +363,7 @@
 (defcfn start-response
   "Start sending HTTP response"
   clj_h2o_start_response
-  [::mem/pointer ::mem/int ::mem/pointer ::mem/long ::mem/long ::mem/pointer ::mem/pointer] ::mem/void)
+  [::mem/pointer ::mem/int ::mem/pointer ::mem/long ::mem/long ::mem/pointer ::mem/pointer] ::mem/long)
 
 (defcfn cancel-request
   "Cancel a request after the response has started"

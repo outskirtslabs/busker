@@ -137,7 +137,8 @@ size_t clj_h2o_context_get_active_conns(h2o_context_t *ctx);
 size_t clj_h2o_context_get_idle_conns(h2o_context_t *ctx);
 size_t clj_h2o_context_get_shutdown_conns(h2o_context_t *ctx);
 
-void clj_h2o_start_response(
+/* Returns the preferred_chunk_size by the ostream */
+size_t clj_h2o_start_response(
     clj_req_ctx_t *ctx, int status, const clj_header_t *headers,
     size_t headers_len, size_t content_length,
     void (*on_response_generator_proceed)(clj_req_ctx_t *ctx),
