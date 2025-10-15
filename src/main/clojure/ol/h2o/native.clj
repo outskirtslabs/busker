@@ -117,7 +117,9 @@
     [::mem/struct
      [[:callbacks ::mem/pointer]
       [:len ::mem/long]
-      [:raw ::mem/pointer]]]))
+      ;; Union of raw pointer OR cb_arg[2], takes 16 bytes (size of larger member)
+      [:raw ::mem/pointer]
+      [:cb_arg_padding ::mem/long]]]))
 
 (def size-of-h2o-sendvec-t (mem/size-of ::h2o-sendvec-t))
 
@@ -393,7 +395,7 @@
 
    Returns handler pointer."
   "clj_h2o_create_handler"
-  [::mem/pointer  ::mem/pointer ::mem/pointer ::mem/int ::mem/int] ::mem/pointer
+  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/int ::mem/int] ::mem/pointer
   native-fn
   [hostconf-ptr on-req-callback on-cleanup-callback supports-request-streaming handles-expect]
   (let [on-req-ptr (mem/serialize (fn [ctx-ptr]
@@ -575,6 +577,7 @@
                     name-str                  (->string name name_len)
                     value-str                 (->string value value_len)]
                 [(str/lower-case name-str) value-str]))))))
+
 (defn build-ring-request
   "Build a Ring request map from clj_req_meta_t.
    Returns: Ring request map"
@@ -596,7 +599,7 @@
                                  [(subs path-str 0 idx) (subs path-str (inc idx))]
                                  [path-str nil]))
                              [nil nil])
-        version            (case  (int http_version)
+        version            (case (int http_version)
                              0x0101 [1 1]
                              0x0200 [2 0]
                              0x0300 [3 0]
