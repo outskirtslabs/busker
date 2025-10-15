@@ -1,14 +1,14 @@
 (ns ol.h2o.response
   "Response handling for h2o HTTP server."
   (:require
-   [ol.h2o.protocols.streamable-response-body :as srb]
+   #_[ol.h2o.protocols.streamable-response-body :as srb]
    [coffi.mem :as mem]
    [ol.h2o.native :as h2o]
    [ol.h2o.protocols.content-length :as content-length]
    [ol.h2o.response-queue :as response-queue]
    [ol.h2o.response-channel :as response-channel]
    [ol.h2o.util :as util]
-   #_[ring.core.protocols :as ring-protocols])
+   [ring.core.protocols :as ring-protocols])
   (:import
    [java.io OutputStream]
    [java.lang.foreign MemorySegment]
@@ -94,6 +94,6 @@
                                                                 (response-channel/create-write-res-channel req {}))
         _                                       (h2o/start-response req-ctx-ptr status headers headers-len content-length on-proceed on-stop)]
     (if body
-      #_(ring-protocols/write-body-to-stream body ring-resp out-stream)
-      (srb/write-body-to-stream body ring-resp out-stream)
+      (ring-protocols/write-body-to-stream body ring-resp out-stream)
+      #_(srb/write-body-to-stream body ring-resp out-stream)
       (.close out-stream))))

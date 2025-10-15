@@ -23,6 +23,7 @@
 ;; OTHER DEALINGS IN THE SOFTWARE.
 (ns ol.h2o.util
   (:require
+   [taoensso.trove :as trove]
    [ol.h2o.util.parsing :as parsing]))
 
 (defn find-header
@@ -49,3 +50,11 @@
   "Returns an updated Ring response with the specified header added."
   [resp name value]
   (assoc-in resp [:headers name] (str value)))
+
+(defmacro msg-time
+  "Like clojure.core/time, but with a user defined prefix message."
+  [prefix expr]
+  `(let [start# (. System (nanoTime))
+         ret# ~expr]
+     (trove/log! {:id :time :msg (str ~prefix " " (/ (double (- (. System (nanoTime)) start#)) 1000000.0) " msecs")})
+     ret#))

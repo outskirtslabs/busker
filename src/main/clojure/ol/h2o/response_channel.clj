@@ -58,6 +58,7 @@
         on-proceed-callback
         (mem/serialize
          (fn [_ctx-ptr]
+           (println "proceed")
            (try
              (reset! in-flight-segments [])
              (.release proceed-sem)
@@ -144,6 +145,7 @@
           (write [_ src]
             (when @closed? (throw (java.nio.channels.ClosedChannelException.)))
             (when @error (throw @error))
+            (println "write")
             (let [chunk-size (.remaining src)]
               (if (zero? chunk-size)
                 0

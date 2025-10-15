@@ -1,5 +1,8 @@
 (ns ol.h2o.evloop
-  (:require [ol.h2o.native :as h2o])
+  (:require
+   [taoensso.trove :as trove]
+   [ol.h2o.util :refer [msg-time]]
+   [ol.h2o.native :as h2o])
   (:import
    [java.util.concurrent.atomic AtomicBoolean]
    [java.util.concurrent ArrayBlockingQueue]))
@@ -28,6 +31,7 @@
     (.offer ^ArrayBlockingQueue mailbox msg)
     (wake this))
   (wake [_]
+    (trove/log! {:worker id :id :wake})
     (h2o/mt-wakeup wakeup-receiver)))
 
 (defonce ^:private next-id_ (atom 0))
@@ -81,7 +85,7 @@
       (loop [s {}]
         (when (.get running?)
           (let [w (drain-mailbox! w)]
-            (recur (loop-fn w s))))))
+            (recur (msg-time (str "evloop [" (:id w) "]") (loop-fn w s)))))))
     (catch InterruptedException _
       (.set ^AtomicBoolean (:running? w) false))
     (catch Throwable t

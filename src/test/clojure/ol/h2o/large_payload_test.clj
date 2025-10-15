@@ -49,13 +49,10 @@
     [(format "%064x" (BigInteger. 1 (.digest md)))
      total]))
 
-(def payload-size (* 3 mib))
+(def payload-size (* 30 mib))
 (def value (byte \b))
-(let [[sha total] (with-open [is (repeat-input-stream payload-size value)] (sha256-hex is))]
-  (def sha sha)
-  (def total total))
-
-(println "\nBASE LINE sha" sha " total " total)
+(def sha (first (with-open [is (repeat-input-stream payload-size value)] (sha256-hex is))))
+(println "Large test with payload size " payload-size "has sha" sha)
 (deftest request-body
   (st/with-server [_server
                    (st/test-server

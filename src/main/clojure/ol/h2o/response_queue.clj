@@ -2,6 +2,8 @@
   (:require
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]
+   [taoensso.trove :as trove]
+   [ol.h2o.util :refer [msg-time]]
    [ol.h2o.buffer-pool :as bp]
    [ol.h2o.byte-bounded-queue :as bbq]
    [ol.h2o.evloop :as evloop]
@@ -179,12 +181,17 @@
    Uses CAS on scheduled?_ to ensure only one drain is posted at a time.
    Returns true if a new drain was scheduled, false if one was already pending."
   [^ResponseState st]
-  (when (.compareAndSet ^AtomicBoolean (:scheduled?_ st) false true)
-    (evloop/send-msg (:worker (:req st)) [:h2o/sendvec (fn [] (send-vecs st))])
-    true))
+  (let [trig (when (.compareAndSet ^AtomicBoolean (:scheduled?_ st) false true)
+               (trove/log! {:id :sending-vec})
+               (evloop/send-msg (:worker (:req st)) [:h2o/sendvec (fn [] (send-vecs st))])
+               true)]
+    (trove/log! {:id :schedule-drain :msg (str
+                                           (bbq/queued-bytes (:bbq st))
+                                           " / " (bbq/capacity-bytes (:bbq st))
+                                           " triggered schedule?=" trig)})))
 
 (defn report-error [e]
-  (println e))
+  (trove/log! {:level :error :id :h2o/error :ex e}))
 
 (defn on-proceed
   "Worker thread. Called by libh2o to progress the response generator"
@@ -251,7 +258,7 @@
                    (.flip buf)
                    (let [chunk (seal-chunk [buf] false)]
                      (.set cur-ref nil)
-                     (bbq/put (:bbq st) chunk)
+                     (msg-time "bbq/put" (bbq/put (:bbq st) chunk))
                      (schedule-drain! st)))
                  (recur (- left can-copy))))))))
      (isOpen [_]
