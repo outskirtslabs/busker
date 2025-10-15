@@ -10,7 +10,7 @@
   (:import
    [java.lang.foreign Arena MemorySegment]
    [java.nio ByteBuffer]
-   [java.nio.channels WritableByteChannel]
+   [java.nio.channels Channels WritableByteChannel]
    [java.util.concurrent.atomic AtomicBoolean AtomicReference]
    [ol.h2o.pool FixedPool]))
 
@@ -287,6 +287,6 @@
 (defn create-response-queue [req evloop-system _opts]
   (let [st (new-response-state req evloop-system)]
     {:state st
-     :to-output-stream (partial output-stream st)
+     :to-output-stream (fn [] (Channels/newOutputStream (output-stream st)))
      :on-proceed (mem/serialize (fn [_ctx-ptr] (on-proceed st)) [::ffi/fn [::mem/pointer] ::mem/void])
      :on-stop (mem/serialize (fn [_ctx-ptr reason] (on-stop st reason)) [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])}))
