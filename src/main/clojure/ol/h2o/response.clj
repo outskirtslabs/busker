@@ -97,8 +97,8 @@
     (h2o/start-response (:req-ctx-ptr req) status
                         headers headers-len
                         content-length
-                        (-> req :write-resp :on-proceed)
-                        (-> req :write-resp :on-stop))
+                        (-> req :write-resp :on-proceed-cb-ptr)
+                        (-> req :write-resp :on-stop-cb-ptr))
     (if body
       (ring-protocols/write-body-to-stream body ring-resp (-> req :write-resp :out-stream))
       #_(srb/write-body-to-stream body ring-resp out-stream)

@@ -60,47 +60,43 @@
                               (evloop/wake (:worker req))
                               (.acquire proceed-sem)))
 
-        on-proceed-callback
-        (mem/serialize
-         (fn [_ctx-ptr]
-           (try
-             (reset! in-flight-segments [])
-             (.release proceed-sem)
-             (when @final-chunk-pending?
-               (let [agg-pos (.position aggregation-buffer)]
-                 (if (pos? agg-pos)
-                   (do
-                     (.flip aggregation-buffer)
-                     (let [stable-seg (mem/alloc agg-pos arena)]
-                       (MemorySegment/copy (MemorySegment/ofBuffer aggregation-buffer) 0
-                                           stable-seg 0 agg-pos)
-                       (swap! in-flight-segments conj [{:seg stable-seg :len agg-pos}])
-                       (h2o/sendvec-init-raw send-vec-array-seg stable-seg agg-pos)
-                       (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg 1
-                                    h2o/H2O_SEND_STATE_FINAL))
-                     (.clear aggregation-buffer)
-                     (swap! n-bytes-sent + agg-pos))
+        on-proceed-cb (fn [_ctx-ptr]
+                        (try
+                          (reset! in-flight-segments [])
+                          (.release proceed-sem)
+                          (when @final-chunk-pending?
+                            (let [agg-pos (.position aggregation-buffer)]
+                              (if (pos? agg-pos)
+                                (do
+                                  (.flip aggregation-buffer)
+                                  (let [stable-seg (mem/alloc agg-pos arena)]
+                                    (MemorySegment/copy (MemorySegment/ofBuffer aggregation-buffer) 0
+                                                        stable-seg 0 agg-pos)
+                                    (swap! in-flight-segments conj [{:seg stable-seg :len agg-pos}])
+                                    (h2o/sendvec-init-raw send-vec-array-seg stable-seg agg-pos)
+                                    (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg 1
+                                                 h2o/H2O_SEND_STATE_FINAL))
+                                  (.clear aggregation-buffer)
+                                  (swap! n-bytes-sent + agg-pos))
                    ;; No buffered data - send empty final
-                   (do
-                     (h2o/sendvec-init-raw send-vec-array-seg empty-seg 0)
-                     (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg 1
-                                  h2o/H2O_SEND_STATE_FINAL))))
-               (signal-close-complete!))
-             (catch Exception e
-               (handle-error! e :message "Error in on-proceed callback"))))
-         [::ffi/fn [::mem/pointer] ::mem/void])
+                                (do
+                                  (h2o/sendvec-init-raw send-vec-array-seg empty-seg 0)
+                                  (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg 1
+                                               h2o/H2O_SEND_STATE_FINAL))))
+                            (signal-close-complete!))
+                          (catch Exception e
+                            (handle-error! e :message "Error in on-proceed callback"))))
+        on-proceed-cb-ptr (mem/serialize on-proceed-cb [::ffi/fn [::mem/pointer] ::mem/void])
 
-        on-stop-callback
-        (mem/serialize
-         (fn [_ctx-ptr reason]
-           (try
-             (reset! closed? true)
-             (reset! error (ex-info "Response generator stopped" {:reason reason}))
-             (.release proceed-sem)
-             (when @final-chunk-pending? (.release close-complete-sem))
-             (catch Exception e
-               (handle-error! e :message "on-stop callback error" :release-proceed? false))))
-         [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])
+        on-stop-cb (fn [_ctx-ptr reason]
+                     (try
+                       (reset! closed? true)
+                       (reset! error (ex-info "Response generator stopped" {:reason reason}))
+                       (.release proceed-sem)
+                       (when @final-chunk-pending? (.release close-complete-sem))
+                       (catch Exception e
+                         (handle-error! e :message "on-stop callback error" :release-proceed? false))))
+        on-stop-cb-ptr (mem/serialize on-stop-cb [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])
 
         send-vecs-internal!
         (fn [vecs vec-count is-final]
@@ -210,7 +206,9 @@
               (when-not @closed?
                 (reset! closed? true)))))]
 
-    {:channel body-channel
-     :on-proceed on-proceed-callback
+    {::on-proceed-cb on-proceed-cb
+     ::on-stop-cb on-stop-cb
+     ::channel body-channel
      :out-stream (Channels/newOutputStream body-channel)
-     :on-stop on-stop-callback}))
+     :on-proceed-cb-ptr on-proceed-cb-ptr
+     :on-stop-cb-ptr on-stop-cb-ptr}))

@@ -576,6 +576,7 @@
 
 (defn build-ring-request
   "Build a Ring request map from clj_req_meta_t.
+   input-stream is the request body, can be nil if has_body is false
    Returns: Ring request map"
   [{:keys [method method_len path path_len authority authority_len
            http_version headers headers_len has_body
