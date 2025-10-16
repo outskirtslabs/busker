@@ -106,8 +106,9 @@
                             (evloop/send-msg worker [:h2o/proceed-request req-ctx]))
         {:keys [write-chunk] :as write-req} (create-write-req-channel proceed-callback)
         on-req-body-chunk (mem/serialize (fn [_ chunk-seg ^long chunk-len ^long is-last]
-                                           (assert chunk-seg)
-                                           (write-chunk (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len) (if (= 1 is-last) true false)))
+                                           (write-chunk
+                                            (when-not (mem/null? chunk-seg) (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len))
+                                            (if (= 1 is-last) true false)))
                                          [::ffi/fn [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void])]
     (h2o/set-on-request-body-chunk-callback req-ctx-ptr on-req-body-chunk)
     write-req))
