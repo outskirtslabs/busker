@@ -31,24 +31,14 @@
         (response/send-ring-response! req ring-resp))
     nil))
 
-(defn create-ring-handler
-  "Create an h2o handler that delegates to a Ring handler.
-   Returns handler pointer that must be kept alive."
-  [hostconf-ptr ring-handler]
-  (h2o/create-handler
-   hostconf-ptr
-   (partial request/on-request ring-handler)
-   (partial request/on-request-cleanup ring-handler)
-   true true))
-
 (defn create-connection-close-callback
   "Create callback for socket close events to track connection count.
    The callback signature is: void on_close(void *data)"
   [active-connections]
-  (mem/serialize
-   (fn [_data-ptr]
-     (.decrementAndGet ^AtomicLong active-connections))
-   [::ffi/fn [::mem/pointer] ::mem/void]))
+  (let [cb (fn [_data-ptr]
+             (.decrementAndGet ^AtomicLong active-connections))]
+    {::connection-close-cb cb
+     ::connection-close-cb-ptr (mem/serialize cb [::ffi/fn [::mem/pointer] ::mem/void])}))
 
 (defn create-server-config
   "Create and initialize h2o global configuration with a default host and Ring handler.
@@ -61,10 +51,16 @@
     (let [host-iovec-seg (h2o/create-iovec "default" arena)
           host-iovec-data (mem/deserialize host-iovec-seg ::h2o/h2o-iovec-t)
           hostconf-ptr (h2o/config-register-host config-ptr host-iovec-data 65535)
-          handler-ptr (create-ring-handler hostconf-ptr ring-handler)]
+          on-request-cb (partial request/on-request ring-handler)
+          on-request-cleanup-cb (partial request/on-request-cleanup ring-handler)
+          handler (h2o/create-handler hostconf-ptr on-request-cb on-request-cleanup-cb true true)]
+      ;; all of these things pay not be used again, but they must not be GCed
+      ;; until the server itself is reaped
       {::config-ptr config-ptr
        ::hostconf-ptr hostconf-ptr
-       ::handler-ptr handler-ptr})))
+       ::on-request-cb on-request-cb
+       ::on-request-cleanup-cb on-request-cleanup-cb
+       ::handler handler})))
 
 (defn update-listener-state!
   "Throttle TCP listeners by starting/stopping accept callbacks based on connection count.
@@ -211,7 +207,7 @@
                             config-ptr)))
 
         accept-callbacks (vec (for [accept-ctx-ptr accept-ctxs]
-                                (h2o/create-accept-callback accept-ctx-ptr active-connections on-close-callback)))
+                                (h2o/create-accept-callback accept-ctx-ptr active-connections (::connection-close-cb-ptr on-close-callback))))
 
         listener-sockets (vec (for [thread-idx (range n-workers)]
                                 (vec (for [listener-idx (range (count listeners))]

@@ -398,26 +398,28 @@
   [::mem/pointer ::mem/pointer ::mem/pointer ::mem/int ::mem/int] ::mem/pointer
   native-fn
   [hostconf-ptr on-req-callback on-cleanup-callback supports-request-streaming handles-expect]
-  (let [on-req-ptr (mem/serialize (fn [ctx-ptr]
-                                    (try
-                                      (on-req-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t))
-                                      (catch Exception e
-                                        (report-almost-fatal-error "The request handler errored with" e)
-                                        CLJ_HANDLER_OVERLOADED)))
+  (let [on-request-cb-ptr (mem/serialize (fn [ctx-ptr]
+                                           (try
+                                             (on-req-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t))
+                                             (catch Exception e
+                                               (report-almost-fatal-error "The request handler errored with" e)
+                                               CLJ_HANDLER_OVERLOADED)))
+                                         [::ffi/fn [::mem/pointer] ::mem/int])
+        on-request-cleanup-cb-ptr (mem/serialize (fn [ctx-ptr]
+                                                   (try
+                                                     (on-cleanup-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t))
+                                                     (catch Exception e
+                                                       (report-almost-fatal-error "The request cleanup callback errored" e))))
 
-                                  [::ffi/fn [::mem/pointer] ::mem/int])
-        on-cleanup-ptr (mem/serialize (fn [ctx-ptr]
-                                        (try
-                                          (on-cleanup-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t))
-                                          (catch Exception e
-                                            (report-almost-fatal-error "The request cleanup callback errored" e))))
-
-                                      [::ffi/fn [::mem/pointer] ::mem/void])]
-    (native-fn hostconf-ptr
-               on-req-ptr
-               on-cleanup-ptr
-               (if supports-request-streaming 1 0)
-               (if handles-expect 1 0))))
+                                                 [::ffi/fn [::mem/pointer] ::mem/void])]
+    {:on-request-cb-ptr         on-request-cb-ptr
+     ::on-request-cleanup-cb-ptr on-request-cleanup-cb-ptr
+     ::handler-ptr
+     (native-fn hostconf-ptr
+                on-request-cb-ptr
+                on-request-cleanup-cb-ptr
+                (if supports-request-streaming 1 0)
+                (if handles-expect 1 0))}))
 (defcfn proceed-req
   "Call req->proceed_req to signal readiness for next request body chunk"
   clj_h2o_proceed_req
