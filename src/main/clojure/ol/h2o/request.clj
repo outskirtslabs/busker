@@ -105,20 +105,22 @@
   (let [proceed-callback  (fn []
                             (evloop/send-msg worker [:h2o/proceed-request req-ctx]))
         {:keys [write-chunk] :as write-req} (create-write-req-channel proceed-callback)
-        on-req-body-chunk (mem/serialize (fn [_ chunk-seg ^long chunk-len ^long is-last]
-                                           (write-chunk
-                                            (when-not (mem/null? chunk-seg) (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len))
-                                            (if (= 1 is-last) true false)))
-                                         [::ffi/fn [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void])]
-    (h2o/set-on-request-body-chunk-callback req-ctx-ptr on-req-body-chunk)
-    write-req))
+        on-req-body-chunk-cb (fn [_ chunk-seg ^long chunk-len ^long is-last]
+                               (write-chunk
+                                (when-not (mem/null? chunk-seg) (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len))
+                                (if (= 1 is-last) true false)))
+        on-req-body-chunk-cb-ptr  (mem/serialize on-req-body-chunk-cb [::ffi/fn [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void])]
+    (h2o/set-on-request-body-chunk-callback req-ctx-ptr on-req-body-chunk-cb-ptr)
+    (assoc write-req
+           ::on-req-body-chunk-cb on-req-body-chunk-cb
+           ::on-req-body-chunk-cb-ptr on-req-body-chunk-cb-ptr)))
 
 (defn on-request [ring-handler req-ctx-ptr req-ctx]
   (let [worker                               (evloop/get-current-worker)
         has-body?                            (:has_body (:meta req-ctx))
         {:keys [input-stream] :as write-req} (when has-body? (set-req-body-channel worker req-ctx-ptr req-ctx))
-        ring-req                             (h2o/build-ring-request (:meta req-ctx) (when has-body? input-stream))]
-    (-> (Request. worker req-ctx-ptr req-ctx ring-req (when has-body? write-req) nil)
+        ring-req                             (h2o/build-ring-request (:meta req-ctx) input-stream)]
+    (-> (Request. worker req-ctx-ptr req-ctx ring-req write-req nil)
         (response/with-response-writer)
         (enqueue-request ring-handler))
     ;; TODO: return CLJ_HANDLER_OVERLOADED if system cannot handle more requests

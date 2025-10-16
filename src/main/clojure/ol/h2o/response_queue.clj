@@ -289,8 +289,12 @@
            nil))))))
 
 (defn create-response-queue [req _opts]
-  (let [st (new-response-state req)]
-    {:state      st
-     :out-stream (output-stream st)
-     :on-proceed (mem/serialize (fn [_ctx-ptr] (on-proceed st)) [::ffi/fn [::mem/pointer] ::mem/void])
-     :on-stop    (mem/serialize (fn [_ctx-ptr reason] (on-stop st reason)) [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])}))
+  (let [st            (new-response-state req)
+        on-proceed-cb (fn [_ctx-ptr] (on-proceed st))
+        on-stop-cb    (fn [_ctx-ptr reason] (on-stop st reason))]
+    {::state            st
+     ::on-proceed-cb    on-proceed-cb
+     ::on-stop-cb       on-stop-cb
+     :out-stream        (output-stream st)
+     :on-proceed-cb-ptr (mem/serialize on-proceed-cb [::ffi/fn [::mem/pointer] ::mem/void])
+     :on-stop-cb-ptr    (mem/serialize on-stop-cb [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])}))
