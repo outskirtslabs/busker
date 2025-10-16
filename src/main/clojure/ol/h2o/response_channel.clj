@@ -55,10 +55,14 @@
           (when release-proceed? (.release proceed-sem))
           (when @final-chunk-pending? (.release close-complete-sem)))
 
+        acquire-with-wake (fn []
+                            (when-not (.tryAcquire proceed-sem)
+                              (evloop/wake (:worker req))
+                              (.acquire proceed-sem)))
+
         on-proceed-callback
         (mem/serialize
          (fn [_ctx-ptr]
-           (println "proceed")
            (try
              (reset! in-flight-segments [])
              (.release proceed-sem)
@@ -110,7 +114,6 @@
                                       vec-seg (mem/slice send-vec-array-seg offset (mem/size-of ::h2o/h2o-sendvec-t))]
                                   (h2o/sendvec-init-raw vec-seg seg len)))
                               (try
-                                #_(println "send vec")
                                 (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg vec-count
                                              (if is-final
                                                h2o/H2O_SEND_STATE_FINAL
@@ -145,14 +148,13 @@
           (write [_ src]
             (when @closed? (throw (java.nio.channels.ClosedChannelException.)))
             (when @error (throw @error))
-            (println "write")
             (let [chunk-size (.remaining src)]
               (if (zero? chunk-size)
                 0
                 (if (>= chunk-size output-aggregation-size)
                   ;; Large write: send buffer + large write in one vectorized call
                   (do
-                    (.acquire proceed-sem)
+                    (acquire-with-wake)
                     (let [agg-buffer-pos (.position aggregation-buffer)
                           chunk (byte-array chunk-size)
                           chunk-seg (mem/alloc chunk-size arena)]
@@ -178,9 +180,9 @@
                   (let [pos (.position aggregation-buffer)
                         new-pos (+ pos chunk-size)]
                     (if (>= new-pos output-buffer-size)
-;; Buffer would overflow: flush first, then buffer this write
+                      ;; Buffer would overflow: flush first, then buffer this write
                       (do
-                        (.acquire proceed-sem)
+                        (acquire-with-wake)
                         (let [flushed-bytes (flush-buffer! false)]
                           (swap! n-bytes-sent + flushed-bytes))
                         (.put aggregation-buffer src)
@@ -203,6 +205,7 @@
                     (reset! closed? true))
                   (do
                     (reset! final-chunk-pending? true)
+                    (evloop/wake (:worker req))
                     (.acquire close-complete-sem))))
               (when-not @closed?
                 (reset! closed? true)))))]
