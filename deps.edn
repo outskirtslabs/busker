@@ -21,6 +21,7 @@
                     :extra-deps  {#_#_com.phronemophobic/clong   {:local/root "extra/clong"}
                                   #_#_org.bytedeco/llvm-platform {:mvn/version "16.0.4-1.5.9"}
                                   dev.weavejester/hashp          {:mvn/version "0.4.0"}
+                                  criterium/criterium            {:mvn/version "0.4.6"}
                                   virgil/virgil                  {:mvn/version "0.4.0"}
                                   babashka/process               {:mvn/version "0.6.23"}
                                   org.babashka/http-client       {:mvn/version "0.4.22"}
