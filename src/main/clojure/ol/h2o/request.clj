@@ -114,12 +114,13 @@
     write-req))
 
 (defn on-request [ring-handler req-ctx-ptr req-ctx]
-  (let [worker                                  (evloop/get-current-worker)
-        has-body?                                (:has_body (:meta req-ctx))
-        {:keys [input-stream] :as write-req}    (when has-body? (set-req-body-channel worker req-ctx-ptr req-ctx))
-        ring-req                                (h2o/build-ring-request (:meta req-ctx) (when has-body? input-stream))
-        req                                     (Request. worker req-ctx-ptr req-ctx ring-req (when has-body? write-req))]
-    (enqueue-request req ring-handler)
+  (let [worker                               (evloop/get-current-worker)
+        has-body?                            (:has_body (:meta req-ctx))
+        {:keys [input-stream] :as write-req} (when has-body? (set-req-body-channel worker req-ctx-ptr req-ctx))
+        ring-req                             (h2o/build-ring-request (:meta req-ctx) (when has-body? input-stream))]
+    (-> (Request. worker req-ctx-ptr req-ctx ring-req (when has-body? write-req) nil)
+        (response/with-response-writer)
+        (enqueue-request ring-handler))
     ;; TODO: return CLJ_HANDLER_OVERLOADED if system cannot handle more requests
     h2o/CLJ_HANDLER_OK))
 
