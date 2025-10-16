@@ -11,12 +11,10 @@
 (def base (str "http://127.0.0.1:" plain-port))
 
 (defn test-server [handler & {:as opts}]
-  (let [config (merge {:handler handler
-                       :listeners [{:port plain-port}]
-                       :max-connections 1024}
-                      opts)]
-    (-> (server/create-server config)
-        (server/start-server))))
+  (server/start-server (merge {:handler handler
+                               :listeners [{:port plain-port}]
+                               :max-connections 1024}
+                              opts)))
 
 (defn req [method path & {:as opts}]
   (->
@@ -239,7 +237,7 @@
                                :host "127.0.0.1"
                                :ssl {:certificate-file cert-file
                                      :private-key-file key-file}}]}]
-      (with-server [_server (server/start-server (server/create-server config))]
+      (with-server [_server (server/start-server config)]
         (testing "http endpoint works"
           (let [response (http/get "http://127.0.0.1:8080/hello")]
             (is (= 200 (:status response)) "HTTP endpoint should return 200")

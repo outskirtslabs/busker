@@ -143,48 +143,21 @@
       (h2o/evloop-run loop-ptr (if (pos? (evloop/count-msgs worker)) 0 max-wait)))
     {:shutdown-initiated? shutdown-initiated?}))
 
-(defn create-server
-  "Create an h2o server with the given configuration.
-   
-   Options:
-   - :handler      Ring handler function (fn [request-map] response-map) (required)
-   - :n-workers    Number of worker threads (default: 1)
-   - :listeners    Vector of listener configs [{:port 8080}]
-   - :max-connections Maximum concurrent connections (default: 1024)"
-  [{:keys [handler n-workers listeners max-connections]
-    :or {n-workers 1
-         listeners [{:port 8080}]
-         max-connections default-max-connections}}]
-  (when-not handler
-    (throw (ex-info "Handler is required" {:handler handler})))
-  (let [arena (mem/shared-arena)
-        config (create-server-config arena handler)]
-    (merge config
-           {::arena arena
-            ::handler handler
-            ::n-workers n-workers
-            ::listeners listeners
-            ::max-connections max-connections
-            ::active-connections (AtomicLong. 0)
-            ::started? (AtomicBoolean. false)
-            ::shutting-down? (AtomicBoolean. false)
-            ::loops []
-            ::contexts []
-            ::worker-ids []})))
-
 (defn start-server
   "Start the h2o server and begin accepting connections"
-  [server]
-  (when (.get ^AtomicBoolean (::started? server))
-    (throw (ex-info "Server already started" {:server server})))
+  [{:keys [handler n-workers listeners max-connections]
+    :or   {n-workers       1
+           listeners       [{:port 8080}]
+           max-connections default-max-connections}}]
 
-  (let [config-ptr         (::config-ptr server)
-        arena              (::arena server)
-        n-workers          (::n-workers server)
-        listeners          (::listeners server)
-        shutting-down?     (::shutting-down? server)
-        active-connections (::active-connections server)
-        message-handler    evloop-msg-processor
+  (when-not handler (throw (ex-info "Handler is required" {:handler handler})))
+
+  (let [arena                            (mem/shared-arena)
+        active-connections               (AtomicLong. 0)
+        started?                         (AtomicBoolean. true)
+        shutting-down?                   (AtomicBoolean. false)
+        {::keys [config-ptr] :as config} (create-server-config arena handler)
+        message-handler                  evloop-msg-processor
 
         loops    (h2o/create-loops n-workers)
         contexts (h2o/create-contexts arena loops config-ptr)
@@ -222,34 +195,40 @@
                                          sock-ptr)))))
 
         workers (vec (for [thread-idx (range n-workers)]
-                       (let [loop-ptr                  (nth loops thread-idx)
-                             ctx-ptr                   (nth contexts thread-idx)
-                             listener-socks-for-thread (nth listener-sockets thread-idx)
-                             thread-accept-callback     (nth accept-callbacks thread-idx)
+                       (let [loop-ptr                    (nth loops thread-idx)
+                             ctx-ptr                     (nth contexts thread-idx)
+                             listener-socks-for-thread   (nth listener-sockets thread-idx)
+                             thread-accept-callback      (nth accept-callbacks thread-idx)
                              accept-callbacks-for-thread (vec (repeat (count listener-socks-for-thread)
                                                                       thread-accept-callback))]
 
                          (evloop/start-worker!
-                          (fn [worker loop-state] (worker-loop worker loop-state {:listener-socks listener-socks-for-thread
-                                                                                  :accept-callbacks   accept-callbacks-for-thread
-                                                                                  :loop-ptr loop-ptr
-                                                                                  :ctx-ptr ctx-ptr
-                                                                                  :shutting-down? shutting-down?}))
+                          (fn [worker loop-state] (worker-loop worker loop-state {:listener-socks   listener-socks-for-thread
+                                                                                  :accept-callbacks accept-callbacks-for-thread
+                                                                                  :loop-ptr         loop-ptr
+                                                                                  :ctx-ptr          ctx-ptr
+                                                                                  :shutting-down?   shutting-down?}))
                           message-handler
-                          (nth wakeup-receivers thread-idx)))))
-
-        _ (.set ^AtomicBoolean (::started? server) true)]
-    (assoc server
-           ::loops loops
-           ::contexts contexts
-           ::accept-ctxs accept-ctxs
-           ::accept-callbacks accept-callbacks
-           ::on-close-callback on-close-callback
-           ::listener-fds listener-fds
-           ::wakeup-receivers wakeup-receivers
-           ::dup-fds dup-fds
-           ::listener-sockets listener-sockets
-           ::workers workers)))
+                          (nth wakeup-receivers thread-idx)))))]
+    {::arena              arena
+     ::config             config
+     ::handler            handler
+     ::n-workers          n-workers
+     ::listeners          listeners
+     ::max-connections    max-connections
+     ::active-connections active-connections
+     ::started?           started?
+     ::shutting-down?     shutting-down?
+     ::loops              loops
+     ::contexts           contexts
+     ::accept-ctxs        accept-ctxs
+     ::accept-callbacks   accept-callbacks
+     ::on-close-callback  on-close-callback
+     ::listener-fds       listener-fds
+     ::wakeup-receivers   wakeup-receivers
+     ::dup-fds            dup-fds
+     ::listener-sockets   listener-sockets
+     ::workers            workers}))
 
 (defn stop-server
   "Stop the h2o server and clean up resources.
@@ -300,9 +279,7 @@
   server)
 
 (comment
-  (def _server (create-server {}))
-
-  (def _server (start-server _server))
+  (def _server (start-server {}))
 
   (stop-server _server)
 

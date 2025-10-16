@@ -298,6 +298,8 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
    ref: https://github.com/h2o/h2o/issues/1894#issuecomment-437231273
    */
 static void cleanup_request(void *ptr) {
+  if (!ptr)
+    return;
   clj_req_ctx_t *const ctx = *(clj_req_ctx_t **)ptr;
   if (!ctx)
     return;
