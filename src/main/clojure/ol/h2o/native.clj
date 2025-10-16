@@ -534,27 +534,6 @@
   (doseq [loop loops]
     (evloop-destroy loop)))
 
-(defn create-accept-callback
-  "Create accept callback for a listener socket with connection tracking.
-   The callback signature is: void on_accept(h2o_socket_t *listener, const char *err)
-   
-   Parameters:
-   - accept-ctx-ptr: pointer to h2o_accept_ctx_t
-   - active-connections: AtomicLong for connection counting
-   - on-close-callback: callback function pointer for socket close"
-  [accept-ctx-ptr active-connections on-close-callback]
-  (mem/serialize
-   (fn [listener-ptr err-ptr]
-     (when-not (mem/null? err-ptr)
-       nil)
-
-     (let [sock-ptr (evloop-socket-accept listener-ptr)]
-       (when-not (mem/null? sock-ptr)
-         (.incrementAndGet ^java.util.concurrent.atomic.AtomicLong active-connections)
-         (socket-set-on-close sock-ptr on-close-callback (mem/as-segment 0))
-         (h2o-accept accept-ctx-ptr sock-ptr))))
-   [::ffi/fn [::mem/pointer ::mem/c-string] ::mem/void]))
-
 (defn create-accept-ctx
   "Create h2o_accept_ctx_t for accepting connections.
    
