@@ -40,6 +40,24 @@
     {::connection-close-cb cb
      ::connection-close-cb-ptr (mem/serialize cb [::ffi/fn [::mem/pointer] ::mem/void])}))
 
+(defn create-accept-callback
+  "Create accept callback for a listener socket with connection tracking.
+   Parameters:
+   - accept-ctx-ptr: pointer to h2o_accept_ctx_t
+   - active-connections: AtomicLong for connection counting
+   - on-close-callback: callback function pointer for socket close"
+  [accept-ctx-ptr active-connections on-close-callback]
+  (let [accept-cb (fn [listener-ptr err-ptr]
+                    (when-not (mem/null? err-ptr)
+                      nil)
+                    (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
+                      (when-not (mem/null? sock-ptr)
+                        (.incrementAndGet ^java.util.concurrent.atomic.AtomicLong active-connections)
+                        (h2o/socket-set-on-close sock-ptr on-close-callback (mem/as-segment 0))
+                        (h2o/h2o-accept accept-ctx-ptr sock-ptr))))]
+    {::accept-cb accept-cb
+     ::accept-cb-ptr  (mem/serialize accept-cb [::ffi/fn [::mem/pointer ::mem/c-string] ::mem/void])}))
+
 (defn create-server-config
   "Create and initialize h2o global configuration with a default host and Ring handler.
    Uses provided arena for server lifetime resources.
@@ -180,7 +198,7 @@
                             config-ptr)))
 
         accept-callbacks (vec (for [accept-ctx-ptr accept-ctxs]
-                                (h2o/create-accept-callback accept-ctx-ptr active-connections (::connection-close-cb-ptr on-close-callback))))
+                                (create-accept-callback accept-ctx-ptr active-connections (::connection-close-cb-ptr on-close-callback))))
 
         listener-sockets (vec (for [thread-idx (range n-workers)]
                                 (vec (for [listener-idx (range (count listeners))]
@@ -190,7 +208,8 @@
                                                        fd
                                                        H2O_SOCKET_FLAG_DONT_READ)
                                              cb-idx   (+ (* thread-idx (count listeners)) listener-idx)
-                                             callback (nth accept-callbacks cb-idx)]
+                                             callback (::accept-cb-ptr (nth accept-callbacks cb-idx))]
+                                         (assert callback)
                                          (h2o/socket-read-start sock-ptr callback)
                                          sock-ptr)))))
 
@@ -198,7 +217,8 @@
                        (let [loop-ptr                    (nth loops thread-idx)
                              ctx-ptr                     (nth contexts thread-idx)
                              listener-socks-for-thread   (nth listener-sockets thread-idx)
-                             thread-accept-callback      (nth accept-callbacks thread-idx)
+                             thread-accept-callback     (::accept-cb-ptr (nth accept-callbacks thread-idx))
+                             _ (assert thread-accept-callback)
                              accept-callbacks-for-thread (vec (repeat (count listener-socks-for-thread)
                                                                       thread-accept-callback))]
 
