@@ -80,20 +80,26 @@
       (util/header response "content-length" (str size))
       response)))
 
-(def use-new-queue? true)
+(def use-new-queue? false)
+
+(defn with-response-writer [req]
+  (assoc req :write-resp
+         (if use-new-queue?
+           (response-queue/create-response-queue req {})
+           (response-channel/create-write-res-channel req {}))))
 
 (defn send-ring-response!
   "Send a Ring response map using StreamableResponseBody protocol."
   [^Request req ring-resp]
   (let [{:keys [status body]
-         :as   ring-resp}                       (with-cl-or-te ring-resp)
-        [headers headers-len content-length]    (build-headers ring-resp)
-        req-ctx-ptr                             (:req-ctx-ptr req)
-        {:keys [^OutputStream out-stream on-proceed on-stop]} (if use-new-queue?
-                                                                (response-queue/create-response-queue req {})
-                                                                (response-channel/create-write-res-channel req {}))
-        _                                       (h2o/start-response req-ctx-ptr status headers headers-len content-length on-proceed on-stop)]
+         :as   ring-resp}                    (with-cl-or-te ring-resp)
+        [headers headers-len content-length] (build-headers ring-resp)]
+    (h2o/start-response (:req-ctx-ptr req) status
+                        headers headers-len
+                        content-length
+                        (-> req :write-resp :on-proceed)
+                        (-> req :write-resp :on-stop))
     (if body
-      (ring-protocols/write-body-to-stream body ring-resp out-stream)
+      (ring-protocols/write-body-to-stream body ring-resp (-> req :write-resp :out-stream))
       #_(srb/write-body-to-stream body ring-resp out-stream)
-      (.close out-stream))))
+      (.close (-> req :write-resp :out-stream)))))

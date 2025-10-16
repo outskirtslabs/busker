@@ -118,11 +118,15 @@ size_t clj_h2o_context_get_shutdown_conns(h2o_context_t *ctx) {
 
 static void clj_generator_proceed(h2o_generator_t *gen, h2o_req_t *req) {
   (void)req; /* unused parameter */
+
+  if (!gen) {
+    return;
+  }
+
   /* gen points to the generator member inside clj_stream_ctx_t, not the start
    * of the struct. */
   clj_req_ctx_t *ctx = H2O_STRUCT_FROM_MEMBER(clj_req_ctx_t, generator, gen);
 
-  /* Defensive guard: drop callback if slot is not in use */
   if (!ctx) {
     return;
   }
