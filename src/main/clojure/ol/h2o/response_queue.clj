@@ -2,16 +2,15 @@
   (:require
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]
-   [taoensso.trove :as trove]
-   [ol.h2o.util :refer [msg-time]]
    [ol.h2o.buffer-pool :as bp]
    [ol.h2o.byte-bounded-queue :as bbq]
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
-   [ol.h2o.pool :as pool])
+   [ol.h2o.pool :as pool]
+   [taoensso.trove :as trove])
   (:import
-   [java.lang.foreign Arena MemorySegment]
    [java.io OutputStream]
+   [java.lang.foreign Arena MemorySegment]
    [java.nio ByteBuffer]
    [java.nio.channels Channels WritableByteChannel]
    [java.util.concurrent.atomic AtomicBoolean AtomicReference]
@@ -38,7 +37,7 @@
     (pool/release p b)))
 
 (defrecord
-    ^{:doc "Per-request state for the queue-based sender.
+ ^{:doc "Per-request state for the queue-based sender.
    Fields:
    - req: the Request
    - bbq: SPSC ByteBoundedQueue of Chunk (writer enqueues, worker drains).
@@ -54,16 +53,16 @@
         :large-threshold  int
         :max-buffered-bytes long
         :max-vecs-per-send int}"}
-    ResponseState
-    [req bbq
-     ^AtomicBoolean scheduled?_
-     ^AtomicReference in-flight_
-     ^AtomicBoolean closing?_
-     ^AtomicBoolean stopped?_
-     ^AtomicBoolean final-enqueued?_
-     ^AtomicReference current-buffer_
-     ^FixedPool buffer-pool
-     ^clojure.lang.IPersistentMap config])
+ ResponseState
+ [req bbq
+  ^AtomicBoolean scheduled?_
+  ^AtomicReference in-flight_
+  ^AtomicBoolean closing?_
+  ^AtomicBoolean stopped?_
+  ^AtomicBoolean final-enqueued?_
+  ^AtomicReference current-buffer_
+  ^FixedPool buffer-pool
+  ^clojure.lang.IPersistentMap config])
 
 (def default-output-buffer-size
   "How much body data in bytes accumulates before writing to the network"
@@ -144,6 +143,7 @@
   "Worker thread. Called after proceed indicates we can send more chunks to native, returns true if final was sent"
   [req bbq preferred-chunk-size arena]
   ;; st must hold an :in-flight ref you set to `chunks` to keep ByteBuffers alive
+
   (let [chunks         (bbq/drain bbq preferred-chunk-size)
         #_#_total-size (reduce + (map :bytes chunks))]
     (when (seq chunks)
@@ -166,29 +166,29 @@
   "Evloop worker thread: drain chunks and send to native when ready."
   [^ResponseState st]
   (when-not (.get ^AtomicBoolean (:stopped?_ st))
-    (let [arena  (Arena/ofAuto)
-          result (drain-chunks (:req st) (:bbq st) (get-in st [:config :preferred-chunk-size] Long/MAX_VALUE)
-                               arena)]
-      (if result
-        (let [[final? chunks stable-segs] result]
-          (.set ^AtomicReference (:in-flight_ st) [chunks arena stable-segs])
-          (when final?
-            (.set ^AtomicBoolean (:stopped?_ st) true)))
-        (.set ^AtomicBoolean (:scheduled?_ st) false)))))
+    (if (nil? (.get ^AtomicReference (:in-flight_ st)))
+      (let [arena  (Arena/ofAuto)
+            result (drain-chunks (:req st) (:bbq st) (get-in st [:config :preferred-chunk-size] Long/MAX_VALUE)
+                                 arena)]
+        (if result
+          (let [[final? chunks stable-segs] result]
+            (.set ^AtomicReference (:in-flight_ st) [chunks arena stable-segs])
+            (when final?
+              (.set ^AtomicBoolean (:stopped?_ st) true)))
+          (.set ^AtomicBoolean (:scheduled?_ st) false))))))
 
 (defn schedule-drain!
   "Try to schedule a drain task on the event loop.
    Uses CAS on scheduled?_ to ensure only one drain is posted at a time.
    Returns true if a new drain was scheduled, false if one was already pending."
   [^ResponseState st]
-  (let [trig (when (.compareAndSet ^AtomicBoolean (:scheduled?_ st) false true)
-               (trove/log! {:id :sending-vec})
-               (evloop/send-msg (:worker (:req st)) [:h2o/sendvec (fn [] (send-vecs st))])
-               true)]
-    (trove/log! {:id :schedule-drain :msg (str
-                                           (bbq/queued-bytes (:bbq st))
-                                           " / " (bbq/capacity-bytes (:bbq st))
-                                           " triggered schedule?=" trig)})))
+  (let [trig (if (.compareAndSet ^AtomicBoolean (:scheduled?_ st) false true)
+               (do
+                 (evloop/send-msg (:worker (:req st)) [:h2o/sendvec (fn [] (send-vecs st))])
+                 :sent-msg)
+               (do
+                 (evloop/wake (:worker (:req st)))
+                 :woke))]))
 
 (defn report-error [e]
   (trove/log! {:level :error :id :h2o/error :ex e}))
@@ -199,8 +199,7 @@
   (try
     (.set ^AtomicBoolean (:scheduled?_ st) false)
     (release-chunks (:buffer-pool st) (:in-flight_ st))
-    (when-not (.get ^AtomicBoolean (:stopped?_ st))
-      (schedule-drain! st))
+    (when-not (.get ^AtomicBoolean (:stopped?_ st)) (schedule-drain! st))
     (catch Exception e
       (report-error e))))
 
@@ -258,7 +257,7 @@
                    (.flip buf)
                    (let [chunk (seal-chunk [buf] false)]
                      (.set cur-ref nil)
-                     (msg-time "bbq/put" (bbq/put (:bbq st) chunk))
+                     (bbq/put (:bbq st) chunk)
                      (schedule-drain! st)))
                  (recur (- left can-copy))))))))
      (isOpen [_]

@@ -5,11 +5,10 @@
  :tasks          {:requires           ([babashka.fs :as fs]
                                        [clojure.string :as str]
                                        [babashka.tasks :refer [shell]])
-                  h2o                 {:doc "Build libh2o" :task (shell {:out :inherit :err :out} "nix" "build" ".#packages.x86_64-linux.h2o-bundle" "--print-build-logs")}
+                  compile-h2o         {:doc "Build libh2o" :task (shell {:out :inherit :err :out} "nix" "build" "--impure" ".#packages.x86_64-linux.h2o-bundle" "--print-build-logs")}
                   compile-shim        {:doc "Compile C shim library" :task (clojure "-T:build compile-shim")}
                   prep                {:doc "Prepare the clojure deps" :task (clojure "-Xdeps prep :aliases '[:dev :test]'")}
-                  compile             {:doc "Compile all the things" :task (do (clojure "-T:build compile")
-                                                                               (clojure "-Xdeps prep :aliases '[:dev :test]'"))}
+                  compile             {:doc "Compile all the things" :depends [compile-shim prep]}
                   test                (apply clojure "-M:dev:test:kaocha" *command-line-args*)
                   test.large-payloads {:doc  "Run large payload tests with restricted memory (2GB heap)"
                                        :task (clojure "-J-Xmx2g" "-J-Xms2g" "-M:dev:test:kaocha" "--no-capture-output" "--focus" "ol.h2o.large-payload-test")}

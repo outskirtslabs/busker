@@ -3,11 +3,43 @@
    [clojure.string :as str]
    [ol.h2o.server :as server]))
 
+(def gib (* 1024 1024 1024))
+(def mib (* 1024 1024))
+(def kib 1024)
+
 (defn read-body
   "Read request body as string"
   [req]
   (when-let [body (:body req)]
     (slurp body)))
+
+(defn repeat-input-stream ^java.io.InputStream
+  [n b]
+  (let [b   (bit-and (int b) 0xFF)        ; 0..255
+        bb  (unchecked-byte b)
+        cnt (java.util.concurrent.atomic.AtomicLong. n)]
+    (proxy [java.io.InputStream] []
+      (read
+        ([] (let [r (.get cnt)]
+              (if (pos? r)
+                (do (.decrementAndGet cnt) b) ; returns 0..255
+                -1)))
+        ([buf]
+         (let [r (.get cnt)]
+           (if (zero? r)
+             -1
+             (let [k (int (min r (alength buf)))]
+               (java.util.Arrays/fill buf 0 k bb)
+               (.addAndGet cnt (- k))
+               k))))
+        ([buf off len]
+         (let [r (.get cnt)]
+           (if (zero? r)
+             -1
+             (let [k (int (min r len))]
+               (java.util.Arrays/fill buf off (+ off k) bb)
+               (.addAndGet cnt (- k))
+               k))))))))
 
 (def abcs (cycle "abcdefghijklmnopqrstuvwxyz"))
 (defn echo-handler
@@ -42,8 +74,9 @@
   "Return a large response body"
   [_req]
   (println "Large response handler")
-  (let [size (* 100 1024) ; 100 KB
-        body (apply str (repeat size "X"))]
+  (let [size (* 30 mib)
+        body (repeat-input-stream size \a)
+        #_(apply str (repeat size "X"))]
     {:status 200
      :headers {"content-type" "text/plain"
                "x-body-size" (str size)}

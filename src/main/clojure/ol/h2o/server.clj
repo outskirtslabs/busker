@@ -1,7 +1,6 @@
 (ns ol.h2o.server
   (:require
    [coffi.ffi :as ffi]
-   [taoensso.trove :as trove]
    [coffi.mem :as mem]
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
@@ -142,11 +141,10 @@
     ;; Perform periodic cleanup tasks
     (let [now (h2o/evloop-now loop-ptr)
           max-wait (h2o/cleanup-thread now ctx-ptr)]
-      (trove/log! {:level :info :id :max-wait :msg (str max-wait)})
       ;; Throttle listeners based on connection count (only if not shutting down)
       (when-not shutdown-initiated?
         (update-listener-state! listener-socks accept-callbacks))
-      (h2o/evloop-run loop-ptr max-wait))
+      (h2o/evloop-run loop-ptr (if (pos? (evloop/count-msgs worker)) 0 max-wait)))
     {:shutdown-initiated? shutdown-initiated?}))
 
 (defn create-server
