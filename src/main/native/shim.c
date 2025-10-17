@@ -77,8 +77,6 @@ void clj_h2o_socket_set_on_close(h2o_socket_t *sock, void *callback,
   }
 }
 
-size_t clj_h2o_globalconf_size(void) { return sizeof(h2o_globalconf_t); }
-
 size_t clj_h2o_context_size(void) { return sizeof(h2o_context_t); }
 
 size_t clj_h2o_accept_ctx_size(void) { return sizeof(h2o_accept_ctx_t); }
@@ -495,4 +493,125 @@ void clj_h2o_mt_wakeup(clj_mt_receiver_t *wr) {
     return;
   /* just wake the loop; no message allocation necessary */
   h2o_multithread_send_message(&wr->receiver, NULL);
+}
+
+static h2o_globalconf_t *
+clj_h2o_apply_flat_config(h2o_globalconf_t *conf,
+                          const clj_h2o_flat_globalconf_t *flat) {
+  if (!conf || !flat)
+    return conf;
+
+  if (flat->has_server_name && flat->server_name != NULL) {
+    size_t len = strlen(flat->server_name);
+    conf->server_name = h2o_strdup(NULL, flat->server_name, len);
+  }
+
+  if (flat->has_proxy_status_identity && flat->proxy_status_identity != NULL) {
+    size_t len = strlen(flat->proxy_status_identity);
+    conf->proxy_status_identity =
+        h2o_strdup(NULL, flat->proxy_status_identity, len);
+  }
+
+  if (flat->has_max_request_entity_size) {
+    conf->max_request_entity_size = flat->max_request_entity_size;
+  }
+
+  if (flat->has_max_delegations) {
+    conf->max_delegations = flat->max_delegations;
+  }
+
+  if (flat->has_max_reprocesses) {
+    conf->max_reprocesses = flat->max_reprocesses;
+  }
+
+  if (flat->has_handshake_timeout) {
+    conf->handshake_timeout = flat->handshake_timeout;
+  }
+
+  if (flat->has_max_spare_pipes) {
+    conf->max_spare_pipes = flat->max_spare_pipes;
+  }
+
+  if (flat->has_http1__req_timeout) {
+    conf->http1.req_timeout = flat->http1__req_timeout;
+  }
+
+  if (flat->has_http1__req_io_timeout) {
+    conf->http1.req_io_timeout = flat->http1__req_io_timeout;
+  }
+
+  if (flat->has_http1__upgrade_to_http2) {
+    conf->http1.upgrade_to_http2 = flat->http1__upgrade_to_http2;
+  }
+
+  if (flat->has_http2__idle_timeout) {
+    conf->http2.idle_timeout = flat->http2__idle_timeout;
+  }
+
+  if (flat->has_http2__graceful_shutdown_timeout) {
+    conf->http2.graceful_shutdown_timeout =
+        flat->http2__graceful_shutdown_timeout;
+  }
+
+  if (flat->has_http2__max_streams) {
+    conf->http2.max_streams = flat->http2__max_streams;
+  }
+
+  if (flat->has_http2__max_concurrent_requests_per_connection) {
+    conf->http2.max_concurrent_requests_per_connection =
+        flat->http2__max_concurrent_requests_per_connection;
+  }
+
+  if (flat->has_http2__max_concurrent_streaming_requests_per_connection) {
+    conf->http2.max_concurrent_streaming_requests_per_connection =
+        flat->http2__max_concurrent_streaming_requests_per_connection;
+  }
+
+  if (flat->has_http2__max_streams_for_priority) {
+    conf->http2.max_streams_for_priority =
+        flat->http2__max_streams_for_priority;
+  }
+
+  if (flat->has_http2__active_stream_window_size) {
+    conf->http2.active_stream_window_size =
+        flat->http2__active_stream_window_size;
+  }
+
+  if (flat->has_http2__dos_delay) {
+    conf->http2.dos_delay = flat->http2__dos_delay;
+  }
+
+  if (flat->has_http3__idle_timeout) {
+    conf->http3.idle_timeout = flat->http3__idle_timeout;
+  }
+
+  if (flat->has_http3__graceful_shutdown_timeout) {
+    conf->http3.graceful_shutdown_timeout =
+        flat->http3__graceful_shutdown_timeout;
+  }
+
+  if (flat->has_http3__active_stream_window_size) {
+    conf->http3.active_stream_window_size =
+        flat->http3__active_stream_window_size;
+  }
+
+  if (flat->has_http3__ack_frequency) {
+    conf->http3.ack_frequency = flat->http3__ack_frequency;
+  }
+
+  return conf;
+}
+
+h2o_globalconf_t *
+clj_h2o_create_globalconf(const clj_h2o_flat_globalconf_t *flat) {
+  h2o_globalconf_t *conf = malloc(sizeof(h2o_globalconf_t));
+  if (conf == NULL)
+    return NULL;
+
+  h2o_config_init(conf);
+
+  if (flat != NULL)
+    clj_h2o_apply_flat_config(conf, flat);
+
+  return conf;
 }

@@ -80,7 +80,7 @@
       (util/header response "content-length" (str size))
       response)))
 
-(def use-new-queue? false)
+(def use-new-queue? true)
 
 (defn with-response-writer [req]
   (assoc req :write-resp

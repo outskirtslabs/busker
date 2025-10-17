@@ -7,6 +7,7 @@
    [ol.h2o.native.socket :as socket]
    [ol.h2o.request :as request])
   (:import
+   [java.util.concurrent Executors]
    [java.util.concurrent.atomic AtomicBoolean AtomicLong]))
 
 (set! *warn-on-reflection* true)
@@ -56,29 +57,104 @@
                         (h2o/socket-set-on-close sock-ptr on-close-callback (mem/as-segment 0))
                         (h2o/h2o-accept accept-ctx-ptr sock-ptr))))]
     {::accept-cb accept-cb
-     ::accept-cb-ptr  (mem/serialize accept-cb [::ffi/fn [::mem/pointer ::mem/c-string] ::mem/void])}))
+     ::accept-cb-ptr (mem/serialize accept-cb [::ffi/fn [::mem/pointer ::mem/c-string] ::mem/void])}))
+
+(defn config->flat-globalconf-t
+  "Convert public config map to flat globalconf struct format.
+   Arena keeps string fields alive during native call (C function will h2o_strdup them)."
+  [config]
+  (let [;; Helper to set has_ flag (1 if key present, 0 otherwise)
+        has? (fn [k] (if (contains? config k) 1 0))
+        ;; Helper to get numeric value or 0
+        num-val (fn [k] (get config k 0))
+        ;; Helper to convert boolean to int (1/0)
+        bool->int (fn [k] (if (get config k) 1 0))]
+
+    {:has_server_name (has? :server-name)
+     :server_name (get config :server-name)
+
+     :has_proxy_status_identity (has? :proxy-status-identity)
+     :proxy_status_identity (get config :proxy-status-identity)
+
+     :has_max_request_entity_size (has? :max-request-entity-size)
+     :max_request_entity_size (num-val :max-request-entity-size)
+
+     :has_max_delegations (has? :max-delegations)
+     :max_delegations (num-val :max-delegations)
+
+     :has_max_reprocesses (has? :max-reprocesses)
+     :max_reprocesses (num-val :max-reprocesses)
+
+     :has_handshake_timeout (has? :handshake-timeout)
+     :handshake_timeout (num-val :handshake-timeout)
+
+     :has_max_spare_pipes (has? :max-spare-pipes)
+     :max_spare_pipes (num-val :max-spare-pipes)
+
+     :has_http1__req_timeout (has? :http1-req-timeout)
+     :http1__req_timeout (num-val :http1-req-timeout)
+
+     :has_http1__req_io_timeout (has? :http1-req-io-timeout)
+     :http1__req_io_timeout (num-val :http1-req-io-timeout)
+
+     :has_http1__upgrade_to_http2 (has? :http1-upgrade?)
+     :http1__upgrade_to_http2 (bool->int :http1-upgrade?)
+
+     :has_http2__idle_timeout (has? :http2-idle-timeout)
+     :http2__idle_timeout (num-val :http2-idle-timeout)
+
+     :has_http2__graceful_shutdown_timeout (has? :http2-graceful-shutdown-timeout)
+     :http2__graceful_shutdown_timeout (num-val :http2-graceful-shutdown-timeout)
+
+     :has_http2__max_streams (has? :http2-max-streams)
+     :http2__max_streams (num-val :http2-max-streams)
+
+     :has_http2__max_concurrent_requests_per_connection (has? :http2-max-requests)
+     :http2__max_concurrent_requests_per_connection (num-val :http2-max-requests)
+
+     :has_http2__max_concurrent_streaming_requests_per_connection (has? :http2-max-streaming-requests)
+     :http2__max_concurrent_streaming_requests_per_connection (num-val :http2-max-streaming-requests)
+
+     :has_http2__max_streams_for_priority (has? :http2-max-priority-streams)
+     :http2__max_streams_for_priority (num-val :http2-max-priority-streams)
+
+     :has_http2__active_stream_window_size (has? :http2-stream-window-size)
+     :http2__active_stream_window_size (num-val :http2-stream-window-size)
+
+     :has_http2__dos_delay (has? :http2-dos-delay)
+     :http2__dos_delay (num-val :http2-dos-delay)
+
+     :has_http3__idle_timeout (has? :http3-idle-timeout)
+     :http3__idle_timeout (num-val :http3-idle-timeout)
+
+     :has_http3__graceful_shutdown_timeout (has? :http3-graceful-shutdown-timeout)
+     :http3__graceful_shutdown_timeout (num-val :http3-graceful-shutdown-timeout)
+
+     :has_http3__active_stream_window_size (has? :http3-stream-window-size)
+     :http3__active_stream_window_size (num-val :http3-stream-window-size)
+
+     :has_http3__ack_frequency (has? :http3-ack-frequency)
+     :http3__ack_frequency (num-val :http3-ack-frequency)}))
 
 (defn create-server-config
   "Create and initialize h2o global configuration with a default host and Ring handler.
    Uses provided arena for server lifetime resources.
    Returns map with ::config-ptr, ::hostconf-ptr, ::handler-ptr"
-  [arena ring-handler]
-  (let [size (h2o/globalconf-size)
-        config-ptr (mem/alloc size arena)]
-    (h2o/config-init config-ptr)
-    (let [host-iovec-seg (h2o/create-iovec "default" arena)
-          host-iovec-data (mem/deserialize host-iovec-seg ::h2o/h2o-iovec-t)
-          hostconf-ptr (h2o/config-register-host config-ptr host-iovec-data 65535)
-          on-request-cb (partial request/on-request ring-handler)
-          on-request-cleanup-cb (partial request/on-request-cleanup ring-handler)
-          handler (h2o/create-handler hostconf-ptr on-request-cb on-request-cleanup-cb true true)]
-      ;; all of these things pay not be used again, but they must not be GCed
-      ;; until the server itself is reaped
-      {::config-ptr config-ptr
-       ::hostconf-ptr hostconf-ptr
-       ::on-request-cb on-request-cb
-       ::on-request-cleanup-cb on-request-cleanup-cb
-       ::handler handler})))
+  [arena ring-handler config]
+  (let [config-ptr (h2o/create-global-conf (mem/serialize (config->flat-globalconf-t config) ::h2o/clj-h2o-flat-globalconf-t))
+        host-iovec-seg (h2o/create-iovec "default" arena)
+        host-iovec-data (mem/deserialize host-iovec-seg ::h2o/h2o-iovec-t)
+        hostconf-ptr (h2o/config-register-host config-ptr host-iovec-data 65535)
+        on-request-cb (partial request/on-request ring-handler)
+        on-request-cleanup-cb (partial request/on-request-cleanup ring-handler)
+        handler (h2o/create-handler hostconf-ptr on-request-cb on-request-cleanup-cb true true)]
+    ;; all of these things may not be used again, but they must not be GCed
+    ;; until the server itself is reaped
+    {::config-ptr config-ptr
+     ::hostconf-ptr hostconf-ptr
+     ::on-request-cb on-request-cb
+     ::on-request-cleanup-cb on-request-cleanup-cb
+     ::handler handler}))
 
 (defn update-listener-state!
   "Throttle TCP listeners by starting/stopping accept callbacks based on connection count.
@@ -90,7 +166,7 @@
   (let [;; TODO implement connection limit
         should-accept? true]
     (doseq [listener-idx (range (count listener-socks))]
-      (let [sock-ptr        (nth listener-socks listener-idx)
+      (let [sock-ptr (nth listener-socks listener-idx)
             accept-callback (nth accept-callbacks listener-idx)]
         #_{:clj-kondo/ignore [:type-mismatch]}
         (when-not (mem/null? sock-ptr)
@@ -161,94 +237,177 @@
       (h2o/evloop-run loop-ptr (if (pos? (evloop/count-msgs worker)) 0 max-wait)))
     {:shutdown-initiated? shutdown-initiated?}))
 
+(defn with-defaults [{:keys [handler n-workers listeners max-connections executor server-name]
+                      :or {n-workers 1
+                           server-name "ol.h2o/dev"
+                           listeners [{:port 8080}]
+                           executor (Executors/newVirtualThreadPerTaskExecutor)
+                           max-connections default-max-connections}
+                      :as config}]
+  (merge config {:executor executor
+                 :server-name server-name
+                 :listeners listeners
+                 :n-workers n-workers
+                 :max-connections max-connections}))
+
 (defn start-server
-  "Start the h2o server and begin accepting connections"
-  [{:keys [handler n-workers listeners max-connections]
-    :or   {n-workers       1
-           listeners       [{:port 8080}]
-           max-connections default-max-connections}}]
+  "Start an h2o webserver to serve the given Ring handler according to the
+  supplied options:
 
-  (when-not handler (throw (ex-info "Handler is required" {:handler handler})))
+  Core Options:
+  :listeners              - vector of listener maps, each with :port (required)
+                            (defaults to [{:port 8080}])
+  :n-workers              - number of event loop worker threads
+                            (defaults to available CPU cores)
+  :executor               - ExecutorService for handler execution
+                            (defaults to virtual thread executor)
+  :max-connections        - maximum concurrent connections across all workers
+                            (defaults to 1024)
 
-  (let [arena                            (mem/shared-arena)
-        active-connections               (AtomicLong. 0)
-        started?                         (AtomicBoolean. true)
-        shutting-down?                   (AtomicBoolean. false)
-        {::keys [config-ptr] :as config} (create-server-config arena handler)
-        message-handler                  evloop-msg-processor
+  Server Identity:
+  :server-name            - server name for Server header
+                            (defaults to h2o version string)
+  :proxy-status-identity  - identity for Proxy-Status header (RFC 9209)
 
-        loops    (h2o/create-loops n-workers)
-        contexts (h2o/create-contexts arena loops config-ptr)
+  Request Limits:
+  :max-request-entity-size       - maximum request entity size in bytes
+                            (defaults to 1GB)
+  :max-delegations        - maximum internal request delegations
+                            (defaults to 5)
+  :max-reprocesses        - maximum internal request reprocesses
+                            (defaults to 5)
 
-        wakeup-receivers (vec (for [ctx-ptr contexts]
-                                (h2o/mt-create-wakeup-receiver ctx-ptr)))
+  Timeouts (all in milliseconds):
+  :handshake-timeout      - SSL/TLS handshake timeout
+                            (defaults to 10000)
+  :max-spare-pipes        - maximum idle connection pipes to retain
+                            (defaults to 0)
 
-        on-close-callback (create-connection-close-callback active-connections)
+  HTTP/1.1 Options:
+  :http1-req-timeout      - HTTP/1.1 request timeout
+                            (defaults to 10000)
+  :http1-req-io-timeout   - HTTP/1.1 request I/O timeout
+                            (defaults to 5000)
+  :http1-upgrade?         - allow HTTP/1.1 to HTTP/2 upgrade
+                            (defaults to true)
 
-        listener-fds (vec (for [{:keys [port]} listeners]
-                            (socket/open-master-listener {:port port})))
+  HTTP/2 Options:
+  :http2-idle-timeout     - HTTP/2 idle timeout
+                            (defaults to 10000)
+  :http2-graceful-shutdown-timeout
+                          - HTTP/2 graceful shutdown timeout (0 = no timeout)
+                            (defaults to 0)
+  :http2-max-streams      - maximum concurrent HTTP/2 streams
+                            (defaults to 100)
+  :http2-max-requests     - maximum concurrent HTTP/2 requests per connection
+                            (defaults to 100)
+  :http2-max-streaming-requests
+                          - maximum concurrent streaming requests per connection
+                            (defaults to 1)
+  :http2-max-priority-streams
+                          - maximum streams in IDLE/CLOSED for priority tracking
+                            (defaults to 16)
+  :http2-stream-window-size
+                          - HTTP/2 stream-level flow control window size
+                            (defaults to 16777216, 16MB)
+  :http2-dos-delay        - delay in ms when suspicious behavior detected
+                            (defaults to 100)
 
-        dup-fds (vec (for [master-fd listener-fds]
-                       (socket/dup-for-threads master-fd n-workers)))
+  HTTP/3 Options:
+  :http3-idle-timeout     - HTTP/3 idle timeout (from quicly)
+  :http3-graceful-shutdown-timeout
+                          - HTTP/3 graceful shutdown timeout
+                            (defaults to 0)
+  :http3-stream-window-size
+                          - HTTP/3 stream-level flow control window size
+                            (defaults to 16777216, 16MB)
+  :http3-ack-frequency    - ACK frequency for HTTP/3
+                            (defaults to 0, uses quicly default)
 
-        accept-ctxs (vec (for [thread-idx (range n-workers)]
-                           (h2o/create-accept-ctx
-                            arena
-                            (nth contexts thread-idx)
-                            config-ptr)))
+  Returns a server map that can be passed to stop-server."
+  ([handler]
+   (start-server handler {}))
+  ([handler config]
+   (when-not handler (throw (ex-info "Handler is required" {:handler handler})))
+   (let [{:keys [n-workers listeners max-connections executor] :as config} (with-defaults config)
+         arena (mem/shared-arena)
+         active-connections (AtomicLong. 0)
+         started? (AtomicBoolean. true)
+         shutting-down? (AtomicBoolean. false)
+         {::keys [config-ptr] :as config} (create-server-config arena handler config)
+         message-handler evloop-msg-processor
 
-        accept-callbacks (vec (for [accept-ctx-ptr accept-ctxs]
-                                (create-accept-callback accept-ctx-ptr active-connections (::connection-close-cb-ptr on-close-callback))))
+         loops (h2o/create-loops n-workers)
+         contexts (h2o/create-contexts arena loops config-ptr)
 
-        listener-sockets (vec (for [thread-idx (range n-workers)]
-                                (vec (for [listener-idx (range (count listeners))]
-                                       (let [fd       (nth (nth dup-fds listener-idx) thread-idx)
-                                             sock-ptr (h2o/create-socket-for-loop
-                                                       (nth loops thread-idx)
-                                                       fd
-                                                       H2O_SOCKET_FLAG_DONT_READ)
-                                             cb-idx   (+ (* thread-idx (count listeners)) listener-idx)
-                                             callback (::accept-cb-ptr (nth accept-callbacks cb-idx))]
-                                         (assert callback)
-                                         (h2o/socket-read-start sock-ptr callback)
-                                         sock-ptr)))))
+         wakeup-receivers (vec (for [ctx-ptr contexts]
+                                 (h2o/mt-create-wakeup-receiver ctx-ptr)))
 
-        workers (vec (for [thread-idx (range n-workers)]
-                       (let [loop-ptr                    (nth loops thread-idx)
-                             ctx-ptr                     (nth contexts thread-idx)
-                             listener-socks-for-thread   (nth listener-sockets thread-idx)
-                             thread-accept-callback     (::accept-cb-ptr (nth accept-callbacks thread-idx))
-                             _ (assert thread-accept-callback)
-                             accept-callbacks-for-thread (vec (repeat (count listener-socks-for-thread)
-                                                                      thread-accept-callback))]
+         on-close-callback (create-connection-close-callback active-connections)
 
-                         (evloop/start-worker!
-                          (fn [worker loop-state] (worker-loop worker loop-state {:listener-socks   listener-socks-for-thread
-                                                                                  :accept-callbacks accept-callbacks-for-thread
-                                                                                  :loop-ptr         loop-ptr
-                                                                                  :ctx-ptr          ctx-ptr
-                                                                                  :shutting-down?   shutting-down?}))
-                          message-handler
-                          (nth wakeup-receivers thread-idx)))))]
-    {::arena              arena
-     ::config             config
-     ::handler            handler
-     ::n-workers          n-workers
-     ::listeners          listeners
-     ::max-connections    max-connections
-     ::active-connections active-connections
-     ::started?           started?
-     ::shutting-down?     shutting-down?
-     ::loops              loops
-     ::contexts           contexts
-     ::accept-ctxs        accept-ctxs
-     ::accept-callbacks   accept-callbacks
-     ::on-close-callback  on-close-callback
-     ::listener-fds       listener-fds
-     ::wakeup-receivers   wakeup-receivers
-     ::dup-fds            dup-fds
-     ::listener-sockets   listener-sockets
-     ::workers            workers}))
+         listener-fds (vec (for [{:keys [port]} listeners]
+                             (socket/open-master-listener {:port port})))
+
+         dup-fds (vec (for [master-fd listener-fds]
+                        (socket/dup-for-threads master-fd n-workers)))
+
+         accept-ctxs (vec (for [thread-idx (range n-workers)]
+                            (h2o/create-accept-ctx
+                             arena
+                             (nth contexts thread-idx)
+                             config-ptr)))
+
+         accept-callbacks (vec (for [accept-ctx-ptr accept-ctxs]
+                                 (create-accept-callback accept-ctx-ptr active-connections (::connection-close-cb-ptr on-close-callback))))
+
+         listener-sockets (vec (for [thread-idx (range n-workers)]
+                                 (vec (for [listener-idx (range (count listeners))]
+                                        (let [fd (nth (nth dup-fds listener-idx) thread-idx)
+                                              sock-ptr (h2o/create-socket-for-loop
+                                                        (nth loops thread-idx)
+                                                        fd
+                                                        H2O_SOCKET_FLAG_DONT_READ)
+                                              cb-idx (+ (* thread-idx (count listeners)) listener-idx)
+                                              callback (::accept-cb-ptr (nth accept-callbacks cb-idx))]
+                                          (h2o/socket-read-start sock-ptr callback)
+                                          sock-ptr)))))
+
+         workers (vec (for [thread-idx (range n-workers)]
+                        (let [loop-ptr (nth loops thread-idx)
+                              ctx-ptr (nth contexts thread-idx)
+                              listener-socks-for-thread (nth listener-sockets thread-idx)
+                              thread-accept-callback (::accept-cb-ptr (nth accept-callbacks thread-idx))
+                              accept-callbacks-for-thread (vec (repeat (count listener-socks-for-thread)
+                                                                       thread-accept-callback))]
+
+                          (evloop/start-worker!
+                           (fn [worker loop-state] (worker-loop worker loop-state {:listener-socks listener-socks-for-thread
+                                                                                   :accept-callbacks accept-callbacks-for-thread
+                                                                                   :loop-ptr loop-ptr
+                                                                                   :ctx-ptr ctx-ptr
+                                                                                   :shutting-down? shutting-down?}))
+                           message-handler
+                           (nth wakeup-receivers thread-idx)))))]
+     {::arena arena
+      ::config config
+      ::handler handler
+      ::executor executor
+      ::n-workers n-workers
+      ::listeners listeners
+      ::max-connections max-connections
+      ::active-connections active-connections
+      ::started? started?
+      ::shutting-down? shutting-down?
+      ::loops loops
+      ::contexts contexts
+      ::accept-ctxs accept-ctxs
+      ::accept-callbacks accept-callbacks
+      ::on-close-callback on-close-callback
+      ::listener-fds listener-fds
+      ::wakeup-receivers wakeup-receivers
+      ::dup-fds dup-fds
+      ::listener-sockets listener-sockets
+      ::workers workers})))
 
 (defn stop-server
   "Stop the h2o server and clean up resources.
