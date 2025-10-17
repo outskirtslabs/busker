@@ -102,4 +102,4 @@
     (if body
       (ring-protocols/write-body-to-stream body ring-resp (-> req :write-resp :out-stream))
       #_(srb/write-body-to-stream body ring-resp out-stream)
-      (.close (-> req :write-resp :out-stream)))))
+      (.close ^OutputStream (-> req :write-resp :out-stream)))))

@@ -1,12 +1,13 @@
 (ns ol.h2o.native
-  (:import
-   [java.io InputStream])
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]
    [coffi.ffi :as ffi :refer [defcfn]]
    [coffi.layout :as layout]
-   [coffi.mem :as mem]))
+   [coffi.mem :as mem])
+  (:import
+   [java.io InputStream]
+   [java.lang.foreign MemorySegment]))
 
 (set! *warn-on-reflection* true)
 
@@ -556,7 +557,7 @@
 (defn str->iovec
   [s arena]
   (let [str-ptr (mem/serialize s ::mem/c-string arena)
-        len (max 0  (dec (.byteSize str-ptr)))]
+        len (max 0  (dec (.byteSize ^MemorySegment str-ptr)))]
     {:base str-ptr :len len}))
 
 (defn create-context
