@@ -154,7 +154,6 @@
   (layout/with-c-layout
     [::mem/struct
      [[:authority ::mem/pointer]
-      [:charset ::mem/pointer]
       [:method ::mem/pointer]
       [:path ::mem/pointer]
       [:remote_addr ::mem/pointer]
@@ -162,7 +161,6 @@
       [:headers ::mem/pointer]
 
       [:authority_len ::mem/long]
-      [:charset_len ::mem/long]
       [:method_len ::mem/long]
       [:path_len ::mem/long]
       [:remote_addr_len ::mem/long]
@@ -174,7 +172,6 @@
 #_(print-offsets-for (layout/with-c-layout
                        [::mem/struct
                         [[:authority ::mem/pointer]
-                         [:charset ::mem/pointer]
                          [:method ::mem/pointer]
                          [:path ::mem/pointer]
                          [:remote_addr ::mem/pointer]
@@ -182,7 +179,6 @@
                          [:headers ::mem/pointer]
 
                          [:authority_len ::mem/long]
-                         [:charset_len ::mem/long]
                          [:method_len ::mem/long]
                          [:path_len ::mem/long]
                          [:remote_addr_len ::mem/long]
@@ -569,11 +565,6 @@
     (context-init ctx-ptr loop-ptr config-ptr)
     ctx-ptr))
 
-#_(defn dispose-server-config
-    "Dispose h2o configuration and free resources"
-    [config-ptr]
-    (config-dispose config-ptr))
-
 (defn create-loops
   "Create n event loops.
    Returns vector of h2o_evloop_t pointers"
@@ -650,15 +641,13 @@
    Returns: Ring request map"
   [{:keys [method method_len path path_len authority authority_len
            http_version headers headers_len has_body
-           scheme scheme_len remote_addr remote_addr_len
-           #_#_charset charset_len]}
+           scheme scheme_len remote_addr remote_addr_len]}
    ^InputStream input-stream]
   (let [method-str (->string method method_len)
         path-str (->string path path_len)
         authority-str (->string authority authority_len)
         scheme-str (->string scheme scheme_len)
         remote-addr-str (->string remote_addr remote_addr_len)
-        #_#_charset-str (->string charset charset_len)
         headers-map (build-ring-headers-map headers headers_len)
         [uri query-string] (if path-str
                              (let [idx (str/index-of path-str "?")]

@@ -48,7 +48,6 @@ typedef struct {
 
 typedef struct {
   const uint8_t *authority;
-  const uint8_t *charset;
   const uint8_t *method;
   const uint8_t *path;
   const uint8_t *remote_addr;
@@ -56,7 +55,6 @@ typedef struct {
   const clj_header_t *headers;
 
   size_t authority_len;
-  size_t charset_len;
   size_t method_len;
   size_t path_len;
   size_t remote_addr_len;
