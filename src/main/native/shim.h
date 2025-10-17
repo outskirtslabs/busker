@@ -64,7 +64,7 @@ typedef struct {
   size_t headers_len;
 
   int http_version;
-  int has_body;
+  short int has_body;
 } clj_req_meta_t;
 
 typedef struct clj_req_ctx_t clj_req_ctx_t;
@@ -94,6 +94,81 @@ typedef struct {
 
 typedef struct clj_mt_receiver_t clj_mt_receiver_t;
 
+/**
+ * Flat representation of the subset of h2o_globalconf_t exposed via the shim.
+ * Field names follow the <section>__<field> naming convention (e.g.
+ * http1__req_timeout). Each value is guarded by a has_* flag so callers can opt
+ * into overrides without mutating libh2o defaults unintentionally. String
+ * values must be UTF-8 encoded and accompanied by their byte length.
+ */
+typedef struct {
+  short int has_server_name;
+  const char *server_name;
+
+  short int has_proxy_status_identity;
+  const char *proxy_status_identity;
+
+  short int has_max_request_entity_size;
+  size_t max_request_entity_size;
+
+  short int has_max_delegations;
+  unsigned max_delegations;
+
+  short int has_max_reprocesses;
+  unsigned max_reprocesses;
+
+  short int has_handshake_timeout;
+  uint64_t handshake_timeout;
+
+  short int has_max_spare_pipes;
+  size_t max_spare_pipes;
+
+  short int has_http1__req_timeout;
+  uint64_t http1__req_timeout;
+
+  short int has_http1__req_io_timeout;
+  uint64_t http1__req_io_timeout;
+
+  short int has_http1__upgrade_to_http2;
+  int http1__upgrade_to_http2;
+
+  short int has_http2__idle_timeout;
+  uint64_t http2__idle_timeout;
+
+  short int has_http2__graceful_shutdown_timeout;
+  uint64_t http2__graceful_shutdown_timeout;
+
+  short int has_http2__max_streams;
+  uint32_t http2__max_streams;
+
+  short int has_http2__max_concurrent_requests_per_connection;
+  size_t http2__max_concurrent_requests_per_connection;
+
+  short int has_http2__max_concurrent_streaming_requests_per_connection;
+  size_t http2__max_concurrent_streaming_requests_per_connection;
+
+  short int has_http2__max_streams_for_priority;
+  size_t http2__max_streams_for_priority;
+
+  short int has_http2__active_stream_window_size;
+  uint32_t http2__active_stream_window_size;
+
+  short int has_http2__dos_delay;
+  uint64_t http2__dos_delay;
+
+  short int has_http3__idle_timeout;
+  uint64_t http3__idle_timeout;
+
+  short int has_http3__graceful_shutdown_timeout;
+  uint64_t http3__graceful_shutdown_timeout;
+
+  short int has_http3__active_stream_window_size;
+  uint32_t http3__active_stream_window_size;
+
+  short int has_http3__ack_frequency;
+  uint16_t http3__ack_frequency;
+} clj_h2o_flat_globalconf_t;
+
 /* 1 if socket has a read callback (i.e. currently reading), else 0 */
 int clj_h2o_socket_is_reading(h2o_socket_t *sock);
 
@@ -107,9 +182,6 @@ void *clj_h2o_socket_get_write_cb(h2o_socket_t *sock);
 /* Socket on_close callback support for connection tracking */
 void clj_h2o_socket_set_on_close(h2o_socket_t *sock, void *callback,
                                  void *data);
-
-/* Return size of h2o_globalconf_t for FFI allocation */
-size_t clj_h2o_globalconf_size(void);
 
 /* Return size of h2o_context_t for FFI allocation */
 size_t clj_h2o_context_size(void);
@@ -175,5 +247,13 @@ void clj_h2o_mt_destroy_wakeup_receiver(clj_mt_receiver_t *wr);
 
 /* Send a wakeup message to the loop owning this receiver */
 void clj_h2o_mt_wakeup(clj_mt_receiver_t *wr);
+
+/* Create, initialize, and configure a new h2o_globalconf_t.
+ * Allocates memory, calls h2o_config_init, and applies flat config if provided.
+ * Returns NULL on allocation failure, otherwise returns configured globalconf
+ * pointer.
+ */
+h2o_globalconf_t *
+clj_h2o_create_globalconf(const clj_h2o_flat_globalconf_t *flat);
 
 #endif /* CLJ_H2O_SHIM_H */

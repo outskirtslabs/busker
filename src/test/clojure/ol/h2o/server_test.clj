@@ -11,10 +11,9 @@
 (def base (str "http://127.0.0.1:" plain-port))
 
 (defn test-server [handler & {:as opts}]
-  (server/start-server (merge {:handler handler
-                               :listeners [{:port plain-port}]
-                               :max-connections 1024}
-                              opts)))
+  (server/start-server handler (merge {:listeners [{:port plain-port}]
+                                       :max-connections 1024}
+                                      opts)))
 
 (defn req [method path & {:as opts}]
   (->

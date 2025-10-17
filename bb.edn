@@ -17,6 +17,8 @@
                   lint.copy-configs   {:doc  "Copy clj-kondo config files from deps in the project"
                                        :task (let [cp (-> (shell {:out :string} "clojure -Spath -M:test:dev") :out str/trim)]
                                                (shell (str "clj-kondo --lint " cp " --dependencies --copy-configs --skip-lint")))}
+                  lint.shim           {:doc  "Run the clang-tidy linter on the C shim code"
+                                       :task (shell "cmake --build cmake-build-debug --target lint")}
                   lint                {:doc  "Run the clj-kondo linter on the clojure code"
                                        :task (shell (str "clj-kondo" " --fail-level error"
                                                          (if (seq *command-line-args*)

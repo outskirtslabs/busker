@@ -206,6 +206,75 @@
       [:closing ::mem/int]
       [:response_started ::mem/int]]]))
 
+(mem/defalias ::clj-h2o-flat-globalconf-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:has_server_name ::mem/short]
+      [:server_name ::mem/c-string]
+
+      [:has_proxy_status_identity ::mem/short]
+      [:proxy_status_identity ::mem/c-string]
+
+      [:has_max_request_entity_size ::mem/short]
+      [:max_request_entity_size ::mem/long]
+
+      [:has_max_delegations ::mem/short]
+      [:max_delegations ::mem/int]
+
+      [:has_max_reprocesses ::mem/short]
+      [:max_reprocesses ::mem/int]
+
+      [:has_handshake_timeout ::mem/short]
+      [:handshake_timeout ::mem/long]
+
+      [:has_max_spare_pipes ::mem/short]
+      [:max_spare_pipes ::mem/long]
+
+      [:has_http1__req_timeout ::mem/short]
+      [:http1__req_timeout ::mem/long]
+
+      [:has_http1__req_io_timeout ::mem/short]
+      [:http1__req_io_timeout ::mem/long]
+
+      [:has_http1__upgrade_to_http2 ::mem/short]
+      [:http1__upgrade_to_http2 ::mem/int]
+
+      [:has_http2__idle_timeout ::mem/short]
+      [:http2__idle_timeout ::mem/long]
+
+      [:has_http2__graceful_shutdown_timeout ::mem/short]
+      [:http2__graceful_shutdown_timeout ::mem/long]
+
+      [:has_http2__max_streams ::mem/short]
+      [:http2__max_streams ::mem/int]
+
+      [:has_http2__max_concurrent_requests_per_connection ::mem/short]
+      [:http2__max_concurrent_requests_per_connection ::mem/long]
+
+      [:has_http2__max_concurrent_streaming_requests_per_connection ::mem/short]
+      [:http2__max_concurrent_streaming_requests_per_connection ::mem/long]
+
+      [:has_http2__max_streams_for_priority ::mem/short]
+      [:http2__max_streams_for_priority ::mem/long]
+
+      [:has_http2__active_stream_window_size ::mem/short]
+      [:http2__active_stream_window_size ::mem/int]
+
+      [:has_http2__dos_delay ::mem/short]
+      [:http2__dos_delay ::mem/long]
+
+      [:has_http3__idle_timeout ::mem/short]
+      [:http3__idle_timeout ::mem/long]
+
+      [:has_http3__graceful_shutdown_timeout ::mem/short]
+      [:http3__graceful_shutdown_timeout ::mem/long]
+
+      [:has_http3__active_stream_window_size ::mem/short]
+      [:http3__active_stream_window_size ::mem/int]
+
+      [:has_http3__ack_frequency ::mem/short]
+      [:http3__ack_frequency ::mem/short]]]))
+
 #_(print-offsets-for
    (layout/with-c-layout
      [::mem/struct
@@ -234,20 +303,15 @@
   h2o_evloop_run
   [::mem/pointer ::mem/int] ::mem/int)
 
-(defcfn config-init
-  "Initialize h2o global configuration structure"
-  h2o_config_init
-  [::mem/pointer] ::mem/void)
+(defcfn create-global-conf
+  "Create, initialize, and configure a new h2o_globalconf_t with our configuration"
+  clj_h2o_create_globalconf
+  [::mem/pointer] ::mem/pointer)
 
 (defcfn config-dispose
   "Dispose h2o global configuration and free resources"
   h2o_config_dispose
   [::mem/pointer] ::mem/void)
-
-(defcfn globalconf-size
-  "Get size of h2o_globalconf_t structure"
-  clj_h2o_globalconf_size
-  [] ::mem/long)
 
 (defcfn context-size
   "Get size of h2o_context_t structure"
@@ -412,7 +476,7 @@
                                                        (report-almost-fatal-error "The request cleanup callback errored" e))))
 
                                                  [::ffi/fn [::mem/pointer] ::mem/void])]
-    {:on-request-cb-ptr         on-request-cb-ptr
+    {:on-request-cb-ptr on-request-cb-ptr
      ::on-request-cleanup-cb-ptr on-request-cleanup-cb-ptr
      ::handler-ptr
      (native-fn hostconf-ptr
@@ -561,17 +625,17 @@
 
 (defn build-ring-headers-map [headers headers_len]
   (when (and (not (mem/null? headers)) (pos? headers_len))
-    (let [header-size   (mem/size-of ::clj-header-t)
-          total-size    (* headers_len header-size)
+    (let [header-size (mem/size-of ::clj-header-t)
+          total-size (* headers_len header-size)
           sized-headers (mem/reinterpret headers total-size)]
       (into {}
             (for [i (range headers_len)]
-              (let [header-seg                (mem/slice sized-headers (* i header-size) header-size)
-                    header                    (mem/deserialize header-seg ::clj-header-t)
+              (let [header-seg (mem/slice sized-headers (* i header-size) header-size)
+                    header (mem/deserialize header-seg ::clj-header-t)
                     {:keys [name name_len
                             value value_len]} header
-                    name-str                  (->string name name_len)
-                    value-str                 (->string value value_len)]
+                    name-str (->string name name_len)
+                    value-str (->string value value_len)]
                 [(str/lower-case name-str) value-str]))))))
 
 (defn build-ring-request
@@ -583,40 +647,40 @@
            scheme scheme_len remote_addr remote_addr_len
            #_#_charset charset_len]}
    ^InputStream input-stream]
-  (let [method-str         (->string method method_len)
-        path-str           (->string path path_len)
-        authority-str      (->string authority authority_len)
-        scheme-str         (->string scheme scheme_len)
-        remote-addr-str    (->string remote_addr remote_addr_len)
-        #_#_charset-str    (->string charset charset_len)
-        headers-map        (build-ring-headers-map headers headers_len)
+  (let [method-str (->string method method_len)
+        path-str (->string path path_len)
+        authority-str (->string authority authority_len)
+        scheme-str (->string scheme scheme_len)
+        remote-addr-str (->string remote_addr remote_addr_len)
+        #_#_charset-str (->string charset charset_len)
+        headers-map (build-ring-headers-map headers headers_len)
         [uri query-string] (if path-str
                              (let [idx (str/index-of path-str "?")]
                                (if idx
                                  [(subs path-str 0 idx) (subs path-str (inc idx))]
                                  [path-str nil]))
                              [nil nil])
-        version            (case (int http_version)
-                             0x0101 [1 1]
-                             0x0200 [2 0]
-                             0x0300 [3 0]
-                             [1 1])]
-    {:server-port    (if authority-str
-                       (if-let [colon-idx (str/last-index-of authority-str ":")]
-                         (Integer/parseInt (subs authority-str (inc colon-idx)))
-                         80)
-                       80)
-     :server-name    (if authority-str
-                       (if-let [colon-idx (str/last-index-of authority-str ":")]
-                         (subs authority-str 0 colon-idx)
-                         authority-str)
-                       "localhost")
-     :remote-addr    (or remote-addr-str "")
-     :uri            uri
-     :query-string   query-string
-     :scheme         (keyword (or scheme-str "http"))
+        version (case (int http_version)
+                  0x0101 [1 1]
+                  0x0200 [2 0]
+                  0x0300 [3 0]
+                  [1 1])]
+    {:server-port (if authority-str
+                    (if-let [colon-idx (str/last-index-of authority-str ":")]
+                      (Integer/parseInt (subs authority-str (inc colon-idx)))
+                      80)
+                    80)
+     :server-name (if authority-str
+                    (if-let [colon-idx (str/last-index-of authority-str ":")]
+                      (subs authority-str 0 colon-idx)
+                      authority-str)
+                    "localhost")
+     :remote-addr (or remote-addr-str "")
+     :uri uri
+     :query-string query-string
+     :scheme (keyword (or scheme-str "http"))
      :request-method (keyword (str/lower-case (or method-str "get")))
-     :protocol       (str "HTTP/" (first version) "." (second version))
-     :headers        headers-map
-     :body           (when (= 1 has_body)
-                       input-stream)}))
+     :protocol (str "HTTP/" (first version) "." (second version))
+     :headers headers-map
+     :body (when (= 1 has_body)
+             input-stream)}))

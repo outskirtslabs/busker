@@ -70,17 +70,26 @@
      :headers {"content-type" "application/json"}
      :body (str "{\"received\":\"" body-str "\",\"length\":" (count (or body-str "")) "}")}))
 
-(defn large-response-handler
+(defn large-body-handler
   "Return a large response body"
-  [_req]
-  (println "Large response handler")
-  (let [size (* 30 mib)
-        body (repeat-input-stream size \a)
-        #_(apply str (repeat size "X"))]
-    {:status 200
-     :headers {"content-type" "text/plain"
-               "x-body-size" (str size)}
-     :body body}))
+  [req]
+  (if (= :post (:request-method req))
+    (let [size (let [buf (byte-array 8192)]
+                 (loop [total 0]
+                   (let [n (.read (:body req) buf)]
+                     (if (neg? n)
+                       total
+                       (recur (+ total n))))))]
+      {:status  200
+       :headers {"content-type" "text/plain"
+                 "x-body-size"  (str size)}
+       :body    (str "got body with size: " size)})
+    (let [size (* 1024 mib)
+          body (repeat-input-stream size \a)]
+      {:status  200
+       :headers {"content-type" "text/plain"
+                 "x-body-size"  (str size)}
+       :body    body})))
 
 (defn query-handler
   "Show query string parsing"
@@ -131,7 +140,7 @@
 
       (= uri "/json") (json-handler req)
 
-      (= uri "/large") (large-response-handler req)
+      (= uri "/large") (large-body-handler req)
 
       (= uri "/query") (query-handler req)
 
@@ -144,14 +153,15 @@
              :body "Not Found"})))
 
 (defn -main [& _]
-  (let [s (server/start-server {:handler router})]
+  (let [s (server/start-server router)]
     (println "Server started on port 8080")
     (println "Listening for connections...")
     (println "\nAvailable endpoints:")
     (println "  GET  /              - Hello World")
     (println "  POST /echo          - Echo request body")
     (println "  POST /json          - JSON handler")
-    (println "  GET  /large         - Large response (100KB)")
+    (println "  GET  /large         - Large response (1GiB)")
+    (println "  POST /large         - Large request (prints size of body)")
     (println "  GET  /query?foo=bar - Query string parsing")
     (println "  GET  /headers       - Show all headers")
     (println "  GET  /status/404    - Custom status codes")
