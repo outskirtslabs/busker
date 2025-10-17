@@ -38,4 +38,4 @@
                                        :depends [jar]
                                        :task    (clojure "-T:build deploy")}
                   pom                 {:doc "Generate the pom.xml from clj" :task (clojure "-Xdeps mvn-pom :aliases '[:dev :test]'")}
-                  ci                  {:depends [lint compile-shim test]}}}
+                  ci                  {:depends [compile-h2o compile-shim prep test]}}}
