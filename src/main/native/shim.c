@@ -265,31 +265,6 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
     meta->remote_addr = NULL;
     meta->remote_addr_len = 0;
   }
-
-  /* Extract charset from content-type if present */
-  ssize_t ct_idx = h2o_find_header(&req->headers, H2O_TOKEN_CONTENT_TYPE, -1);
-  if (ct_idx != -1) {
-    h2o_iovec_t ct = req->headers.entries[ct_idx].value;
-    const char *charset_marker = "; charset=";
-    size_t charset_marker_len = strlen(charset_marker);
-    size_t offset =
-        h2o_strstr(ct.base, ct.len, charset_marker, charset_marker_len);
-    if (offset != SIZE_MAX) {
-      const char *charset_start = ct.base + offset + charset_marker_len;
-      size_t charset_len = ct.len - offset - charset_marker_len;
-      char *cs = h2o_mem_alloc_pool(&req->pool, char, charset_len + 1);
-      memcpy(cs, charset_start, charset_len);
-      cs[charset_len] = '\0';
-      meta->charset = (const uint8_t *)cs;
-      meta->charset_len = (int32_t)charset_len;
-    } else {
-      meta->charset = NULL;
-      meta->charset_len = 0;
-    }
-  } else {
-    meta->charset = NULL;
-    meta->charset_len = 0;
-  }
 }
 
 /* Completion cleanup callback - this is called by h2o when our request dies
