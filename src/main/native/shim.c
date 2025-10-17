@@ -2,6 +2,7 @@
 // Intended for FFI use from Clojure (coffi/FFM).
 #include "shim.h"
 #include "h2o/multithread.h"
+#include <inttypes.h>
 
 #define REQ_ERROR "request error\n"
 
@@ -130,6 +131,7 @@ static void clj_generator_proceed(h2o_generator_t *gen, h2o_req_t *req) {
   if (!ctx) {
     return;
   }
+
   if (ctx->on_response_generator_proceed) {
     ctx->on_response_generator_proceed(ctx);
   }
@@ -137,20 +139,19 @@ static void clj_generator_proceed(h2o_generator_t *gen, h2o_req_t *req) {
 
 static void clj_generator_stop(h2o_generator_t *gen, h2o_req_t *req) {
   (void)req; /* unused parameter */
+
+  if (!gen) {
+    return;
+  }
+
   clj_req_ctx_t *ctx = H2O_STRUCT_FROM_MEMBER(clj_req_ctx_t, generator, gen);
 
-  /* Defensive guard: drop callback if slot is not in use */
   if (!ctx) {
     return;
   }
 
   if (ctx->on_response_generator_stop) {
     ctx->on_response_generator_stop(ctx, CLJ_COMPLETE_RESET);
-  }
-
-  /* Complete deferred deallocation if closing flag is set */
-  if (ctx->closing) {
-    //??? TODO
   }
 }
 
@@ -275,9 +276,7 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
 static void cleanup_request(void *ptr) {
   if (!ptr)
     return;
-  clj_req_ctx_t *const ctx = *(clj_req_ctx_t **)ptr;
-  if (!ctx)
-    return;
+  clj_req_ctx_t *const ctx = (clj_req_ctx_t *)ptr;
   ctx->cleanup = 1;
   if (ctx->on_request_cleanup) {
     ctx->on_request_cleanup(ctx);
@@ -318,7 +317,7 @@ static int clj_body_write_callback(void *self, int is_end_stream) {
 }
 
 static int request_handler(h2o_handler_t *self, h2o_req_t *req) {
-  /* Cast self back to our custom handler type to access the server pointer */
+  // Cast self back to our custom handler type to access the server pointer
   clj_h2o_handler_t *handler = (clj_h2o_handler_t *)self;
 
   if (handler->shutting_down) {
@@ -326,50 +325,61 @@ static int request_handler(h2o_handler_t *self, h2o_req_t *req) {
                        H2O_SEND_ERROR_HTTP1_CLOSE_CONNECTION);
     return 0;
   }
-  clj_req_ctx_t *const ctx = calloc(1, sizeof(*ctx));
-  if (ctx) {
-    clj_req_ctx_t **const p =
-        h2o_mem_alloc_shared(&req->pool, sizeof(*p), cleanup_request);
-    *p = ctx;
-    ctx->req = req;
-    ctx->preferred_chunk_size = req->preferred_chunk_size;
-    ctx->cleanup = 0;
-    ctx->on_request_body_chunk = 0;
-    clj_h2o_extract_req_meta(req, &ctx->meta);
-    ctx->on_request_cleanup = 0;
-    if (handler->on_request_cleanup)
-      ctx->on_request_cleanup = handler->on_request_cleanup;
 
-    // upcall to the jvm's on-request-callback
-    int ret = handler->on_request(ctx);
-
-    if (ret == CLJ_HANDLER_OVERLOADED) {
-      h2o_send_error_503(req, "Service Unavailable", "Server overloaded", 0);
-      return 0;
-    } else if (ret == CLJ_HANDLER_DECLINED) {
-      return -1;
-    }
-
-    if (ctx->meta.has_body && ctx->on_request_body_chunk != 0) {
-      if (req->proceed_req != NULL) {
-        // Set up our body write callback to receive chunks
-        req->write_req.cb = clj_body_write_callback;
-        req->write_req.ctx = ctx;
-        if (req->entity.base != NULL && req->entity.len > 0) {
-          // Deliver the already-buffered chunk
-          ctx->on_request_body_chunk(ctx, req->entity.base, req->entity.len, 0);
-        } else {
-          // Nothing buffered: request the first chunk
-          req->proceed_req(req, NULL);
-        }
-      } else if (req->entity.base != NULL) {
-        // Small body - already buffered by h2o, deliver immediately
-        if (ctx->on_request_body_chunk)
-          ctx->on_request_body_chunk(ctx, req->entity.base, req->entity.len, 1);
-      }
-    }
-  } else {
+  // Allocate ctx from pool so it's auto-freed with request
+  clj_req_ctx_t *const ctx =
+      h2o_mem_alloc_shared(&req->pool, sizeof(*ctx), cleanup_request);
+  if (!ctx) {
     send_error(INTERNAL_SERVER_ERROR, REQ_ERROR, req);
+  }
+  memset(ctx, 0, sizeof(*ctx));
+  ctx->req = req;
+
+  /* Generate req_id string: "{uuid}-{req_id}" */
+  const char *conn_uuid = h2o_conn_get_uuid(req->conn);
+  uint64_t req_num = req->conn->callbacks->get_req_id(req);
+
+  /* req_id is embedded in ctx struct, so it's valid during cleanup */
+  snprintf(ctx->req_id, sizeof(ctx->req_id), "%s-%" PRIu64, conn_uuid, req_num);
+
+  // DEBUG_LOG("request start id=%s uuid=%s req=%" PRIu64,
+  // ctx->req_id, conn_uuid, req_num);
+
+  ctx->preferred_chunk_size = req->preferred_chunk_size;
+  ctx->cleanup = 0;
+  ctx->on_request_body_chunk = 0;
+  clj_h2o_extract_req_meta(req, &ctx->meta);
+  ctx->on_request_cleanup = 0;
+  if (handler->on_request_cleanup)
+    ctx->on_request_cleanup = handler->on_request_cleanup;
+
+  // upcall to the jvm's on-request-callback
+  int ret = handler->on_request(ctx);
+
+  if (ret == CLJ_HANDLER_OVERLOADED) {
+    h2o_send_error_503(req, "Service Unavailable", "Server overloaded", 0);
+    return 0;
+  } else if (ret == CLJ_HANDLER_DECLINED) {
+    return -1;
+  }
+
+  if (ctx->meta.has_body && ctx->on_request_body_chunk != 0) {
+    if (req->proceed_req != NULL) {
+      // Set up our body write callback to receive chunks
+      req->write_req.cb = clj_body_write_callback;
+      req->write_req.ctx = ctx;
+      if (req->entity.base != NULL && req->entity.len > 0) {
+        // Deliver the already-buffered chunk
+        ctx->on_request_body_chunk(ctx, req->entity.base, req->entity.len, 0);
+      } else {
+        // Nothing buffered: request the first chunk
+        req->proceed_req(req, NULL);
+      }
+    } else if (req->entity.base != NULL) {
+      // Small body - already buffered by h2o, deliver immediately
+      if (ctx->on_request_body_chunk)
+        ctx->on_request_body_chunk(ctx, req->entity.base, req->entity.len, 1);
+    }
   }
   return 0;
 }

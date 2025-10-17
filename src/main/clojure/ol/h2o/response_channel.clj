@@ -2,8 +2,8 @@
   (:require
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]
-   [ol.h2o.evloop :as evloop]
-   [ol.h2o.native :as h2o])
+   [ol.h2o.native :as h2o]
+   [ol.h2o.protocols :as p])
   (:import
    [java.lang.foreign Arena MemorySegment ValueLayout]
    [java.nio ByteBuffer]
@@ -57,7 +57,7 @@
 
         acquire-with-wake (fn []
                             (when-not (.tryAcquire proceed-sem)
-                              (evloop/wake (:worker req))
+                              (p/wake (:worker req))
                               (.acquire proceed-sem)))
 
         on-proceed-cb (fn [_ctx-ptr]
@@ -102,22 +102,22 @@
         (fn [vecs vec-count is-final]
 
           (swap! in-flight-segments conj vecs)
-          (evloop/send-msg (:worker req)
-                           [:h2o/sendvec
-                            (fn []
-                              (doseq [[idx {:keys [seg len]}] (map-indexed vector vecs)]
-                                (let [offset (* idx (mem/size-of ::h2o/h2o-sendvec-t))
-                                      vec-seg (mem/slice send-vec-array-seg offset (mem/size-of ::h2o/h2o-sendvec-t))]
-                                  (h2o/sendvec-init-raw vec-seg seg len)))
-                              (try
-                                (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg vec-count
-                                             (if is-final
-                                               h2o/H2O_SEND_STATE_FINAL
-                                               h2o/H2O_SEND_STATE_IN_PROGRESS))
-                                (when is-final
-                                  (reset! closed? true))
-                                (catch Exception e
-                                  (handle-error! e :release-proceed? true))))]))
+          (p/send-msg (:worker req)
+                      [:h2o/sendvec
+                       (fn []
+                         (doseq [[idx {:keys [seg len]}] (map-indexed vector vecs)]
+                           (let [offset (* idx (mem/size-of ::h2o/h2o-sendvec-t))
+                                 vec-seg (mem/slice send-vec-array-seg offset (mem/size-of ::h2o/h2o-sendvec-t))]
+                             (h2o/sendvec-init-raw vec-seg seg len)))
+                         (try
+                           (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg vec-count
+                                        (if is-final
+                                          h2o/H2O_SEND_STATE_FINAL
+                                          h2o/H2O_SEND_STATE_IN_PROGRESS))
+                           (when is-final
+                             (reset! closed? true))
+                           (catch Exception e
+                             (handle-error! e :release-proceed? true))))]))
 
         flush-buffer!
         (fn [is-final]
@@ -201,7 +201,7 @@
                     (reset! closed? true))
                   (do
                     (reset! final-chunk-pending? true)
-                    (evloop/wake (:worker req))
+                    (p/wake (:worker req))
                     (.acquire close-complete-sem))))
               (when-not @closed?
                 (reset! closed? true)))))]

@@ -18,6 +18,11 @@
 (import 'java.lang.foreign.MemoryLayout)
 (import 'java.lang.foreign.MemoryLayout$PathElement)
 
+(defn cstr-array->string
+  "Convert a null-terminated C string (char array) to a Clojure string."
+  [char-array]
+  (apply str (take-while #(not= (byte 0) %) char-array)))
+
 (defn offset-of
   "Given a `struct-def`, returns the byte offset of the `field`."
   [struct-def field]
@@ -79,15 +84,8 @@
       [:value ::mem/pointer]
       [:value_len ::mem/int]]]))
 
-(mem/defalias ::clj-iovec-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:data ::mem/pointer]
-      [:len ::mem/int]]]))
-
 ;; h2o_iovec_t is:
 ;;   typedef struct { char *base; size_t len; } h2o_iovec_t;
-;; Use a typed pointer for clarity; size_t→::mem/long is OK on typical *nix.
 (mem/defalias ::h2o-iovec-t
   (layout/with-c-layout
     [::mem/struct
@@ -196,12 +194,28 @@
       [:on-cleanup ::mem/pointer]
       [:on-request-body-chunk ::mem/pointer]
       [:generator ::h2o-generator-t]
-      [:on-response-generator-stop ::mem/pointer]
       [:on-response-generator-proceed ::mem/pointer]
-      [:preferred-chunk-size ::mem/int]
+      [:on-response-generator-stop ::mem/pointer]
+      [:preferred-chunk-size ::mem/long]
+      [:req-id [::mem/array ::mem/char 64]]
       [:cleanup ::mem/int]
       [:closing ::mem/int]
       [:response_started ::mem/int]]]))
+
+#_(print-offsets-for (layout/with-c-layout
+                       [::mem/struct
+                        [[:req ::mem/pointer]
+                         [:meta ::clj-req-meta-t]
+                         [:on-cleanup ::mem/pointer]
+                         [:on-request-body-chunk ::mem/pointer]
+                         [:generator ::h2o-generator-t]
+                         [:on-response-generator-proceed ::mem/pointer]
+                         [:on-response-generator-stop ::mem/pointer]
+                         [:preferred-chunk-size ::mem/long]
+                         [:req-id [::mem/array ::mem/char 64]]
+                         [:cleanup ::mem/int]
+                         [:closing ::mem/int]
+                         [:response_started ::mem/int]]]))
 
 (mem/defalias ::clj-h2o-flat-globalconf-t
   (layout/with-c-layout
@@ -553,7 +567,7 @@
 (defn str->iovec
   [s arena]
   (let [str-ptr (mem/serialize s ::mem/c-string arena)
-        len (max 0  (dec (.byteSize ^MemorySegment str-ptr)))]
+        len (max 0 (dec (.byteSize ^MemorySegment str-ptr)))]
     {:base str-ptr :len len}))
 
 (defn create-context

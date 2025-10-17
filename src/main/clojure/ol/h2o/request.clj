@@ -4,7 +4,7 @@
    [coffi.mem :as mem]
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
-   [ol.h2o.protocols]
+   [ol.h2o.protocols :as p]
    [ol.h2o.response :as response])
   (:import
    [java.nio ByteBuffer]
@@ -103,7 +103,7 @@
                                                               :body "Internal Server Error"}))))))
 (defn set-req-body-channel [worker req-ctx-ptr req-ctx]
   (let [proceed-callback  (fn []
-                            (evloop/send-msg worker [:h2o/proceed-request req-ctx]))
+                            (p/send-msg worker [:h2o/proceed-request req-ctx]))
         {:keys [write-chunk] :as write-req} (create-write-req-channel proceed-callback)
         on-req-body-chunk-cb (fn [_ chunk-seg ^long chunk-len ^long is-last]
                                (write-chunk
@@ -116,13 +116,14 @@
            ::on-req-body-chunk-cb-ptr on-req-body-chunk-cb-ptr)))
 
 (defn on-request [ring-handler req-ctx-ptr req-ctx]
-  (let [worker                               (evloop/get-current-worker)
-        has-body?                            (:has_body (:meta req-ctx))
-        {:keys [input-stream] :as write-req} (when has-body? (set-req-body-channel worker req-ctx-ptr req-ctx))
-        ring-req                             (h2o/build-ring-request (:meta req-ctx) input-stream)]
-    (-> (Request. worker req-ctx-ptr req-ctx ring-req write-req nil)
-        (response/with-response-writer)
-        (enqueue-request ring-handler))
+  (let [worker    (evloop/get-current-worker)
+        has-body? (:has_body (:meta req-ctx))
+        write-req (when has-body? (set-req-body-channel worker req-ctx-ptr req-ctx))
+        ring-req  (h2o/build-ring-request (:meta req-ctx) (:input-stream write-req))
+        req-id    (h2o/cstr-array->string (:req-id req-ctx))
+        req (response/with-response-writer (Request. worker req-id req-ctx-ptr req-ctx ring-req write-req nil))]
+    (p/add-req worker req)
+    (enqueue-request req ring-handler)
     ;; TODO: return CLJ_HANDLER_OVERLOADED if system cannot handle more requests
     h2o/CLJ_HANDLER_OK))
 
@@ -130,6 +131,11 @@
   "Completion cleanup callback - this is called by h2o when our request dies
    such as when the client disconnects abruptly
    ref: https://github.com/h2o/h2o/issues/1894#issuecomment-437231273"
-  [ring-handler req-ctx-ptr req-ctx]
-  ;; TODO
-  #_(println "CLEANUP!"))
+  [_ring-handler _req-ctx-ptr req-ctx]
+  (let [req (p/reap-req (evloop/get-current-worker) (h2o/cstr-array->string (:req-id req-ctx)))]
+    (when-some [input-stream (-> req :write-req :input-stream)]
+      (println "closeing req entity")
+      (.close input-stream))
+    (when-some [output-stream (-> req :write-resp :out-stream)]
+      (println "closeing resp entity")
+      (.close output-stream))))

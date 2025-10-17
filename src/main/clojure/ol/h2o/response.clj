@@ -1,12 +1,12 @@
 (ns ol.h2o.response
   "Response handling for h2o HTTP server."
   (:require
-   #_[ol.h2o.protocols.streamable-response-body :as srb]
    [coffi.mem :as mem]
    [ol.h2o.native :as h2o]
+   [ol.h2o.protocols :as p]
    [ol.h2o.protocols.content-length :as content-length]
-   [ol.h2o.response-queue :as response-queue]
    [ol.h2o.response-channel :as response-channel]
+   [ol.h2o.response-queue :as response-queue]
    [ol.h2o.util :as util]
    [ring.core.protocols :as ring-protocols])
   (:import
@@ -93,13 +93,14 @@
   [^Request req ring-resp]
   (let [{:keys [status body]
          :as   ring-resp}                    (with-cl-or-te ring-resp)
-        [headers headers-len content-length] (build-headers ring-resp)]
+        [headers headers-len content-length] (build-headers ring-resp)
+        ^OutputStream out-stream (-> req :write-resp :out-stream)]
     (h2o/start-response (:req-ctx-ptr req) status
                         headers headers-len
                         content-length
                         (-> req :write-resp :on-proceed-cb-ptr)
                         (-> req :write-resp :on-stop-cb-ptr))
     (if body
-      (ring-protocols/write-body-to-stream body ring-resp (-> req :write-resp :out-stream))
+      (ring-protocols/write-body-to-stream body ring-resp out-stream)
       #_(srb/write-body-to-stream body ring-resp out-stream)
-      (.close ^OutputStream (-> req :write-resp :out-stream)))))
+      (.close ^OutputStream out-stream))))

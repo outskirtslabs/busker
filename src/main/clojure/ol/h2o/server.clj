@@ -5,6 +5,7 @@
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
    [ol.h2o.native.socket :as socket]
+   [ol.h2o.protocols :as p]
    [ol.h2o.request :as request])
   (:import
    [java.util.concurrent Executors]
@@ -230,7 +231,7 @@
     ;; Exit condition: shutdown initiated AND all connections drained
     ;; this will stop the thread on the next iteration
     (when (and shutdown-initiated? (all-connections-drained? ctx-ptr))
-      (evloop/send-msg worker evloop/stop-msg))
+      (p/send-msg worker evloop/stop-msg))
 
     ;; Perform periodic cleanup tasks
     (let [now (h2o/evloop-now loop-ptr)
@@ -238,7 +239,7 @@
       ;; Throttle listeners based on connection count (only if not shutting down)
       (when-not shutdown-initiated?
         (update-listener-state! listener-socks accept-callbacks))
-      (h2o/evloop-run loop-ptr (if (pos? (evloop/count-msgs worker)) 0 max-wait)))
+      (h2o/evloop-run loop-ptr (if (pos? (p/count-msgs worker)) 0 max-wait)))
     {:shutdown-initiated? shutdown-initiated?}))
 
 (defn with-defaults [{:keys [n-workers listeners max-connections executor server-name]
