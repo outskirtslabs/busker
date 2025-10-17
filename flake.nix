@@ -32,7 +32,7 @@
         h2o-bundle =
           pkgs:
           pkgs.callPackage ./pkgs/h2o-bundle.nix {
-            #            h2oSrc = /home/ramblurr/src/ol/http-clj/extra/h2o;
+            #h2oSrc = /home/ramblurr/src/ol/http-clj/extra/h2o;
           };
       };
 

@@ -30,8 +30,6 @@ jobs:
           determinate: true
       - uses: DeterminateSystems/flakehub-cache-action@main
       - uses: DeterminateSystems/flake-checker-action@main
-      # - name: Run flake check
-      #   run: nix flake check
       - name: Build h2o-bundle
         run: nix build .#h2o-bundle
       - name: Copy build artifacts
@@ -39,6 +37,8 @@ jobs:
           artifact_name="h2o-bundle-${{ matrix.name }}"
           mkdir -p "artifacts/${artifact_name}"
           cp -rL result/* "artifacts/${artifact_name}/"
+      - name: Build and test
+        run: nix develop --command bb ci
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # tag: v4.6.2
         with:
           name: h2o-bundle-${{ matrix.name }}
