@@ -209,71 +209,71 @@
 (mem/defalias ::clj-h2o-flat-globalconf-t
   (layout/with-c-layout
     [::mem/struct
-     [[:has_server_name ::mem/short]
+     [[:has_server_name ::mem/int]
       [:server_name ::mem/c-string]
 
-      [:has_proxy_status_identity ::mem/short]
+      [:has_proxy_status_identity ::mem/int]
       [:proxy_status_identity ::mem/c-string]
 
-      [:has_max_request_entity_size ::mem/short]
+      [:has_max_request_entity_size ::mem/int]
       [:max_request_entity_size ::mem/long]
 
-      [:has_max_delegations ::mem/short]
+      [:has_max_delegations ::mem/int]
       [:max_delegations ::mem/int]
 
-      [:has_max_reprocesses ::mem/short]
+      [:has_max_reprocesses ::mem/int]
       [:max_reprocesses ::mem/int]
 
-      [:has_handshake_timeout ::mem/short]
+      [:has_handshake_timeout ::mem/int]
       [:handshake_timeout ::mem/long]
 
-      [:has_max_spare_pipes ::mem/short]
+      [:has_max_spare_pipes ::mem/int]
       [:max_spare_pipes ::mem/long]
 
-      [:has_http1__req_timeout ::mem/short]
+      [:has_http1__req_timeout ::mem/int]
       [:http1__req_timeout ::mem/long]
 
-      [:has_http1__req_io_timeout ::mem/short]
+      [:has_http1__req_io_timeout ::mem/int]
       [:http1__req_io_timeout ::mem/long]
 
-      [:has_http1__upgrade_to_http2 ::mem/short]
+      [:has_http1__upgrade_to_http2 ::mem/int]
       [:http1__upgrade_to_http2 ::mem/int]
 
-      [:has_http2__idle_timeout ::mem/short]
+      [:has_http2__idle_timeout ::mem/int]
       [:http2__idle_timeout ::mem/long]
 
-      [:has_http2__graceful_shutdown_timeout ::mem/short]
+      [:has_http2__graceful_shutdown_timeout ::mem/int]
       [:http2__graceful_shutdown_timeout ::mem/long]
 
-      [:has_http2__max_streams ::mem/short]
+      [:has_http2__max_streams ::mem/int]
       [:http2__max_streams ::mem/int]
 
-      [:has_http2__max_concurrent_requests_per_connection ::mem/short]
+      [:has_http2__max_concurrent_requests_per_connection ::mem/int]
       [:http2__max_concurrent_requests_per_connection ::mem/long]
 
-      [:has_http2__max_concurrent_streaming_requests_per_connection ::mem/short]
+      [:has_http2__max_concurrent_streaming_requests_per_connection ::mem/int]
       [:http2__max_concurrent_streaming_requests_per_connection ::mem/long]
 
-      [:has_http2__max_streams_for_priority ::mem/short]
+      [:has_http2__max_streams_for_priority ::mem/int]
       [:http2__max_streams_for_priority ::mem/long]
 
-      [:has_http2__active_stream_window_size ::mem/short]
+      [:has_http2__active_stream_window_size ::mem/int]
       [:http2__active_stream_window_size ::mem/int]
 
-      [:has_http2__dos_delay ::mem/short]
+      [:has_http2__dos_delay ::mem/int]
       [:http2__dos_delay ::mem/long]
 
-      [:has_http3__idle_timeout ::mem/short]
+      [:has_http3__idle_timeout ::mem/int]
       [:http3__idle_timeout ::mem/long]
 
-      [:has_http3__graceful_shutdown_timeout ::mem/short]
+      [:has_http3__graceful_shutdown_timeout ::mem/int]
       [:http3__graceful_shutdown_timeout ::mem/long]
 
-      [:has_http3__active_stream_window_size ::mem/short]
+      [:has_http3__active_stream_window_size ::mem/int]
       [:http3__active_stream_window_size ::mem/int]
 
-      [:has_http3__ack_frequency ::mem/short]
-      [:http3__ack_frequency ::mem/short]]]))
+      [:has_http3__ack_frequency ::mem/int]
+      [:http3__ack_frequency ::mem/int]]]))
 
 #_(print-offsets-for
    (layout/with-c-layout
@@ -303,10 +303,15 @@
   h2o_evloop_run
   [::mem/pointer ::mem/int] ::mem/int)
 
+(defcfn globalconf-size
+  "Get size of h2o_globalconf_t structure"
+  clj_h2o_globalconf_size
+  [] ::mem/long)
+
 (defcfn create-global-conf
   "Create, initialize, and configure a new h2o_globalconf_t with our configuration"
   clj_h2o_create_globalconf
-  [::mem/pointer] ::mem/pointer)
+  [::mem/pointer ::mem/pointer] ::mem/void)
 
 (defcfn config-dispose
   "Dispose h2o global configuration and free resources"
@@ -462,21 +467,24 @@
   [::mem/pointer ::mem/pointer ::mem/pointer ::mem/int ::mem/int] ::mem/pointer
   native-fn
   [hostconf-ptr on-req-callback on-cleanup-callback supports-request-streaming handles-expect]
-  (let [on-request-cb-ptr (mem/serialize (fn [ctx-ptr]
-                                           (try
-                                             (on-req-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t))
-                                             (catch Exception e
-                                               (report-almost-fatal-error "The request handler errored with" e)
-                                               CLJ_HANDLER_OVERLOADED)))
-                                         [::ffi/fn [::mem/pointer] ::mem/int])
-        on-request-cleanup-cb-ptr (mem/serialize (fn [ctx-ptr]
-                                                   (try
-                                                     (on-cleanup-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t))
-                                                     (catch Exception e
-                                                       (report-almost-fatal-error "The request cleanup callback errored" e))))
+  (let [on-request-cb (fn [ctx-ptr]
+                        (try
+                          (on-req-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t))
+                          (catch Exception e
+                            (report-almost-fatal-error "The request handler errored with" e)
+                            CLJ_HANDLER_OVERLOADED)))
+        on-request-cb-ptr (mem/serialize on-request-cb [::ffi/fn [::mem/pointer] ::mem/int])
 
-                                                 [::ffi/fn [::mem/pointer] ::mem/void])]
-    {:on-request-cb-ptr on-request-cb-ptr
+        on-request-cleanup-cb (fn [ctx-ptr]
+                                (try
+                                  (on-cleanup-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t))
+                                  (catch Exception e
+                                    (report-almost-fatal-error "The request cleanup callback errored" e))))
+        on-request-cleanup-cb-ptr (mem/serialize on-request-cleanup-cb [::ffi/fn [::mem/pointer] ::mem/void])]
+
+    {::on-request-cb on-request-cb
+     ::on-request-cleanup-cb on-request-cleanup-cb
+     ::on-request-cb-ptr on-request-cb-ptr
      ::on-request-cleanup-cb-ptr on-request-cleanup-cb-ptr
      ::handler-ptr
      (native-fn hostconf-ptr
@@ -484,6 +492,7 @@
                 on-request-cleanup-cb-ptr
                 (if supports-request-streaming 1 0)
                 (if handles-expect 1 0))}))
+
 (defcfn proceed-req
   "Call req->proceed_req to signal readiness for next request body chunk"
   clj_h2o_proceed_req
@@ -544,15 +553,11 @@
     clj_h2o_req_print_offsets
     [] ::mem/void)
 
-(defn create-iovec
-  "Create an h2o_iovec_t from a string.
-   IMPORTANT: Caller must provide arena to ensure string memory lives long enough
-   Returns a memory segment containing the h2o_iovec_t struct"
+(defn str->iovec
   [s arena]
   (let [str-ptr (mem/serialize s ::mem/c-string arena)
-        len (count s)
-        iovec-data {:base str-ptr :len len}]
-    (mem/serialize iovec-data ::h2o-iovec-t arena)))
+        len (max 0  (dec (.byteSize str-ptr)))]
+    {:base str-ptr :len len}))
 
 (defn create-context
   "Create and initialize h2o context for an event loop.

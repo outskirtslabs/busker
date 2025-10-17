@@ -63,18 +63,15 @@
   "Convert public config map to flat globalconf struct format.
    Arena keeps string fields alive during native call (C function will h2o_strdup them)."
   [config]
-  (let [;; Helper to set has_ flag (1 if key present, 0 otherwise)
-        has? (fn [k] (if (contains? config k) 1 0))
-        ;; Helper to get numeric value or 0
+  (let [has? (fn [k] (if (contains? config k) 1 0))
         num-val (fn [k] (get config k 0))
-        ;; Helper to convert boolean to int (1/0)
         bool->int (fn [k] (if (get config k) 1 0))]
 
     {:has_server_name (has? :server-name)
-     :server_name (get config :server-name)
+     :server_name (get config :server-name "")
 
      :has_proxy_status_identity (has? :proxy-status-identity)
-     :proxy_status_identity (get config :proxy-status-identity)
+     :proxy_status_identity (get config :proxy-status-identity "")
 
      :has_max_request_entity_size (has? :max-request-entity-size)
      :max_request_entity_size (num-val :max-request-entity-size)
@@ -141,10 +138,17 @@
    Uses provided arena for server lifetime resources.
    Returns map with ::config-ptr, ::hostconf-ptr, ::handler-ptr"
   [arena ring-handler config]
-  (let [config-ptr (h2o/create-global-conf (mem/serialize (config->flat-globalconf-t config) ::h2o/clj-h2o-flat-globalconf-t))
-        host-iovec-seg (h2o/create-iovec "default" arena)
-        host-iovec-data (mem/deserialize host-iovec-seg ::h2o/h2o-iovec-t)
-        hostconf-ptr (h2o/config-register-host config-ptr host-iovec-data 65535)
+  (let [;; allocate and configure h2o_globalconf_t
+        config-ptr (with-open [arena2 (mem/confined-arena)]
+                     (let [config-ptr (mem/alloc (h2o/globalconf-size) arena)
+                           flat-config-ptr (mem/serialize (config->flat-globalconf-t config) ::h2o/clj-h2o-flat-globalconf-t arena2)]
+                       (h2o/create-global-conf config-ptr flat-config-ptr)
+                       config-ptr))
+
+        ;; we need at least one h2o_hostconf_t, prepare that here
+        hostconf-ptr (with-open [arena2 (mem/confined-arena)]
+                       (h2o/config-register-host config-ptr (h2o/str->iovec "default" arena2) 65535))
+
         on-request-cb (partial request/on-request ring-handler)
         on-request-cleanup-cb (partial request/on-request-cleanup ring-handler)
         handler (h2o/create-handler hostconf-ptr on-request-cb on-request-cleanup-cb true true)]
@@ -237,7 +241,7 @@
       (h2o/evloop-run loop-ptr (if (pos? (evloop/count-msgs worker)) 0 max-wait)))
     {:shutdown-initiated? shutdown-initiated?}))
 
-(defn with-defaults [{:keys [handler n-workers listeners max-connections executor server-name]
+(defn with-defaults [{:keys [n-workers listeners max-connections executor server-name]
                       :or {n-workers 1
                            server-name "ol.h2o/dev"
                            listeners [{:port 8080}]
@@ -250,7 +254,7 @@
                  :n-workers n-workers
                  :max-connections max-connections}))
 
-(defn start-server
+(defn run-server
   "Start an h2o webserver to serve the given Ring handler according to the
   supplied options:
 
@@ -326,15 +330,14 @@
 
   Returns a server map that can be passed to stop-server."
   ([handler]
-   (start-server handler {}))
+   (run-server handler {}))
   ([handler config]
    (when-not handler (throw (ex-info "Handler is required" {:handler handler})))
    (let [{:keys [n-workers listeners max-connections executor] :as config} (with-defaults config)
          arena (mem/shared-arena)
+         {::keys [config-ptr]} (create-server-config arena handler config)
          active-connections (AtomicLong. 0)
-         started? (AtomicBoolean. true)
          shutting-down? (AtomicBoolean. false)
-         {::keys [config-ptr] :as config} (create-server-config arena handler config)
          message-handler evloop-msg-processor
 
          loops (h2o/create-loops n-workers)
@@ -396,7 +399,6 @@
       ::listeners listeners
       ::max-connections max-connections
       ::active-connections active-connections
-      ::started? started?
       ::shutting-down? shutting-down?
       ::loops loops
       ::contexts contexts
@@ -421,9 +423,6 @@
    7. Close arena (frees all server-scoped memory)"
   [server]
   (assert server)
-  (when-not (.get ^AtomicBoolean (::started? server))
-    (throw (ex-info "Server not started" {:server server})))
-
   ;; Signal shutdown to all workers
   (.set ^AtomicBoolean (::shutting-down? server) true)
 
@@ -453,12 +452,10 @@
 
   (when-let [arena (::arena server)]
     (.close ^java.lang.AutoCloseable arena))
-
-  (.set ^AtomicBoolean (::started? server) false)
   server)
 
 (comment
-  (def _server (start-server {}))
+  (def _server (run-server {}))
 
   (stop-server _server)
 

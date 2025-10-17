@@ -79,6 +79,8 @@ void clj_h2o_socket_set_on_close(h2o_socket_t *sock, void *callback,
 
 size_t clj_h2o_context_size(void) { return sizeof(h2o_context_t); }
 
+size_t clj_h2o_globalconf_size(void) { return sizeof(h2o_globalconf_t); }
+
 size_t clj_h2o_accept_ctx_size(void) { return sizeof(h2o_accept_ctx_t); }
 
 h2o_hostconf_t **clj_h2o_globalconf_get_hosts(h2o_globalconf_t *globalconf) {
@@ -602,16 +604,15 @@ clj_h2o_apply_flat_config(h2o_globalconf_t *conf,
   return conf;
 }
 
-h2o_globalconf_t *
-clj_h2o_create_globalconf(const clj_h2o_flat_globalconf_t *flat) {
-  h2o_globalconf_t *conf = malloc(sizeof(h2o_globalconf_t));
+void clj_h2o_create_globalconf(h2o_globalconf_t *conf,
+                               const clj_h2o_flat_globalconf_t *flat) {
   if (conf == NULL)
-    return NULL;
+    return;
 
   h2o_config_init(conf);
 
   if (flat != NULL)
     clj_h2o_apply_flat_config(conf, flat);
 
-  return conf;
+  return;
 }

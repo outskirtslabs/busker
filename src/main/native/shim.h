@@ -102,70 +102,70 @@ typedef struct clj_mt_receiver_t clj_mt_receiver_t;
  * values must be UTF-8 encoded and accompanied by their byte length.
  */
 typedef struct {
-  short int has_server_name;
+  int has_server_name;
   const char *server_name;
 
-  short int has_proxy_status_identity;
+  int has_proxy_status_identity;
   const char *proxy_status_identity;
 
-  short int has_max_request_entity_size;
+  int has_max_request_entity_size;
   size_t max_request_entity_size;
 
-  short int has_max_delegations;
+  int has_max_delegations;
   unsigned max_delegations;
 
-  short int has_max_reprocesses;
+  int has_max_reprocesses;
   unsigned max_reprocesses;
 
-  short int has_handshake_timeout;
+  int has_handshake_timeout;
   uint64_t handshake_timeout;
 
-  short int has_max_spare_pipes;
+  int has_max_spare_pipes;
   size_t max_spare_pipes;
 
-  short int has_http1__req_timeout;
+  int has_http1__req_timeout;
   uint64_t http1__req_timeout;
 
-  short int has_http1__req_io_timeout;
+  int has_http1__req_io_timeout;
   uint64_t http1__req_io_timeout;
 
-  short int has_http1__upgrade_to_http2;
+  int has_http1__upgrade_to_http2;
   int http1__upgrade_to_http2;
 
-  short int has_http2__idle_timeout;
+  int has_http2__idle_timeout;
   uint64_t http2__idle_timeout;
 
-  short int has_http2__graceful_shutdown_timeout;
+  int has_http2__graceful_shutdown_timeout;
   uint64_t http2__graceful_shutdown_timeout;
 
-  short int has_http2__max_streams;
+  int has_http2__max_streams;
   uint32_t http2__max_streams;
 
-  short int has_http2__max_concurrent_requests_per_connection;
+  int has_http2__max_concurrent_requests_per_connection;
   size_t http2__max_concurrent_requests_per_connection;
 
-  short int has_http2__max_concurrent_streaming_requests_per_connection;
+  int has_http2__max_concurrent_streaming_requests_per_connection;
   size_t http2__max_concurrent_streaming_requests_per_connection;
 
-  short int has_http2__max_streams_for_priority;
+  int has_http2__max_streams_for_priority;
   size_t http2__max_streams_for_priority;
 
-  short int has_http2__active_stream_window_size;
+  int has_http2__active_stream_window_size;
   uint32_t http2__active_stream_window_size;
 
-  short int has_http2__dos_delay;
+  int has_http2__dos_delay;
   uint64_t http2__dos_delay;
 
-  short int has_http3__idle_timeout;
+  int has_http3__idle_timeout;
   uint64_t http3__idle_timeout;
 
-  short int has_http3__graceful_shutdown_timeout;
+  int has_http3__graceful_shutdown_timeout;
   uint64_t http3__graceful_shutdown_timeout;
 
-  short int has_http3__active_stream_window_size;
+  int has_http3__active_stream_window_size;
   uint32_t http3__active_stream_window_size;
 
-  short int has_http3__ack_frequency;
+  int has_http3__ack_frequency;
   uint16_t http3__ack_frequency;
 } clj_h2o_flat_globalconf_t;
 
@@ -185,6 +185,9 @@ void clj_h2o_socket_set_on_close(h2o_socket_t *sock, void *callback,
 
 /* Return size of h2o_context_t for FFI allocation */
 size_t clj_h2o_context_size(void);
+
+/* Return size of h2o_globalconf_t for FFI allocation */
+size_t clj_h2o_globalconf_size(void);
 
 /* Return size of h2o_accept_ctx_t for FFI allocation */
 size_t clj_h2o_accept_ctx_size(void);
@@ -253,7 +256,7 @@ void clj_h2o_mt_wakeup(clj_mt_receiver_t *wr);
  * Returns NULL on allocation failure, otherwise returns configured globalconf
  * pointer.
  */
-h2o_globalconf_t *
-clj_h2o_create_globalconf(const clj_h2o_flat_globalconf_t *flat);
+void clj_h2o_create_globalconf(h2o_globalconf_t *globalconf,
+                               const clj_h2o_flat_globalconf_t *flat);
 
 #endif /* CLJ_H2O_SHIM_H */
