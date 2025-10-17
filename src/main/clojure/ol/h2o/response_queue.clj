@@ -4,9 +4,9 @@
    [coffi.mem :as mem]
    [ol.h2o.buffer-pool :as bp]
    [ol.h2o.byte-bounded-queue :as bbq]
-   [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
    [ol.h2o.pool :as pool]
+   [ol.h2o.protocols :as p]
    [taoensso.trove :as trove])
   (:import
    [java.io OutputStream]
@@ -184,10 +184,10 @@
   [^ResponseState st]
   (let [trig (if (.compareAndSet ^AtomicBoolean (:scheduled?_ st) false true)
                (do
-                 (evloop/send-msg (:worker (:req st)) [:h2o/sendvec (fn [] (send-vecs st))])
+                 (p/send-msg (:worker (:req st)) [:h2o/sendvec (fn [] (send-vecs st))])
                  :sent-msg)
                (do
-                 (evloop/wake (:worker (:req st)))
+                 (p/wake (:worker (:req st)))
                  :woke))]))
 
 (defn report-error [e]

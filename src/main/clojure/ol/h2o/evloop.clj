@@ -1,38 +1,40 @@
 (ns ol.h2o.evloop
   (:require
    [ol.h2o.native :as h2o]
-   [ol.h2o.util :refer [msg-time]])
+   [ol.h2o.protocols :as p])
   (:import
+   [java.util HashMap]
    [java.util.concurrent ArrayBlockingQueue]
    [java.util.concurrent.atomic AtomicBoolean]))
 
 (set! *warn-on-reflection* true)
+
 ;; ------------------------------
 ;; Worker control-plane primitives
 ;; ------------------------------
 
-(defprotocol WorkerWut
-  (count-msgs [_])
-  (send-msg [_ msg] "Send a message to the worker")
-  (wake [_] "Wake up the worker"))
-
 (defrecord Worker
-           [id                 ;; int
-            thread             ;; java.lang.Thread (platform)
-            running?           ;; AtomicBoolean
-            mailbox            ;; ArrayBlockingQueue of control messages
-            evloop             ;; opaque: native pointer/handle when interop lands
-            loop-fn ;;  the loop iteration body
-            message-handler ;; fn: (op, args) -> void, handles custom messages
+           [id                     ;; int
+            thread                 ;; java.lang.Thread (platform)
+            running?               ;; AtomicBoolean
+            mailbox                ;; ArrayBlockingQueue of control messages
+            evloop                 ;; opaque: native pointer/handle when interop lands
+            loop-fn                ;;  the loop iteration body
+            message-handler        ;; fn: (op, args) -> void, handles custom messages
             wakeup-receiver
+            ^HashMap requests
             args]
-  WorkerWut
-  (count-msgs [_] (.size ^ArrayBlockingQueue mailbox))
+  p/WorkerThread
+  (wake [_]
+    (h2o/mt-wakeup wakeup-receiver))
   (send-msg [this msg]
     (.offer ^ArrayBlockingQueue mailbox msg)
-    (wake this))
-  (wake [_]
-    (h2o/mt-wakeup wakeup-receiver)))
+    (p/wake this))
+  (count-msgs [_] (.size ^ArrayBlockingQueue mailbox))
+  (add-req [_ req]
+    (.put requests (:req-id req) req))
+  (reap-req [_ req-id]
+    (.remove requests req-id)))
 
 (defonce ^:private next-id_ (atom 0))
 
@@ -116,6 +118,7 @@
   (let [id (swap! next-id_ inc)
         w (map->Worker {:id id
                         :thread nil
+                        :requests (HashMap. 100)
                         :running? (AtomicBoolean. true)
                         :mailbox (ArrayBlockingQueue. 256)
                         :evloop nil
@@ -133,7 +136,7 @@
    Parameters:
    - worker: the workder to stop "
   [worker]
-  (send-msg worker stop-msg)
+  (p/send-msg worker stop-msg)
   (when-let [^Thread t (:thread worker)]
     (.interrupt t)
     (.join t)))
@@ -155,7 +158,7 @@
    - msg: message to broadcast "
   [workers msg]
   (doseq [^Worker w workers]
-    (send-msg w msg)))
+    (p/send-msg w msg)))
 
 (defn broadcast-wake!
   "Wake all workers.
@@ -164,4 +167,4 @@
    - workers: a seq of workers "
   [workers]
   (doseq [^Worker w workers]
-    (wake w)))
+    (p/wake w)))
