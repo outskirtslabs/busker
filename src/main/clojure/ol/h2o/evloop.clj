@@ -27,7 +27,7 @@
             wakeup-receiver
             args]
   WorkerWut
-  (count-msgs [_] (.size mailbox))
+  (count-msgs [_] (.size ^ArrayBlockingQueue mailbox))
   (send-msg [this msg]
     (.offer ^ArrayBlockingQueue mailbox msg)
     (wake this))
