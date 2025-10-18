@@ -3,6 +3,8 @@
 #include "shim.h"
 #include "h2o/multithread.h"
 #include <inttypes.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #define REQ_ERROR "request error\n"
 
@@ -600,4 +602,56 @@ void clj_h2o_create_globalconf(h2o_globalconf_t *conf,
     clj_h2o_apply_flat_config(conf, flat);
 
   return;
+}
+
+/* TLS/SSL Support Implementation */
+
+SSL_CTX *clj_h2o_create_ssl_ctx(const char *cert_file, const char *key_file,
+                                int enable_http2) {
+  if (!cert_file || !key_file)
+    return NULL;
+
+  SSL_load_error_strings();
+  SSL_library_init();
+  OpenSSL_add_all_algorithms();
+
+  SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_server_method());
+  if (!ssl_ctx) {
+    ERR_print_errors_fp(stderr);
+    return NULL;
+  }
+
+  SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 |
+                                    SSL_OP_NO_COMPRESSION);
+
+  if (SSL_CTX_use_certificate_chain_file(ssl_ctx, cert_file) != 1) {
+    ERR_print_errors_fp(stderr);
+    SSL_CTX_free(ssl_ctx);
+    return NULL;
+  }
+
+  if (SSL_CTX_use_PrivateKey_file(ssl_ctx, key_file, SSL_FILETYPE_PEM) != 1) {
+    ERR_print_errors_fp(stderr);
+    SSL_CTX_free(ssl_ctx);
+    return NULL;
+  }
+
+  /* Mozilla Intermediate cipher suite (modern, widely compatible) */
+  SSL_CTX_set_cipher_list(
+      ssl_ctx,
+      "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"
+      "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:"
+      "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256");
+
+  if (enable_http2) {
+    h2o_ssl_register_alpn_protocols(ssl_ctx, h2o_http2_alpn_protocols);
+  }
+
+  return ssl_ctx;
+}
+
+void clj_h2o_free_ssl_ctx(SSL_CTX *ssl_ctx) {
+  if (ssl_ctx) {
+    SSL_CTX_free(ssl_ctx);
+  }
 }

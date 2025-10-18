@@ -1,8 +1,10 @@
 (ns ol.h2o.server-test
   (:require
    [babashka.http-client :as http]
-   [clojure.test :as test :refer [deftest is testing]]
+   [babashka.process :as p]
+   [clojure.java.io :as io]
    [clojure.string :as str]
+   [clojure.test :as test :refer [deftest is testing]]
    [ol.h2o.server :as server]
    [ol.h2o.test-utils :as util]))
 
@@ -223,31 +225,38 @@
           (is (= 204 (:status response)))
           (is (= "" (:body response))))))))
 
-;; TLS tests disabled - not yet implemented
-#_(deftest test-http2-request
+(deftest test-tls-listener
+  (testing "TLS listener with HTTPS connections"
     (let [cert-file (.getAbsolutePath (io/file "src/test/fixtures/server.crt"))
-          key-file (.getAbsolutePath (io/file "src/test/fixtures/server.key"))
-          config {:handler (fn [req]
-                             {:status 200
-                              :headers {"content-type" "text/plain"}
-                              :body (str "Hello via " (:protocol req) " from " (:server-name req "unknown"))})
-                  :listeners [{:port 8080 :host "127.0.0.1"}
-                              {:port 8443
-                               :host "127.0.0.1"
-                               :ssl {:certificate-file cert-file
-                                     :private-key-file key-file}}]}]
-      (with-server [_server (server/start-server config)]
-        (testing "http endpoint works"
-          (let [response (http/get "http://127.0.0.1:8080/hello")]
-            (is (= 200 (:status response)) "HTTP endpoint should return 200")
-            (is (re-find #"Hello via HTTP" (:body response)) "HTTP endpoint should return expected body")))
-        (testing "https with HTTP/2 negotiation"
+          key-file (.getAbsolutePath (io/file "src/test/fixtures/server.key"))]
+      (with-server [_server (test-server
+                             (fn [{:keys [scheme uri]}]
+                               {:status 200
+                                :headers {"content-type" "text/plain"}
+                                :body (str "Hello via " (name scheme) " at " uri)})
+                             :listeners [{:port plain-port}
+                                         {:port 7891
+                                          :tls {:cert-file cert-file
+                                                :key-file key-file}}])]
+        (testing "plaintext HTTP endpoint works"
+          (let [response (req :get "/hello")]
+            (is (= 200 (:status response)))
+            (is (= "Hello via http at /hello" (:body response)))))
+
+        (testing "HTTPS endpoint works"
+          (let [result (p/shell {:out :string :err :string :continue true}
+                                "curl" "--insecure" "-s"
+                                "https://127.0.0.1:7891/secure")]
+            (is (= 0 (:exit result)) "HTTPS request should succeed")
+            (is (re-find #"Hello via https at /secure" (:out result)) "HTTPS should return expected response")))
+
+        (testing "HTTPS with HTTP/2 ALPN negotiation"
           (let [result (p/shell {:out :string :err :string}
                                 "curl" "--http2" "--insecure" "-v" "-s"
-                                "https://127.0.0.1:8443/hello")]
-            (is (= 0 (:exit result)) "HTTPS request should succeed")
-            (is (re-find #"Hello via HTTP" (:out result)) "HTTPS should return expected response body")
-            (is (re-find #"ALPN: server accepted h2" (:err result)) "Should negotiate protocol via ALPN"))))))
+                                "https://127.0.0.1:7891/h2")]
+            (is (= 0 (:exit result)) "HTTP/2 request should succeed")
+            (is (re-find #"Hello via https at /h2" (:out result)) "HTTP/2 should return expected response")
+            (is (re-find #"ALPN.*h2" (:err result)) "Should negotiate HTTP/2 via ALPN")))))))
 
 ;; TODO: Implement these tests once streaming support is complete
 #_(deftest test-exceptions

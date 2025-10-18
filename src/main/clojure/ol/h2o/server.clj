@@ -6,7 +6,8 @@
    [ol.h2o.native :as h2o]
    [ol.h2o.native.socket :as socket]
    [ol.h2o.protocols :as p]
-   [ol.h2o.request :as request])
+   [ol.h2o.request :as request]
+   [clojure.java.io :as io])
   (:import
    [java.util.concurrent Executors]
    [java.util.concurrent.atomic AtomicBoolean AtomicLong]))
@@ -44,8 +45,12 @@
 
 (defn create-accept-callback
   "Create accept callback for a listener socket with connection tracking.
+   h2o_accept handles both plaintext and TLS connections automatically:
+   - For plaintext: directly starts HTTP/1.1
+   - For TLS: initiates SSL handshake, negotiates protocol (HTTP/1.1 or HTTP/2 via ALPN)
+
    Parameters:
-   - accept-ctx-ptr: pointer to h2o_accept_ctx_t
+   - accept-ctx-ptr: pointer to h2o_accept_ctx_t (contains ssl_ctx if TLS)
    - active-connections: AtomicLong for connection counting
    - on-close-callback: callback function pointer for socket close"
   [accept-ctx-ptr active-connections on-close-callback]
@@ -242,6 +247,48 @@
       (h2o/evloop-run loop-ptr (if (pos? (p/count-msgs worker)) 0 max-wait)))
     {:shutdown-initiated? shutdown-initiated?}))
 
+(defn- validate-tls-config
+  "Validate TLS configuration for a listener. Throws on invalid config."
+  [{:keys [cert-file key-file] :as tls-config}]
+  (when-not (and cert-file key-file)
+    (throw (ex-info "TLS config requires both :cert-file and :key-file" {:tls-config tls-config})))
+  (when-not (.exists (io/file cert-file))
+    (throw (ex-info "TLS certificate file not found" {:cert-file cert-file})))
+  (when-not (.exists (io/file key-file))
+    (throw (ex-info "TLS private key file not found" {:key-file key-file})))
+  tls-config)
+
+(defn- validate-listener
+  "Validate a single listener configuration. Throws on invalid config."
+  [{:keys [port tls] :as listener}]
+  (when-not (and (int? port) (pos? port) (<= port 65535))
+    (throw (ex-info "Listener port must be integer between 1 and 65535"
+                    {:listener listener})))
+  (when tls
+    (validate-tls-config tls))
+  listener)
+
+(defn- create-ssl-contexts
+  "Create SSL_CTX for each TLS listener.
+   Returns map: listener-index -> {:ssl-ctx ssl-ctx-ptr}
+   Throws if SSL_CTX creation fails."
+  [listeners]
+  (into {}
+        (keep-indexed
+         (fn [idx {:keys [tls]}]
+           (when tls
+             (let [{:keys [cert-file key-file protocols]} tls
+                   enable-http2? (or (nil? protocols)
+                                     (contains? (set protocols) :http2))
+                   ssl-ctx (h2o/create-ssl-ctx cert-file key-file (if enable-http2? 1 0))]
+               (when (mem/null? ssl-ctx)
+                 (throw (ex-info "Failed to create SSL_CTX (check OpenSSL errors in stderr)"
+                                 {:listener-index idx
+                                  :cert-file cert-file
+                                  :key-file key-file})))
+               [idx {:ssl-ctx ssl-ctx}])))
+         listeners)))
+
 (defn with-defaults [{:keys [n-workers listeners max-connections executor server-name]
                       :or {n-workers 1
                            server-name "ol.h2o/dev"
@@ -249,11 +296,12 @@
                            executor (Executors/newVirtualThreadPerTaskExecutor)
                            max-connections default-max-connections}
                       :as config}]
-  (merge config {:executor executor
-                 :server-name server-name
-                 :listeners listeners
-                 :n-workers n-workers
-                 :max-connections max-connections}))
+  (let [validated-listeners (mapv validate-listener listeners)]
+    (merge config {:executor executor
+                   :server-name server-name
+                   :listeners validated-listeners
+                   :n-workers n-workers
+                   :max-connections max-connections})))
 
 (defn run-server
   "Start an h2o webserver to serve the given Ring handler according to the
@@ -339,7 +387,10 @@
          {::keys [config-ptr]} (create-server-config arena handler config)
          active-connections (AtomicLong. 0)
          shutting-down? (AtomicBoolean. false)
+
          message-handler evloop-msg-processor
+
+         ssl-contexts (create-ssl-contexts listeners)
 
          loops (h2o/create-loops n-workers)
          contexts (h2o/create-contexts arena loops config-ptr)
@@ -355,11 +406,14 @@
          dup-fds (vec (for [master-fd listener-fds]
                         (socket/dup-for-threads master-fd n-workers)))
 
-         accept-ctxs (vec (for [thread-idx (range n-workers)]
-                            (h2o/create-accept-ctx
-                             arena
-                             (nth contexts thread-idx)
-                             config-ptr)))
+         accept-ctxs (vec (for [thread-idx (range n-workers)
+                                listener-idx (range (count listeners))]
+                            (let [ssl-ctx-ptr (get-in ssl-contexts [listener-idx :ssl-ctx])]
+                              (h2o/create-accept-ctx
+                               arena
+                               (nth contexts thread-idx)
+                               config-ptr
+                               ssl-ctx-ptr))))
 
          accept-callbacks (vec (for [accept-ctx-ptr accept-ctxs]
                                  (create-accept-callback accept-ctx-ptr active-connections (::connection-close-cb-ptr on-close-callback))))
@@ -404,6 +458,7 @@
       ::loops loops
       ::contexts contexts
       ::accept-ctxs accept-ctxs
+      ::ssl-contexts ssl-contexts
       ::accept-callbacks accept-callbacks
       ::on-close-callback on-close-callback
       ::listener-fds listener-fds
@@ -450,6 +505,10 @@
   ;; Dispose config and arena
   (when-let [config-ptr (::config-ptr server)]
     (h2o/config-dispose config-ptr))
+
+  (doseq [[_idx {:keys [ssl-ctx]}] (::ssl-contexts server)]
+    (when ssl-ctx
+      (h2o/free-ssl-ctx ssl-ctx)))
 
   (when-let [arena (::arena server)]
     (.close ^java.lang.AutoCloseable arena))
