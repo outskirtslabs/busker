@@ -258,4 +258,18 @@ void clj_h2o_mt_wakeup(clj_mt_receiver_t *wr);
 void clj_h2o_create_globalconf(h2o_globalconf_t *globalconf,
                                const clj_h2o_flat_globalconf_t *flat);
 
+/* Create and configure SSL_CTX for TLS listener.
+ * Parameters:
+ *   cert_file: path to PEM certificate file
+ *   key_file: path to PEM private key file
+ *   enable_http2: 1 to register HTTP/2 ALPN protocols, 0 for HTTP/1.1 only
+ * Returns: SSL_CTX pointer on success, NULL on error
+ * Note: Caller must free with clj_h2o_free_ssl_ctx when done
+ */
+SSL_CTX *clj_h2o_create_ssl_ctx(const char *cert_file, const char *key_file,
+                                int enable_http2);
+
+/* Free SSL_CTX created by clj_h2o_create_ssl_ctx */
+void clj_h2o_free_ssl_ctx(SSL_CTX *ssl_ctx);
+
 #endif /* CLJ_H2O_SHIM_H */

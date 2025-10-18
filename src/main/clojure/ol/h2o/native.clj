@@ -559,6 +559,21 @@
   clj_h2o_mt_wakeup
   [::mem/pointer] ::mem/void)
 
+(defcfn create-ssl-ctx
+  "Create and configure SSL_CTX for TLS listener.
+   Parameters:
+   - cert-file: path to PEM certificate file
+   - key-file: path to PEM private key file
+   - enable-http2: 1 to register HTTP/2 ALPN protocols, 0 for HTTP/1.1 only
+   Returns: SSL_CTX pointer on success, NULL on error"
+  clj_h2o_create_ssl_ctx
+  [::mem/c-string ::mem/c-string ::mem/int] ::mem/pointer)
+
+(defcfn free-ssl-ctx
+  "Free SSL_CTX created by create-ssl-ctx"
+  clj_h2o_free_ssl_ctx
+  [::mem/pointer] ::mem/void)
+
 #_(defcfn req-print-offsets
     "Debug helper: print h2o_req_t field offsets to stderr for struct layout verification"
     clj_h2o_req_print_offsets
@@ -616,16 +631,20 @@
    - arena: memory arena for allocation
    - ctx-ptr: pointer to h2o_context_t
    - config-ptr: pointer to h2o_globalconf_t
+   - ssl-ctx-ptr: pointer to SSL_CTX for TLS, or nil/NULL for plaintext
    
    Returns: pointer to h2o_accept_ctx_t"
-  [arena ctx-ptr config-ptr]
+  [arena ctx-ptr config-ptr ssl-ctx-ptr]
   (let [hosts-ptr (globalconf-get-hosts config-ptr)
+        ssl-ctx (if (and ssl-ctx-ptr (not (mem/null? ssl-ctx-ptr)))
+                  ssl-ctx-ptr
+                  mem/null)
         accept-ctx-data {:ctx ctx-ptr
                          :hosts hosts-ptr
-                         :ssl_ctx (mem/as-segment 0) ; NULL for now (no TLS)
-                         :http2_origin_frame (mem/as-segment 0) ; NULL
+                         :ssl_ctx ssl-ctx
+                         :http2_origin_frame mem/null
                          :expect_proxy_line 0
-                         :libmemcached_receiver (mem/as-segment 0)}] ; NULL
+                         :libmemcached_receiver mem/null}]
     (mem/serialize accept-ctx-data ::h2o-accept-ctx-t arena)))
 
 (defn ->string
