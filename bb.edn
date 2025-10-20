@@ -5,8 +5,7 @@
  :tasks          {:requires           ([babashka.fs :as fs]
                                        [clojure.string :as str]
                                        [babashka.tasks :refer [shell]])
-                  compile-h2o         {:doc "Build libh2o" :task (shell {:out :inherit :err :out} "nix" "build" "--impure" ".#packages.x86_64-linux.h2o-bundle" "--print-build-logs")}
-                  compile-shim        {:doc "Compile C shim library" :task (clojure "-T:build compile-shim")}
+                  compile-shim        {:doc "Compile C shim library" :task (shell "zig build")}
                   prep                {:doc "Prepare the clojure deps" :task (clojure "-Xdeps prep :aliases '[:dev :test]'")}
                   compile             {:doc "Compile all the things" :depends [compile-shim prep]}
                   test                (apply clojure "-M:dev:test:kaocha" *command-line-args*)
@@ -17,8 +16,6 @@
                   lint.copy-configs   {:doc  "Copy clj-kondo config files from deps in the project"
                                        :task (let [cp (-> (shell {:out :string} "clojure -Spath -M:test:dev") :out str/trim)]
                                                (shell (str "clj-kondo --lint " cp " --dependencies --copy-configs --skip-lint")))}
-                  lint.shim           {:doc  "Run the clang-tidy linter on the C shim code"
-                                       :task (shell "cmake --build cmake-build-debug --target lint")}
                   lint                {:doc  "Run the clj-kondo linter on the clojure code"
                                        :task (shell (str "clj-kondo" " --fail-level error"
                                                          (if (seq *command-line-args*)
@@ -32,10 +29,10 @@
                                        :doc              "Clean build artifacts"
                                        :task
                                        (do
-                                         (shell {:dir "."} "rm -rf cmake-build-debug")
+                                         (shell {:dir "."} "rm -rf zig-out zig-cache")
                                          #_(shell {:dir "."} "clj -T:build clean"))}
                   publish             {:doc     "Publish the clojure sdk libs to clojars"
                                        :depends [jar]
                                        :task    (clojure "-T:build deploy")}
                   pom                 {:doc "Generate the pom.xml from clj" :task (clojure "-Xdeps mvn-pom :aliases '[:dev :test]'")}
-                  ci                  {:depends [compile-h2o compile-shim prep test]}}}
+                  ci                  {:depends [compile-shim prep test]}}}
