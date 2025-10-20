@@ -5,7 +5,7 @@
  :tasks          {:requires           ([babashka.fs :as fs]
                                        [clojure.string :as str]
                                        [babashka.tasks :refer [shell]])
-                  compile-shim        {:doc "Compile C shim library" :task (shell "zig build")}
+                  compile-shim        {:doc "Compile C shim library" :task (shell {:dir "shim"} "zig build")}
                   prep                {:doc "Prepare the clojure deps" :task (clojure "-Xdeps prep :aliases '[:dev :test]'")}
                   compile             {:doc "Compile all the things" :depends [compile-shim prep]}
                   test                (apply clojure "-M:dev:test:kaocha" *command-line-args*)
@@ -21,16 +21,22 @@
                                                          (if (seq *command-line-args*)
                                                            (str " --lint " (first *command-line-args*))
                                                            " --lint src")))}
-                  jar                 {:override-builtin true
-                                       :depends          [clean]
-                                       :doc              "Build an jar"
-                                       :task             (shell "clojure -T:build jar")}
+                  jar                 {:depends          [clean compile]
+                                       :override-builtin true
+                                       :doc              "Build jars"
+                                       :task             (let [arch-dirs ["shim/linux-x86-64" "shim/macos-x86-64" "shim/macos-aarch64"]]
+                                                           (doseq [dir arch-dirs]
+                                                             (println (str "Building jar for " dir))
+                                                             (shell {:dir dir} "clj -T:build jar"))
+                                                           #_(shell "clojure -T:build jar"))}
                   clean               {:override-builtin true
                                        :doc              "Clean build artifacts"
                                        :task
                                        (do
                                          (shell {:dir "."} "rm -rf zig-out zig-cache")
-                                         #_(shell {:dir "."} "clj -T:build clean"))}
+                                         (shell {:dir "."} "rm -rf shim/linux-x86-64/resources shim/macos-x86-64/resources shim/macos-aarch64/resources")
+                                         (shell {:dir "."} "rm -rf shim/linux-x86-64/target shim/macos-x86-64/target shim/macos-aarch64/target")
+                                         (shell {:dir "."} "clj -T:build clean"))}
                   publish             {:doc     "Publish the clojure sdk libs to clojars"
                                        :depends [jar]
                                        :task    (clojure "-T:build deploy")}
