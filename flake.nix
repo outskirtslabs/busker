@@ -5,12 +5,14 @@
     flakelight.url = "github:nix-community/flakelight";
     flakelight.inputs.nixpkgs.follows = "nixpkgs";
     treefmt-nix.url = "github:numtide/treefmt-nix";
+    zig.url = "github:mitchellh/zig-overlay";
   };
   outputs =
     {
       self,
       flakelight,
       treefmt-nix,
+      zig,
       ...
     }:
     let
@@ -28,11 +30,20 @@
       };
       legacyPackages = pkgs: pkgs;
       packages = {
-        h2o-shared = pkgs: pkgs.callPackage ./pkgs/h2o.nix { };
-        h2o-bundle =
+        apple-sdk =
           pkgs:
-          pkgs.callPackage ./pkgs/h2o-bundle.nix {
-            #h2oSrc = /home/ramblurr/src/ol/http-clj/extra/h2o;
+          pkgs.stdenv.mkDerivation {
+            name = "apple-sdk_15.2";
+            src = pkgs.fetchzip {
+              url = "https://github.com/joseluisq/macosx-sdks/releases/download/15.2/MacOSX15.2.sdk.tar.xz";
+              sha256 = "sha256:0fgj0pvjclq2pfsq3f3wjj39906xyj6bsgx1da933wyc918p4zi3";
+            };
+            phases = [ "installPhase" ];
+            installPhase = ''
+              mkdir -p "$out"
+              cp -r "$src"/* "$out"
+              ls "$out"
+            '';
           };
       };
 
@@ -42,13 +53,9 @@
           javaVersion = "25";
           jdk = pkgs."jdk${javaVersion}";
           clojure = pkgs.clojure.override { inherit jdk; };
-          h2o-bundle = (self.packages.${pkgs.system}.h2o-bundle);
+          zigpkgs = zig.packages.${pkgs.system};
+          apple-sdk = (self.packages.${pkgs.system}.apple-sdk);
           libraries = [
-            h2o-bundle
-            #pkgs.llvmPackages.clangUseLLVM
-            #pkgs.llvmPackages.llvm
-            #pkgs.llvmPackages.libclang
-            #pkgs.llvmPackages.stdenv
           ];
         in
         {
@@ -73,10 +80,8 @@
             pkgs.bison
             pkgs.ruby
             pkgs.liburing
-
-            self.packages.${pkgs.system}.h2o-shared
-
             # Development tools
+            zigpkgs."0.15.2"
             pkgs.gdb
             pkgs.clojure-lsp
             pkgs.jdt-language-server
@@ -85,12 +90,12 @@
             pkgs.cljfmt
             pkgs.babashka
             pkgs.git
+            apple-sdk
             #pkgs.nghttp2 # for h2load
-            #pkgs.clang
-            #pkgs.llvmPackages.clangUseLLVM
           ];
           env.LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libraries;
-          env.PKG_CONFIG_PATH = "${h2o-bundle}/lib/pkgconfig";
+          env.APPLE_SDK_PATH = "${apple-sdk}";
+          env.ZIG_GLOBAL_CACHE_DIR = ".zig-cache-global";
         };
 
       flakelight.builtinFormatters = false;

@@ -14,21 +14,14 @@
   (b/delete {:path "target"}))
 
 (defn compile-shim
-  "Compile C shim library using CMake."
+  "Compile C shim library using Zig."
   [_]
   (println "Compiling C shim library...")
-  (let [mkdir-result (shell/sh "mkdir" "-p" "cmake-build-debug")
-        _ (when (not= 0 (:exit mkdir-result))
-            (throw (ex-info "Failed to create cmake-build-debug directory" mkdir-result)))
-        cmake-result (shell/sh "cmake" "-DCMAKE_BUILD_TYPE=Debug" "-B" "cmake-build-debug")
-        _ (when (not= 0 (:exit cmake-result))
-            (println (:err cmake-result))
-            (throw (ex-info "CMake configuration failed" cmake-result)))
-        build-result (shell/sh "cmake" "--build" "cmake-build-debug" "--config" "Debug" "--target" "h2oclj")]
+  (let [build-result (shell/sh "zig" "build" "-Doptimize=Debug")]
     (when (not= 0 (:exit build-result))
       (println (:err build-result))
-      (throw (ex-info "CMake build failed" build-result)))
-    (println "Compiled C shim to cmake-build-debug/libh2oclj.so")))
+      (throw (ex-info "Zig build failed" build-result)))
+    (println "Compiled C shim to zig-out/lib/libh2oclj.so")))
 
 (defn compile-java
   [_]
