@@ -102,22 +102,25 @@
   "Build a sockaddr_in for IPv4.
    host can be nil/\"0.0.0.0\" for INADDR_ANY."
   [{:keys [host port] :or {host "0.0.0.0"}} arena]
-  (let [s_addr (if (or (nil? host) (= host "0.0.0.0"))
-                 INADDR_ANY
-                 (with-open [tmp-arena (mem/confined-arena)]
-                   #_{:clj-kondo/ignore [:type-mismatch]}
-                   (let [dst (mem/alloc ::in_addr tmp-arena)
-                         r (inet_pton AF_INET host dst)]
-                     (when (neg? r)
-                       (throw (ex-info "inet_pton error" {:host host :port port})))
-                     (when (zero? r)
-                       (throw (ex-info "inet_pton: invalid address" {:host host})))
-                     (:s_addr (mem/deserialize dst ::in_addr)))))
-        data {:sin_family (short AF_INET)
-              :sin_port (htons (short port))
-              :sin_addr {:s_addr s_addr}
-              :sin_zero [0 0 0 0 0 0 0 0]}]
-    (mem/serialize data ::sockaddr_in arena)))
+  (let [port-val (long port)]
+    (when (or (neg? port-val) (> port-val 0xFFFF))
+      (throw (ex-info "port must be in [0, 65535]" {:port port})))
+    (let [s_addr (if (or (nil? host) (= host "0.0.0.0"))
+                   INADDR_ANY
+                   (with-open [tmp-arena (mem/confined-arena)]
+                     #_{:clj-kondo/ignore [:type-mismatch]}
+                     (let [dst (mem/alloc ::in_addr tmp-arena)
+                           r   (inet_pton AF_INET host dst)]
+                       (when (neg? r)
+                         (throw (ex-info "inet_pton error" {:host host :port port})))
+                       (when (zero? r)
+                         (throw (ex-info "inet_pton: invalid address" {:host host})))
+                       (:s_addr (mem/deserialize dst ::in_addr)))))
+          data   {:sin_family (short AF_INET)
+                  :sin_port   (htons (unchecked-short port-val))
+                  :sin_addr   {:s_addr s_addr}
+                  :sin_zero   [0 0 0 0 0 0 0 0]}]
+      (mem/serialize data ::sockaddr_in arena))))
 
 ;; ------------------------------------------------------------
 ;; public API
