@@ -5,7 +5,7 @@
   (:import
    [java.util HashMap]
    [java.util.concurrent ArrayBlockingQueue]
-   [java.util.concurrent.atomic AtomicBoolean]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicReference]))
 
 (set! *warn-on-reflection* true)
 
@@ -16,20 +16,25 @@
 (defrecord Worker
            [id                     ;; int
             thread                 ;; java.lang.Thread (platform)
-            running?               ;; AtomicBoolean
+            ^AtomicBoolean running?_;; AtomicBoolean
             mailbox                ;; ArrayBlockingQueue of control messages
             evloop                 ;; opaque: native pointer/handle when interop lands
             loop-fn                ;;  the loop iteration body
             message-handler        ;; fn: (op, args) -> void, handles custom messages
-            wakeup-receiver
+            ^AtomicReference wakeup-receiver_
             ^HashMap requests
             args]
   p/WorkerThread
+  (running? [_]
+    (.get running?_))
   (wake [_]
-    (h2o/mt-wakeup wakeup-receiver))
+    (when (.get running?_)
+      (when-let [receiver (.get wakeup-receiver_)]
+        (h2o/mt-wakeup receiver))))
   (send-msg [this msg]
-    (.offer ^ArrayBlockingQueue mailbox msg)
-    (p/wake this))
+    (when (.get running?_)
+      (.offer ^ArrayBlockingQueue mailbox msg)
+      (p/wake this)))
   (count-msgs [_] (.size ^ArrayBlockingQueue mailbox))
   (add-req [_ req]
     (.put requests (:req-id req) req))
@@ -65,7 +70,7 @@
       (if (nil? msg)
         (do
           (when stop-requested?
-            (.set ^AtomicBoolean (:running? w) false))
+            (.set ^AtomicBoolean (:running?_ w) false))
           w)
         (let [[op & args] msg]
           (case op
@@ -82,14 +87,14 @@
   [^Worker w]
   (.set worker-context w)
   (try
-    (let [running? ^AtomicBoolean (:running? w)
+    (let [running? ^AtomicBoolean (:running?_ w)
           loop-fn (:loop-fn w)]
       (loop [s {}]
         (when (.get running?)
           (let [w (drain-mailbox! w)]
             (recur (loop-fn w s))))))
     (catch InterruptedException _
-      (.set ^AtomicBoolean (:running? w) false))
+      (.set ^AtomicBoolean (:running?_ w) false))
     (catch Throwable t
       (println "[evloop] worker crashed:" (.getMessage t))
       (println t))
@@ -119,36 +124,30 @@
         w (map->Worker {:id id
                         :thread nil
                         :requests (HashMap. 100)
-                        :running? (AtomicBoolean. true)
+                        :running?_ (AtomicBoolean. true)
                         :mailbox (ArrayBlockingQueue. 256)
                         :evloop nil
                         :loop-fn loop-fn
                         :message-handler message-handler
-                        :wakeup-receiver wakeup-receiver})
+                        :wakeup-receiver_ (AtomicReference. wakeup-receiver)})
         t (Thread. #(run-evloop-on-thread! (assoc w :thread (Thread/currentThread))) (format "%s-%d" thread-name-prefix id))
         w (assoc w :thread t)]
     (.start t)
     w))
 
-(defn stop-worker!
-  "Stop a specific worker by id. Blocks until worker thread terminates.
-   
-   Parameters:
-   - worker: the workder to stop "
+(defn join-worker!
+  "Join a worker thread without sending stop messages. Assumes the worker will
+   exit on its own (e.g. after draining)."
   [worker]
-  (p/send-msg worker stop-msg)
   (when-let [^Thread t (:thread worker)]
-    (.interrupt t)
-    (.join t)))
+    (.join t)
+    (.set ^AtomicReference (:wakeup-receiver_ worker) nil)))
 
-(defn stop-all!
-  "Stop all workers in the system.
-   
-   Parameters:
-   - workers: a seq of workers "
+(defn join-all!
+  "Join all workers without signalling stop."
   [workers]
   (doseq [w workers]
-    (stop-worker! w)))
+    (join-worker! w)))
 
 (defn broadcast!
   "Send a control message to all workers.

@@ -213,7 +213,7 @@
 
 ;; ----- Writer/Producer side functions
 ;; the request thread is the virtualthread spawned to handle the request. It writes responses
-;; ref: ol.h2o.request/enqueue-request
+;; ref: ol.h2o.request/on-request
 
 (defn seal-chunk
   "Build a sealed Chunk from a seq of ByteBuffers and a final? flag.
@@ -295,6 +295,7 @@
     {::state            st
      ::on-proceed-cb    on-proceed-cb
      ::on-stop-cb       on-stop-cb
+     :cancel            (fn [] (.set ^AtomicBoolean (:stopped?_ st) true))
      :out-stream        (output-stream st)
      :on-proceed-cb-ptr (mem/serialize on-proceed-cb [::ffi/fn [::mem/pointer] ::mem/void])
      :on-stop-cb-ptr    (mem/serialize on-stop-cb [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])}))

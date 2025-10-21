@@ -28,6 +28,9 @@
                                   org.clojure/tools.deps      {:mvn/version "0.24.1523"}
                                   ol.http-clj/macos-aarch64   {:local/root "shim/macos-aarch64"}
                                   ol.http-clj/linux-x86-64    {:local/root "shim/linux-x86-64"}}}
+           :bench {:extra-paths ["src/test/clojure" "src/test/resources"]
+                   :extra-deps  {http-kit/http-kit        {:mvn/version "2.8.0"}
+                                 ring/ring-jetty-adapter {:mvn/version "1.11.0"}}}
            :neil   {:project {:url "https://github.com/outskirtslabs/http"
                               :scm [:scm
                                     [:url "https://github.com/outskirtslabs/http"]

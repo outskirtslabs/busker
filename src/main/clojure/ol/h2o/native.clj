@@ -11,9 +11,16 @@
 
 (set! *warn-on-reflection* true)
 
+(def ^:const H2O_SOCKET_FLAG_DONT_READ 0x20)
+
 (def ^:const H2O_SEND_STATE_IN_PROGRESS 0)
 (def ^:const H2O_SEND_STATE_FINAL 1)
 (def ^:const H2O_SEND_STATE_ERROR 2)
+
+(def ^:const CLJ_HANDLER_OK 0)
+(def ^:const CLJ_HANDLER_DECLINED -1)
+(def ^:const CLJ_HANDLER_OVERLOADED -2)
+(def ^:const CLJ_HANDLER_SHUTTING_DOWN -3)
 
 (def ^{:const true :doc "Let h2o negotiate compression based on the configuration"}
   H2O_COMPRESS_HINT_AUTO 0)
@@ -447,43 +454,39 @@
   clj_h2o_cancel_request
   [::mem/pointer] ::mem/int)
 
-(def CLJ_HANDLER_OVERLOADED -2)
-(def CLJ_HANDLER_DECLINED -1)
-(def CLJ_HANDLER_OK 0)
-
 (defn report-almost-fatal-error [msg e]
   #p msg
   #p e)
 
-(defcfn create-handler
+(defcfn create-handler*
+  "FFI binding for handler construction."
+  "clj_h2o_create_handler"
+  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer] ::mem/pointer)
+
+(defn create-handler
   "Create and configure h2o handler with optional callbacks.
    Registers path '/', creates handler, and configures callbacks.
 
-   Returns handler pointer."
-  "clj_h2o_create_handler"
-  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer] ::mem/pointer
-  native-fn
-  [hostconf-ptr on-req-callback on-cleanup-callback flat-config-ptr]
-  (let [on-request-cb (fn [ctx-ptr]
-                        (try
-                          (on-req-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t))
-                          (catch Exception e
-                            (report-almost-fatal-error "The request handler errored with" e)
-                            CLJ_HANDLER_OVERLOADED)))
-        on-request-cb-ptr (mem/serialize on-request-cb [::ffi/fn [::mem/pointer] ::mem/int])
+   Returns map containing handler pointer and pinned callback references."
+  [hostconf-ptr on-req-callback on-cleanup-callback flat-config-ptr arena]
+  (let [on-request-cb (fn on-request-cb [ctx-ptr]
+                        (on-req-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t)))
+        on-request-cb-ptr (mem/serialize on-request-cb [::ffi/fn [::mem/pointer] ::mem/int] arena)
 
-        on-request-cleanup-cb (fn [ctx-ptr]
-                                (try
-                                  (on-cleanup-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t))
-                                  (catch Exception e
-                                    (report-almost-fatal-error "The request cleanup callback errored" e))))
-        on-request-cleanup-cb-ptr (mem/serialize on-request-cleanup-cb [::ffi/fn [::mem/pointer] ::mem/void])]
+        on-request-cleanup-cb (fn on-request-cleanup-cb [ctx-ptr]
+                                (on-cleanup-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t)))
+        on-request-cleanup-cb-ptr (mem/serialize on-request-cleanup-cb [::ffi/fn [::mem/pointer] ::mem/void] arena)]
 
     {::on-request-cb on-request-cb
      ::on-request-cleanup-cb on-request-cleanup-cb
      ::on-request-cb-ptr on-request-cb-ptr
      ::on-request-cleanup-cb-ptr on-request-cleanup-cb-ptr
-     ::handler-ptr (native-fn hostconf-ptr on-request-cb-ptr on-request-cleanup-cb-ptr flat-config-ptr)}))
+     ::handler-ptr (create-handler* hostconf-ptr on-request-cb-ptr on-request-cleanup-cb-ptr flat-config-ptr)}))
+
+(defcfn handler-set-shutting-down
+  "Update the handler shutting_down flag (1 means shutdown in progress)."
+  clj_h2o_handler_set_shutting_down
+  [::mem/pointer ::mem/int] ::mem/void)
 
 (defcfn proceed-req
   "Call req->proceed_req to signal readiness for next request body chunk"

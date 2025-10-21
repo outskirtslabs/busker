@@ -36,7 +36,8 @@ typedef enum {
 typedef enum {
   CLJ_HANDLER_OK = 0,        /* Handler accepted and will process the request */
   CLJ_HANDLER_DECLINED = -1, /* Handler declined; h2o should try next handler */
-  CLJ_HANDLER_OVERLOADED = -2 /* System overloaded; send 503 immediately */
+  CLJ_HANDLER_OVERLOADED = -2,   /* System overloaded; send 503 immediately */
+  CLJ_HANDLER_SHUTTING_DOWN = -3 /* System is shutting down */
 } clj_handler_status_t;
 
 typedef struct {
@@ -92,6 +93,9 @@ typedef struct {
 } clj_h2o_handler_t;
 
 typedef struct clj_mt_receiver_t clj_mt_receiver_t;
+
+void clj_h2o_handler_set_shutting_down(clj_h2o_handler_t *handler,
+                                       int shutting_down);
 
 /**
  * Flat representation of the subset of h2o_globalconf_t exposed via the shim.

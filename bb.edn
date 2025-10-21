@@ -5,7 +5,7 @@
  :tasks          {:requires           ([babashka.fs :as fs]
                                        [clojure.string :as str]
                                        [babashka.tasks :refer [shell]])
-                  compile-shim        {:doc "Compile C shim library" :task (shell {:dir "shim"} "zig build")}
+                  compile-shim        {:doc "Compile C shim library" :task (shell {:dir "shim"} "zig build -Doptimize=Debug")}
                   prep                {:doc "Prepare the clojure deps" :task (clojure "-Xdeps prep :aliases '[:dev :test]'")}
                   compile             {:doc "Compile all the things" :depends [compile-shim prep]}
                   test                (apply clojure "-M:dev:test:kaocha" *command-line-args*)
@@ -21,6 +21,8 @@
                                                          (if (seq *command-line-args*)
                                                            (str " --lint " (first *command-line-args*))
                                                            " --lint src")))}
+                  bench               {:doc  "Run the benchmark suite (wraps `clojure -M:dev:bench -m ol.h2o.benchmark`)"
+                                       :task (apply clojure "-M:dev:bench" "-m" "ol.h2o.benchmark" *command-line-args*)}
                   jar                 {:depends          [clean compile]
                                        :override-builtin true
                                        :doc              "Build jars"

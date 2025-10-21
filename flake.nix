@@ -91,7 +91,10 @@
             pkgs.babashka
             pkgs.git
             apple-sdk
-            #pkgs.nghttp2 # for h2load
+
+            # HTTP Benchmarking
+            pkgs.wrk
+            pkgs.nghttp2 # provides h2load
           ];
           env.LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libraries;
           env.APPLE_SDK_PATH = "${apple-sdk}";

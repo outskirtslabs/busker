@@ -105,4 +105,5 @@
     (if body
       (ring-protocols/write-body-to-stream body ring-resp out-stream)
       #_(srb/write-body-to-stream body ring-resp out-stream)
-      (.close ^OutputStream out-stream))))
+      (.close ^OutputStream out-stream)))
+  nil)
