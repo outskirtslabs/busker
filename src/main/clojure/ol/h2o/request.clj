@@ -134,8 +134,6 @@
   [_ring-handler _req-ctx-ptr req-ctx]
   (let [req (p/reap-req (evloop/get-current-worker) (h2o/cstr-array->string (:req-id req-ctx)))]
     (when-some [input-stream (-> req :write-req :input-stream)]
-      (println "closeing req entity")
       (.close input-stream))
     (when-some [output-stream (-> req :write-resp :out-stream)]
-      (println "closeing resp entity")
       (.close output-stream))))

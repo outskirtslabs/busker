@@ -137,7 +137,13 @@
      :http3__active_stream_window_size (num-val :http3-stream-window-size)
 
      :has_http3__ack_frequency (has? :http3-ack-frequency)
-     :http3__ack_frequency (num-val :http3-ack-frequency)}))
+     :http3__ack_frequency (num-val :http3-ack-frequency)
+
+     :has_compress_args (if (:compress? config false) 1 0)
+     :compress_args_mine_size (num-val :compress-min-size)
+     :compress_args_gzip_quality (num-val :compress-gzip-level)
+     :compress_args_brotli_quality (num-val :compress-brotli-level)
+     :compress_args_zstd_quality (num-val :compress-zstd-level)}))
 
 (defn create-server-config
   "Create and initialize h2o global configuration with a default host and Ring handler.
@@ -145,11 +151,11 @@
    Returns map with ::config-ptr, ::hostconf-ptr, ::handler-ptr"
   [arena ring-handler config]
   (let [;; allocate and configure h2o_globalconf_t
-        config-ptr (with-open [arena2 (mem/confined-arena)]
-                     (let [config-ptr (mem/alloc (h2o/globalconf-size) arena)
-                           flat-config-ptr (mem/serialize (config->flat-globalconf-t config) ::h2o/clj-h2o-flat-globalconf-t arena2)]
-                       (h2o/create-global-conf config-ptr flat-config-ptr)
-                       config-ptr))
+        config-ptr (mem/alloc (h2o/globalconf-size) arena)
+        flat-config-ptr (mem/serialize (config->flat-globalconf-t config) ::h2o/clj-h2o-flat-globalconf-t arena)
+        config-ptr (do
+                     (h2o/create-global-conf config-ptr flat-config-ptr)
+                     config-ptr)
 
         ;; we need at least one h2o_hostconf_t, prepare that here
         hostconf-ptr (with-open [arena2 (mem/confined-arena)]
@@ -157,7 +163,7 @@
 
         on-request-cb (partial request/on-request ring-handler)
         on-request-cleanup-cb (partial request/on-request-cleanup ring-handler)
-        handler (h2o/create-handler hostconf-ptr on-request-cb on-request-cleanup-cb true true)]
+        handler (h2o/create-handler hostconf-ptr on-request-cb on-request-cleanup-cb flat-config-ptr)]
     ;; all of these things may not be used again, but they must not be GCed
     ;; until the server itself is reaped
     {::config-ptr config-ptr
@@ -289,19 +295,31 @@
                [idx {:ssl-ctx ssl-ctx}])))
          listeners)))
 
-(defn with-defaults [{:keys [n-workers listeners max-connections executor server-name]
-                      :or {n-workers 1
-                           server-name "ol.h2o/dev"
-                           listeners [{:port 8080}]
-                           executor (Executors/newVirtualThreadPerTaskExecutor)
-                           max-connections default-max-connections}
-                      :as config}]
+(defn with-defaults [{:keys [n-workers listeners max-connections executor server-name
+                             compress? compress-min-size compress-gzip-level
+                             compress-brotli-level compress-zstd-level]
+                      :or   {n-workers             1
+                             server-name           "ol.h2o/dev"
+                             listeners             [{:port 8080}]
+                             executor              (Executors/newVirtualThreadPerTaskExecutor)
+                             max-connections       default-max-connections
+                             compress?             true
+                             compress-min-size     100
+                             compress-gzip-level   1
+                             compress-brotli-level 1
+                             compress-zstd-level   3}
+                      :as   config}]
   (let [validated-listeners (mapv validate-listener listeners)]
-    (merge config {:executor executor
-                   :server-name server-name
-                   :listeners validated-listeners
-                   :n-workers n-workers
-                   :max-connections max-connections})))
+    (merge config {:executor              executor
+                   :server-name           server-name
+                   :listeners             validated-listeners
+                   :n-workers             n-workers
+                   :max-connections       max-connections
+                   :compress?             compress?
+                   :compress-min-size     compress-min-size
+                   :compress-gzip-level   compress-gzip-level
+                   :compress-brotli-level compress-brotli-level
+                   :compress-zstd-level   compress-zstd-level})))
 
 (defn run-server
   "Start an h2o webserver to serve the given Ring handler according to the
@@ -376,6 +394,18 @@
                             (defaults to 16777216, 16MB)
   :http3-ack-frequency    - ACK frequency for HTTP/3
                             (defaults to 0, uses quicly default)
+
+  Compression Options:
+  :compress?              - Enables on-the-fly compression of HTTP response
+                            (defaults to true)
+  :compress-min-size      - The minimum size in bytes a response needs to have before compression kicks in
+                            (defaults to 100)
+  :compress-gzip-level    - The gzip compression level
+                            (defaults to 1)
+  :compress-brotli-level   - The brotli compression level
+                            (defaults to 1)
+  :compress-zstd-level    - The zstd compression level
+                            (defaults to 3)
 
   Returns a server map that can be passed to stop-server."
   ([handler]

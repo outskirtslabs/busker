@@ -15,6 +15,27 @@
 (def ^:const H2O_SEND_STATE_FINAL 1)
 (def ^:const H2O_SEND_STATE_ERROR 2)
 
+(def ^{:const true :doc "Let h2o negotiate compression based on the configuration"}
+  H2O_COMPRESS_HINT_AUTO 0)
+(def ^{:const true :doc "Compression explictly disabled for the request"}
+  H2O_COMPRESS_HINT_DISABLE 1)
+(def ^{:const true :doc "Compression negotiation explicitly enabled for this request"}
+  H2O_COMPRESS_HINT_ENABLE 2)
+(def ^{:const true :doc "Compression negotiation explicitly enabled for this request, preferring gzip"}
+  H2O_COMPRESS_HINT_ENABLE_GZIP 3)
+(def ^{:const true :doc "Compression negotiation explicitly enabled for this request, preferring brotli"}
+  H2O_COMPRESS_HINT_ENABLE_BR 4)
+(def ^{:const true :doc "Compression negotiation explicitly enabled for this request, preferring zstd"}
+  H2O_COMPRESS_HINT_ENABLE_ZSTD 5)
+
+(def ^{:const true} ->compress-hint
+  {:h2o.compress/auto        H2O_COMPRESS_HINT_AUTO
+   :h2o.compress/disable     H2O_COMPRESS_HINT_DISABLE
+   :h2o.compress/enable      H2O_COMPRESS_HINT_ENABLE
+   :h2o.compress/enable-gzip H2O_COMPRESS_HINT_ENABLE_GZIP
+   :h2o.compress/enable-br   H2O_COMPRESS_HINT_ENABLE_BR
+   :h2o.compress/enable-zstd H2O_COMPRESS_HINT_ENABLE_ZSTD})
+
 (import 'java.lang.foreign.MemoryLayout)
 (import 'java.lang.foreign.MemoryLayout$PathElement)
 
@@ -250,7 +271,13 @@
       [:http3__active_stream_window_size ::mem/int]
 
       [:has_http3__ack_frequency ::mem/int]
-      [:http3__ack_frequency ::mem/int]]]))
+      [:http3__ack_frequency ::mem/int]
+
+      [:has_compress_args ::mem/int]
+      [:compress_args_mine_size ::mem/long]
+      [:compress_args_gzip_quality ::mem/int]
+      [:compress_args_brotli_quality ::mem/int]
+      [:compress_args_zstd_quality ::mem/int]]]))
 
 #_(print-offsets-for
    (layout/with-c-layout
@@ -413,7 +440,7 @@
 (defcfn start-response
   "Start sending HTTP response"
   clj_h2o_start_response
-  [::mem/pointer ::mem/int ::mem/pointer ::mem/long ::mem/long ::mem/pointer ::mem/pointer] ::mem/long)
+  [::mem/pointer ::mem/int ::mem/pointer ::mem/long ::mem/long ::mem/int ::mem/pointer ::mem/pointer] ::mem/long)
 
 (defcfn cancel-request
   "Cancel a request after the response has started"
@@ -432,18 +459,11 @@
   "Create and configure h2o handler with optional callbacks.
    Registers path '/', creates handler, and configures callbacks.
 
-   Parameters:
-   - hostconf-ptr: h2o_hostconf_t* pointer
-   - on-req-callback: Clojure fn (req-ctx-ptr, clj_req_ctx map) (required)
-   - on-cleanup-callback: Clojure fn  (req-ctx-ptr, clj_req_ctx map) (required)
-   - supports-request-streaming: boolean
-   - handles-expect: boolean
-
    Returns handler pointer."
   "clj_h2o_create_handler"
-  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/int ::mem/int] ::mem/pointer
+  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer] ::mem/pointer
   native-fn
-  [hostconf-ptr on-req-callback on-cleanup-callback supports-request-streaming handles-expect]
+  [hostconf-ptr on-req-callback on-cleanup-callback flat-config-ptr]
   (let [on-request-cb (fn [ctx-ptr]
                         (try
                           (on-req-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t))
@@ -463,12 +483,7 @@
      ::on-request-cleanup-cb on-request-cleanup-cb
      ::on-request-cb-ptr on-request-cb-ptr
      ::on-request-cleanup-cb-ptr on-request-cleanup-cb-ptr
-     ::handler-ptr
-     (native-fn hostconf-ptr
-                on-request-cb-ptr
-                on-request-cleanup-cb-ptr
-                (if supports-request-streaming 1 0)
-                (if handles-expect 1 0))}))
+     ::handler-ptr (native-fn hostconf-ptr on-request-cb-ptr on-request-cleanup-cb-ptr flat-config-ptr)}))
 
 (defcfn proceed-req
   "Call req->proceed_req to signal readiness for next request body chunk"
