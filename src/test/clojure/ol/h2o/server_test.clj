@@ -14,12 +14,14 @@
 
 (defn test-server [handler & {:as opts}]
   (server/run-server handler (merge {:listeners [{:port plain-port}]
+                                     :compress-min-size 10
                                      :max-connections 1024}
                                     opts)))
 
 (defn req [method path & {:as opts}]
   (->
-   (http/request (merge {:timeout 5000 :throw false}
+   (http/request (merge {:timeout 5000 :throw false
+                         :headers {"Accept-Encoding" []}}
                         opts
                         {:uri (str base path)
                          :method method}))
@@ -46,12 +48,12 @@
                      (take n abcs)))
 
 (deftest test-simple-request
-  (with-server [_server (test-server (fn [{:keys [uri]}]
+  (with-server [_server (test-server (fn [{:keys [uri] :as req}]
                                        (cond
                                          (= "/simple" uri)
                                          {:status  200
                                           :headers {"content-type" "text/plain"}
-                                          :body    "Hello, World"}
+                                          :body    "Hello, World Hello, World Hello, World"}
 
                                          (= "/chunked" uri)
                                          {:status  200
@@ -65,9 +67,9 @@
     (testing "simple"
       (is (util/submap? {:status  200
                          :version :http1.1
-                         :body    "Hello, World"
-                         :headers {"connection"     "close",
-                                   "content-length" "12",
+                         :body    "Hello, World Hello, World Hello, World"
+                         :headers {"connection"     "close"
+                                   "content-length" "38"
                                    "content-type"   "text/plain"}}
                         (req :get "/simple"))))
     (testing "chunked"
@@ -81,7 +83,16 @@
                          :version :http1.1
                          :body    large-payload-str
                          :headers {"connection" "close" "content-type" "text/plain" "content-length" "1000008"}}
-                        (req :post "/large"))))))
+                        (req :post "/large"))))
+    (testing "gzip"
+      (is (util/submap? {:status  200
+                         :version :http1.1
+                         :body    "Hello, World Hello, World Hello, World"
+                         :headers {"connection"     "close"
+                                   "content-encoding" "gzip"
+                                   "vary" "accept-encoding"
+                                   "content-type"   "text/plain"}}
+                        (req :get "/simple" {:headers {"Accept-Encoding" ["gzip"]}}))))))
 
 (deftest test-content-length
   (testing "content-length with get and head"
