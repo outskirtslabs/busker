@@ -387,6 +387,7 @@ static int request_handler(h2o_handler_t *self, h2o_req_t *req) {
   return 0;
 }
 
+/*
 static void on_context_init(h2o_handler_t *_self, h2o_context_t *ctx) {
   struct clj_h2o_handler_t *self = (void *)_self;
   DEBUG_LOG("on_context_init");
@@ -399,6 +400,7 @@ static void on_handler_dispose(h2o_handler_t *_self) {
   struct clj_h2o_handler_t *self = (void *)_self;
   DEBUG_LOG("on_handler_dispose");
 }
+*/
 
 clj_h2o_handler_t *
 clj_h2o_create_handler(h2o_hostconf_t *hostconf,
