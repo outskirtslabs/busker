@@ -73,7 +73,7 @@
                        :headers {"content-type" "application/octet-stream"}
                        :timeout 120000
                        :body (repeat-input-stream payload-size value))]
-      (is (= 200 (:status #p resp)))
+      (is (= 200 (:status resp)))
       (is (= (str payload-size) (get-in resp [:headers "x-len"]))))))
 
 (deftest response-body
