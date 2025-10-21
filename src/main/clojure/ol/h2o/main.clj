@@ -153,7 +153,8 @@
              :body "Not Found"})))
 
 (defn -main [& _]
-  (let [s (server/run-server router)]
+  (let [s (server/run-server router {:compress-brotli-level 15
+                                     :compress-gzip-level 5})]
     (println "Server started on port 8080")
     (println "Listening for connections...")
     (println "\nAvailable endpoints:")

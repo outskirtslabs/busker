@@ -3,8 +3,8 @@
 #include "shim.h"
 #include "h2o/multithread.h"
 #include <inttypes.h>
-#include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/ssl.h>
 
 #define REQ_ERROR "request error\n"
 
@@ -159,7 +159,7 @@ static void clj_generator_stop(h2o_generator_t *gen, h2o_req_t *req) {
 
 size_t clj_h2o_start_response(
     clj_req_ctx_t *ctx, int status, const clj_header_t *headers,
-    size_t headers_len, size_t content_length,
+    size_t headers_len, size_t content_length, int compress_hint,
     void (*on_response_generator_proceed)(clj_req_ctx_t *ctx),
     void (*on_response_generator_stop)(clj_req_ctx_t *ctx,
                                        clj_complete_reason_t reason)) {
@@ -198,6 +198,7 @@ size_t clj_h2o_start_response(
                           pool_name, pool_value, value_len);
   }
 
+  req->compress_hint = H2O_COMPRESS_HINT_ENABLE;
   ctx->generator.proceed = clj_generator_proceed;
   ctx->generator.stop = clj_generator_stop;
   ctx->on_response_generator_proceed = on_response_generator_proceed;
@@ -403,21 +404,29 @@ clj_h2o_handler_t *
 clj_h2o_create_handler(h2o_hostconf_t *hostconf,
                        int (*on_request)(clj_req_ctx_t *),
                        void (*on_request_cleanup)(clj_req_ctx_t *),
-                       int supports_request_streaming, int handles_expect) {
+                       const clj_h2o_flat_globalconf_t *flat) {
 
   h2o_pathconf_t *pathconf = h2o_config_register_path(hostconf, "/", 0);
   clj_h2o_handler_t *handler = (clj_h2o_handler_t *)h2o_create_handler(
       pathconf, sizeof(clj_h2o_handler_t));
+  if (flat->has_compress_args) {
+    h2o_compress_args_t comp = {
+        .min_size = flat->compress_args_mine_size,
+        .gzip = {.quality = flat->compress_args_gzip_quality},
+        .brotli = {.quality = flat->compress_args_brotli_quality},
+        //.zstd = {.quality = flat->compress_args_zstd_quality},
+    };
+    h2o_compress_register(pathconf, &comp);
+  }
   handler->on_request = on_request;
   handler->on_request_cleanup = on_request_cleanup;
   handler->shutting_down = 0;
   handler->super.on_req = request_handler;
-  handler->super.supports_request_streaming =
-      supports_request_streaming ? 1 : 0;
+  handler->super.supports_request_streaming = 1;
+  handler->super.handles_expect = 1;
   // handler->super.on_context_init = on_context_init;
   // handler->super.on_context_dispose = on_context_dispose;
   // handler->super.dispose = on_handler_dispose;
-  // handler->super.handles_expect = handles_expect ? 1 : 0;
   return handler;
 }
 
@@ -622,7 +631,7 @@ SSL_CTX *clj_h2o_create_ssl_ctx(const char *cert_file, const char *key_file,
   }
 
   SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 |
-                                    SSL_OP_NO_COMPRESSION);
+                                   SSL_OP_NO_COMPRESSION);
 
   if (SSL_CTX_use_certificate_chain_file(ssl_ctx, cert_file) != 1) {
     ERR_print_errors_fp(stderr);
@@ -638,10 +647,9 @@ SSL_CTX *clj_h2o_create_ssl_ctx(const char *cert_file, const char *key_file,
 
   /* Mozilla Intermediate cipher suite (modern, widely compatible) */
   SSL_CTX_set_cipher_list(
-      ssl_ctx,
-      "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"
-      "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:"
-      "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256");
+      ssl_ctx, "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"
+               "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:"
+               "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256");
 
   if (enable_http2) {
     h2o_ssl_register_alpn_protocols(ssl_ctx, h2o_http2_alpn_protocols);

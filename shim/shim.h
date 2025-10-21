@@ -166,6 +166,13 @@ typedef struct {
 
   int has_http3__ack_frequency;
   uint16_t http3__ack_frequency;
+
+  int has_compress_args;
+  size_t compress_args_mine_size;
+  int compress_args_gzip_quality;
+  int compress_args_brotli_quality;
+  int compress_args_zstd_quality;
+
 } clj_h2o_flat_globalconf_t;
 
 /* 1 if socket has a read callback (i.e. currently reading), else 0 */
@@ -216,7 +223,7 @@ size_t clj_h2o_context_get_shutdown_conns(h2o_context_t *ctx);
 /* Returns the preferred_chunk_size by the ostream */
 size_t clj_h2o_start_response(
     clj_req_ctx_t *ctx, int status, const clj_header_t *headers,
-    size_t headers_len, size_t content_length,
+    size_t headers_len, size_t content_length, int compress_hint,
     void (*on_response_generator_proceed)(clj_req_ctx_t *ctx),
     void (*on_response_generator_stop)(clj_req_ctx_t *ctx,
                                        clj_complete_reason_t reason));
@@ -230,7 +237,7 @@ clj_h2o_handler_t *
 clj_h2o_create_handler(h2o_hostconf_t *hostconf,
                        int (*on_request)(clj_req_ctx_t *),
                        void (*on_request_cleanup)(clj_req_ctx_t *),
-                       int supports_request_streaming, int handles_expect);
+                       const clj_h2o_flat_globalconf_t *flat);
 
 void clj_h2o_set_on_request_body_chunk(
     clj_req_ctx_t *ctx,

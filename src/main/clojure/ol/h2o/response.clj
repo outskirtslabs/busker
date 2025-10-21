@@ -92,14 +92,16 @@
   "Send a Ring response map using StreamableResponseBody protocol."
   [^Request req ring-resp]
   (let [{:keys [status body]
+         :h2o/keys [compress-hint]
          :as   ring-resp}                    (with-cl-or-te ring-resp)
         [headers headers-len content-length] (build-headers ring-resp)
         ^OutputStream out-stream (-> req :write-resp :out-stream)]
-    (h2o/start-response (:req-ctx-ptr req) status
-                        headers headers-len
-                        content-length
-                        (-> req :write-resp :on-proceed-cb-ptr)
-                        (-> req :write-resp :on-stop-cb-ptr))
+    (let [compress-hint (get h2o/->compress-hint compress-hint h2o/H2O_COMPRESS_HINT_ENABLE)]
+      (h2o/start-response (:req-ctx-ptr req) status
+                          headers headers-len
+                          content-length compress-hint
+                          (-> req :write-resp :on-proceed-cb-ptr)
+                          (-> req :write-resp :on-stop-cb-ptr)))
     (if body
       (ring-protocols/write-body-to-stream body ring-resp out-stream)
       #_(srb/write-body-to-stream body ring-resp out-stream)
