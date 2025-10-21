@@ -414,7 +414,7 @@ clj_h2o_create_handler(h2o_hostconf_t *hostconf,
         .min_size = flat->compress_args_mine_size,
         .gzip = {.quality = flat->compress_args_gzip_quality},
         .brotli = {.quality = flat->compress_args_brotli_quality},
-        //.zstd = {.quality = flat->compress_args_zstd_quality},
+        .zstd = {.quality = flat->compress_args_zstd_quality},
     };
     h2o_compress_register(pathconf, &comp);
   }
