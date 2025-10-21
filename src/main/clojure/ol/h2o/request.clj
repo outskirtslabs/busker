@@ -7,16 +7,13 @@
    [ol.h2o.protocols :as p]
    [ol.h2o.response :as response])
   (:import
+   [java.io InputStream OutputStream]
    [java.nio ByteBuffer]
    [java.nio.channels Channels ReadableByteChannel]
-   [java.util.concurrent LinkedBlockingQueue]
-   [java.util.concurrent ExecutorService Executors]
+   [java.util.concurrent ExecutorService LinkedBlockingQueue RejectedExecutionException]
    [ol.h2o.protocols Request]))
 
 (set! *warn-on-reflection* true)
-
-(defonce vthread-executor
-  (delay (Executors/newVirtualThreadPerTaskExecutor)))
 
 (defn create-write-req-channel
   "Creates a ReadableByteChannel + RequestBody for streaming request body.
@@ -79,28 +76,6 @@
                         (.put queue eof-marker))))
      :input-stream (Channels/newInputStream body-channel)}))
 
-(defn enqueue-request
-  "Process request asynchronously on virtual thread.
-
-   The handler runs on a vthread and when complete, the response
-   is enqueued back to the same worker thread that received the request.
-
-   Parameters:
-   - worker-id: ID of the worker thread that received this request
-   - req: The Request
-   - ring-handler: Ring handler function (request-map -> response-map) "
-  [^Request req ring-handler]
-  (.submit ^ExecutorService @vthread-executor
-           ^Runnable (fn []
-                       (try
-                         (let [ring-resp (ring-handler (:ring-req req))]
-                           (response/send-ring-response! req ring-resp))
-                         (catch Exception e
-                           (println "Handler error:" (.getMessage e))
-                           (.printStackTrace e)
-                           (response/send-ring-response! req {:status 500
-                                                              :headers {"content-type" "text/plain"}
-                                                              :body "Internal Server Error"}))))))
 (defn set-req-body-channel [worker req-ctx-ptr req-ctx]
   (let [proceed-callback  (fn []
                             (p/send-msg worker [:h2o/proceed-request req-ctx]))
@@ -115,25 +90,72 @@
            ::on-req-body-chunk-cb on-req-body-chunk-cb
            ::on-req-body-chunk-cb-ptr on-req-body-chunk-cb-ptr)))
 
-(defn on-request [ring-handler req-ctx-ptr req-ctx]
-  (let [worker    (evloop/get-current-worker)
-        has-body? (:has_body (:meta req-ctx))
-        write-req (when has-body? (set-req-body-channel worker req-ctx-ptr req-ctx))
-        ring-req  (h2o/build-ring-request (:meta req-ctx) (:input-stream write-req))
-        req-id    (h2o/cstr-array->string (:req-id req-ctx))
-        req (response/with-response-writer (Request. worker req-id req-ctx-ptr req-ctx ring-req write-req nil))]
-    (p/add-req worker req)
-    (enqueue-request req ring-handler)
-    ;; TODO: return CLJ_HANDLER_OVERLOADED if system cannot handle more requests
-    h2o/CLJ_HANDLER_OK))
+(defn close-streams [req cancel?]
+  (when req
+    (when-some [^InputStream input-stream (-> req :write-req :input-stream)]
+      (.close  input-stream))
+    (when cancel?
+      (when-some [cancel (-> req :write-resp :cancel)]
+        (cancel)))
+    (when-some [^OutputStream output-stream (-> req :write-resp :out-stream)]
+      (.close output-stream))))
+
+(defn on-request
+  [^ExecutorService executor ring-handler req-ctx-ptr req-ctx]
+  (if-not (p/running? (evloop/get-current-worker))
+    h2o/CLJ_HANDLER_SHUTTING_DOWN
+    (try
+      (let [worker    (evloop/get-current-worker)
+            has-body? (:has_body (:meta req-ctx))
+            write-req (when has-body? (set-req-body-channel worker req-ctx-ptr req-ctx))
+            ring-req  (h2o/build-ring-request (:meta req-ctx) (:input-stream write-req))
+            req-id    (h2o/cstr-array->string (:req-id req-ctx))
+            req       (response/with-response-writer
+                        (Request. worker req-id req-ctx-ptr req-ctx ring-req write-req nil))]
+        (p/add-req worker req)
+        (try
+          (letfn [(request-task []
+                    (let [ring-resp (try
+                                      (ring-handler (:ring-req req))
+                                      (catch InterruptedException _
+                                        (.interrupt (Thread/currentThread))
+                                        {:status  503
+                                         :headers {"content-type" "text/plain; charset=utf-8"}
+                                         :body    "Server shutting down"})
+                                      (catch Exception e
+                                        (println "Handler error:" (.getMessage e))
+                                        (.printStackTrace e)
+                                        {:status  500
+                                         :headers {"content-type" "text/plain; charset=utf-8"}
+                                         :body    "Internal Server Error"}))]
+
+                      (response/send-ring-response! req ring-resp)))]
+            (.submit executor ^Runnable request-task))
+          h2o/CLJ_HANDLER_OK
+          (catch RejectedExecutionException e
+            ;; Handler never ran: remove and close local state so the shim cleanup does not see a dangling queue.
+            (p/reap-req worker req-id)
+            (close-streams req true)
+            h2o/CLJ_HANDLER_SHUTTING_DOWN)))
+      (catch InterruptedException e
+        (.interrupt (Thread/currentThread))
+        h2o/CLJ_HANDLER_SHUTTING_DOWN)
+      (catch Exception e
+        (h2o/report-almost-fatal-error "The request handler errored with" e)
+        h2o/CLJ_HANDLER_OVERLOADED)
+      (catch Throwable t
+        #p t
+        h2o/CLJ_HANDLER_OVERLOADED))))
 
 (defn on-request-cleanup
   "Completion cleanup callback - this is called by h2o when our request dies
    such as when the client disconnects abruptly
-   ref: https://github.com/h2o/h2o/issues/1894#issuecomment-437231273"
+   ref: https://github.com/h2o/h2o/issues/1894#issuecomment-437231273
+
+   Exceptions thrown from this function will crash the jvm."
   [_ring-handler _req-ctx-ptr req-ctx]
-  (let [req (p/reap-req (evloop/get-current-worker) (h2o/cstr-array->string (:req-id req-ctx)))]
-    (when-some [input-stream (-> req :write-req :input-stream)]
-      (.close input-stream))
-    (when-some [output-stream (-> req :write-resp :out-stream)]
-      (.close output-stream))))
+  (try
+    (when-some [req-id (-> req-ctx :req-id (h2o/cstr-array->string))]
+      (close-streams (p/reap-req (evloop/get-current-worker) req-id) false))
+    (catch Exception e
+      (h2o/report-almost-fatal-error "The request cleanup callback errored" e))))

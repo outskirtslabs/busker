@@ -362,6 +362,10 @@ static int request_handler(h2o_handler_t *self, h2o_req_t *req) {
   if (ret == CLJ_HANDLER_OVERLOADED) {
     h2o_send_error_503(req, "Service Unavailable", "Server overloaded", 0);
     return 0;
+  } else if (ret == CLJ_HANDLER_SHUTTING_DOWN) {
+    h2o_send_error_503(req, "Service Unavailable", "Server is shutting down",
+                       H2O_SEND_ERROR_HTTP1_CLOSE_CONNECTION);
+    return 0;
   } else if (ret == CLJ_HANDLER_DECLINED) {
     return -1;
   }
@@ -430,6 +434,13 @@ clj_h2o_create_handler(h2o_hostconf_t *hostconf,
   // handler->super.on_context_dispose = on_context_dispose;
   // handler->super.dispose = on_handler_dispose;
   return handler;
+}
+
+void clj_h2o_handler_set_shutting_down(clj_h2o_handler_t *handler,
+                                       int shutting_down) {
+  if (handler == NULL)
+    return;
+  handler->shutting_down = shutting_down ? 1 : 0;
 }
 
 void clj_h2o_set_on_request_body_chunk(

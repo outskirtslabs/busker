@@ -1,21 +1,20 @@
 (ns ol.h2o.server
   (:require
+   [clojure.java.io :as io]
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
    [ol.h2o.native.socket :as socket]
    [ol.h2o.protocols :as p]
-   [ol.h2o.request :as request]
-   [clojure.java.io :as io])
+   [ol.h2o.request :as request])
   (:import
-   [java.util.concurrent Executors]
-   [java.util.concurrent.atomic AtomicBoolean AtomicLong]))
+   [java.util.concurrent ExecutorService Executors TimeUnit]
+   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
 
 (set! *warn-on-reflection* true)
 
 (def ^:const default-max-connections 1024)
-(def ^:const H2O_SOCKET_FLAG_DONT_READ 0x20)
 
 (defn evloop-msg-processor
   "Called by drain-mailbox! inside each worker thread for each message on the evloop"
@@ -151,26 +150,24 @@
    Returns map with ::config-ptr, ::hostconf-ptr, ::handler-ptr"
   [arena ring-handler config]
   (let [;; allocate and configure h2o_globalconf_t
-        config-ptr (mem/alloc (h2o/globalconf-size) arena)
-        flat-config-ptr (mem/serialize (config->flat-globalconf-t config) ::h2o/clj-h2o-flat-globalconf-t arena)
-        config-ptr (do
-                     (h2o/create-global-conf config-ptr flat-config-ptr)
-                     config-ptr)
-
+        config-ptr            (mem/alloc (h2o/globalconf-size) arena)
+        flat-config-ptr       (mem/serialize (config->flat-globalconf-t config) ::h2o/clj-h2o-flat-globalconf-t arena)
+        config-ptr            (do
+                                (h2o/create-global-conf config-ptr flat-config-ptr)
+                                config-ptr)
         ;; we need at least one h2o_hostconf_t, prepare that here
-        hostconf-ptr (with-open [arena2 (mem/confined-arena)]
-                       (h2o/config-register-host config-ptr (h2o/str->iovec "default" arena2) 65535))
-
-        on-request-cb (partial request/on-request ring-handler)
+        hostconf-ptr          (with-open [arena2 (mem/confined-arena)]
+                                (h2o/config-register-host config-ptr (h2o/str->iovec "default" arena2) 65535))
+        on-request-cb         (partial request/on-request (:executor config) ring-handler)
         on-request-cleanup-cb (partial request/on-request-cleanup ring-handler)
-        handler (h2o/create-handler hostconf-ptr on-request-cb on-request-cleanup-cb flat-config-ptr)]
+        handler               (h2o/create-handler hostconf-ptr on-request-cb on-request-cleanup-cb flat-config-ptr arena)]
     ;; all of these things may not be used again, but they must not be GCed
     ;; until the server itself is reaped
-    {::config-ptr config-ptr
-     ::hostconf-ptr hostconf-ptr
-     ::on-request-cb on-request-cb
+    {::config-ptr            config-ptr
+     ::hostconf-ptr          hostconf-ptr
+     ::on-request-cb         on-request-cb
      ::on-request-cleanup-cb on-request-cleanup-cb
-     ::handler handler}))
+     ::handler               handler}))
 
 (defn update-listener-state!
   "Throttle TCP listeners by starting/stopping accept callbacks based on connection count.
@@ -235,23 +232,51 @@
       (initiate-worker-shutdown! state))
     should-shutdown?))
 
+(defn- receiver-destroyed?*
+  "Has the wakeup receiver been removed (either already noted or cleared by the main thread)?"
+  [worker destroyed-flag]
+  (or (true? destroyed-flag)
+      (nil? (.get ^AtomicReference (:wakeup-receiver_ worker)))))
+
+(defn- dispose-context-if-ready
+  "If we're past shutdown initiation, the receiver is gone, and connections are drained,
+   dispose the worker's context and queue an ::stop message."
+  [worker ctx-ptr context-disposed? shutdown-initiated? receiver-destroyed?]
+  (if (or context-disposed?
+          (not shutdown-initiated?)
+          (not receiver-destroyed?)
+          (not (all-connections-drained? ctx-ptr)))
+    context-disposed?
+    (do
+      (h2o/context-dispose ctx-ptr)
+      (p/send-msg worker evloop/stop-msg)
+      true)))
+
 ;; TODO this fn call is a tragedy
-(defn worker-loop [worker {:keys [shutdown-initiated?] :as _loop-state} {:keys [loop-ptr ctx-ptr listener-socks accept-callbacks] :as state}]
-  (let [shutdown-initiated? (check-and-initiate-shutdown! (assoc state :shutdown-initiated? shutdown-initiated?))]
-
-    ;; Exit condition: shutdown initiated AND all connections drained
-    ;; this will stop the thread on the next iteration
-    (when (and shutdown-initiated? (all-connections-drained? ctx-ptr))
-      (p/send-msg worker evloop/stop-msg))
-
-    ;; Perform periodic cleanup tasks
-    (let [now (h2o/evloop-now loop-ptr)
-          max-wait (h2o/cleanup-thread now ctx-ptr)]
-      ;; Throttle listeners based on connection count (only if not shutting down)
-      (when-not shutdown-initiated?
-        (update-listener-state! listener-socks accept-callbacks))
-      (h2o/evloop-run loop-ptr (if (pos? (p/count-msgs worker)) 0 max-wait)))
-    {:shutdown-initiated? shutdown-initiated?}))
+(defn worker-loop
+  "Drive a worker event-loop iteration, advancing staged shutdown once the main
+   thread has signalled it. The worker moves through three phases:
+     1. `shutdown-initiated?` is recorded after we stop accepting and close listeners.
+     2. `receiver-destroyed?` flips true when stop-server destroys the wakeup receiver,
+        ensuring no more cross-thread wakeups are delivered.
+     3. Once connections drain, `context-disposed?` becomes true after the worker
+        disposes its `h2o_context_t` and posts ::stop to exit the loop."
+  [worker {:keys [shutdown-initiated? context-disposed? receiver-destroyed?] :as _loop-state}
+   {:keys [loop-ptr ctx-ptr listener-socks accept-callbacks] :as state}]
+  (let [shutdown-recorded?  (true? shutdown-initiated?)
+        shutdown-initiated? (check-and-initiate-shutdown! (assoc state :shutdown-initiated? shutdown-recorded?))
+        receiver-destroyed? (receiver-destroyed?* worker receiver-destroyed?)
+        context-disposed?   (dispose-context-if-ready worker ctx-ptr (true? context-disposed?) shutdown-initiated? receiver-destroyed?)]
+    (if context-disposed?
+      (h2o/evloop-run loop-ptr 0)
+      (let [now      (h2o/evloop-now loop-ptr)
+            max-wait (h2o/cleanup-thread now ctx-ptr)]
+        (when-not shutdown-initiated?
+          (update-listener-state! listener-socks accept-callbacks))
+        (h2o/evloop-run loop-ptr (if (pos? (p/count-msgs worker)) 0 max-wait))))
+    {:shutdown-initiated? shutdown-initiated?
+     :context-disposed?   context-disposed?
+     :receiver-destroyed? receiver-destroyed?}))
 
 (defn- validate-tls-config
   "Validate TLS configuration for a listener. Throws on invalid config."
@@ -454,7 +479,7 @@
                                               sock-ptr (h2o/create-socket-for-loop
                                                         (nth loops thread-idx)
                                                         fd
-                                                        H2O_SOCKET_FLAG_DONT_READ)
+                                                        h2o/H2O_SOCKET_FLAG_DONT_READ)
                                               cb-idx (+ (* thread-idx (count listeners)) listener-idx)
                                               callback (::accept-cb-ptr (nth accept-callbacks cb-idx))]
                                           (h2o/socket-read-start sock-ptr callback)
@@ -498,51 +523,70 @@
       ::workers workers})))
 
 (defn stop-server
-  "Stop the h2o server and clean up resources.
-   Follows proper shutdown order:
-   1. Signal shutdown to workers
-   2. Wait for workers to drain connections and exit naturally
-   3. Dispose h2o contexts (cleans up connections)
-   4. Destroy event loops
-   5. Close file descriptors
-   6. Dispose h2o config
-   7. Close arena (frees all server-scoped memory)"
-  [server]
-  (assert server)
-  ;; Signal shutdown to all workers
-  (.set ^AtomicBoolean (::shutting-down? server) true)
+  "Synchronously shut down the server, blocking until all requests and native
+   loops have stopped and associated resources are released."
+  ([server]
+   (stop-server server 60 TimeUnit/SECONDS))
+  ([{::keys [^ExecutorService executor] :as server} ^long timeout ^TimeUnit timeunit]
+   (assert server)
+   ;; Implementation notes:
+   ;; - Handler callbacks are arena-backed, so we mark the handler as shutting
+   ;;   down before signalling workers; they refuse new work immediately.
+   ;; - Workers dispose their own contexts once connections drain. We destroy
+   ;;   wakeup receivers on the main thread before joining worker threads so the
+   ;;   libh2o multithread queues can be torn down cleanly.
+   ;; - Only after workers exit do we destroy loops, close sockets, release
+   ;;   configs, and finally close the shared arena, guaranteeing no native
+   ;;   upcalls occur after this function returns.
+   (when-let [handler-ptr (some-> server ::handler ::h2o/handler-ptr)]
+     (h2o/handler-set-shutting-down handler-ptr 1))
+   ;; Signal shutdown to all workers
+   (.set ^AtomicBoolean (::shutting-down? server) true)
 
-  ;; Wake up all workers so they see the shutdown signal (send dummy message)
-  (evloop/broadcast-wake! (::workers server))
+   ;; Wake up all workers so they see the shutdown signal
+   (evloop/broadcast-wake! (::workers server))
 
-  ;; Wait for all workers to stop themselves after draining connections
-  (evloop/stop-all! (::workers server))
-  ;; (Thread/sleep 1000) ;; Give some time for connections to drain
-  (doseq [wr (::wakeup-receivers server)]
-    (h2o/mt-destroy-wakeup-receiver wr))
+   ;; Stop new requests from being executed
+   (.shutdown executor)
 
-  ;; All workers have exited; clean up h2o resources
-  (h2o/dispose-contexts (::contexts server))
-  (h2o/destroy-loops (::loops server))
+   ;; Wait for all virtual threads to finish
+   (when-not (.awaitTermination executor timeout timeunit)
+     (.shutdownNow executor)
+     (when-not (.awaitTermination executor timeout timeunit)
+       (println "Virtual thread request executor pool did not shutdown cleanly")))
 
-  ;; Close file descriptors
-  (doseq [dup-fd-vec (::dup-fds server)
-          fd dup-fd-vec]
-    (socket/close-fd! fd))
-  (doseq [fd (::listener-fds server)]
-    (socket/close-fd! fd))
+   (evloop/broadcast-wake! (::workers server))
 
-  ;; Dispose config and arena
-  (when-let [config-ptr (::config-ptr server)]
-    (h2o/config-dispose config-ptr))
+   ;; Destroy wakeup receivers so workers can finish draining without further wakeups.
+   (doseq [[worker wr] (map vector (::workers server) (::wakeup-receivers server))]
+     (when (and wr (not (mem/null? wr)))
+       (h2o/mt-destroy-wakeup-receiver wr))
+     (.set ^AtomicReference (:wakeup-receiver_ worker) nil))
 
-  (doseq [[_idx {:keys [ssl-ctx]}] (::ssl-contexts server)]
-    (when ssl-ctx
-      (h2o/free-ssl-ctx ssl-ctx)))
+   ;; Wait for all workers to stop themselves after draining connections
+   (evloop/join-all! (::workers server))
 
-  (when-let [arena (::arena server)]
-    (.close ^java.lang.AutoCloseable arena))
-  server)
+   ;; All workers have exited; clean up h2o resources
+   (h2o/destroy-loops (::loops server))
+
+   ;; Close file descriptors
+   (doseq [dup-fd-vec (::dup-fds server)
+           fd dup-fd-vec]
+     (socket/close-fd! fd))
+   (doseq [fd (::listener-fds server)]
+     (socket/close-fd! fd))
+
+   ;; Dispose config and arena
+   (when-let [config-ptr (::config-ptr server)]
+     (h2o/config-dispose config-ptr))
+
+   (doseq [[_idx {:keys [ssl-ctx]}] (::ssl-contexts server)]
+     (when ssl-ctx
+       (h2o/free-ssl-ctx ssl-ctx)))
+
+   (when-let [arena (::arena server)]
+     (.close ^java.lang.AutoCloseable arena))
+   server))
 
 (comment
   (def _server (run-server {}))
