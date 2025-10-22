@@ -49,7 +49,14 @@
 (defn cstr-array->string
   "Convert a null-terminated C string (char array) to a Clojure string."
   [char-array]
-  (apply str (take-while #(not= (byte 0) %) char-array)))
+  (let [sb (StringBuilder.)]
+    (loop [v (seq char-array)]
+      (when-let [b (first v)]
+        (let [octet (bit-and (long b) 0xFF)]
+          (when (pos? octet)
+            (.append sb (char octet))
+            (recur (next v))))))
+    (str sb)))
 
 (defn offset-of
   "Given a `struct-def`, returns the byte offset of the `field`."
