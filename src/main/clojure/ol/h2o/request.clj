@@ -77,14 +77,15 @@
      :input-stream (Channels/newInputStream body-channel)}))
 
 (defn set-req-body-channel [worker req-ctx-ptr req-ctx]
-  (let [proceed-callback  (fn []
-                            (p/send-msg worker [:h2o/proceed-request req-ctx]))
-        {:keys [write-chunk] :as write-req} (create-write-req-channel proceed-callback)
-        on-req-body-chunk-cb (fn [_ chunk-seg ^long chunk-len ^long is-last]
-                               (write-chunk
-                                (when-not (mem/null? chunk-seg) (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len))
-                                (if (= 1 is-last) true false)))
-        on-req-body-chunk-cb-ptr  (mem/serialize on-req-body-chunk-cb [::ffi/fn [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void])]
+  (let [proceed-callback         (fn []
+                                   (p/send-msg worker [:h2o/proceed-request req-ctx]))
+        {:keys [write-chunk]
+         :as   write-req}          (create-write-req-channel proceed-callback)
+        on-req-body-chunk-cb     (fn [_ chunk-seg ^long chunk-len ^long is-last]
+                                   (write-chunk
+                                    (when-not (mem/null? chunk-seg) (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len))
+                                    (if (= 1 is-last) true false)))
+        on-req-body-chunk-cb-ptr (mem/serialize on-req-body-chunk-cb [::ffi/fn [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void])]
     (h2o/set-on-request-body-chunk-callback req-ctx-ptr on-req-body-chunk-cb-ptr)
     (assoc write-req
            ::on-req-body-chunk-cb on-req-body-chunk-cb
@@ -93,7 +94,7 @@
 (defn close-streams [req cancel?]
   (when req
     (when-some [^InputStream input-stream (-> req :write-req :input-stream)]
-      (.close  input-stream))
+      (.close input-stream))
     (when cancel?
       (when-some [cancel (-> req :write-resp :cancel)]
         (cancel)))
@@ -101,7 +102,7 @@
       (.close output-stream))))
 
 (defn on-request
-  [^ExecutorService executor ring-handler req-ctx-ptr req-ctx]
+  [^ExecutorService executor buffer-pool ring-handler req-ctx-ptr req-ctx]
   (if-not (p/running? (evloop/get-current-worker))
     h2o/CLJ_HANDLER_SHUTTING_DOWN
     (try
@@ -111,7 +112,7 @@
             ring-req  (h2o/build-ring-request (:meta req-ctx) (:input-stream write-req))
             req-id    (h2o/cstr-array->string (:req-id req-ctx))
             req       (response/with-response-writer
-                        (Request. worker req-id req-ctx-ptr req-ctx ring-req write-req nil))]
+                        (Request. worker buffer-pool req-id req-ctx-ptr req-ctx ring-req write-req nil))]
         (p/add-req worker req)
         (try
           (letfn [(request-task []
