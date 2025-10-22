@@ -4,7 +4,7 @@
 
 (defrecord Request
            [worker
-            buffer-pool
+            config
             req-id
             req-ctx-ptr
             req-ctx

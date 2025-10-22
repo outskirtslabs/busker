@@ -102,7 +102,7 @@
       (.close output-stream))))
 
 (defn on-request
-  [^ExecutorService executor buffer-pool ring-handler req-ctx-ptr req-ctx]
+  [^ExecutorService executor config ring-handler req-ctx-ptr req-ctx]
   (if-not (p/running? (evloop/get-current-worker))
     h2o/CLJ_HANDLER_SHUTTING_DOWN
     (try
@@ -112,7 +112,7 @@
             ring-req  (h2o/build-ring-request (:meta req-ctx) (:input-stream write-req))
             req-id    (h2o/cstr-array->string (:req-id req-ctx))
             req       (response/with-response-writer
-                        (Request. worker buffer-pool req-id req-ctx-ptr req-ctx ring-req write-req nil))]
+                        (Request. worker config req-id req-ctx-ptr req-ctx ring-req write-req nil))]
         (p/add-req worker req)
         (try
           (letfn [(request-task []

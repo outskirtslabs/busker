@@ -194,7 +194,7 @@
         hostconf-ptr (with-open [arena2 (mem/confined-arena)]
                        (h2o/config-register-host config-ptr (h2o/str->iovec "default" arena2) 65535))
         on-request-cb (partial request/on-request (:executor config)
-                               (:buffer-pool config)
+                               config
                                ring-handler)
         on-request-cleanup-cb (partial request/on-request-cleanup ring-handler)
         handler (h2o/create-handler hostconf-ptr on-request-cb on-request-cleanup-cb flat-config-ptr arena)]
@@ -359,32 +359,34 @@
          listeners)))
 
 (defn with-defaults [{:keys [n-workers listeners max-connections executor server-name
-                             compress? compress-min-size compress-gzip-level
+                             compress? compress-min-size compress-gzip-level output-buffer-size
                              compress-brotli-level compress-zstd-level buffer-pool]
-                      :or {n-workers 1
-                           server-name "ol.h2o/dev"
-                           listeners [{:port 8080}]
-                           executor (Executors/newVirtualThreadPerTaskExecutor)
-                           max-connections default-max-connections
-                           compress? true
-                           compress-min-size 100
+                      :or {compress-brotli-level 1
                            compress-gzip-level 1
-                           compress-brotli-level 1
-                           compress-zstd-level 3}
+                           compress-min-size 100
+                           compress? true
+                           compress-zstd-level 3
+                           executor (Executors/newVirtualThreadPerTaskExecutor)
+                           listeners [{:port 8080}]
+                           max-connections default-max-connections
+                           n-workers 1
+                           output-buffer-size 32768
+                           server-name "ol.h2o/dev"}
                       :as config}]
 
   (let [validated-listeners (mapv validate-listener listeners)]
-    (merge config {:executor executor
-                   :buffer-pool (or buffer-pool (bp/make-bytebuffer-pool {}))
-                   :server-name server-name
-                   :listeners validated-listeners
-                   :n-workers n-workers
-                   :max-connections max-connections
-                   :compress? compress?
-                   :compress-min-size compress-min-size
-                   :compress-gzip-level compress-gzip-level
+    (merge config {:buffer-pool (or buffer-pool (bp/make-bytebuffer-pool {}))
                    :compress-brotli-level compress-brotli-level
-                   :compress-zstd-level compress-zstd-level})))
+                   :compress? compress?
+                   :compress-gzip-level compress-gzip-level
+                   :compress-min-size compress-min-size
+                   :compress-zstd-level compress-zstd-level
+                   :executor executor
+                   :listeners validated-listeners
+                   :max-connections max-connections
+                   :n-workers n-workers
+                   :output-buffer-size output-buffer-size
+                   :server-name server-name})))
 
 (defn run-server
   "Start an h2o webserver to serve the given Ring handler according to the
@@ -399,6 +401,9 @@
                             (defaults to virtual thread executor)
   :max-connections        - maximum concurrent connections across all workers
                             (defaults to 1024)
+
+  :ouput-buffer-size      - the size of the buffer into which response data is aggregated before being sent to the client
+                            (defaults to 32768)
 
   Server Identity:
   :server-name            - server name for Server header

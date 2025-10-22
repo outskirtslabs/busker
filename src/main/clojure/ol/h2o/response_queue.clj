@@ -39,6 +39,7 @@
    Fields:
    - req: the Request
    - bbq: SPSC ByteBoundedQueue of Chunk (writer enqueues, worker drains).
+   - output-buffer-size: size of buffers to grab from the pool
    - scheduled: AtomicBoolean; true iff a drain task is scheduled/on-going on the event loop.
    - in-flight: AtomicReference<Chunk>; the currently sent chunk awaiting proceed.
    - closing: AtomicBoolean; producer side. writer set when close() called (no more writes).
@@ -52,7 +53,7 @@
         :max-buffered-bytes long
         :max-vecs-per-send int}"}
  ResponseState
- [req bbq
+ [req bbq output-buffer-size
   ^AtomicBoolean scheduled?_
   ^AtomicReference in-flight_
   ^AtomicBoolean closing?_
@@ -68,16 +69,18 @@
 
 (defn new-response-state
   [req]
-  (assert (:buffer-pool req))
+  (assert (-> req :config :buffer-pool))
+  (assert (-> req :config :output-buffer-size))
   (->ResponseState req
-                   (bbq/byte-bounded-spsc-queue default-output-buffer-size)
+                   (bbq/byte-bounded-spsc-queue (-> req :config :output-buffer-size))
+                   (-> req :config :output-buffer-size)
                    (AtomicBoolean. false)
                    (AtomicReference. nil)
                    (AtomicBoolean. false)
                    (AtomicBoolean. false)
                    (AtomicBoolean. false)
                    (AtomicReference. nil)
-                   (:buffer-pool req)
+                   (-> req :config :buffer-pool)
                    {}))
 
 ;; ----- Worker side functions
@@ -244,7 +247,7 @@
              (if (zero? left)
                total
                (let [^ByteBuffer buf (or (.get cur-ref)
-                                         (let [b (bp/borrow pool 8192 true)]
+                                         (let [b (bp/borrow pool (:output-buffer-size st) true)]
                                            (when (nil? b) (throw (ex-info "Buffer pool exhausted" {})))
                                            (.clear ^ByteBuffer b)
                                            (.set cur-ref b)
