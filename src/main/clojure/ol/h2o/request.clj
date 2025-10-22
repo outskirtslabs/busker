@@ -145,7 +145,7 @@
         (h2o/report-almost-fatal-error "The request handler errored with" e)
         h2o/CLJ_HANDLER_OVERLOADED)
       (catch Throwable t
-        #p t
+        (println "THROWABLE in request handler:" t)
         h2o/CLJ_HANDLER_OVERLOADED))))
 
 (defn on-request-cleanup

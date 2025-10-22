@@ -1,4 +1,4 @@
-{:paths   ["src/main/clojure" "target/classes"]
+{:paths   ["src/main/clojure" "target/classes" "shim/linux-x86-64/resources"]
  :deps    {io.github.IGJoshua/coffi                  {:git/sha "ae3e38a449c88b998db98b0d4bffa9908dea1c79"}
            com.taoensso/trove                        {:mvn/version "1.1.0"}
            org.ring-clojure/ring-core-protocols      {:mvn/version "1.15.3"}

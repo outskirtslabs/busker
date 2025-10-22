@@ -108,12 +108,12 @@
                                            (-> req :write-resp :on-proceed-cb-ptr)
                                            (-> req :write-resp :on-stop-cb-ptr))
                        (catch Throwable t
-                         #p t)))])
+                         (println "THROWABLE in response write:" t))))])
       (if body
         (ring-protocols/write-body-to-stream body ring-resp out-stream)
         (.close ^OutputStream out-stream)))
 
     (catch Exception e
-      #p e
+      (println "EXCEPTION in response:" e)
       (.printStackTrace e)))
   nil)

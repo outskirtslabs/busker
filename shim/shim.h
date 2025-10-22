@@ -283,4 +283,64 @@ SSL_CTX *clj_h2o_create_ssl_ctx(const char *cert_file, const char *key_file,
 /* Free SSL_CTX created by clj_h2o_create_ssl_ctx */
 void clj_h2o_free_ssl_ctx(SSL_CTX *ssl_ctx);
 
+/* WebSocket support */
+typedef struct clj_ws_conn_t clj_ws_conn_t;
+
+/* WebSocket message callback signature
+ * opcode: WSLAY_TEXT_FRAME (0x1) or WSLAY_BINARY_FRAME (0x2)
+ * msg: message data (may be NULL if connection closed)
+ * msg_length: length of message data
+ */
+typedef void (*clj_ws_msg_callback)(clj_ws_conn_t *conn, uint8_t opcode,
+                                    const uint8_t *msg, size_t msg_length);
+
+struct clj_ws_conn_t {
+  void *h2o_ws_conn; /* h2o_websocket_conn_t pointer */
+  void *user_data;
+  clj_ws_msg_callback on_message;
+};
+
+/* Check if request is a WebSocket handshake
+ * Returns: 0 if valid handshake, -1 if invalid, 1 if not a websocket request
+ * client_key_out: pointer to receive the client key (if valid handshake)
+ */
+int clj_h2o_is_websocket_handshake(h2o_req_t *req, const char **client_key_out);
+
+/* Upgrade HTTP request to WebSocket
+ * Returns: WebSocket connection handle, or NULL on error
+ * user_data: arbitrary data to associate with connection
+ * on_message: callback for received messages (NULL message indicates close)
+ */
+clj_ws_conn_t *clj_h2o_upgrade_to_websocket(h2o_req_t *req,
+                                            const char *client_key,
+                                            void *user_data,
+                                            clj_ws_msg_callback on_message);
+
+/* Send text or binary message via WebSocket
+ * opcode: WSLAY_TEXT_FRAME (0x1) or WSLAY_BINARY_FRAME (0x2)
+ * Returns: 0 on success, -1 on error
+ */
+int clj_h2o_websocket_send(clj_ws_conn_t *conn, uint8_t opcode,
+                           const uint8_t *data, size_t length);
+
+/* Send ping message via WebSocket
+ * Returns: 0 on success, -1 on error
+ */
+int clj_h2o_websocket_ping(clj_ws_conn_t *conn, const uint8_t *data,
+                           size_t length);
+
+/* Send pong message via WebSocket
+ * Returns: 0 on success, -1 on error
+ */
+int clj_h2o_websocket_pong(clj_ws_conn_t *conn, const uint8_t *data,
+                           size_t length);
+
+/* Close WebSocket connection
+ * code: close status code (e.g., 1000 for normal closure)
+ * reason: close reason string (may be NULL)
+ * reason_length: length of reason string
+ */
+void clj_h2o_websocket_close(clj_ws_conn_t *conn, uint16_t code,
+                             const char *reason, size_t reason_length);
+
 #endif /* CLJ_H2O_SHIM_H */

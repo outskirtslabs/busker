@@ -676,3 +676,178 @@ void clj_h2o_free_ssl_ctx(SSL_CTX *ssl_ctx) {
     SSL_CTX_free(ssl_ctx);
   }
 }
+
+/* WebSocket support implementation */
+#include "h2o/websocket.h"
+
+/* Internal callback that bridges h2o websocket to our callback */
+static void clj_ws_on_message(h2o_websocket_conn_t *h2o_conn,
+                              const struct wslay_event_on_msg_recv_arg *arg) {
+  clj_ws_conn_t *conn = (clj_ws_conn_t *)h2o_conn->data;
+
+  if (arg == NULL) {
+    /* Connection closed */
+    DEBUG_LOG("WebSocket connection closed");
+    if (conn->on_message) {
+      conn->on_message(conn, 0, NULL, 0);
+    }
+    h2o_websocket_close(h2o_conn);
+    free(conn);
+    return;
+  }
+
+  /* Call user callback with message data */
+  DEBUG_LOG("WebSocket message received: opcode=%d, length=%zu", arg->opcode,
+            arg->msg_length);
+  if (conn->on_message) {
+    conn->on_message(conn, arg->opcode, arg->msg, arg->msg_length);
+  }
+}
+
+int clj_h2o_is_websocket_handshake(h2o_req_t *req,
+                                   const char **client_key_out) {
+  int result = h2o_is_websocket_handshake(req, client_key_out);
+  if (result == 0 && *client_key_out != NULL) {
+    DEBUG_LOG("Valid WebSocket handshake detected");
+    return 0; /* Valid handshake */
+  } else if (result == -1) {
+    DEBUG_LOG("Invalid WebSocket handshake");
+    return -1; /* Invalid handshake */
+  } else {
+    return 1; /* Not a websocket request */
+  }
+}
+
+clj_ws_conn_t *clj_h2o_upgrade_to_websocket(h2o_req_t *req,
+                                            const char *client_key,
+                                            void *user_data,
+                                            clj_ws_msg_callback on_message) {
+  DEBUG_LOG("Upgrading to WebSocket connection");
+  
+  clj_ws_conn_t *conn = (clj_ws_conn_t *)malloc(sizeof(clj_ws_conn_t));
+  if (!conn) {
+    DEBUG_LOG("Failed to allocate WebSocket connection");
+    return NULL;
+  }
+
+  conn->user_data = user_data;
+  conn->on_message = on_message;
+
+  /* Upgrade the connection */
+  h2o_websocket_conn_t *h2o_conn =
+      h2o_upgrade_to_websocket(req, client_key, conn, clj_ws_on_message);
+
+  if (!h2o_conn) {
+    DEBUG_LOG("h2o_upgrade_to_websocket failed");
+    free(conn);
+    return NULL;
+  }
+
+  conn->h2o_ws_conn = h2o_conn;
+  DEBUG_LOG("WebSocket upgrade successful");
+  return conn;
+}
+
+int clj_h2o_websocket_send(clj_ws_conn_t *conn, uint8_t opcode,
+                           const uint8_t *data, size_t length) {
+  if (!conn || !conn->h2o_ws_conn) {
+    DEBUG_LOG("Invalid WebSocket connection for send");
+    return -1;
+  }
+
+  DEBUG_LOG("Sending WebSocket message: opcode=%d, length=%zu", opcode, length);
+  
+  h2o_websocket_conn_t *h2o_conn = (h2o_websocket_conn_t *)conn->h2o_ws_conn;
+  struct wslay_event_msg msg = {opcode, data, length};
+
+  if (wslay_event_queue_msg(h2o_conn->ws_ctx, &msg) != 0) {
+    DEBUG_LOG("wslay_event_queue_msg failed");
+    return -1;
+  }
+
+  h2o_websocket_proceed(h2o_conn);
+  return 0;
+}
+
+int clj_h2o_websocket_ping(clj_ws_conn_t *conn, const uint8_t *data,
+                           size_t length) {
+  if (!conn || !conn->h2o_ws_conn) {
+    DEBUG_LOG("Invalid WebSocket connection for ping");
+    return -1;
+  }
+
+  DEBUG_LOG("Sending WebSocket ping: length=%zu", length);
+  
+  h2o_websocket_conn_t *h2o_conn = (h2o_websocket_conn_t *)conn->h2o_ws_conn;
+  struct wslay_event_msg msg = {WSLAY_PING, data, length};
+
+  if (wslay_event_queue_msg_ex(h2o_conn->ws_ctx, &msg, 0) != 0) {
+    DEBUG_LOG("wslay_event_queue_msg_ex (PING) failed");
+    return -1;
+  }
+
+  h2o_websocket_proceed(h2o_conn);
+  return 0;
+}
+
+int clj_h2o_websocket_pong(clj_ws_conn_t *conn, const uint8_t *data,
+                           size_t length) {
+  if (!conn || !conn->h2o_ws_conn) {
+    DEBUG_LOG("Invalid WebSocket connection for pong");
+    return -1;
+  }
+
+  DEBUG_LOG("Sending WebSocket pong: length=%zu", length);
+  
+  h2o_websocket_conn_t *h2o_conn = (h2o_websocket_conn_t *)conn->h2o_ws_conn;
+  struct wslay_event_msg msg = {WSLAY_PONG, data, length};
+
+  if (wslay_event_queue_msg_ex(h2o_conn->ws_ctx, &msg, 0) != 0) {
+    DEBUG_LOG("wslay_event_queue_msg_ex (PONG) failed");
+    return -1;
+  }
+
+  h2o_websocket_proceed(h2o_conn);
+  return 0;
+}
+
+void clj_h2o_websocket_close(clj_ws_conn_t *conn, uint16_t code,
+                             const char *reason, size_t reason_length) {
+  if (!conn || !conn->h2o_ws_conn) {
+    DEBUG_LOG("Invalid WebSocket connection for close");
+    return;
+  }
+
+  DEBUG_LOG("Closing WebSocket connection: code=%d, reason_length=%zu", code,
+            reason_length);
+  
+  h2o_websocket_conn_t *h2o_conn = (h2o_websocket_conn_t *)conn->h2o_ws_conn;
+
+  /* Queue close frame with status code and reason */
+  if (reason && reason_length > 0) {
+    /* Allocate buffer for code + reason */
+    size_t total_len = 2 + reason_length;
+    uint8_t *close_data = (uint8_t *)malloc(total_len);
+    if (close_data) {
+      /* Pack status code in network byte order */
+      close_data[0] = (code >> 8) & 0xFF;
+      close_data[1] = code & 0xFF;
+      memcpy(close_data + 2, reason, reason_length);
+
+      struct wslay_event_msg msg = {WSLAY_CONNECTION_CLOSE, close_data, total_len};
+      wslay_event_queue_msg_ex(h2o_conn->ws_ctx, &msg, 0);
+      free(close_data);
+    }
+  } else {
+    /* Just send status code */
+    uint8_t close_data[2];
+    close_data[0] = (code >> 8) & 0xFF;
+    close_data[1] = code & 0xFF;
+    struct wslay_event_msg msg = {WSLAY_CONNECTION_CLOSE, close_data, 2};
+    wslay_event_queue_msg_ex(h2o_conn->ws_ctx, &msg, 0);
+  }
+
+  h2o_websocket_proceed(h2o_conn);
+
+  /* Note: actual cleanup happens in clj_ws_on_message when arg is NULL */
+}
