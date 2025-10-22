@@ -206,9 +206,10 @@
               (when-not @closed?
                 (reset! closed? true)))))]
 
-    {::on-proceed-cb on-proceed-cb
-     ::on-stop-cb on-stop-cb
-     ::channel body-channel
-     :out-stream (Channels/newOutputStream body-channel)
+    {::on-proceed-cb    on-proceed-cb
+     ::on-stop-cb       on-stop-cb
+     ::channel          body-channel
+     :cancel            (fn [] (reset! closed? true))
+     :out-stream        (Channels/newOutputStream body-channel)
      :on-proceed-cb-ptr on-proceed-cb-ptr
-     :on-stop-cb-ptr on-stop-cb-ptr}))
+     :on-stop-cb-ptr    on-stop-cb-ptr}))
