@@ -5,7 +5,6 @@
    [ol.h2o.buffer-pool :as bp]
    [ol.h2o.byte-bounded-queue :as bbq]
    [ol.h2o.native :as h2o]
-   [ol.h2o.pool :as pool]
    [ol.h2o.protocols :as p]
    [taoensso.trove :as trove])
   (:import
@@ -13,8 +12,7 @@
    [java.lang.foreign Arena MemorySegment]
    [java.nio ByteBuffer]
    [java.nio.channels Channels WritableByteChannel]
-   [java.util.concurrent.atomic AtomicBoolean AtomicReference]
-   [ol.h2o.pool FixedPool]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicReference]))
 
 (set! *warn-on-reflection* true)
 
@@ -34,7 +32,7 @@
 
 (defn release-chunk [p ^Chunk c]
   (doseq [b (:bufs c)]
-    (pool/release p b)))
+    (bp/return p b)))
 
 (defrecord
  ^{:doc "Per-request state for the queue-based sender.
@@ -61,14 +59,16 @@
   ^AtomicBoolean stopped?_
   ^AtomicBoolean final-enqueued?_
   ^AtomicReference current-buffer_
-  ^FixedPool buffer-pool
+  buffer-pool
   ^clojure.lang.IPersistentMap config])
 
 (def default-output-buffer-size
   "How much body data in bytes accumulates before writing to the network"
   32768)
 
-(defn new-response-state [req]
+(defn new-response-state
+  [req]
+  (assert (:buffer-pool req))
   (->ResponseState req
                    (bbq/byte-bounded-spsc-queue default-output-buffer-size)
                    (AtomicBoolean. false)
@@ -77,7 +77,7 @@
                    (AtomicBoolean. false)
                    (AtomicBoolean. false)
                    (AtomicReference. nil)
-                   (bp/make-bytebuffer-pool {:buf-size 8192})
+                   (:buffer-pool req)
                    {}))
 
 ;; ----- Worker side functions
@@ -166,6 +166,7 @@
   "Evloop worker thread: drain chunks and send to native when ready."
   [^ResponseState st]
   (when-not (.get ^AtomicBoolean (:stopped?_ st))
+    ;; TODO: what should else branch here be?
     (if (nil? (.get ^AtomicReference (:in-flight_ st)))
       (let [arena  (Arena/ofAuto)
             result (drain-chunks (:req st) (:bbq st) (get-in st [:config :preferred-chunk-size] Long/MAX_VALUE)
@@ -208,6 +209,9 @@
   [^ResponseState st _reason]
   (try
     (.set ^AtomicBoolean (:stopped?_ st) true)
+    (bbq/close (:bbq st))
+    (when-some [^ByteBuffer buf (.getAndSet ^AtomicReference (:current-buffer_ st) nil)]
+      (bp/return (:buffer-pool st) buf))
     (catch Exception e
       (report-error e))))
 
@@ -233,14 +237,14 @@
                  (.get ^AtomicBoolean (:closing?_ st)))
          (throw (java.nio.channels.ClosedChannelException.)))
        (let [^AtomicReference cur-ref (:current-buffer_ st)
-             ^FixedPool pool          (:buffer-pool st)
+             pool                     (:buffer-pool st)
              total                    (long (.remaining src))]
          (when (pos? total)
            (loop [left total]
              (if (zero? left)
                total
                (let [^ByteBuffer buf (or (.get cur-ref)
-                                         (let [b (pool/borrow pool)]
+                                         (let [b (bp/borrow pool 8192 true)]
                                            (when (nil? b) (throw (ex-info "Buffer pool exhausted" {})))
                                            (.clear ^ByteBuffer b)
                                            (.set cur-ref b)
@@ -268,7 +272,7 @@
          (do
            ;; Best-effort: release any borrowed current buffer back to the pool.
            (when-some [^ByteBuffer buf (.get ^AtomicReference (:current-buffer_ st))]
-             (pool/release (:buffer-pool st) buf)
+             (bp/return (:buffer-pool st) buf)
              (.set ^AtomicReference (:current-buffer_ st) nil))
            (.set ^AtomicBoolean (:closing?_ st) true)
            nil)
@@ -288,14 +292,18 @@
              nil)
            nil))))))
 
-(defn create-response-queue [req _opts]
+(defn create-response-queue [req]
   (let [st            (new-response-state req)
         on-proceed-cb (fn [_ctx-ptr] (on-proceed st))
         on-stop-cb    (fn [_ctx-ptr reason] (on-stop st reason))]
     {::state            st
      ::on-proceed-cb    on-proceed-cb
      ::on-stop-cb       on-stop-cb
-     :cancel            (fn [] (.set ^AtomicBoolean (:stopped?_ st) true))
+     :cancel            (fn []
+                          (.set ^AtomicBoolean (:stopped?_ st) true)
+                          (bbq/close (:bbq st))
+                          (when-some [^ByteBuffer buf (.getAndSet ^AtomicReference (:current-buffer_ st) nil)]
+                            (bp/return (:buffer-pool st) buf)))
      :out-stream        (output-stream st)
      :on-proceed-cb-ptr (mem/serialize on-proceed-cb [::ffi/fn [::mem/pointer] ::mem/void])
      :on-stop-cb-ptr    (mem/serialize on-stop-cb [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])}))

@@ -3,18 +3,53 @@
    [clojure.java.io :as io]
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]
+   [ol.h2o.buffer-pool :as bp]
+   [ol.h2o.byte-bounded-queue :as bbq]
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
    [ol.h2o.native.socket :as socket]
    [ol.h2o.protocols :as p]
-   [ol.h2o.request :as request])
+   [ol.h2o.request :as request]
+   [ol.h2o.response-queue :as response-queue])
   (:import
    [java.util.concurrent ExecutorService Executors TimeUnit]
-   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]
+   [ol.h2o.response_queue ResponseState]))
 
 (set! *warn-on-reflection* true)
 
 (def ^:const default-max-connections 1024)
+
+(defn- response-state-pending?
+  [^ResponseState st]
+  (let [scheduled? (.get ^AtomicBoolean (:scheduled?_ st))
+        in-flight? (some? (.get ^AtomicReference (:in-flight_ st)))
+        queued-bytes (bbq/queued-bytes (:bbq st))]
+    (or scheduled?
+        in-flight?
+        (pos? queued-bytes))))
+
+(defn- request-awaiting-final?
+  [req]
+  (when-let [latency (:latency/state req)]
+    (let [^AtomicLong handler-start (:handler-start latency)
+          ^AtomicLong response-final (:response-final latency)]
+      (and handler-start response-final
+           (pos? (.get handler-start))
+           (zero? (.get response-final))))))
+
+(defn- pending-response-work?
+  "Return true if any live request on this worker still needs JVM-driven response work."
+  [worker]
+  (let [^java.util.HashMap requests (:requests worker)]
+    (boolean
+     (some
+      (fn [req]
+        (or (when-let [write-resp (:write-resp req)]
+              (when-let [^ResponseState st (::response-queue/state write-resp)]
+                (response-state-pending? st)))
+            (request-awaiting-final? req)))
+      (.values requests)))))
 
 (defn evloop-msg-processor
   "Called by drain-mailbox! inside each worker thread for each message on the evloop"
@@ -28,9 +63,9 @@
     (let [[send-vecs] args]
       (send-vecs))
 
-    #_#_:h2o/send-response
-      (let [[req ring-resp] args]
-        (response/send-ring-response! req ring-resp))
+    :h2o/start-response
+    (let [[start-fn] args]
+      (start-fn))
     nil))
 
 (defn create-connection-close-callback
@@ -150,24 +185,26 @@
    Returns map with ::config-ptr, ::hostconf-ptr, ::handler-ptr"
   [arena ring-handler config]
   (let [;; allocate and configure h2o_globalconf_t
-        config-ptr            (mem/alloc (h2o/globalconf-size) arena)
-        flat-config-ptr       (mem/serialize (config->flat-globalconf-t config) ::h2o/clj-h2o-flat-globalconf-t arena)
-        config-ptr            (do
-                                (h2o/create-global-conf config-ptr flat-config-ptr)
-                                config-ptr)
+        config-ptr (mem/alloc (h2o/globalconf-size) arena)
+        flat-config-ptr (mem/serialize (config->flat-globalconf-t config) ::h2o/clj-h2o-flat-globalconf-t arena)
+        config-ptr (do
+                     (h2o/create-global-conf config-ptr flat-config-ptr)
+                     config-ptr)
         ;; we need at least one h2o_hostconf_t, prepare that here
-        hostconf-ptr          (with-open [arena2 (mem/confined-arena)]
-                                (h2o/config-register-host config-ptr (h2o/str->iovec "default" arena2) 65535))
-        on-request-cb         (partial request/on-request (:executor config) ring-handler)
+        hostconf-ptr (with-open [arena2 (mem/confined-arena)]
+                       (h2o/config-register-host config-ptr (h2o/str->iovec "default" arena2) 65535))
+        on-request-cb (partial request/on-request (:executor config)
+                               (:buffer-pool config)
+                               ring-handler)
         on-request-cleanup-cb (partial request/on-request-cleanup ring-handler)
-        handler               (h2o/create-handler hostconf-ptr on-request-cb on-request-cleanup-cb flat-config-ptr arena)]
+        handler (h2o/create-handler hostconf-ptr on-request-cb on-request-cleanup-cb flat-config-ptr arena)]
     ;; all of these things may not be used again, but they must not be GCed
     ;; until the server itself is reaped
-    {::config-ptr            config-ptr
-     ::hostconf-ptr          hostconf-ptr
-     ::on-request-cb         on-request-cb
+    {::config-ptr config-ptr
+     ::hostconf-ptr hostconf-ptr
+     ::on-request-cb on-request-cb
      ::on-request-cleanup-cb on-request-cleanup-cb
-     ::handler               handler}))
+     ::handler handler}))
 
 (defn update-listener-state!
   "Throttle TCP listeners by starting/stopping accept callbacks based on connection count.
@@ -270,7 +307,8 @@
     (if context-disposed?
       (h2o/evloop-run loop-ptr 0)
       (let [now      (h2o/evloop-now loop-ptr)
-            max-wait (h2o/cleanup-thread now ctx-ptr)]
+            max-wait (h2o/cleanup-thread now ctx-ptr)
+            max-wait (if (pending-response-work? worker) 5 max-wait)]
         (when-not shutdown-initiated?
           (update-listener-state! listener-socks accept-callbacks))
         (h2o/evloop-run loop-ptr (if (pos? (p/count-msgs worker)) 0 max-wait))))
@@ -322,29 +360,31 @@
 
 (defn with-defaults [{:keys [n-workers listeners max-connections executor server-name
                              compress? compress-min-size compress-gzip-level
-                             compress-brotli-level compress-zstd-level]
-                      :or   {n-workers             1
-                             server-name           "ol.h2o/dev"
-                             listeners             [{:port 8080}]
-                             executor              (Executors/newVirtualThreadPerTaskExecutor)
-                             max-connections       default-max-connections
-                             compress?             true
-                             compress-min-size     100
-                             compress-gzip-level   1
-                             compress-brotli-level 1
-                             compress-zstd-level   3}
-                      :as   config}]
+                             compress-brotli-level compress-zstd-level buffer-pool]
+                      :or {n-workers 1
+                           server-name "ol.h2o/dev"
+                           listeners [{:port 8080}]
+                           executor (Executors/newVirtualThreadPerTaskExecutor)
+                           max-connections default-max-connections
+                           compress? true
+                           compress-min-size 100
+                           compress-gzip-level 1
+                           compress-brotli-level 1
+                           compress-zstd-level 3}
+                      :as config}]
+
   (let [validated-listeners (mapv validate-listener listeners)]
-    (merge config {:executor              executor
-                   :server-name           server-name
-                   :listeners             validated-listeners
-                   :n-workers             n-workers
-                   :max-connections       max-connections
-                   :compress?             compress?
-                   :compress-min-size     compress-min-size
-                   :compress-gzip-level   compress-gzip-level
+    (merge config {:executor executor
+                   :buffer-pool (or buffer-pool (bp/make-bytebuffer-pool {}))
+                   :server-name server-name
+                   :listeners validated-listeners
+                   :n-workers n-workers
+                   :max-connections max-connections
+                   :compress? compress?
+                   :compress-min-size compress-min-size
+                   :compress-gzip-level compress-gzip-level
                    :compress-brotli-level compress-brotli-level
-                   :compress-zstd-level   compress-zstd-level})))
+                   :compress-zstd-level compress-zstd-level})))
 
 (defn run-server
   "Start an h2o webserver to serve the given Ring handler according to the
@@ -505,6 +545,7 @@
       ::config config
       ::handler handler
       ::executor executor
+
       ::n-workers n-workers
       ::listeners listeners
       ::max-connections max-connections
@@ -584,9 +625,11 @@
      (when ssl-ctx
        (h2o/free-ssl-ctx ssl-ctx)))
 
+   (bp/dispose (-> server ::config :buffer-pool))
+
    (when-let [arena (::arena server)]
      (.close ^java.lang.AutoCloseable arena))
-   server))
+   nil))
 
 (comment
   (def _server (run-server {}))

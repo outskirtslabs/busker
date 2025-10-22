@@ -16,8 +16,9 @@
 (def ^:dynamic *verbose-logging?* false)
 
 (def ^:const dep-ol-h2o "ol.http-clj (local)")
-(def ^:const dep-http-kit "http-kit v2.8.0")
-(def ^:const dep-jetty "ring-jetty-adapter v1.11.0")
+(def ^:const dep-http-kit "http-kit v2.9.0-beta2")
+(def ^:const dep-jetty "ring-jetty-adapter v1.15.3")
+(def ^:const dep-sunng-jetty "sunng-jetty9-adapter v0.39.0")
 
 ;;;; General helpers
 

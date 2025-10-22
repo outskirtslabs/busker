@@ -2,7 +2,15 @@
 
 (set! *warn-on-reflection* true)
 
-(defrecord Request [worker req-id req-ctx-ptr req-ctx ring-req write-req write-resp])
+(defrecord Request
+           [worker
+            buffer-pool
+            req-id
+            req-ctx-ptr
+            req-ctx
+            ring-req
+            write-req
+            write-resp])
 
 (defprotocol WorkerThread
   (running? [_])

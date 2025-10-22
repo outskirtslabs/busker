@@ -55,7 +55,12 @@
   (queued-bytes [_] (- bytes-capacity (.availablePermits permits)))
   (remaining-bytes [_] (.availablePermits permits))
   (closed? [_] @closed?_)
-  (close [_] (reset! closed?_ true))
+  (close [_]
+    (reset! closed?_ true)
+    (let [missing (- bytes-capacity (.availablePermits permits))]
+      (when (pos? missing)
+        (.release permits (int missing))))
+    nil)
   (put [_ item]
     (ensure-open closed?_)
     (let [b (long (byte-size item))]
@@ -63,6 +68,7 @@
       (when (> b bytes-capacity) (throw (IllegalArgumentException. (str "Chunk bytes " b " exceed capacity " bytes-capacity))))
       (when (pos? b) (.acquire permits (int b)))
       (try
+        (ensure-open closed?_)
         (.put q item)
         (catch Throwable t
           (when (pos? b) (.release permits (int b)))

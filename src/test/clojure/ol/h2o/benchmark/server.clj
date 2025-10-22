@@ -2,16 +2,19 @@
   "Server benchmark harness mirroring the http-kit benchmark suite, extended
   with our ol.h2o server."
   (:require
+   [clj-async-profiler.core :as prof]
    [clojure.string :as str]
    [ol.h2o.benchmark.utils :as u]
    [ol.h2o.server :as h2o-server]
    [org.httpkit.server :as http-kit]
+   [ring.adapter.jetty9 :as sunng-jetty]
    [ring.adapter.jetty :as jetty])
   (:import
-   [java.time Duration]
    [java.util.concurrent Executors ExecutorService ThreadPoolExecutor LinkedBlockingQueue TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean]
-   [java.lang Thread]))
+   [java.lang Thread]
+   [org.eclipse.jetty.util.thread QueuedThreadPool]
+   [org.eclipse.jetty.util.component LifeCycle]))
 
 (set! *warn-on-reflection* true)
 
@@ -92,9 +95,13 @@
   (server-start [_ handler port worker-opts]
     (when (nil? @state_)
       (let [{:keys [pool] :as worker} (new-h2o-worker worker-opts)
-            n-workers (max 1 (or (:n-workers worker-opts)
-                                 (:n-threads worker-opts)
-                                 u/num-cores))
+            #_#_n-workers (max 1 (or (:n-workers worker-opts)
+                                     (:n-threads worker-opts)
+                                     u/num-cores))
+            n-workers (min (or (:n-workers worker-opts)
+                               (:n-threads worker-opts)
+                               u/num-cores) u/num-cores)
+            _ (prof/start)
             server (h2o-server/run-server handler
                                           {:listeners [{:port port}]
                                            :n-workers n-workers
@@ -109,6 +116,7 @@
 
   (server-stop [_ timeout-msecs]
     (when-let [{:keys [server pool]} @state_]
+      (prof/stop)
       (h2o-server/stop-server server)
       (shutdown-pool pool timeout-msecs)
       (reset! state_ nil)
@@ -142,6 +150,52 @@
       (reset! state_ nil)
       true)))
 
+(deftype ServerSunngJetty [state_]
+  clojure.lang.IDeref
+  (deref [_]
+    (let [{:keys [worker port]} @state_]
+      {:server-name u/dep-sunng-jetty
+       :running? (boolean port)
+       :worker worker
+       :port port}))
+
+  IServer
+  (server-start [_ handler port worker-opts]
+    (when (nil? @state_)
+      (let [max-threads (long (or (:n-threads worker-opts)
+                                  (* 2 u/num-cores)))
+            min-threads (long (max 1 (min max-threads (or (:n-min-threads worker-opts)
+                                                          (quot max-threads 2)))))
+            queue-size (some-> (:queue-size worker-opts) long)
+            idle-timeout (int 60000)
+            queue (if (and queue-size (pos? queue-size))
+                    (LinkedBlockingQueue. (int queue-size))
+                    (LinkedBlockingQueue.))
+            thread-pool (QueuedThreadPool. (int max-threads)
+                                           (int min-threads)
+                                           idle-timeout
+                                           queue)
+            server (sunng-jetty/run-jetty handler {:port port :thread-pool thread-pool :join? false})
+            worker {:type :queued
+                    :n-min-threads (int min-threads)
+                    :n-max-threads (int max-threads)
+                    :queue-size (when queue-size (int queue-size))}]
+        (reset! state_
+                {:server server
+                 :worker worker
+                 :thread-pool thread-pool
+                 :port port})
+        true)))
+
+  (server-stop [_ timeout-msecs]
+    (when-let [{:keys [^org.eclipse.jetty.server.Server server thread-pool]} @state_]
+      (.setStopTimeout server timeout-msecs)
+      (.stop server)
+      (when (instance? LifeCycle thread-pool)
+        (.stop ^LifeCycle thread-pool))
+      (reset! state_ nil)
+      true)))
+
 (deftype ServerJetty [state_]
   clojure.lang.IDeref
   (deref [_]
@@ -154,32 +208,37 @@
   IServer
   (server-start [_ handler port worker-opts]
     (when (nil? @state_)
-      (let [worker (http-kit/new-worker worker-opts)
-            pool
-            (let [{:keys [^ExecutorService pool type]} worker]
-              (if (= type :virtual)
-                ;; Basic adapter to let Jetty run on virtual threads until native support lands.
-                (reify
-                  org.eclipse.jetty.util.thread.ThreadPool
-                  (execute [_ job] (.submit pool ^Runnable job))
-                  (getThreads [_] 1)
-                  (getIdleThreads [_] 256)
-                  (isLowOnThreads [_] false))
-                (org.eclipse.jetty.util.thread.ExecutorThreadPool.
-                 ^ThreadPoolExecutor pool)))]
-        (let [server (jetty/run-jetty handler {:port port :thread-pool pool :join? false})]
-          (reset! state_
-                  {:server server
-                   :worker (dissoc worker :pool :queue :n-cores)
-                   :pool (:pool worker)
-                   :port port})
-          true))))
+      (let [max-threads (long (or (:n-threads worker-opts)
+                                  (* 2 u/num-cores)))
+            min-threads (long (max 1 (min max-threads (or (:n-min-threads worker-opts)
+                                                          (quot max-threads 2)))))
+            queue-size (some-> (:queue-size worker-opts) long)
+            idle-timeout (int 60000)
+            queue (if (and queue-size (pos? queue-size))
+                    (LinkedBlockingQueue. (int queue-size))
+                    (LinkedBlockingQueue.))
+            thread-pool (QueuedThreadPool. (int max-threads)
+                                           (int min-threads)
+                                           idle-timeout
+                                           queue)
+            server (jetty/run-jetty handler {:port port :thread-pool thread-pool :join? false})
+            worker {:type :queued
+                    :n-min-threads (int min-threads)
+                    :n-max-threads (int max-threads)
+                    :queue-size (when queue-size (int queue-size))}]
+        (reset! state_
+                {:server server
+                 :worker worker
+                 :thread-pool thread-pool
+                 :port port})
+        true)))
 
   (server-stop [_ timeout-msecs]
-    (when-let [{:keys [^org.eclipse.jetty.server.Server server pool]} @state_]
+    (when-let [{:keys [^org.eclipse.jetty.server.Server server thread-pool]} @state_]
       (.setStopTimeout server timeout-msecs)
       (.stop server)
-      (shutdown-pool pool timeout-msecs)
+      (when (instance? LifeCycle thread-pool)
+        (.stop ^LifeCycle thread-pool))
       (reset! state_ nil)
       true)))
 
@@ -188,9 +247,10 @@
     :ol-h2o (ServerH2O. (atom nil))
     :http-kit (ServerHttpKit. (atom nil))
     :jetty (ServerJetty. (atom nil))
+    :sunng-jetty (ServerSunngJetty. (atom nil))
     (throw (ex-info "[new-server] unexpected server id"
                     {:server-id server-id
-                     :expected #{:ol-h2o :http-kit :jetty}}))))
+                     :expected #{:ol-h2o :http-kit :jetty :sunng-jetty}}))))
 
 ;;;; Request handler ----------------------------------------------------------
 
@@ -300,49 +360,36 @@
 ;;;; Profiles -----------------------------------------------------------------
 
 (def profiles
-  (let [nc u/num-cores
-        queue-size 65536
+  (let [nc          u/num-cores
+        queue-size  65536
         wrk-threads (max 1 (u/round0 (* nc 0.333)))
-        wrk-conns (cond
-                    (>= nc 16) [128 256]
-                    (>= nc 8) [64 128]
-                    (>= nc 4) [32 64]
-                    :else [8 16])]
+        wrk-conns   (cond
+                      #_#_(>= nc 16) [128 256]
+                      (>= nc 8) [64 128]
+                      (>= nc 4) [32 64]
+                      :else     [8 16])]
     {:quick
-     {:comments "Quick comparison across servers"
-      :server-opts {:server-id [:ol-h2o :http-kit :jetty]
-                    :resp-len [128]
+     {:comments    "Quick comparison across servers"
+      :server-opts {:server-id [:ol-h2o :http-kit :jetty :sunng-jetty]
+                    :resp-len  [128]
                     :resp-work [{:sleep [10 70] :hot [0 20]}]}
       :worker-opts {:queue-size [queue-size]
-                    :n-threads [(* nc 2) nil]}
-      :wrk-opts {:timeout ["2s"]
-                 :n-threads [wrk-threads]
-                 :keep-alive? [true false]
-                 :n-conns wrk-conns}}
-
+                    :n-threads  [(* nc 2)]}
+      :wrk-opts    {:timeout     ["2s"]
+                    :n-threads   [wrk-threads]
+                    :keep-alive? [true]
+                    :n-conns     wrk-conns}}
      :single
-     {:comments "Single spec targetted run"
-      :server-opts {:server-id [:ol-h2o :http-kit :jetty]
-                    :resp-len [128]
-                    :resp-work [{:sleep [10 70] :hot [0 20]}]}
-      :worker-opts {:queue-size [queue-size]
-                    :n-threads [(* nc 4)]}
-      :wrk-opts {:timeout ["1s"]
-                 :n-threads [wrk-threads]
-                 :keep-alive? [true]
-                 :n-conns wrk-conns}}
-
-     :shutdown-debug
-     {:comments "Focused run to exercise the long-running shutdown path"
+     {:comments    "single run"
       :server-opts {:server-id [:ol-h2o]
-                    :resp-len [128]
+                    :resp-len  [128]
                     :resp-work [{:sleep [10 70] :hot [0 20]}]}
       :worker-opts {:queue-size [queue-size]
-                    :n-threads [nil]}
-      :wrk-opts {:timeout ["2s"]
-                 :n-threads [wrk-threads]
-                 :keep-alive? [true]
-                 :n-conns [256]}}}))
+                    :n-threads  [(* nc 2)]}
+      :wrk-opts    {:timeout     ["2s"]
+                    :n-threads   [wrk-threads]
+                    :keep-alive? [true]
+                    :n-conns     wrk-conns}}}))
 
 (defn bench-by-profile
   [{:keys [metadata system-info port profile runtime dry-run? skip?]

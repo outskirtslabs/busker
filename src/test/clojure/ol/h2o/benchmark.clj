@@ -1,5 +1,9 @@
 (ns ol.h2o.benchmark
-  "Benchmark entrypoint for comparing ol.h2o with other Clojure HTTP servers."
+  "This is a benchmark suite based on the implementation by Peter Taoussanis (@ptaoussanis) in http-kit
+
+  ref: https://github.com/http-kit/http-kit/blob/master/test/org/httpkit/benchmark.clj
+
+  All caveats and disclaimers apply here as well."
   (:require
    [clojure.edn :as edn]
    [ol.h2o.benchmark.server :as server]
@@ -24,7 +28,7 @@
   ([]
    (bench {}))
   ([{:keys [metadata profile dry-run? server]
-     :or {profile :quick}}]
+     :or {profile :quick} :as opts}]
    (let [t0 (System/currentTimeMillis)
          metadata (merge default-metadata metadata)
          system-info (u/get-system-info)
