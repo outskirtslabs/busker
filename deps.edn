@@ -27,7 +27,7 @@
                                   com.cnuernber/charred                    {:mvn/version "1.034"}
                                   org.clojure/clojure                      {:mvn/version "1.12.1"}
                                   io.github.tonsky/clj-reload              {:mvn/version "1.0.0"}
-                                  org.clojure/tools.deps                   {:mvn/version "0.24.1523"}
+                                  org.clojure/tools.deps                   {:mvn/version "0.26.1553"}
                                   com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.6.2"}
                                   ol.http-clj/macos-aarch64                {:local/root "shim/macos-aarch64"}
                                   ol.http-clj/linux-x86-64                 {:local/root "shim/linux-x86-64"}}}
