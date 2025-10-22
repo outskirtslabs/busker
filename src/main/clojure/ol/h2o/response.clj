@@ -91,19 +91,24 @@
 (defn send-ring-response!
   "Send a Ring response map using StreamableResponseBody protocol."
   [^Request req ring-resp]
-  (let [{:keys [status body]
+  (let [{:keys     [status body]
          :h2o/keys [compress-hint]
-         :as   ring-resp}                    (with-cl-or-te ring-resp)
+         :as       ring-resp}                    (with-cl-or-te ring-resp)
         [headers headers-len content-length] (build-headers ring-resp)
-        ^OutputStream out-stream (-> req :write-resp :out-stream)]
-    (let [compress-hint (get h2o/->compress-hint compress-hint h2o/H2O_COMPRESS_HINT_ENABLE)]
-      (h2o/start-response (:req-ctx-ptr req) status
-                          headers headers-len
-                          content-length compress-hint
-                          (-> req :write-resp :on-proceed-cb-ptr)
-                          (-> req :write-resp :on-stop-cb-ptr)))
+        ^OutputStream out-stream             (-> req :write-resp :out-stream)
+        compress-hint                        (get h2o/->compress-hint compress-hint h2o/H2O_COMPRESS_HINT_ENABLE)]
+    (p/send-msg (:worker req)
+                [:h2o/start-response
+                 (fn []
+                   (try
+                     (h2o/start-response (:req-ctx-ptr req) status
+                                         headers headers-len
+                                         content-length compress-hint
+                                         (-> req :write-resp :on-proceed-cb-ptr)
+                                         (-> req :write-resp :on-stop-cb-ptr))
+                     (catch Throwable t
+                       #p t)))])
     (if body
       (ring-protocols/write-body-to-stream body ring-resp out-stream)
-      #_(srb/write-body-to-stream body ring-resp out-stream)
       (.close ^OutputStream out-stream)))
   nil)
