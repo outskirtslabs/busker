@@ -4,8 +4,8 @@
    [coffi.mem :as mem]
    [ol.h2o.buffer-pool :as bp]
    [ol.h2o.byte-bounded-queue :as bbq]
-   [ol.h2o.native :as h2o]
    [ol.h2o.internal.protocols :as p]
+   [ol.h2o.native :as h2o]
    [taoensso.trove :as trove])
   (:import
    [java.io OutputStream]

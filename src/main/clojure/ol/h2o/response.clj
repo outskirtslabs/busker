@@ -2,8 +2,8 @@
   "Response handling for h2o HTTP server."
   (:require
    [coffi.mem :as mem]
-   [ol.h2o.native :as h2o]
    [ol.h2o.internal.protocols :as p]
+   [ol.h2o.native :as h2o]
    [ol.h2o.protocols.content-length :as content-length]
    [ol.h2o.response-channel :as response-channel]
    [ol.h2o.response-queue :as response-queue]

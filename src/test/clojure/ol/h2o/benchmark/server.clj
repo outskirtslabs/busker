@@ -3,18 +3,20 @@
   with our ol.h2o server."
   (:require
    [clj-async-profiler.core :as prof]
-   [clojure.string :as str]
    [ol.h2o.benchmark.utils :as u]
    [ol.h2o.server :as h2o-server]
    [org.httpkit.server :as http-kit]
-   [ring.adapter.jetty9 :as sunng-jetty]
-   [ring.adapter.jetty :as jetty])
+   [ring.adapter.jetty :as jetty]
+   [ring.adapter.jetty9 :as sunng-jetty])
   (:import
-   [java.util.concurrent Executors ExecutorService ThreadPoolExecutor LinkedBlockingQueue TimeUnit]
-   [java.util.concurrent.atomic AtomicBoolean]
    [java.lang Thread]
-   [org.eclipse.jetty.util.thread QueuedThreadPool]
-   [org.eclipse.jetty.util.component LifeCycle]))
+   [java.util.concurrent
+    ExecutorService
+    Executors
+    LinkedBlockingQueue
+    TimeUnit]
+   [org.eclipse.jetty.util.component LifeCycle]
+   [org.eclipse.jetty.util.thread QueuedThreadPool]))
 
 (set! *warn-on-reflection* true)
 

@@ -1,7 +1,7 @@
 (ns ol.h2o.evloop
   (:require
-   [ol.h2o.native :as h2o]
-   [ol.h2o.internal.protocols :as p])
+   [ol.h2o.internal.protocols :as p]
+   [ol.h2o.native :as h2o])
   (:import
    [java.util HashMap]
    [java.util.concurrent ArrayBlockingQueue]

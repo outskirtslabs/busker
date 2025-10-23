@@ -67,7 +67,8 @@
     java.nio.ByteBuffer
     (byte-size [buf] (.capacity buf)))
   ```"
-  (:import [java.util.concurrent LinkedTransferQueue Semaphore]))
+  (:import
+   [java.util.concurrent LinkedTransferQueue Semaphore]))
 
 (defprotocol Sized
   "Protocol for types that can report their size in bytes.

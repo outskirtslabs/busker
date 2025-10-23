@@ -1,6 +1,6 @@
 (ns ol.h2o.large-payload-test
   (:require
-   [clojure.test :as test :refer [deftest is testing]]
+   [clojure.test :as test :refer [deftest is]]
    [ol.h2o.server-test :as st]))
 
 (def gib (* 1024 1024 1024))

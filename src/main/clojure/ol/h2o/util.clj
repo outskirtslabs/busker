@@ -23,8 +23,8 @@
 ;; OTHER DEALINGS IN THE SOFTWARE.
 (ns ol.h2o.util
   (:require
-   [taoensso.trove :as trove]
-   [ol.h2o.util.parsing :as parsing]))
+   [ol.h2o.util.parsing :as parsing]
+   [taoensso.trove :as trove]))
 
 (defn find-header
   "Looks up a header in a Ring response (or request) case insensitively,

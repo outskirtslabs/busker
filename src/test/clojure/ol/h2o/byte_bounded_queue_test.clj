@@ -2,7 +2,8 @@
   (:require
    [clojure.test :refer [deftest is testing]]
    [ol.h2o.byte-bounded-queue :as bbq])
-  (:import [java.util.concurrent CountDownLatch TimeUnit]))
+  (:import
+   [java.util.concurrent CountDownLatch TimeUnit]))
 
 (extend-protocol bbq/Sized
   String

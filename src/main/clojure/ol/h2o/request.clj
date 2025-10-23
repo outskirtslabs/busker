@@ -3,8 +3,8 @@
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]
    [ol.h2o.evloop :as evloop]
-   [ol.h2o.native :as h2o]
    [ol.h2o.internal.protocols :as p]
+   [ol.h2o.native :as h2o]
    [ol.h2o.response :as response])
   (:import
    [java.io InputStream OutputStream]

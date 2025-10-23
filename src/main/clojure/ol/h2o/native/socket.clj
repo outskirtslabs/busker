@@ -7,8 +7,8 @@
    - small utilities for flags and options "
   (:require
    [coffi.ffi :as ffi :refer [defcfn]]
-   [coffi.mem :as mem]
-   [coffi.layout :as layout]))
+   [coffi.layout :as layout]
+   [coffi.mem :as mem]))
 
 (set! *warn-on-reflection* true)
 

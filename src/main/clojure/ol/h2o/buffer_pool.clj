@@ -58,7 +58,8 @@
   ## Thread Safety
 
   All operations are atomic and safe for concurrent access from multiple threads."
-  (:import [java.nio ByteBuffer]))
+  (:import
+   [java.nio ByteBuffer]))
 
 (defprotocol BufferPool
   "Protocol for thread-safe ByteBuffer pooling."
