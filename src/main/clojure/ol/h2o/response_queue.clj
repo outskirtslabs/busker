@@ -11,7 +11,6 @@
    [java.io OutputStream]
    [java.lang.foreign Arena MemorySegment]
    [java.nio ByteBuffer]
-   [java.nio.channels Channels WritableByteChannel]
    [java.util.concurrent.atomic AtomicBoolean AtomicReference]))
 
 (set! *warn-on-reflection* true)
@@ -119,22 +118,22 @@
    Returns map with :seg (sendvec array), :veccnt, :final?, and :stable-segs (to prevent GC)."
   [chunks arena]
   (let [last-final? (boolean (when-let [c (peek chunks)] (:final? c)))
-        bufs-flat   (vec (mapcat :bufs chunks))
-        veccnt      (count bufs-flat)]
+        bufs-flat (vec (mapcat :bufs chunks))
+        veccnt (count bufs-flat)]
     (if (zero? veccnt)
       {:seg (mem/alloc 0 arena) :veccnt 0 :final? last-final? :stable-segs []}
-      (let [elem-size     h2o/size-of-h2o-sendvec-t
-            total-size    (* veccnt elem-size)
+      (let [elem-size h2o/size-of-h2o-sendvec-t
+            total-size (* veccnt elem-size)
             sendvec-array (mem/alloc total-size arena)]
-        (loop [i           0
+        (loop [i 0
                stable-segs (transient [])]
           (if (< i veccnt)
             (let [^ByteBuffer b (nth bufs-flat i)]
               (when-not (.isDirect b) (throw (ex-info "Non-direct ByteBuffer in Chunk bufs; must be direct" {:index i})))
-              (let [slot-off   (* i elem-size)
-                    slot       (mem/slice sendvec-array slot-off elem-size)
-                    len        (.remaining b)
-                    byte-arr   (byte-array len)
+              (let [slot-off (* i elem-size)
+                    slot (mem/slice sendvec-array slot-off elem-size)
+                    len (.remaining b)
+                    byte-arr (byte-array len)
                     stable-seg (mem/alloc len arena)]
                 (.get ^ByteBuffer b byte-arr)
                 (MemorySegment/copy byte-arr 0 stable-seg java.lang.foreign.ValueLayout/JAVA_BYTE 0 len)
@@ -147,7 +146,7 @@
   [req bbq preferred-chunk-size arena]
   ;; st must hold an :in-flight ref you set to `chunks` to keep ByteBuffers alive
 
-  (let [chunks         (bbq/drain bbq preferred-chunk-size)
+  (let [chunks (bbq/drain bbq preferred-chunk-size)
         #_#_total-size (reduce + (map :bytes chunks))]
     (when (seq chunks)
       (let [{:keys [seg veccnt final? stable-segs]} (package-chunks chunks arena)]
@@ -171,7 +170,7 @@
   (when-not (.get ^AtomicBoolean (:stopped?_ st))
     ;; TODO: what should else branch here be?
     (if (nil? (.get ^AtomicReference (:in-flight_ st)))
-      (let [arena  (Arena/ofAuto)
+      (let [arena (Arena/ofAuto)
             result (drain-chunks (:req st) (:bbq st) (get-in st [:config :preferred-chunk-size] Long/MAX_VALUE)
                                  arena)]
         (if result
@@ -231,82 +230,83 @@
     (->Chunk vbufs total (boolean final?))))
 
 (defn output-stream ^OutputStream [st]
-  (Channels/newOutputStream
-   (reify
-     WritableByteChannel
-     (write [_ src]
-       ;; If stopped? is true, the channel is closed regardless of closing?
+  (proxy [OutputStream] []
+    (write
+      ([x]
+       (if (number? x)
+         (.write ^OutputStream this (byte-array [x]))
+         (.write ^OutputStream this x 0 (alength ^bytes x))))
+      ([^bytes ba off len]
        (when (or (.get ^AtomicBoolean (:stopped?_ st))
                  (.get ^AtomicBoolean (:closing?_ st)))
-         (throw (java.nio.channels.ClosedChannelException.)))
+         (throw (java.io.IOException. "Stream closed")))
        (let [^AtomicReference cur-ref (:current-buffer_ st)
-             pool                     (:buffer-pool st)
-             total                    (long (.remaining src))]
-         (when (pos? total)
-           (loop [left total]
-             (if (zero? left)
-               total
-               (let [^ByteBuffer buf (or (.get cur-ref)
-                                         (let [b (bp/borrow pool (:output-buffer-size st) true)]
-                                           (when (nil? b) (throw (ex-info "Buffer pool exhausted" {})))
-                                           (.clear ^ByteBuffer b)
-                                           (.set cur-ref b)
-                                           b))
-                     can-copy        (min left (.remaining buf))
-                     pos             (.position src)
-                     lim             (.limit src)]
-                 ;; Copy exactly can-copy bytes from src to buf
-                 (.limit src (+ pos can-copy))
-                 (.put buf src)
-                 (.limit src lim)
-                 ;; If aggregation buffer is full, seal it into a Chunk and enqueue
-                 (when (zero? (.remaining buf))
-                   (.flip buf)
-                   (let [chunk (seal-chunk [buf] false)]
-                     (.set cur-ref nil)
-                     (bbq/put (:bbq st) chunk)
-                     (schedule-drain! st)))
-                 (recur (- left can-copy))))))))
-     (isOpen [_]
-       (not (or (.get ^AtomicBoolean (:stopped?_ st))
-                (.get ^AtomicBoolean (:closing?_ st)))))
-     (close [_]
-       (if (.get ^AtomicBoolean (:stopped?_ st))
-         (do
-           ;; Best-effort: release any borrowed current buffer back to the pool.
-           (when-some [^ByteBuffer buf (.get ^AtomicReference (:current-buffer_ st))]
-             (bp/return (:buffer-pool st) buf)
-             (.set ^AtomicReference (:current-buffer_ st) nil))
-           (.set ^AtomicBoolean (:closing?_ st) true)
-           nil)
-         (if (.compareAndSet ^AtomicBoolean (:closing?_ st) false true)
-           (let [^AtomicReference cur-ref (:current-buffer_ st)
-                 ^ByteBuffer buf          (.get cur-ref)
-                 final-chunk              (if (and buf (pos? (.position buf)))
-                                            (do
-                                              (.flip buf)
-                                              (.set cur-ref nil)
-                                              (seal-chunk [buf] true))
-                                            (seal-chunk [] true))]
-             ;; Enqueue final (empty or with remaining data)
-             (bbq/put (:bbq st) final-chunk)
-             (.set ^AtomicBoolean (:final-enqueued?_ st) true)
-             (schedule-drain! st)
-             nil)
-           nil))))))
+             pool                     (:buffer-pool st)]
+         (loop [offset    (int off)
+                remaining (int len)]
+           (when (pos? remaining)
+             (let [^ByteBuffer buf (or (.get cur-ref)
+                                       (let [b (bp/borrow pool (:output-buffer-size st) true)]
+                                         (when (nil? b) (throw (ex-info "Buffer pool exhausted" {})))
+                                         (.clear ^ByteBuffer b)
+                                         (.set cur-ref b)
+                                         b))
+                   can-copy        (min remaining (.remaining buf))]
+               (.put buf ba offset can-copy)
+               (when (zero? (.remaining buf))
+                 (.flip buf)
+                 (let [chunk (seal-chunk [buf] false)]
+                   (.set cur-ref nil)
+                   (bbq/put (:bbq st) chunk)
+                   (schedule-drain! st)))
+               (recur (+ offset can-copy) (- remaining can-copy))))))))
+    (flush []
+      (when (or (.get ^AtomicBoolean (:stopped?_ st))
+                (.get ^AtomicBoolean (:closing?_ st)))
+        (throw (java.io.IOException. "Stream closed")))
+      (let [^AtomicReference cur-ref (:current-buffer_ st)
+            ^ByteBuffer buf          (.get cur-ref)]
+        (when (and buf (pos? (.position buf)))
+          (.flip buf)
+          (.set cur-ref nil)
+          (let [chunk (seal-chunk [buf] false)]
+            (bbq/put (:bbq st) chunk)
+            (schedule-drain! st)))))
+    (close []
+      (if (.get ^AtomicBoolean (:stopped?_ st))
+        (do
+          (when-some [^ByteBuffer buf (.get ^AtomicReference (:current-buffer_ st))]
+            (bp/return (:buffer-pool st) buf)
+            (.set ^AtomicReference (:current-buffer_ st) nil))
+          (.set ^AtomicBoolean (:closing?_ st) true)
+          nil)
+        (if (.compareAndSet ^AtomicBoolean (:closing?_ st) false true)
+          (let [^AtomicReference cur-ref (:current-buffer_ st)
+                ^ByteBuffer buf          (.get cur-ref)
+                final-chunk              (if (and buf (pos? (.position buf)))
+                                           (do
+                                             (.flip buf)
+                                             (.set cur-ref nil)
+                                             (seal-chunk [buf] true))
+                                           (seal-chunk [] true))]
+            (bbq/put (:bbq st) final-chunk)
+            (.set ^AtomicBoolean (:final-enqueued?_ st) true)
+            (schedule-drain! st)
+            nil)
+          nil)))))
 
 (defn create-response-queue [req]
-  (let [st            (new-response-state req)
+  (let [st (new-response-state req)
         on-proceed-cb (fn [_ctx-ptr] (on-proceed st))
-        on-stop-cb    (fn [_ctx-ptr reason] (on-stop st reason))]
-    {::state            st
-     ::on-proceed-cb    on-proceed-cb
-     ::on-stop-cb       on-stop-cb
-     :cancel            (fn []
-                          (.set ^AtomicBoolean (:stopped?_ st) true)
-                          (bbq/close (:bbq st))
-                          (when-some [^ByteBuffer buf (.getAndSet ^AtomicReference (:current-buffer_ st) nil)]
-                            (bp/return (:buffer-pool st) buf)))
-     :out-stream        (output-stream st)
+        on-stop-cb (fn [_ctx-ptr reason] (on-stop st reason))]
+    {::state st
+     ::on-proceed-cb on-proceed-cb
+     ::on-stop-cb on-stop-cb
+     :cancel (fn []
+               (.set ^AtomicBoolean (:stopped?_ st) true)
+               (bbq/close (:bbq st))
+               (when-some [^ByteBuffer buf (.getAndSet ^AtomicReference (:current-buffer_ st) nil)]
+                 (bp/return (:buffer-pool st) buf)))
+     :out-stream (output-stream st)
      :on-proceed-cb-ptr (mem/serialize on-proceed-cb [::ffi/fn [::mem/pointer] ::mem/void])
-     :on-stop-cb-ptr    (mem/serialize on-stop-cb [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])}))
+     :on-stop-cb-ptr (mem/serialize on-stop-cb [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])}))
