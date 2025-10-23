@@ -194,6 +194,10 @@ fn buildShimForTarget(b: *std.Build, target_config: TargetConfig, optimize: std.
     const h2o_lib = h2o_dep.artifact("h2o-evloop");
     shim.addIncludePath(h2o_lib.getEmittedIncludeTree());
 
+    // Add wslay headers from h2o dependency
+    const wslay_lib = h2o_dep.artifact("wslay");
+    shim.addIncludePath(wslay_lib.getEmittedIncludeTree());
+
     shim.linkLibrary(h2o_lib);
     shim.linkLibrary(boringssl.artifact("bcm"));
     shim.linkLibrary(boringssl.artifact("crypto"));

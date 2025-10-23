@@ -49,8 +49,8 @@
         handle-error!
         (fn [e & {:keys [message release-proceed?]
                   :or {message nil release-proceed? false}}]
-          (when message (println message e))
-          (when-not message (println e))
+          (when message
+            (.printStackTrace e))
           (reset! error e)
           (when release-proceed? (.release proceed-sem))
           (when @final-chunk-pending? (.release close-complete-sem)))

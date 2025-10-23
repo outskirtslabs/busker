@@ -304,14 +304,14 @@ struct clj_ws_conn_t {
  * Returns: 0 if valid handshake, -1 if invalid, 1 if not a websocket request
  * client_key_out: pointer to receive the client key (if valid handshake)
  */
-int clj_h2o_is_websocket_handshake(h2o_req_t *req, const char **client_key_out);
+int clj_h2o_is_websocket_handshake(clj_req_ctx_t *ctx, const char **client_key_out);
 
 /* Upgrade HTTP request to WebSocket
  * Returns: WebSocket connection handle, or NULL on error
  * user_data: arbitrary data to associate with connection
  * on_message: callback for received messages (NULL message indicates close)
  */
-clj_ws_conn_t *clj_h2o_upgrade_to_websocket(h2o_req_t *req,
+clj_ws_conn_t *clj_h2o_upgrade_to_websocket(clj_req_ctx_t *ctx,
                                             const char *client_key,
                                             void *user_data,
                                             clj_ws_msg_callback on_message);

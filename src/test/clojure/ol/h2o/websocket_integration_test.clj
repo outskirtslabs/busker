@@ -31,7 +31,8 @@
           
           ;; Create echo handler
           handler (fn [request]
-                    (if (ws/websocket-handshake? (:req request))
+                    (if (and (= :get (:request-method request))
+                             (get-in request [:headers "sec-websocket-key"]))
                       (ws/websocket-response
                        {:on-open (fn [socket]
                                    (reset! opened? true)
@@ -51,7 +52,7 @@
           ;; Start server on a fixed port for testing
           port 18080
           _ (println "Starting server on port" port)
-          server-instance (server/run-server handler {:port port})
+          server-instance (server/run-server handler {:listeners [{:port port}]})
           _ (do (Thread/sleep 500) (println "Server started"))
           
           ;; Create WebSocket client
@@ -122,7 +123,7 @@
           message-latch (CountDownLatch. 1)
           
           handler (fn [request]
-                    (if (ws/websocket-handshake? (:req request))
+                    (if ((and (= :get (:request-method request)) (get-in request [:headers "sec-websocket-key"])))
                       (ws/websocket-response
                        {:on-message (fn [socket message]
                                       (swap! received conj message)
@@ -133,7 +134,7 @@
                       {:status 404 :body "Not found"}))
           
           port 18081
-          server-instance (server/run-server handler {:port port})
+          server-instance (server/run-server handler {:listeners [{:port port}]})
           
           client (HttpClient/newHttpClient)
           client-received (atom [])
@@ -189,7 +190,7 @@
           pong-latch (CountDownLatch. 1)
           
           handler (fn [request]
-                    (if (ws/websocket-handshake? (:req request))
+                    (if ((and (= :get (:request-method request)) (get-in request [:headers "sec-websocket-key"])))
                       (ws/websocket-response
                        {:on-open (fn [socket]
                                    ;; Send ping on open
@@ -200,7 +201,7 @@
                       {:status 404 :body "Not found"}))
           
           port 18081
-          server-instance (server/run-server handler {:port port})
+          server-instance (server/run-server handler {:listeners [{:port port}]})
           
           client (HttpClient/newHttpClient)
           ping-received? (atom false)
@@ -245,7 +246,7 @@
           close-latch (CountDownLatch. 1)
           
           handler (fn [request]
-                    (if (ws/websocket-handshake? (:req request))
+                    (if ((and (= :get (:request-method request)) (get-in request [:headers "sec-websocket-key"])))
                       (ws/websocket-response
                        {:on-open (fn [socket]
                                    ;; Close immediately with custom code
@@ -257,7 +258,7 @@
                       {:status 404 :body "Not found"}))
           
           port 18081
-          server-instance (server/run-server handler {:port port})
+          server-instance (server/run-server handler {:listeners [{:port port}]})
           
           client (HttpClient/newHttpClient)
           client-close-code (atom nil)

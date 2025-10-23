@@ -462,8 +462,9 @@
   [::mem/pointer] ::mem/int)
 
 (defn report-almost-fatal-error [msg e]
-  (println "ALMOST FATAL ERROR:" msg)
-  (println "Exception:" e))
+  (binding [*out* *err*]
+    (println "ALMOST FATAL ERROR:" msg)
+    (when e (.printStackTrace e))))
 
 (defcfn create-handler*
   "FFI binding for handler construction."

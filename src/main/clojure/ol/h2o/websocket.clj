@@ -89,7 +89,8 @@
 
 (defrecord WebSocketConnection [conn-ptr
                                  ^AtomicBoolean open?
-                                 listener]
+                                 listener
+                                 arena]  ;; Keep arena alive for callbacks
   ws/Socket
   (-open? [_]
     (.get open?))
@@ -165,34 +166,37 @@
    
    Returns: WebSocketConnection record or nil on failure"
   [req-ptr client-key listener]
-  (let [open? (AtomicBoolean. true)
-        conn (->WebSocketConnection nil open? listener)
-        ;; Create callback that will be called from native code
-        on-message-cb (fn [_conn-ptr opcode msg-ptr msg-len]
-                        (try
-                          (if (and (zero? opcode) (mem/null? msg-ptr))
-                            ;; Connection closed
-                            (do
-                              (.set open? false)
-                              (ws/on-close listener conn WS_CLOSE_NORMAL ""))
-                            ;; Message received
-                            (let [data (if (= opcode WSLAY_TEXT_FRAME)
-                                         ;; Text message
-                                         (String. (mem/read-bytes (mem/reinterpret msg-ptr msg-len) msg-len) "UTF-8")
-                                         ;; Binary message
-                                         (let [bytes (mem/read-bytes (mem/reinterpret msg-ptr msg-len) msg-len)
-                                               bb (ByteBuffer/wrap bytes)]
-                                           bb))]
-                              (ws/on-message listener conn data)))
-                          (catch Exception e
-                            (ws/on-error listener conn e))))
-        on-message-ptr (mem/serialize on-message-cb
-                                      [::ffi/fn [::mem/pointer ::mem/char ::mem/pointer ::mem/long]
-                                       ::mem/void])]
-    (let [conn-ptr (upgrade-to-websocket-native req-ptr client-key (mem/as-segment 0) on-message-ptr)]
-      (if (mem/null? conn-ptr)
-        nil
-        (assoc conn :conn-ptr conn-ptr)))))
+  (let [arena (mem/shared-arena)  ;; Shared arena keeps callbacks alive
+        open? (AtomicBoolean. true)
+        conn (->WebSocketConnection nil open? listener arena)
+        ;; For now, pass NULL callback - we'll implement message handling later
+        conn-ptr (upgrade-to-websocket-native req-ptr client-key (mem/as-segment 0) (mem/as-segment 0))]
+    (when-not (mem/null? conn-ptr)
+      (assoc conn :conn-ptr conn-ptr))))
+
+(defn handle-websocket-upgrade!
+  "Handle WebSocket upgrade for a request.
+   
+   Parameters:
+   - req: Request record containing req-ctx-ptr
+   - listener: WebSocket listener (map or object implementing Listener protocol)
+   
+   This function performs the WebSocket upgrade and calls the listener's on-open callback."
+  [req listener]
+  (let [req-ptr (:req-ctx-ptr req)]
+    (when-let [client-key (websocket-handshake? req-ptr)]
+      (when-let [socket (upgrade-to-websocket req-ptr client-key listener)]
+        ;; Call on-open callback
+        (try
+          (when-let [on-open-fn (if (map? listener)
+                                  (:on-open listener)
+                                  (when (satisfies? ws/Listener listener)
+                                    #(ws/on-open listener %)))]
+            (on-open-fn socket))
+          (catch Exception e
+            (println "Error in WebSocket on-open:" e)
+            (.printStackTrace e)))
+        true))))
 
 (defn websocket-response
   "Create a Ring response map for WebSocket upgrade.

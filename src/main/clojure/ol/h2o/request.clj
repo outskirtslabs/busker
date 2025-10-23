@@ -5,7 +5,8 @@
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
    [ol.h2o.protocols :as p]
-   [ol.h2o.response :as response])
+   [ol.h2o.response :as response]
+   [ol.h2o.websocket :as ws])
   (:import
    [java.io InputStream OutputStream]
    [java.nio ByteBuffer]
@@ -124,13 +125,19 @@
                                          :headers {"content-type" "text/plain; charset=utf-8"}
                                          :body    "Server shutting down"})
                                       (catch Exception e
-                                        (println "Handler error:" (.getMessage e))
                                         (.printStackTrace e)
                                         {:status  500
                                          :headers {"content-type" "text/plain; charset=utf-8"}
                                          :body    "Internal Server Error"}))]
 
-                      (response/send-ring-response! req ring-resp)))]
+                      ;; Check if this is a WebSocket upgrade response
+                      (if-let [listener (::ws/listener ring-resp)]
+                        (do
+                          (ws/handle-websocket-upgrade! req listener)
+                          ;; After WebSocket upgrade, don't send any HTTP response
+                          ;; The connection is now owned by the WebSocket
+                          nil)
+                        (response/send-ring-response! req ring-resp))))]
             (.submit executor ^Runnable request-task))
           h2o/CLJ_HANDLER_OK
           (catch RejectedExecutionException e
@@ -145,7 +152,7 @@
         (h2o/report-almost-fatal-error "The request handler errored with" e)
         h2o/CLJ_HANDLER_OVERLOADED)
       (catch Throwable t
-        (println "THROWABLE in request handler:" t)
+        (h2o/report-almost-fatal-error "THROWABLE in request handler" t)
         h2o/CLJ_HANDLER_OVERLOADED))))
 
 (defn on-request-cleanup

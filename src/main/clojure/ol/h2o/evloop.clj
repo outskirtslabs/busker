@@ -96,8 +96,7 @@
     (catch InterruptedException _
       (.set ^AtomicBoolean (:running?_ w) false))
     (catch Throwable t
-      (println "[evloop] worker crashed:" (.getMessage t))
-      (println t))
+      (.printStackTrace t))
     (finally
       (.remove worker-context))))
 

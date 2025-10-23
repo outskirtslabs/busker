@@ -155,7 +155,8 @@
     (let [conn (ws/->WebSocketConnection
                 nil
                 (java.util.concurrent.atomic.AtomicBoolean. true)
-                {})]
+                {}
+                nil)]  ;; arena can be nil for testing
       
       (is (satisfies? wsp/Socket conn))
       (is (satisfies? wsp/AsyncSocket conn))

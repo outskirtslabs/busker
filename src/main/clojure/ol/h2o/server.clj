@@ -598,8 +598,7 @@
    ;; Wait for all virtual threads to finish
    (when-not (.awaitTermination executor timeout timeunit)
      (.shutdownNow executor)
-     (when-not (.awaitTermination executor timeout timeunit)
-       (println "Virtual thread request executor pool did not shutdown cleanly")))
+     (.awaitTermination executor timeout timeunit))
 
    (evloop/broadcast-wake! (::workers server))
 

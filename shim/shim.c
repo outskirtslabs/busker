@@ -159,7 +159,7 @@ static void clj_generator_stop(h2o_generator_t *gen, h2o_req_t *req) {
 
 size_t clj_h2o_start_response(
     clj_req_ctx_t *ctx, int status, const clj_header_t *headers,
-    size_t headers_len, size_t content_length, int compress_hint,
+    size_t headers_len, size_t content_length, int compress_hint __attribute__((unused)),
     void (*on_response_generator_proceed)(clj_req_ctx_t *ctx),
     void (*on_response_generator_stop)(clj_req_ctx_t *ctx,
                                        clj_complete_reason_t reason)) {
@@ -221,9 +221,9 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
         h2o_mem_alloc_pool(&req->pool, clj_header_t, req->headers.size);
     for (size_t i = 0; i < req->headers.size; i++) {
       h2o_header_t *h = &req->headers.entries[i];
-      headers[i].name = (const uint8_t *)h->name->base;
+      headers[i].name = (const char *)h->name->base;
       headers[i].name_len = h->name->len;
-      headers[i].value = (const uint8_t *)h->value.base;
+      headers[i].value = (const char *)h->value.base;
       headers[i].value_len = h->value.len;
     }
     meta->headers = headers;
@@ -704,9 +704,14 @@ static void clj_ws_on_message(h2o_websocket_conn_t *h2o_conn,
   }
 }
 
-int clj_h2o_is_websocket_handshake(h2o_req_t *req,
+int clj_h2o_is_websocket_handshake(clj_req_ctx_t *ctx,
                                    const char **client_key_out) {
-  int result = h2o_is_websocket_handshake(req, client_key_out);
+  if (!ctx || !ctx->req) {
+    DEBUG_LOG("Invalid context or request");
+    return 1;
+  }
+  
+  int result = h2o_is_websocket_handshake(ctx->req, client_key_out);
   if (result == 0 && *client_key_out != NULL) {
     DEBUG_LOG("Valid WebSocket handshake detected");
     return 0; /* Valid handshake */
@@ -714,15 +719,21 @@ int clj_h2o_is_websocket_handshake(h2o_req_t *req,
     DEBUG_LOG("Invalid WebSocket handshake");
     return -1; /* Invalid handshake */
   } else {
+    DEBUG_LOG("Not a WebSocket request");
     return 1; /* Not a websocket request */
   }
 }
 
-clj_ws_conn_t *clj_h2o_upgrade_to_websocket(h2o_req_t *req,
+clj_ws_conn_t *clj_h2o_upgrade_to_websocket(clj_req_ctx_t *ctx,
                                             const char *client_key,
                                             void *user_data,
                                             clj_ws_msg_callback on_message) {
   DEBUG_LOG("Upgrading to WebSocket connection");
+  
+  if (!ctx || !ctx->req) {
+    DEBUG_LOG("Invalid context or request");
+    return NULL;
+  }
   
   clj_ws_conn_t *conn = (clj_ws_conn_t *)malloc(sizeof(clj_ws_conn_t));
   if (!conn) {
@@ -735,7 +746,7 @@ clj_ws_conn_t *clj_h2o_upgrade_to_websocket(h2o_req_t *req,
 
   /* Upgrade the connection */
   h2o_websocket_conn_t *h2o_conn =
-      h2o_upgrade_to_websocket(req, client_key, conn, clj_ws_on_message);
+      h2o_upgrade_to_websocket(ctx->req, client_key, conn, clj_ws_on_message);
 
   if (!h2o_conn) {
     DEBUG_LOG("h2o_upgrade_to_websocket failed");
