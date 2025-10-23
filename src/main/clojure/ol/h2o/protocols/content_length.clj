@@ -27,24 +27,17 @@
 
 (ns ol.h2o.protocols.content-length
   (:require
+   [ol.h2o.protocols :as p]
    [ol.h2o.util :as util]))
-
-(defprotocol SizableResponseBody
-  (body-size-in-bytes [body response]
-    "Return the number of bytes that an object will require when it is
-    serialized as a response body. This number will be placed in the
-    Content-Length header of the response by the wrap-content-length
-    middleware. If the number of bytes cannot be ascertained, nil is
-    returned."))
 
 ;; Extending primitive arrays prior to Clojure 1.12 requires using the low-level
 ;; extend function.
 (extend (Class/forName "[B")
-  SizableResponseBody
+  p/SizableResponseBody
   {:body-size-in-bytes
    (fn [bs _] (alength bs))})
 
-(extend-protocol SizableResponseBody
+(extend-protocol p/SizableResponseBody
   String
   (body-size-in-bytes [s response]
     (alength (.getBytes s (or (util/get-charset response) "utf-8"))))
