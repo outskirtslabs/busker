@@ -23,7 +23,7 @@
                                   criterium/criterium                      {:mvn/version "0.4.6"}
                                   virgil/virgil                            {:mvn/version "0.5.0"}
                                   babashka/process                         {:mvn/version "0.6.23"}
-                                  org.babashka/http-client                 {:mvn/version "0.4.22"}
+                                  org.babashka/http-client                 {:mvn/version "0.4.23"}
                                   com.cnuernber/charred                    {:mvn/version "1.037"}
                                   org.clojure/clojure                      {:mvn/version "1.12.3"}
                                   io.github.tonsky/clj-reload              {:mvn/version "1.0.0"}
