@@ -8,7 +8,7 @@
    [ol.h2o.evloop :as evloop]
    [ol.h2o.native :as h2o]
    [ol.h2o.native.socket :as socket]
-   [ol.h2o.protocols :as p]
+   [ol.h2o.internal.protocols :as p]
    [ol.h2o.request :as request]
    [ol.h2o.response-queue :as response-queue])
   (:import

@@ -3,7 +3,7 @@
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]
    [ol.h2o.native :as h2o]
-   [ol.h2o.protocols :as p])
+   [ol.h2o.internal.protocols :as p])
   (:import
    [java.lang.foreign Arena MemorySegment ValueLayout]
    [java.nio ByteBuffer]

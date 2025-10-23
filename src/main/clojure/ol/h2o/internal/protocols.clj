@@ -1,4 +1,4 @@
-(ns ol.h2o.protocols)
+(ns ol.h2o.internal.protocols)
 
 (set! *warn-on-reflection* true)
 
