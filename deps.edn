@@ -25,7 +25,7 @@
                                   babashka/process                         {:mvn/version "0.6.23"}
                                   org.babashka/http-client                 {:mvn/version "0.4.22"}
                                   com.cnuernber/charred                    {:mvn/version "1.037"}
-                                  org.clojure/clojure                      {:mvn/version "1.12.1"}
+                                  org.clojure/clojure                      {:mvn/version "1.12.3"}
                                   io.github.tonsky/clj-reload              {:mvn/version "1.0.0"}
                                   org.clojure/tools.deps                   {:mvn/version "0.26.1553"}
                                   com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.6.2"}
