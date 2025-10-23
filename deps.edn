@@ -32,7 +32,7 @@
                                   ol.http-clj/macos-aarch64                {:local/root "shim/macos-aarch64"}
                                   ol.http-clj/linux-x86-64                 {:local/root "shim/linux-x86-64"}}}
            :bench  {:extra-paths ["src/test/clojure" "src/test/resources"]
-                    :extra-deps  {http-kit/http-kit              {:mvn/version "2.8.0"}
+                    :extra-deps  {http-kit/http-kit              {:mvn/version "2.8.1"}
                                   info.sunng/ring-jetty9-adapter {:mvn/version "0.39.0"}
                                   ;; info.sunng/ring-jetty9-adapter-http2 {:mvn/version "0.39.0"}
                                   ;; info.sunng/ring-jetty9-adapter-http3 {:mvn/version "0.39.0"}
