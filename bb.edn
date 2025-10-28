@@ -1,46 +1,141 @@
-
 {:min-bb-version "0.8.156"
- :deps           {lambdaisland/kaocha {:mvn/version "1.91.1392"}}
- :paths          ["scripts"]
- :tasks          {:requires           ([babashka.fs :as fs]
-                                       [clojure.string :as str]
-                                       [babashka.tasks :refer [shell]])
-                  compile-shim        {:doc "Compile C shim library" :task (shell {:dir "shim"} "zig build -Doptimize=Debug")}
-                  prep                {:doc "Prepare the clojure deps" :task (clojure "-Xdeps prep :aliases '[:dev :test]'")}
-                  compile             {:doc "Compile all the things" :depends [compile-shim prep]}
-                  test                (apply clojure "-M:dev:test:kaocha" *command-line-args*)
-                  test.large-payloads {:doc  "Run large payload tests with restricted memory (2GB heap)"
-                                       :task (clojure "-J-Xmx2g" "-J-Xms2g" "-M:dev:test:kaocha" "--no-capture-output" "--focus" "ol.busker.large-payload-test")}
-                  deps-tree           (clojure "-X:deps tree :aliases '[:dev]'")
-                  dev                 {:doc "Start a local development server" :task (apply clojure "-M:dev:repl/dev" *command-line-args*)}
-                  lint.copy-configs   {:doc  "Copy clj-kondo config files from deps in the project"
-                                       :task (let [cp (-> (shell {:out :string} "clojure -Spath -M:test:dev") :out str/trim)]
-                                               (shell (str "clj-kondo --lint " cp " --dependencies --copy-configs --skip-lint")))}
-                  lint                {:doc  "Run the clj-kondo linter on the clojure code"
-                                       :task (shell (str "clj-kondo" " --fail-level error"
-                                                         (if (seq *command-line-args*)
-                                                           (str " --lint " (first *command-line-args*))
-                                                           " --lint src")))}
-                  bench               {:doc  "Run the benchmark suite (wraps `clojure -M:dev:bench -m ol.busker.benchmark`)"
-                                       :task (apply clojure "-M:dev:bench" "-m" "ol.busker.benchmark" *command-line-args*)}
-                  jar                 {:depends          [clean compile]
-                                       :override-builtin true
-                                       :doc              "Build jars"
-                                       :task             (let [arch-dirs ["shim/linux-x86-64" "shim/macos-x86-64" "shim/macos-aarch64"]]
-                                                           (doseq [dir arch-dirs]
-                                                             (println (str "Building jar for " dir))
-                                                             (shell {:dir dir} "clj -T:build jar"))
-                                                           #_(shell "clojure -T:build jar"))}
-                  clean               {:override-builtin true
-                                       :doc              "Clean build artifacts"
-                                       :task
-                                       (do
-                                         (shell {:dir "."} "rm -rf zig-out zig-cache")
-                                         (shell {:dir "."} "rm -rf shim/linux-x86-64/resources shim/macos-x86-64/resources shim/macos-aarch64/resources")
-                                         (shell {:dir "."} "rm -rf shim/linux-x86-64/target shim/macos-x86-64/target shim/macos-aarch64/target")
-                                         (shell {:dir "."} "clj -T:build clean"))}
-                  publish             {:doc     "Publish the clojure sdk libs to clojars"
-                                       :depends [jar]
-                                       :task    (clojure "-T:build deploy")}
-                  pom                 {:doc "Generate the pom.xml from clj" :task (clojure "-Xdeps mvn-pom :aliases '[:dev :test]'")}
-                  ci                  {:depends [compile test test.large-payloads jar]}}}
+ :paths ["src/bb"]
+ :deps {borkdude/rewrite-edn {:mvn/version "0.4.9"}
+        lambdaisland/kaocha  {:mvn/version "1.91.1392"}}
+ :tasks {:requires ([babashka.fs :as fs]
+                    [tasks.build  :as build]
+                    [clojure.string :as str]
+                    [babashka.tasks :refer [shell]])
+
+  ;; ---------------------------------------------------------------------------
+  ;; Build tasks
+  ;; ---------------------------------------------------------------------------
+         build:shim
+         {:doc  "Compile C shim library"
+          :task (shell {:dir "shim"} "zig build -Doptimize=Debug")}
+
+         prep
+         {:doc  "Prepare the clojure deps"
+          :task (clojure "-Xdeps prep :aliases '[:dev :test]'")}
+
+         build
+         {:doc     "Compile all the things"
+          :depends [build:shim prep]}
+
+         jar:native
+         {:depends [clean build]
+          :doc     "Build native dep jars"
+          :task    (let [arch-dirs ["shim/linux-x86-64" "shim/macos-x86-64" "shim/macos-aarch64"]]
+                     (doseq [dir arch-dirs]
+                       (println (str "Building jar for " dir))
+                       (shell {:dir dir} "clj -T:build jar")))}
+
+         jar:lib
+         {:depends [jar:native]
+          :doc     "Build the jar for busker"
+          :task    (shell "clojure -T:build jar")}
+
+         jar:all
+         {:depends [jar:native jar:lib]
+          :doc     "Build the jars"}
+
+         clean
+         {:override-builtin true
+          :doc              "Clean build artifacts"
+          :task
+          (do
+            (shell {:dir "shim"} "rm -rf zig-out zig-cache")
+            (shell {:dir "shim"} "rm -rf linux-x86-64/resources macos-x86-64/resources macos-aarch64/resources")
+            (shell {:dir "shim"} "rm -rf linux-x86-64/target macos-x86-64/target macos-aarch64/target")
+            (shell {:dir "."} "clj -T:build clean"))}
+
+         dist-clean
+         {:override-builtin true
+          :doc              "Clean everything"
+          :depends          [clean]
+          :task             (shell {:dir "shim"} "rm -rf .zig-cache .zig-cache-global")}
+
+         publish
+         {:doc     "Publish the clojure libs to clojars"
+          :depends [jar:all]
+          :task    (clojure "-T:build deploy")}
+
+         set-version
+         {:doc  "Set the version in all libs"
+          :task (doseq [dir build/lib-dirs]
+                  (build/lib-set-version! dir (first *command-line-args*)))}
+
+         bump-version
+         {:doc  "Bump the version component in all libs. First argument must be one of: major, minor, patch"
+          :task (doseq [dir build/lib-dirs]
+                  (let [component (first *command-line-args*)]
+                    (build/lib-bump! dir component)))}
+
+         publish:native
+         {:doc     "Publish the clojure libs to clojars"
+          :depends [jar:all]
+          :task    (doseq [dir build/lib-dir]
+                     (build/lib-publish! dir))}
+         publish:all
+         {:doc     "Publish the clojure libs to clojars"
+          :depends [jar:all]
+          :task    (doseq [dir (conj build/lib-dirs ".")]
+                     (build/lib-publish! dir))}
+
+  ;; ---------------------------------------------------------------------------
+  ;; Dev tasks
+  ;; ---------------------------------------------------------------------------
+         dev
+         {:doc  "Start a local development repl"
+          :task (apply clojure "-M:dev:repl/dev" *command-line-args*)}
+
+  ;; ---------------------------------------------------------------------------
+  ;; Test tasks
+  ;; ---------------------------------------------------------------------------
+         test
+         {:doc  "Run tests"
+          :task (apply clojure "-M:dev:test:kaocha" *command-line-args*)}
+
+         test:large-payloads
+         {:doc  "Run large payload tests"
+          :task (clojure "-J-Xmx2g" "-J-Xms2g" "-M:dev:test:kaocha" "--no-capture-output" "--focus" "ol.busker.large-payload-test")}
+
+         test:all
+         {:doc     "Run all the tests"
+          :depends [test test:large-payloads]}
+
+  ;; ---------------------------------------------------------------------------
+  ;; Lint tasks
+  ;; ---------------------------------------------------------------------------
+         lint:copy-configs
+         {:doc  "Copy clj-kondo config files from deps in the project"
+          :task (let [cp (-> (shell {:out :string} "clojure -Spath -M:test:dev") :out str/trim)]
+                  (shell (str "clj-kondo --lint " cp " --dependencies --copy-configs --skip-lint")))}
+
+         lint
+         {:doc  "Run the clj-kondo linter on the clojure code"
+          :task (shell (str "clj-kondo" " --fail-level error"
+                            (if (seq *command-line-args*)
+                              (str " --lint " (first *command-line-args*))
+                              " --lint src")))}
+
+  ;; ---------------------------------------------------------------------------
+  ;; Bench tasks
+  ;; ---------------------------------------------------------------------------
+         bench
+         {:doc  "Run the benchmark suite (wraps `clojure -M:dev:bench -m ol.busker.benchmark`)"
+          :task (apply clojure "-M:dev:bench" "-m" "ol.busker.benchmark" *command-line-args*)}
+
+  ;; ---------------------------------------------------------------------------
+  ;; Utility tasks
+  ;; ---------------------------------------------------------------------------
+         deps-tree
+         {:doc  "Show dependency tree"
+          :task (clojure "-X:deps tree :aliases '[:dev]'")}
+
+  ;; ---------------------------------------------------------------------------
+  ;; CI tasks
+  ;; ---------------------------------------------------------------------------
+         ci
+         {:doc     "Run CI pipeline"
+          :depends [build test:all lint jar:all]}}}

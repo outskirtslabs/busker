@@ -13,6 +13,7 @@ target/
 # native build artifacts
 *.o
 *.so
+*.dylib
 compile_flags.txt
 build/
 src/test/resources/3gb-test-file.bin

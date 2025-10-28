@@ -1,5 +1,5 @@
 (ns user)
-(require 'hashp.preload)
+((requiring-resolve 'hashp.install/install!))
 
 (comment
   (do
