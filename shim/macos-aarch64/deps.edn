@@ -3,6 +3,6 @@
                                                          :git/sha "deedd62"}
                           slipset/deps-deploy {:mvn/version "0.2.2"}}
                    :ns-default build}
-           :neil {:project {:name ol.http-clj/macos-aarch64
-                            :description "Native dependency of http-clj"
+           :neil {:project {:name com.outskirtslabs.busker/macos-aarch64
+                            :description "Native dependency for com.outskirtslabs/busker"
                             :version "0.0.1"}}}}

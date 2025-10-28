@@ -39,8 +39,8 @@
                            [:url (permalink (str "shim/" cwd))]
                            [:licenses
                             [:license
-                             [:name "The MIT License"]
-                             [:url (permalink "LICENSE.md")]]]
+                             [:name "EUPL-1.2"]
+                             [:url (permalink "LICENSE")]]]
                            (conj scm [:tag (str "v" version)])]})
   (b/copy-dir {:src-dirs ["resources"]
                :target-dir class-dir})

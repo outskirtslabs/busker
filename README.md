@@ -29,6 +29,26 @@ The actual state of affairs is:
 - [ ] 0 downtime deployments
 - [ ] GraalVM native-image (need to wait until [coffi][coffi] supports it)
 
+## Usage
+
+You need this deps.edn dependency:
+
+```clojure
+com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
+                          :git/sha ""}
+```
+
+...and you need one of the native dependencies:
+
+The native dependency that matches your target platform is required. If multiple native deps are included, the right one will automatically be chosen (though your uber-jar size will be fatter than necessary):
+
+``` clojure
+com.outskirtslabs.busker/macos-x86-64 {:mvn/version "0.0.1"}
+com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.1"}
+com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.1"}
+com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.1"}
+```
+
 ## License
 
 Busker is distributed under the [EUPL-1.2](https://spdx.org/licenses/EUPL-1.2.html).
