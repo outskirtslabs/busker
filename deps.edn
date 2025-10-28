@@ -29,8 +29,8 @@
                                   io.github.tonsky/clj-reload              {:mvn/version "1.0.0"}
                                   org.clojure/tools.deps                   {:mvn/version "0.26.1553"}
                                   com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.6.2"}
-                                  ol.http-clj/macos-aarch64                {:local/root "shim/macos-aarch64"}
-                                  ol.http-clj/linux-x86-64                 {:local/root "shim/linux-x86-64"}}}
+                                  com.outskirtslabs.busker/macos-aarch64   {:local/root "shim/macos-aarch64"}
+                                  com.outskirtslabs.busker/linux-x86-64    {:local/root "shim/linux-x86-64"}}}
            :bench  {:extra-paths ["src/test/clojure" "src/test/resources"]
                     :extra-deps  {http-kit/http-kit              {:mvn/version "2.8.1"}
                                   info.sunng/ring-jetty9-adapter {:mvn/version "0.39.0"}

@@ -1,7 +1,7 @@
 .{
     .name = .http_clj,
-    .version = "0.0.0",
-    .fingerprint = 0xaabaf927ac5250c6,
+    .version = "0.0.1",
+    .fingerprint = 0xaabaf927ba0e83fa,
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .h2o = .{
@@ -21,8 +21,8 @@
             .hash = "zstd-1.5.7-KEItkJ8vAAC5_rRlKmLflYQ-eKXbAIQBWZNmmJtS18q0",
         },
         .brotli_build = .{
-            .url = "git+https://github.com/Ramblurr/brotli.zig.git#ac26035660084cb329576f78a686984c5e0a8d29",
-            .hash = "brotli_build-0.0.0-KJ9D2_sUAABKsFh3cVnQac7MbuJvgmYoq7PxcRa3lY1x",
+            .url = "git+https://github.com/0x546F6D/brotli.zig#70e899c4db2d3d5a5077d88c1a0d8daf536f4f21",
+            .hash = "brotli_build-0.0.0-KJ9D28gTAADZttq4jT8OAJf7nzd4LaZIIPs3Me7mo8pE",
         },
     },
     .paths = .{

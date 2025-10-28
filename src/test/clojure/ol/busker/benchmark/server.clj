@@ -88,7 +88,7 @@
   clojure.lang.IDeref
   (deref [_]
     (let [{:keys [worker port]} @state_]
-      {:server-name u/dep-ol.busker
+      {:server-name u/dep-busker
        :running? (boolean port)
        :worker worker
        :port port}))
