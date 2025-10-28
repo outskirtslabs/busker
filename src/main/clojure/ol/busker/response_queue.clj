@@ -1,0 +1,310 @@
+(ns ol.busker.response-queue
+  (:require
+   [coffi.ffi :as ffi]
+   [coffi.mem :as mem]
+   [ol.busker.buffer-pool :as bp]
+   [ol.busker.byte-bounded-queue :as bbq]
+   [ol.busker.internal.protocols :as pi]
+   [ol.busker.native :as h2o]
+   [taoensso.trove :as trove])
+  (:import
+   [java.io OutputStream]
+   [java.lang.foreign Arena MemorySegment]
+   [java.nio ByteBuffer]
+   [java.util.concurrent.atomic AtomicBoolean AtomicReference]))
+
+(set! *warn-on-reflection* true)
+
+(defrecord
+ ^{:doc "A sealed, immutable outbound unit to send in one h2o_sendvec call.
+   - bufs: IPersistentVector of read-only ByteBuffer slices (position/limit fixed for send).
+   - bytes: total payload bytes across bufs.
+   - final?: true iff this chunk closes the response body (H2O_SEND_STATE_FINAL)."}
+ Chunk
+ [^clojure.lang.IPersistentVector bufs
+  ^long bytes
+  ^boolean final?])
+
+(extend-protocol bbq/Sized
+  Chunk
+  (byte-size [c] (:bytes c)))
+
+(defn release-chunk [p ^Chunk c]
+  (doseq [b (:bufs c)]
+    (bp/return p b)))
+
+;; ----- Worker side functions
+;; the worker thread is the only one allowed to call native functions
+;; ref ol.busker.evloop
+
+;; the scheduled?_ flag:
+;;
+;; The scheduled?_ AtomicBoolean ensures only one drain task is pending/in-flight at a time,
+;; enforcing h2o's strict "one sendvec in flight" contract: sendvec → on-proceed → sendvec.
+;;
+;; State transitions:
+;;   false → true:  Writer calls schedule-drain! and successfully posts :h2o/sendvec message
+;;   true → false:  Either (1) on-proceed clears it before scheduling next drain, OR
+;;                        (2) send-vecs clears it when queue is empty (no work to do)
+;;
+;; Semantics:
+;;   scheduled?_=true means one of:
+;;     - A drain task is in the evloop mailbox (not yet executed)
+;;     - send-vecs is currently executing on the worker thread
+;;     - h2o_sendvec call is in-flight waiting for on-proceed callback
+;;
+;; Guarantees:
+;;   - Prevents duplicate drain messages in the evloop mailbox (CAS gate in schedule-drain!)
+;;   - Ensures on-proceed sees no concurrent drains (cleared before next schedule)
+;;   - Writer can safely enqueue chunks and post drain without blocking on semaphores
+;;
+;; Key functions:
+;;   schedule-drain!: CAS false→true, posts mailbox message if successful
+;;   send-vecs:       Keeps true while sendvec in-flight; clears to false only if queue empty
+;;   on-proceed:      Clears to false, releases buffers, schedules next drain if not stopped
+
+(defn package-chunks
+  "Build a contiguous array of h2o_sendvec_t descriptors from a vector of Chunks.
+   Copies ByteBuffer data to arena-allocated stable segments for safe native access.
+   Returns map with :seg (sendvec array), :veccnt, :final?, and :stable-segs (to prevent GC)."
+  [chunks arena]
+  (let [last-final? (boolean (when-let [c (peek chunks)] (:final? c)))
+        bufs-flat (vec (mapcat :bufs chunks))
+        veccnt (count bufs-flat)]
+    (if (zero? veccnt)
+      {:seg (mem/alloc 0 arena) :veccnt 0 :final? last-final? :stable-segs []}
+      (let [elem-size h2o/size-of-h2o-sendvec-t
+            total-size (* veccnt elem-size)
+            sendvec-array (mem/alloc total-size arena)]
+        (loop [i 0
+               stable-segs (transient [])]
+          (if (< i veccnt)
+            (let [^ByteBuffer b (nth bufs-flat i)]
+              (when-not (.isDirect b) (throw (ex-info "Non-direct ByteBuffer in Chunk bufs; must be direct" {:index i})))
+              (let [slot-off (* i elem-size)
+                    slot (mem/slice sendvec-array slot-off elem-size)
+                    len (.remaining b)
+                    byte-arr (byte-array len)
+                    stable-seg (mem/alloc len arena)]
+                (.get ^ByteBuffer b byte-arr)
+                (MemorySegment/copy byte-arr 0 stable-seg java.lang.foreign.ValueLayout/JAVA_BYTE 0 len)
+                (h2o/sendvec-init-raw slot stable-seg len)
+                (recur (inc i) (conj! stable-segs stable-seg))))
+            {:seg sendvec-array :veccnt veccnt :final? last-final? :stable-segs (persistent! stable-segs)}))))))
+
+(defn drain-chunks
+  "Worker thread. Called after proceed indicates we can send more chunks to native, returns true if final was sent"
+  [req bbq preferred-chunk-size arena]
+  ;; st must hold an :in-flight ref you set to `chunks` to keep ByteBuffers alive
+
+  (let [chunks (bbq/drain bbq preferred-chunk-size)
+        #_#_total-size (reduce + (map :bytes chunks))]
+    (when (seq chunks)
+      (let [{:keys [seg veccnt final? stable-segs]} (package-chunks chunks arena)]
+        (h2o/sendvec (-> req :req-ctx :req) seg veccnt (if final? h2o/H2O_SEND_STATE_FINAL h2o/H2O_SEND_STATE_IN_PROGRESS))
+        [final? chunks stable-segs]))))
+
+(defn release-chunks
+  "Worker thread. Release the Chunks that were in-flight back to the pool.
+   Note: Arena/ofAuto arenas are GC-managed and should NOT be manually closed."
+  [pool ^AtomicReference in-flight_]
+  (let [in-flight-val (.get in-flight_)]
+    (when-some [[chunks _arena _stable-segs] in-flight-val]
+      (when (seq chunks)
+        (doseq [chunk chunks]
+          (release-chunk pool chunk)))))
+  (.set in-flight_ nil))
+
+(defn send-vecs
+  "Evloop worker thread: drain chunks and send to native when ready."
+  [st]
+  (when-not (.get ^AtomicBoolean (:stopped?_ st))
+    ;; TODO: what should else branch here be?
+    (if (nil? (.get ^AtomicReference (:in-flight_ st)))
+      (let [arena (Arena/ofAuto)
+            result (drain-chunks (:req st) (:bbq st) (get-in st [:config :preferred-chunk-size] Long/MAX_VALUE)
+                                 arena)]
+        (if result
+          (let [[final? chunks stable-segs] result]
+            (.set ^AtomicReference (:in-flight_ st) [chunks arena stable-segs])
+            (when final?
+              (.set ^AtomicBoolean (:stopped?_ st) true)))
+          (.set ^AtomicBoolean (:scheduled?_ st) false))))))
+
+(defn schedule-drain!
+  "Try to schedule a drain task on the event loop.
+   Uses CAS on scheduled?_ to ensure only one drain is posted at a time.
+   Returns true if a new drain was scheduled, false if one was already pending."
+  [st]
+  (let [trig (if (.compareAndSet ^AtomicBoolean (:scheduled?_ st) false true)
+               (do
+                 (pi/send-msg (:worker (:req st)) [:h2o/sendvec (fn [] (send-vecs st))])
+                 :sent-msg)
+               (do
+                 (pi/wake (:worker (:req st)))
+                 :woke))]))
+
+(defn report-error [e]
+  (trove/log! {:level :error :id :h2o/error :ex e}))
+
+(defn on-proceed
+  "Worker thread. Called by libh2o to progress the response generator"
+  [st]
+  (try
+    (.set ^AtomicBoolean (:scheduled?_ st) false)
+    (release-chunks (:buffer-pool st) (:in-flight_ st))
+    (when-not (.get ^AtomicBoolean (:stopped?_ st)) (schedule-drain! st))
+    (catch Exception e
+      (report-error e))))
+
+(defn on-stop
+  "Worker thread. Called by libh2o to cancel the request (because client hung up etc).
+  Must not throw."
+  [st _reason]
+  (try
+    (.set ^AtomicBoolean (:stopped?_ st) true)
+    (bbq/close (:bbq st))
+    (when-some [^ByteBuffer buf (.getAndSet ^AtomicReference (:current-buffer_ st) nil)]
+      (bp/return (:buffer-pool st) buf))
+    (catch Exception e
+      (report-error e))))
+
+;; ----- Writer/Producer side functions
+;; the request thread is the virtualthread spawned to handle the request. It writes responses
+;; ref: ol.busker.request/on-request
+
+(defn seal-chunk
+  "Build a sealed Chunk from a seq of ByteBuffers and a final? flag.
+   Each buffer should already have position/limit set for reading."
+  ^Chunk [bufs final?]
+  (let [vbufs (vec bufs)
+        total (long (reduce (fn [^long acc ^ByteBuffer b] (+ acc (.remaining b))) 0 vbufs))]
+    (->Chunk vbufs total (boolean final?))))
+
+(defn- ->output-stream ^OutputStream [st]
+  (proxy [OutputStream] []
+    (write
+      ([x]
+       (if (number? x)
+         (.write ^OutputStream this (byte-array [x]))
+         (.write ^OutputStream this x 0 (alength ^bytes x))))
+      ([^bytes ba off len]
+       (when (or (.get ^AtomicBoolean (:stopped?_ st))
+                 (.get ^AtomicBoolean (:closing?_ st)))
+         (throw (java.io.IOException. "Stream closed")))
+       (let [^AtomicReference cur-ref (:current-buffer_ st)
+             pool                     (:buffer-pool st)]
+         (loop [offset    (int off)
+                remaining (int len)]
+           (when (pos? remaining)
+             (let [^ByteBuffer buf (or (.get cur-ref)
+                                       (let [b (bp/borrow pool (:output-buffer-size st) true)]
+                                         (when (nil? b) (throw (ex-info "Buffer pool exhausted" {})))
+                                         (.clear ^ByteBuffer b)
+                                         (.set cur-ref b)
+                                         b))
+                   can-copy        (min remaining (.remaining buf))]
+               (.put buf ba offset can-copy)
+               (when (zero? (.remaining buf))
+                 (.flip buf)
+                 (let [chunk (seal-chunk [buf] false)]
+                   (.set cur-ref nil)
+                   (bbq/put (:bbq st) chunk)
+                   (schedule-drain! st)))
+               (recur (+ offset can-copy) (- remaining can-copy))))))))
+    (flush []
+      (when (or (.get ^AtomicBoolean (:stopped?_ st))
+                (.get ^AtomicBoolean (:closing?_ st)))
+        (throw (java.io.IOException. "Stream closed")))
+      (let [^AtomicReference cur-ref (:current-buffer_ st)
+            ^ByteBuffer buf          (.get cur-ref)]
+        (when (and buf (pos? (.position buf)))
+          (.flip buf)
+          (.set cur-ref nil)
+          (let [chunk (seal-chunk [buf] false)]
+            (bbq/put (:bbq st) chunk)
+            (schedule-drain! st)))))
+    (close []
+      (if (.get ^AtomicBoolean (:stopped?_ st))
+        (do
+          (when-some [^ByteBuffer buf (.get ^AtomicReference (:current-buffer_ st))]
+            (bp/return (:buffer-pool st) buf)
+            (.set ^AtomicReference (:current-buffer_ st) nil))
+          (.set ^AtomicBoolean (:closing?_ st) true)
+          nil)
+        (if (.compareAndSet ^AtomicBoolean (:closing?_ st) false true)
+          (let [^AtomicReference cur-ref (:current-buffer_ st)
+                ^ByteBuffer buf          (.get cur-ref)
+                final-chunk              (if (and buf (pos? (.position buf)))
+                                           (do
+                                             (.flip buf)
+                                             (.set cur-ref nil)
+                                             (seal-chunk [buf] true))
+                                           (seal-chunk [] true))]
+            (bbq/put (:bbq st) final-chunk)
+            (.set ^AtomicBoolean (:final-enqueued?_ st) true)
+            (schedule-drain! st)
+            nil)
+          nil)))))
+
+(defrecord
+ ^{:doc "Per-request state for the queue-based sender.
+   Fields:
+   - req: the Request
+   - bbq: SPSC ByteBoundedQueue of Chunk (writer enqueues, worker drains).
+   - output-buffer-size: size of buffers to grab from the pool
+   - scheduled: AtomicBoolean; true iff a drain task is scheduled/on-going on the event loop.
+   - in-flight: AtomicReference<Chunk>; the currently sent chunk awaiting proceed.
+   - closing: AtomicBoolean; producer side. writer set when close() called (no more writes).
+   - stopped: AtomicBoolean; consumer side. libh2o drives this when request is stopped/cancelled or consumer sets it when final chunk sent
+   - final-enqueued: AtomicBoolean; tracks whether a final chunk has been enqueued.
+   - buffer-pool: reference to pooled direct ByteBuffers (opaque here).
+   - current-buffer: AtomicReference<ByteBuffer>; writer-owned aggregation buffer (rotated on seal).
+   - config: IPersistentMap of tuning knobs, e.g.:
+       {:aggregation-size int
+        :large-threshold  int
+        :max-buffered-bytes long
+        :max-vecs-per-send int}"}
+ H2OResponseWriter
+ [req bbq output-buffer-size
+  ^AtomicBoolean scheduled?_
+  ^AtomicReference in-flight_
+  ^AtomicBoolean closing?_
+  ^AtomicBoolean stopped?_
+  ^AtomicBoolean final-enqueued?_
+  ^AtomicReference current-buffer_
+  buffer-pool
+  ^clojure.lang.IPersistentMap config]
+  pi/Stopable
+  (stop [this] (on-stop this nil)))
+
+(defn new-response-state
+  [req]
+  (assert (-> req :config :buffer-pool))
+  (assert (-> req :config :output-buffer-size))
+  (->H2OResponseWriter req
+                       (bbq/byte-bounded-spsc-queue (-> req :config :output-buffer-size))
+                       (-> req :config :output-buffer-size)
+                       (AtomicBoolean. false)
+                       (AtomicReference. nil)
+                       (AtomicBoolean. false)
+                       (AtomicBoolean. false)
+                       (AtomicBoolean. false)
+                       (AtomicReference. nil)
+                       (-> req :config :buffer-pool)
+                       {}))
+
+(defn create-response-writer [req]
+  (let [st            (new-response-state req)
+        on-proceed-cb (fn [_ctx-ptr] (on-proceed st))
+        on-stop-cb    (fn [_ctx-ptr reason] (on-stop st reason))]
+    (assoc st
+           ;; these must not be GCed until the request is complete
+           ;; but from here they no longer need to be accessed
+           ::on-proceed-cb    on-proceed-cb
+           ::on-stop-cb       on-stop-cb
+           ;; these also musn't be GCed, but they must be accessed later
+           ;; when h2o_start_response or h2o_send_informational is called
+           :on-proceed-cb-ptr (mem/serialize on-proceed-cb [::ffi/fn [::mem/pointer] ::mem/void])
+           :on-stop-cb-ptr    (mem/serialize on-stop-cb [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])
+           :out-stream     (->output-stream st))))

@@ -10,7 +10,7 @@
                   compile             {:doc "Compile all the things" :depends [compile-shim prep]}
                   test                (apply clojure "-M:dev:test:kaocha" *command-line-args*)
                   test.large-payloads {:doc  "Run large payload tests with restricted memory (2GB heap)"
-                                       :task (clojure "-J-Xmx2g" "-J-Xms2g" "-M:dev:test:kaocha" "--no-capture-output" "--focus" "ol.h2o.large-payload-test")}
+                                       :task (clojure "-J-Xmx2g" "-J-Xms2g" "-M:dev:test:kaocha" "--no-capture-output" "--focus" "ol.busker.large-payload-test")}
                   deps-tree           (clojure "-X:deps tree :aliases '[:dev]'")
                   dev                 {:doc "Start a local development server" :task (apply clojure "-M:dev:repl/dev" *command-line-args*)}
                   lint.copy-configs   {:doc  "Copy clj-kondo config files from deps in the project"
@@ -21,8 +21,8 @@
                                                          (if (seq *command-line-args*)
                                                            (str " --lint " (first *command-line-args*))
                                                            " --lint src")))}
-                  bench               {:doc  "Run the benchmark suite (wraps `clojure -M:dev:bench -m ol.h2o.benchmark`)"
-                                       :task (apply clojure "-M:dev:bench" "-m" "ol.h2o.benchmark" *command-line-args*)}
+                  bench               {:doc  "Run the benchmark suite (wraps `clojure -M:dev:bench -m ol.busker.benchmark`)"
+                                       :task (apply clojure "-M:dev:bench" "-m" "ol.busker.benchmark" *command-line-args*)}
                   jar                 {:depends          [clean compile]
                                        :override-builtin true
                                        :doc              "Build jars"
