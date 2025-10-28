@@ -6,7 +6,7 @@ Busker is a Clojure HTTP server library built directly on [libh2o](https://githu
 
 - Busker provides full modern HTTP support including HTTP/1.1, HTTP/2, and HTTP/3 with features like 103 Early Hints and HTTP/2 streams
 - Busker handles automatic HTTPS certificate management and renewal
-- Busker simplifies deployment by eliminating Docker, just deploy your uberjar directly with systemd
+- Busker simplifies deployment by eliminating nginx/caddy and Docker, just deploy your uberjar directly with systemd
 - Busker delivers predictable performance under load with sensible production-ready defaults
 
 **Requirements**
@@ -35,7 +35,7 @@ You need this deps.edn dependency:
 
 ```clojure
 com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
-                          :git/sha ""}
+                          :git/sha "cf53e8e003f66b32d3fc3b0b456f764cc665b308"}
 ```
 
 ...and you need one of the native dependencies:
