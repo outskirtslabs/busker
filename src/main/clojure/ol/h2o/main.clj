@@ -1,5 +1,7 @@
 (ns ol.h2o.main
   (:require
+   [clojure.java.io :as io]
+   [ol.h2o.protocols :as h2o]
    [clojure.string :as str]
    [ol.h2o.server :as server]))
 
@@ -70,6 +72,29 @@
      :headers {"content-type" "application/json"}
      :body (str "{\"received\":\"" body-str "\",\"length\":" (count (or body-str "")) "}")}))
 
+(defn early-hints-handler [{emitter :ol.h2o.request/emitter}]
+  (future
+    (h2o/emit! emitter {:status 103 :headers {"Link" "</style.css>; rel=preload; as=style"}})
+    (h2o/flush emitter)
+    (Thread/sleep 1000)
+    (h2o/emit! emitter {:status 200 :headers {"content-type" "text/html"}})
+    (h2o/emit! emitter "<!doctype html><h1>Hello world</h1>")
+    (h2o/close emitter))
+  {:body emitter})
+
+(defn sse-handler [{emitter :ol.h2o.request/emitter}]
+  (future
+    (h2o/emit! emitter {:status 200 :headers {"content-type" "text/event-stream" "connection" "keep-alive"}})
+    (h2o/emit! emitter "event: hello\ndata: first\n\n")
+    (h2o/flush emitter)
+    (Thread/sleep 500)
+    (h2o/emit! emitter "event: world\ndata: second\n\n")
+    (h2o/flush emitter)
+    (Thread/sleep 500)
+    (h2o/emit! emitter "event: close\ndata:\n\n")
+    (h2o/close emitter))
+  {:body emitter})
+
 (defn large-body-handler
   "Return a large response body"
   [req]
@@ -130,7 +155,7 @@
   [req]
   (let [uri (:uri req)
         method (:request-method req)]
-    (println "Router - Method:" method "URI:" uri)
+    (println "Router - Method:" method "URI:" uri " Scheme: " (:scheme req))
     (cond
       (= uri "/") {:status 200
                    :headers {"content-type" "text/plain"}
@@ -146,15 +171,26 @@
 
       (= uri "/headers") (headers-handler req)
 
+      (= uri "/sse") (sse-handler req)
+
+      (= uri "/early-hints") (early-hints-handler req)
+
       (str/starts-with? uri "/status/") (status-handler req)
 
       :else {:status 404
              :headers {"content-type" "text/plain"}
              :body "Not Found"})))
 
+(def  cert-file (.getAbsolutePath (io/file "src/test/fixtures/server.crt")))
+(def  key-file (.getAbsolutePath (io/file "src/test/fixtures/server.key")))
+
 (defn -main [& _]
   (let [s (server/run-server router {:compress-brotli-level 15
-                                     :compress-gzip-level 5})]
+                                     :compress-gzip-level 5
+                                     :listeners [{:port 8080}
+                                                 {:port 8081
+                                                  :tls  {:cert-file cert-file
+                                                         :key-file  key-file}}]})]
     (println "Server started on port 8080")
     (println "Listening for connections...")
     (println "\nAvailable endpoints:")

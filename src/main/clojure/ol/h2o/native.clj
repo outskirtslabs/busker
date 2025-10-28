@@ -456,6 +456,12 @@
   clj_h2o_start_response
   [::mem/pointer ::mem/int ::mem/pointer ::mem/long ::mem/long ::mem/int ::mem/pointer ::mem/pointer] ::mem/long)
 
+(defcfn send-informational
+  "Sends 1xx response"
+  clj_h2o_send_informational
+  [::mem/pointer ::mem/int ::mem/pointer ::mem/long]
+  ::mem/void)
+
 (defcfn cancel-request
   "Cancel a request after the response has started"
   clj_h2o_cancel_request

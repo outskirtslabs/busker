@@ -232,6 +232,10 @@ size_t clj_h2o_start_response(
     void (*on_response_generator_stop)(clj_req_ctx_t *ctx,
                                        clj_complete_reason_t reason));
 
+void clj_h2o_send_informational(clj_req_ctx_t *ctx, int status,
+                                const clj_header_t *headers,
+                                size_t headers_len);
+
 /* Create and configure h2o handler with optional callbacks.
  * All callback parameters can be NULL except on_req_callback.
  * supports_request_streaming: 1 to enable, 0 to disable

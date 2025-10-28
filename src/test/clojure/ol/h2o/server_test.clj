@@ -1,5 +1,6 @@
 (ns ol.h2o.server-test
   (:require
+   [ol.h2o.protocols :as h2o]
    [babashka.http-client :as http]
    [babashka.process :as p]
    [clojure.java.io :as io]
@@ -236,38 +237,39 @@
           (is (= 204 (:status response)))
           (is (= "" (:body response))))))))
 
+(def  cert-file (.getAbsolutePath (io/file "src/test/fixtures/server.crt")))
+(def  key-file (.getAbsolutePath (io/file "src/test/fixtures/server.key")))
+
 (deftest test-tls-listener
   (testing "TLS listener with HTTPS connections"
-    (let [cert-file (.getAbsolutePath (io/file "src/test/fixtures/server.crt"))
-          key-file (.getAbsolutePath (io/file "src/test/fixtures/server.key"))]
-      (with-server [_server (test-server
-                             (fn [{:keys [scheme uri]}]
-                               {:status 200
-                                :headers {"content-type" "text/plain"}
-                                :body (str "Hello via " (name scheme) " at " uri)})
-                             :listeners [{:port plain-port}
-                                         {:port 7891
-                                          :tls {:cert-file cert-file
-                                                :key-file key-file}}])]
-        (testing "plaintext HTTP endpoint works"
-          (let [response (req :get "/hello")]
-            (is (= 200 (:status response)))
-            (is (= "Hello via http at /hello" (:body response)))))
+    (with-server [_server (test-server
+                           (fn [{:keys [scheme uri]}]
+                             {:status  200
+                              :headers {"content-type" "text/plain"}
+                              :body    (str "Hello via " (name scheme) " at " uri)})
+                           :listeners [{:port plain-port}
+                                       {:port 7891
+                                        :tls  {:cert-file cert-file
+                                               :key-file  key-file}}])]
+      (testing "plaintext HTTP endpoint works"
+        (let [response (req :get "/hello")]
+          (is (= 200 (:status response)))
+          (is (= "Hello via http at /hello" (:body response)))))
 
-        (testing "HTTPS endpoint works"
-          (let [result (p/shell {:out :string :err :string :continue true}
-                                "curl" "--insecure" "-s"
-                                "https://127.0.0.1:7891/secure")]
-            (is (= 0 (:exit result)) "HTTPS request should succeed")
-            (is (re-find #"Hello via https at /secure" (:out result)) "HTTPS should return expected response")))
+      (testing "HTTPS endpoint works"
+        (let [result (p/shell {:out :string :err :string :continue true}
+                              "curl" "--insecure" "-s"
+                              "https://127.0.0.1:7891/secure")]
+          (is (= 0 (:exit result)) "HTTPS request should succeed")
+          (is (re-find #"Hello via https at /secure" (:out result)) "HTTPS should return expected response")))
 
-        (testing "HTTPS with HTTP/2 ALPN negotiation"
-          (let [result (p/shell {:out :string :err :string}
-                                "curl" "--http2" "--insecure" "-v" "-s"
-                                "https://127.0.0.1:7891/h2")]
-            (is (= 0 (:exit result)) "HTTP/2 request should succeed")
-            (is (re-find #"Hello via https at /h2" (:out result)) "HTTP/2 should return expected response")
-            (is (re-find #"ALPN.*h2" (:err result)) "Should negotiate HTTP/2 via ALPN")))))))
+      (testing "HTTPS with HTTP/2 ALPN negotiation"
+        (let [result (p/shell {:out :string :err :string}
+                              "curl" "--http2" "--insecure" "-v" "-s"
+                              "https://127.0.0.1:7891/h2")]
+          (is (= 0 (:exit result)) "HTTP/2 request should succeed")
+          (is (re-find #"Hello via https at /h2" (:out result)) "HTTP/2 should return expected response")
+          (is (re-find #"ALPN.*h2" (:err result)) "Should negotiate HTTP/2 via ALPN"))))))
 
 ;; TODO: Implement these tests once streaming support is complete
 #_(deftest test-exceptions
@@ -287,3 +289,51 @@
           (println (:body response))
           (is (= 200 (:status response)))))))
 
+(deftest test-async
+  (testing "async response"
+    (with-server [_ (test-server (fn [{emitter :ol.h2o.request/emitter}]
+                                   (future
+                                     (h2o/emit! emitter {:status 200 :body "Hello Async"}))
+                                   {:body emitter})
+                                 {:listeners [{:port plain-port}
+                                              {:port 7891
+                                               :tls  {:cert-file cert-file
+                                                      :key-file  key-file}}]})]
+      (let [{:keys [status body]} (req :get "/")]
+        (is (= 200 status))
+        (is (= "Hello Async" body)))))
+  (testing "103 early hints" ;; 103 early hints requires h2 or h3
+    (with-server [_ (test-server (fn [{emitter :ol.h2o.request/emitter}]
+                                   (future
+                                     (h2o/emit! emitter {:status 103 :headers {"Link" "</style.css>; rel=preload; as=style"}})
+                                     (h2o/emit! emitter {:status 200 :headers {"content-type" "text/html"}})
+                                     (h2o/emit! emitter "<!doctype html><h1>Hello world</h1>")
+                                     (h2o/close emitter))
+                                   {:body emitter})
+                                 :listeners [{:port plain-port}
+                                             {:port 7891
+                                              :tls  {:cert-file cert-file
+                                                     :key-file  key-file}}])]
+
+      (let [result (p/shell {:out :string :err :string}
+                            "curl" "-v" "--http2" "--insecure"
+                            "https://127.0.0.1:7891")]
+        (is (= 0 (:exit result)))
+        (is (re-find #"HTTP/2 103" (:err result)))
+        (is (re-find #"link: </style.css>; rel=preload; as=style" (:err result)))
+        (is (re-find #"HTTP/2 200" (:err result)))
+        (is (re-find #"<!doctype html><h1>Hello world</h1>" (:out result))))))
+
+  (testing "sse"
+    (with-server [_ (test-server (fn [{emitter :ol.h2o.request/emitter}]
+                                   (future
+                                     (h2o/emit! emitter {:status 200 :headers {"content-type" "text/event-stream" "connection" "keep-alive"}})
+                                     (h2o/emit! emitter "event: hello\ndata: first\n\n")
+                                     (h2o/flush emitter)
+                                     (h2o/emit! emitter "event: close\ndata:\n\n")
+                                     (h2o/close emitter))
+                                   {:body emitter}))]
+      (let [{:keys [headers status body]} (req :get "/")]
+        (is (= "text/event-stream" (get headers "content-type")))
+        (is (= 200 status))
+        (is (= "event: hello\ndata: first\n\nevent: close\ndata:\n\n" body))))))

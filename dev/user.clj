@@ -16,4 +16,3 @@
   (clojure.repl.deps/sync-deps)
   ;;
   )
-(not 0)

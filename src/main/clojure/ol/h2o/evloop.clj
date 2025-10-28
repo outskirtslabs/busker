@@ -36,8 +36,8 @@
       (.offer ^ArrayBlockingQueue mailbox msg)
       (p/wake this)))
   (count-msgs [_] (.size ^ArrayBlockingQueue mailbox))
-  (add-req [_ req]
-    (.put requests (:req-id req) req))
+  (add-req [_ req-id r]
+    (.put requests req-id r))
   (reap-req [_ req-id]
     (.remove requests req-id)))
 

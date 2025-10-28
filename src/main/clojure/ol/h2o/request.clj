@@ -3,15 +3,15 @@
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]
    [ol.h2o.evloop :as evloop]
-   [ol.h2o.internal.protocols :as p]
+   [ol.h2o.internal.protocols :as pi]
    [ol.h2o.native :as h2o]
    [ol.h2o.response :as response])
   (:import
-   [java.io InputStream OutputStream]
+   [java.io InputStream]
    [java.nio ByteBuffer]
    [java.nio.channels Channels ReadableByteChannel]
    [java.util.concurrent ExecutorService LinkedBlockingQueue RejectedExecutionException]
-   [ol.h2o.protocols Request]))
+   [ol.h2o.internal.protocols Request]))
 
 (set! *warn-on-reflection* true)
 
@@ -77,66 +77,72 @@
      :input-stream (Channels/newInputStream body-channel)}))
 
 (defn set-req-body-channel [worker req-ctx-ptr req-ctx]
-  (let [proceed-callback         (fn []
-                                   (p/send-msg worker [:h2o/proceed-request req-ctx]))
+  (let [proceed-callback (fn []
+                           (pi/send-msg worker [:h2o/proceed-request req-ctx]))
         {:keys [write-chunk]
-         :as   write-req}          (create-write-req-channel proceed-callback)
-        on-req-body-chunk-cb     (fn [_ chunk-seg ^long chunk-len ^long is-last]
-                                   (write-chunk
-                                    (when-not (mem/null? chunk-seg) (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len))
-                                    (if (= 1 is-last) true false)))
+         :as write-req} (create-write-req-channel proceed-callback)
+        on-req-body-chunk-cb (fn [_ chunk-seg ^long chunk-len ^long is-last]
+                               (write-chunk
+                                (when-not (mem/null? chunk-seg) (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len))
+                                (if (= 1 is-last) true false)))
         on-req-body-chunk-cb-ptr (mem/serialize on-req-body-chunk-cb [::ffi/fn [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void])]
     (h2o/set-on-request-body-chunk-callback req-ctx-ptr on-req-body-chunk-cb-ptr)
     (assoc write-req
            ::on-req-body-chunk-cb on-req-body-chunk-cb
            ::on-req-body-chunk-cb-ptr on-req-body-chunk-cb-ptr)))
 
-(defn close-streams [req cancel?]
+(defn run-handler
+  "Run the handler given the ring request map. Must return a ring response map."
+  [handler ring-req]
+  (or (try
+        (handler ring-req)
+        (catch InterruptedException _
+          (.interrupt (Thread/currentThread))
+          {:status 503
+           :headers {"content-type" "text/plain; charset=utf-8"}
+           :body "Server shutting down"})
+        (catch Exception e
+          (println "Handler error:" (.getMessage e))
+          (.printStackTrace e)
+          {:status 500
+           :headers {"content-type" "text/plain; charset=utf-8"}
+           :body "Internal Server Error"}))
+      {:status 404
+       :headers {"content-type" "text/plain; charset=utf-8"}
+       :body "Page Not Found"}))
+
+(defn close-streams [req emitter]
   (when req
     (when-some [^InputStream input-stream (-> req :write-req :input-stream)]
-      (.close input-stream))
-    (when cancel?
-      (when-some [cancel (-> req :write-resp :cancel)]
-        (cancel)))
-    (when-some [^OutputStream output-stream (-> req :write-resp :out-stream)]
-      (.close output-stream))))
+      (.close input-stream)))
+  (when emitter
+    (response/stop-emitter emitter)))
 
 (defn on-request
   [^ExecutorService executor config ring-handler req-ctx-ptr req-ctx]
-  (if-not (p/running? (evloop/get-current-worker))
+  (if-not (pi/running? (evloop/get-current-worker))
     h2o/CLJ_HANDLER_SHUTTING_DOWN
     (try
       (let [worker    (evloop/get-current-worker)
             has-body? (:has_body (:meta req-ctx))
             write-req (when has-body? (set-req-body-channel worker req-ctx-ptr req-ctx))
-            ring-req  (h2o/build-ring-request (:meta req-ctx) (:input-stream write-req))
             req-id    (h2o/cstr-array->string (:req-id req-ctx))
-            req       (response/with-response-writer
-                        (Request. worker config req-id req-ctx-ptr req-ctx ring-req write-req nil))]
-        (p/add-req worker req)
+            req       (Request. worker config req-id req-ctx-ptr req-ctx write-req)
+            emitter   (response/new-response-emitter req)
+            ring-req  (assoc (h2o/build-ring-request (:meta req-ctx) (:input-stream write-req))
+                             ::emitter emitter)]
+        (pi/add-req worker req-id [req emitter])
         (try
           (letfn [(request-task []
-                    (let [ring-resp (try
-                                      (ring-handler (:ring-req req))
-                                      (catch InterruptedException _
-                                        (.interrupt (Thread/currentThread))
-                                        {:status  503
-                                         :headers {"content-type" "text/plain; charset=utf-8"}
-                                         :body    "Server shutting down"})
-                                      (catch Exception e
-                                        (println "Handler error:" (.getMessage e))
-                                        (.printStackTrace e)
-                                        {:status  500
-                                         :headers {"content-type" "text/plain; charset=utf-8"}
-                                         :body    "Internal Server Error"}))]
-
-                      (response/send-ring-response! req ring-resp)))]
+                    (let [ring-resp (run-handler ring-handler ring-req)]
+                      (response/send-ring-response! emitter ring-resp)
+                      #_(response/send-ring-response! req ring-resp)))]
             (.submit executor ^Runnable request-task))
           h2o/CLJ_HANDLER_OK
           (catch RejectedExecutionException e
             ;; Handler never ran: remove and close local state so the shim cleanup does not see a dangling queue.
-            (p/reap-req worker req-id)
-            (close-streams req true)
+            (pi/reap-req worker req-id)
+            (close-streams req emitter)
             h2o/CLJ_HANDLER_SHUTTING_DOWN)))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
@@ -157,6 +163,7 @@
   [_ring-handler _req-ctx-ptr req-ctx]
   (try
     (when-some [req-id (-> req-ctx :req-id (h2o/cstr-array->string))]
-      (close-streams (p/reap-req (evloop/get-current-worker) req-id) false))
+      (let [[req emitter] (pi/reap-req (evloop/get-current-worker) req-id)]
+        (close-streams req emitter)))
     (catch Exception e
       (h2o/report-almost-fatal-error "The request cleanup callback errored" e))))

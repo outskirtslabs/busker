@@ -2,20 +2,21 @@
 
 (set! *warn-on-reflection* true)
 
+(defprotocol Stopable
+  (stop [this]))
+
 (defrecord Request
            [worker
             config
             req-id
             req-ctx-ptr
             req-ctx
-            ring-req
-            write-req
-            write-resp])
+            write-req])
 
 (defprotocol WorkerThread
   (running? [_])
   (wake [_] "Wake up the worker")
   (send-msg [_ msg] "Send a message to the worker")
   (count-msgs [_] "The number of messages in the worker mailbox")
-  (add-req [_ ^Request req] "Add an in-flight request")
+  (add-req [_ ^String req-id req] "Add an in-flight request")
   (reap-req [_ ^String req-id] "Remove an in-flight request by ID, returning the Request"))

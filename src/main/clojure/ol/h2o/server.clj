@@ -13,15 +13,14 @@
    [ol.h2o.response-queue :as response-queue])
   (:import
    [java.util.concurrent ExecutorService Executors TimeUnit]
-   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]
-   [ol.h2o.response_queue ResponseState]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
 
 (set! *warn-on-reflection* true)
 
 (def ^:const default-max-connections 1024)
 
 (defn- response-state-pending?
-  [^ResponseState st]
+  [st]
   (let [scheduled? (.get ^AtomicBoolean (:scheduled?_ st))
         in-flight? (some? (.get ^AtomicReference (:in-flight_ st)))
         queued-bytes (bbq/queued-bytes (:bbq st))]
@@ -46,7 +45,7 @@
      (some
       (fn [req]
         (or (when-let [write-resp (:write-resp req)]
-              (when-let [^ResponseState st (::response-queue/state write-resp)]
+              (when-let [st (::response-queue/state write-resp)]
                 (response-state-pending? st)))
             (request-awaiting-final? req)))
       (.values requests)))))
@@ -62,6 +61,10 @@
     :h2o/sendvec
     (let [[send-vecs] args]
       (send-vecs))
+
+    :h2o/send-informational
+    (let [[send-fn] args]
+      (send-fn))
 
     :h2o/start-response
     (let [[start-fn] args]
@@ -300,20 +303,20 @@
         disposes its `h2o_context_t` and posts ::stop to exit the loop."
   [worker {:keys [shutdown-initiated? context-disposed? receiver-destroyed?] :as _loop-state}
    {:keys [loop-ptr ctx-ptr listener-socks accept-callbacks] :as state}]
-  (let [shutdown-recorded?  (true? shutdown-initiated?)
+  (let [shutdown-recorded? (true? shutdown-initiated?)
         shutdown-initiated? (check-and-initiate-shutdown! (assoc state :shutdown-initiated? shutdown-recorded?))
         receiver-destroyed? (receiver-destroyed?* worker receiver-destroyed?)
-        context-disposed?   (dispose-context-if-ready worker ctx-ptr (true? context-disposed?) shutdown-initiated? receiver-destroyed?)]
+        context-disposed? (dispose-context-if-ready worker ctx-ptr (true? context-disposed?) shutdown-initiated? receiver-destroyed?)]
     (if context-disposed?
       (h2o/evloop-run loop-ptr 0)
-      (let [now      (h2o/evloop-now loop-ptr)
+      (let [now (h2o/evloop-now loop-ptr)
             max-wait (h2o/cleanup-thread now ctx-ptr)
             max-wait (if (pending-response-work? worker) 5 max-wait)]
         (when-not shutdown-initiated?
           (update-listener-state! listener-socks accept-callbacks))
         (h2o/evloop-run loop-ptr (if (pos? (p/count-msgs worker)) 0 max-wait))))
     {:shutdown-initiated? shutdown-initiated?
-     :context-disposed?   context-disposed?
+     :context-disposed? context-disposed?
      :receiver-destroyed? receiver-destroyed?}))
 
 (defn- validate-tls-config
@@ -402,7 +405,8 @@
   :max-connections        - maximum concurrent connections across all workers
                             (defaults to 1024)
 
-  :ouput-buffer-size      - the size of the buffer into which response data is aggregated before being sent to the client
+  :ouput-buffer-size      - the size of the buffer into which response data is aggregated
+                            before being sent to the client. A value of 0 indicates no buffering should take place.
                             (defaults to 32768)
 
   Server Identity:

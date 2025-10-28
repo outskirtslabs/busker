@@ -157,6 +157,47 @@ static void clj_generator_stop(h2o_generator_t *gen, h2o_req_t *req) {
   }
 }
 
+/* Copy headers from clj_header_t array to h2o_req_t response headers using pool
+ * allocation */
+static void copy_headers_to_response(h2o_req_t *req,
+                                     const clj_header_t *headers,
+                                     size_t headers_len) {
+  for (uint32_t i = 0; i < headers_len; i++) {
+    const char *name_data = headers[i].name;
+    const char *value_data = headers[i].value;
+    size_t name_len = headers[i].name_len;
+    size_t value_len = headers[i].value_len;
+
+    char *pool_name = h2o_mem_alloc_pool(&req->pool, char, name_len + 1);
+    char *pool_value = h2o_mem_alloc_pool(&req->pool, char, value_len + 1);
+
+    memcpy(pool_name, name_data, name_len);
+    pool_name[name_len] = '\0';
+
+    memcpy(pool_value, value_data, value_len);
+    pool_value[value_len] = '\0';
+
+    h2o_add_header_by_str(&req->pool, &req->res.headers, pool_name, name_len, 0,
+                          pool_name, pool_value, value_len);
+  }
+}
+
+void clj_h2o_send_informational(clj_req_ctx_t *ctx, int status,
+                                const clj_header_t *headers,
+                                size_t headers_len) {
+
+  if (!ctx || !ctx->req)
+    return;
+
+  h2o_req_t *req = ctx->req;
+
+  req->res.status = status;
+
+  copy_headers_to_response(req, headers, headers_len);
+
+  h2o_send_informational(req);
+}
+
 size_t clj_h2o_start_response(
     clj_req_ctx_t *ctx, int status, const clj_header_t *headers,
     size_t headers_len, size_t content_length, int compress_hint,
@@ -176,27 +217,7 @@ size_t clj_h2o_start_response(
     req->res.content_length = content_length;
   }
 
-  for (uint32_t i = 0; i < headers_len; i++) {
-    const char *name_data = headers[i].name;
-    const char *value_data = headers[i].value;
-    size_t name_len = headers[i].name_len;
-    size_t value_len = headers[i].value_len;
-
-    char *pool_name = h2o_mem_alloc_pool(&req->pool, char, name_len + 1);
-    char *pool_value = h2o_mem_alloc_pool(&req->pool, char, value_len + 1);
-
-    memcpy(pool_name, name_data, name_len);
-    pool_name[name_len] = '\0';
-
-    memcpy(pool_value, value_data, value_len);
-    pool_value[value_len] = '\0';
-
-    // DEBUG_LOG("copied header %s (%d) = %s (%d)", pool_name, name_len,
-    //           pool_value, value_len);
-
-    h2o_add_header_by_str(&req->pool, &req->res.headers, pool_name, name_len, 0,
-                          pool_name, pool_value, value_len);
-  }
+  copy_headers_to_response(req, headers, headers_len);
 
   req->compress_hint = H2O_COMPRESS_HINT_ENABLE;
   ctx->generator.proceed = clj_generator_proceed;

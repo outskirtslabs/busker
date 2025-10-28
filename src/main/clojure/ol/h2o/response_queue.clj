@@ -4,7 +4,7 @@
    [coffi.mem :as mem]
    [ol.h2o.buffer-pool :as bp]
    [ol.h2o.byte-bounded-queue :as bbq]
-   [ol.h2o.internal.protocols :as p]
+   [ol.h2o.internal.protocols :as pi]
    [ol.h2o.native :as h2o]
    [taoensso.trove :as trove])
   (:import
@@ -32,55 +32,6 @@
 (defn release-chunk [p ^Chunk c]
   (doseq [b (:bufs c)]
     (bp/return p b)))
-
-(defrecord
- ^{:doc "Per-request state for the queue-based sender.
-   Fields:
-   - req: the Request
-   - bbq: SPSC ByteBoundedQueue of Chunk (writer enqueues, worker drains).
-   - output-buffer-size: size of buffers to grab from the pool
-   - scheduled: AtomicBoolean; true iff a drain task is scheduled/on-going on the event loop.
-   - in-flight: AtomicReference<Chunk>; the currently sent chunk awaiting proceed.
-   - closing: AtomicBoolean; producer side. writer set when close() called (no more writes).
-   - stopped: AtomicBoolean; consumer side. libh2o drives this when request is stopped/cancelled or consumer sets it when final chunk sent
-   - final-enqueued: AtomicBoolean; tracks whether a final chunk has been enqueued.
-   - buffer-pool: reference to pooled direct ByteBuffers (opaque here).
-   - current-buffer: AtomicReference<ByteBuffer>; writer-owned aggregation buffer (rotated on seal).
-   - config: IPersistentMap of tuning knobs, e.g.:
-       {:aggregation-size int
-        :large-threshold  int
-        :max-buffered-bytes long
-        :max-vecs-per-send int}"}
- ResponseState
- [req bbq output-buffer-size
-  ^AtomicBoolean scheduled?_
-  ^AtomicReference in-flight_
-  ^AtomicBoolean closing?_
-  ^AtomicBoolean stopped?_
-  ^AtomicBoolean final-enqueued?_
-  ^AtomicReference current-buffer_
-  buffer-pool
-  ^clojure.lang.IPersistentMap config])
-
-(def default-output-buffer-size
-  "How much body data in bytes accumulates before writing to the network"
-  32768)
-
-(defn new-response-state
-  [req]
-  (assert (-> req :config :buffer-pool))
-  (assert (-> req :config :output-buffer-size))
-  (->ResponseState req
-                   (bbq/byte-bounded-spsc-queue (-> req :config :output-buffer-size))
-                   (-> req :config :output-buffer-size)
-                   (AtomicBoolean. false)
-                   (AtomicReference. nil)
-                   (AtomicBoolean. false)
-                   (AtomicBoolean. false)
-                   (AtomicBoolean. false)
-                   (AtomicReference. nil)
-                   (-> req :config :buffer-pool)
-                   {}))
 
 ;; ----- Worker side functions
 ;; the worker thread is the only one allowed to call native functions
@@ -166,7 +117,7 @@
 
 (defn send-vecs
   "Evloop worker thread: drain chunks and send to native when ready."
-  [^ResponseState st]
+  [st]
   (when-not (.get ^AtomicBoolean (:stopped?_ st))
     ;; TODO: what should else branch here be?
     (if (nil? (.get ^AtomicReference (:in-flight_ st)))
@@ -184,13 +135,13 @@
   "Try to schedule a drain task on the event loop.
    Uses CAS on scheduled?_ to ensure only one drain is posted at a time.
    Returns true if a new drain was scheduled, false if one was already pending."
-  [^ResponseState st]
+  [st]
   (let [trig (if (.compareAndSet ^AtomicBoolean (:scheduled?_ st) false true)
                (do
-                 (p/send-msg (:worker (:req st)) [:h2o/sendvec (fn [] (send-vecs st))])
+                 (pi/send-msg (:worker (:req st)) [:h2o/sendvec (fn [] (send-vecs st))])
                  :sent-msg)
                (do
-                 (p/wake (:worker (:req st)))
+                 (pi/wake (:worker (:req st)))
                  :woke))]))
 
 (defn report-error [e]
@@ -198,7 +149,7 @@
 
 (defn on-proceed
   "Worker thread. Called by libh2o to progress the response generator"
-  [^ResponseState st]
+  [st]
   (try
     (.set ^AtomicBoolean (:scheduled?_ st) false)
     (release-chunks (:buffer-pool st) (:in-flight_ st))
@@ -207,8 +158,9 @@
       (report-error e))))
 
 (defn on-stop
-  "Worker thread. Called by libh2o to cancel the request (because client hung up etc)"
-  [^ResponseState st _reason]
+  "Worker thread. Called by libh2o to cancel the request (because client hung up etc).
+  Must not throw."
+  [st _reason]
   (try
     (.set ^AtomicBoolean (:stopped?_ st) true)
     (bbq/close (:bbq st))
@@ -229,7 +181,7 @@
         total (long (reduce (fn [^long acc ^ByteBuffer b] (+ acc (.remaining b))) 0 vbufs))]
     (->Chunk vbufs total (boolean final?))))
 
-(defn output-stream ^OutputStream [st]
+(defn- ->output-stream ^OutputStream [st]
   (proxy [OutputStream] []
     (write
       ([x]
@@ -295,18 +247,64 @@
             nil)
           nil)))))
 
-(defn create-response-queue [req]
-  (let [st (new-response-state req)
+(defrecord
+ ^{:doc "Per-request state for the queue-based sender.
+   Fields:
+   - req: the Request
+   - bbq: SPSC ByteBoundedQueue of Chunk (writer enqueues, worker drains).
+   - output-buffer-size: size of buffers to grab from the pool
+   - scheduled: AtomicBoolean; true iff a drain task is scheduled/on-going on the event loop.
+   - in-flight: AtomicReference<Chunk>; the currently sent chunk awaiting proceed.
+   - closing: AtomicBoolean; producer side. writer set when close() called (no more writes).
+   - stopped: AtomicBoolean; consumer side. libh2o drives this when request is stopped/cancelled or consumer sets it when final chunk sent
+   - final-enqueued: AtomicBoolean; tracks whether a final chunk has been enqueued.
+   - buffer-pool: reference to pooled direct ByteBuffers (opaque here).
+   - current-buffer: AtomicReference<ByteBuffer>; writer-owned aggregation buffer (rotated on seal).
+   - config: IPersistentMap of tuning knobs, e.g.:
+       {:aggregation-size int
+        :large-threshold  int
+        :max-buffered-bytes long
+        :max-vecs-per-send int}"}
+ H2OResponseWriter
+ [req bbq output-buffer-size
+  ^AtomicBoolean scheduled?_
+  ^AtomicReference in-flight_
+  ^AtomicBoolean closing?_
+  ^AtomicBoolean stopped?_
+  ^AtomicBoolean final-enqueued?_
+  ^AtomicReference current-buffer_
+  buffer-pool
+  ^clojure.lang.IPersistentMap config]
+  pi/Stopable
+  (stop [this] (on-stop this nil)))
+
+(defn new-response-state
+  [req]
+  (assert (-> req :config :buffer-pool))
+  (assert (-> req :config :output-buffer-size))
+  (->H2OResponseWriter req
+                       (bbq/byte-bounded-spsc-queue (-> req :config :output-buffer-size))
+                       (-> req :config :output-buffer-size)
+                       (AtomicBoolean. false)
+                       (AtomicReference. nil)
+                       (AtomicBoolean. false)
+                       (AtomicBoolean. false)
+                       (AtomicBoolean. false)
+                       (AtomicReference. nil)
+                       (-> req :config :buffer-pool)
+                       {}))
+
+(defn create-response-writer [req]
+  (let [st            (new-response-state req)
         on-proceed-cb (fn [_ctx-ptr] (on-proceed st))
-        on-stop-cb (fn [_ctx-ptr reason] (on-stop st reason))]
-    {::state st
-     ::on-proceed-cb on-proceed-cb
-     ::on-stop-cb on-stop-cb
-     :cancel (fn []
-               (.set ^AtomicBoolean (:stopped?_ st) true)
-               (bbq/close (:bbq st))
-               (when-some [^ByteBuffer buf (.getAndSet ^AtomicReference (:current-buffer_ st) nil)]
-                 (bp/return (:buffer-pool st) buf)))
-     :out-stream (output-stream st)
-     :on-proceed-cb-ptr (mem/serialize on-proceed-cb [::ffi/fn [::mem/pointer] ::mem/void])
-     :on-stop-cb-ptr (mem/serialize on-stop-cb [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])}))
+        on-stop-cb    (fn [_ctx-ptr reason] (on-stop st reason))]
+    (assoc st
+           ;; these must not be GCed until the request is complete
+           ;; but from here they no longer need to be accessed
+           ::on-proceed-cb    on-proceed-cb
+           ::on-stop-cb       on-stop-cb
+           ;; these also musn't be GCed, but they must be accessed later
+           ;; when h2o_start_response or h2o_send_informational is called
+           :on-proceed-cb-ptr (mem/serialize on-proceed-cb [::ffi/fn [::mem/pointer] ::mem/void])
+           :on-stop-cb-ptr    (mem/serialize on-stop-cb [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])
+           :out-stream     (->output-stream st))))
