@@ -19,7 +19,7 @@
                      "-XX:+UseZGC"
                      "-XX:+EnableDynamicAgentLoading"
                      "-Djdk.attach.allowAttachSelf"]
-                    :extra-deps  {dev.weavejester/hashp                    {:mvn/version "0.4.0"}
+                    :extra-deps  {dev.weavejester/hashp                    {:mvn/version "0.5.1"}
                                   criterium/criterium                      {:mvn/version "0.4.6"}
                                   virgil/virgil                            {:mvn/version "0.5.0"}
                                   babashka/process                         {:mvn/version "0.6.23"}
