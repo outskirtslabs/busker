@@ -74,7 +74,7 @@
          publish:native
          {:doc     "Publish the clojure libs to clojars"
           :depends [jar:all]
-          :task    (doseq [dir build/lib-dir]
+          :task    (doseq [dir build/lib-dirs]
                      (build/lib-publish! dir))}
          publish:all
          {:doc     "Publish the clojure libs to clojars"

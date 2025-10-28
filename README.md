@@ -26,7 +26,7 @@ The actual state of affairs is:
 - [x] 103 early hints
 - [ ] Automatic HTTPS
 - [ ] HTTP/3
-- [ ] 0 downtime deployments
+- [ ] zero-downtime deployments
 - [ ] GraalVM native-image (need to wait until [coffi][coffi] supports it)
 
 ## Usage
@@ -38,16 +38,21 @@ com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
                           :git/sha "cf53e8e003f66b32d3fc3b0b456f764cc665b308"}
 ```
 
-...and you need one of the native dependencies:
+...and you need (at least) one of the native dependencies below.
 
 The native dependency that matches your target platform is required. If multiple native deps are included, the right one will automatically be chosen (though your uber-jar size will be fatter than necessary):
 
 ``` clojure
-com.outskirtslabs.busker/macos-x86-64 {:mvn/version "0.0.1"}
+# Linux
 com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.1"}
-com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.1"}
 com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.1"}
+
+# MacOS
+com.outskirtslabs.busker/macos-x86-64 {:mvn/version "0.0.1"}
+com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.1"}
 ```
+
+**Important**: When using busker as a git dep always run `clj -Xdeps prep` after bumping the git sha.
 
 ## License
 

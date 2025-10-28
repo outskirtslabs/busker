@@ -8,7 +8,7 @@
 ;; -----------------------------------------------------------------------------
 ;; Util
 ;; -----------------------------------------------------------------------------
-(def lib-dir                                ".")
+(def main-lib-dir                                ".")
 
 (def lib-dirs
   ["shim/linux-aarch64"
@@ -42,7 +42,7 @@
         (->> (spit deps-file)))))
 
 (defn current-version []
-  (-> (t/shell {:dir lib-dir :out :string} "neil" "version")
+  (-> (t/shell {:dir main-lib-dir :out :string} "neil" "version")
       :out
       edn/read-string
       :project))
