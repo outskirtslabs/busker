@@ -1,6 +1,12 @@
 #kaocha/v1
  {:kaocha/reporter
   [kaocha.report/documentation]
+  :bindings {kaocha.stacktrace/*stacktrace-stop-list* ["kaocha.runner"
+                                                       "kaocha.plugin.capture_output"
+                                                       "kaocha.testable"]}
+  :plugins [:kaocha.plugin/randomize
+            :kaocha.plugin/filter
+            :kaocha.plugin/capture-output]
 
   :tests
   [{:id         :h2o

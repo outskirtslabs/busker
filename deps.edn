@@ -21,7 +21,6 @@
                      "-Djdk.attach.allowAttachSelf"]
                     :extra-deps  {dev.weavejester/hashp                    {:mvn/version "0.5.1"}
                                   criterium/criterium                      {:mvn/version "0.4.6"}
-                                  virgil/virgil                            {:mvn/version "0.5.0"}
                                   babashka/process                         {:mvn/version "0.6.23"}
                                   org.babashka/http-client                 {:mvn/version "0.4.23"}
                                   com.cnuernber/charred                    {:mvn/version "1.037"}
@@ -38,12 +37,6 @@
                                   ;; info.sunng/ring-jetty9-adapter-http2 {:mvn/version "0.39.0"}
                                   ;; info.sunng/ring-jetty9-adapter-http3 {:mvn/version "0.39.0"}
                                   ring/ring-jetty-adapter        {:mvn/version "1.15.3"}}}
-           :mcp/clojure
-           {:deps    {org.slf4j/slf4j-nop     {:mvn/version "2.0.17"}
-                      com.bhauman/clojure-mcp {:git/url "https://github.com/bhauman/clojure-mcp.git"
-                                               :git/tag "v0.1.10-alpha"
-                                               :git/sha "8bd96c3b3d21706cd969e8b9fc5ac9975bc6c6e4"}}
-            :exec-fn clojure-mcp.main/start-mcp-server}
 
            :neil {:project {:name        com.outskirtslabs/busker
                             :description "Busker is your Clojure web server that plays live on the open web"
