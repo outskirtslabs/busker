@@ -809,3 +809,25 @@
    Note: all connections must be closed first (num_connections == 0)."
   clj_h2o_http3_dispose_worker_ctx
   [::mem/pointer] ::mem/void)
+
+(defcfn conn-limit-set-max
+  "Set the maximum allowed connections. Zero means unlimited.
+   Process-global counter shared across all workers and listeners."
+  clj_h2o_conn_limit_set_max
+  [::mem/int] ::mem/void)
+
+(defcfn conn-limit-current
+  "Get current global connection count."
+  clj_h2o_conn_limit_current
+  [] ::mem/int)
+
+(defcfn conn-limit-try-acquire
+  "Atomically try to acquire a connection slot.
+   Returns 1 if acquired (count was < max), 0 if at limit."
+  clj_h2o_conn_limit_try_acquire
+  [] ::mem/int)
+
+(defcfn conn-limit-release
+  "Release a connection slot (decrement counter)."
+  clj_h2o_conn_limit_release
+  [] ::mem/void)

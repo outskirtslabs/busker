@@ -72,33 +72,35 @@
     nil))
 
 (defn create-connection-close-callback
-  "Create callback for socket close events to track connection count.
+  "Create callback for socket close events to release global connection limit slot.
    The callback signature is: void on_close(void *data)"
-  [active-connections]
+  []
   (let [cb (fn [_data-ptr]
-             (.decrementAndGet ^AtomicLong active-connections))]
+             (h2o/conn-limit-release))]
     {::connection-close-cb cb
      ::connection-close-cb-ptr (mem/serialize cb [::ffi/fn [::mem/pointer] ::mem/void])}))
 
 (defn create-accept-callback
-  "Create accept callback for a listener socket with connection tracking.
+  "Create accept callback for a listener socket with global connection limit enforcement.
    h2o_accept handles both plaintext and TLS connections automatically:
    - For plaintext: directly starts HTTP/1.1
    - For TLS: initiates SSL handshake, negotiates protocol (HTTP/1.1 or HTTP/2 via ALPN)
 
    Parameters:
    - accept-ctx-ptr: pointer to h2o_accept_ctx_t (contains ssl_ctx if TLS)
-   - active-connections: AtomicLong for connection counting
    - on-close-callback: callback function pointer for socket close"
-  [accept-ctx-ptr active-connections on-close-callback]
+  [accept-ctx-ptr on-close-callback]
   (let [accept-cb (fn [listener-ptr err-ptr]
                     (when-not (mem/null? err-ptr)
                       nil)
                     (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
                       (when-not (mem/null? sock-ptr)
-                        (.incrementAndGet ^java.util.concurrent.atomic.AtomicLong active-connections)
-                        (h2o/socket-set-on-close sock-ptr on-close-callback (mem/as-segment 0))
-                        (h2o/h2o-accept accept-ctx-ptr sock-ptr))))]
+                        #_{:clj-kondo/ignore [:type-mismatch]}
+                        (if (pos? (h2o/conn-limit-try-acquire))
+                          (do
+                            (h2o/socket-set-on-close sock-ptr on-close-callback (mem/as-segment 0))
+                            (h2o/h2o-accept accept-ctx-ptr sock-ptr))
+                          (h2o/socket-close sock-ptr)))))]
     {::accept-cb accept-cb
      ::accept-cb-ptr (mem/serialize accept-cb [::ffi/fn [::mem/pointer ::mem/c-string] ::mem/void])}))
 
@@ -210,23 +212,16 @@
      ::handler handler}))
 
 (defn update-listener-state!
-  "Throttle TCP listeners by starting/stopping accept callbacks based on connection count.
+  "Throttle TCP listeners by starting/stopping accept callbacks based on global connection count.
    Prevents accepting new connections when at/over max-connections limit.
 
-   QUIC listeners (when supported) must remain active as their UDP socket handles
-   all connections; only TCP listeners are throttled here."
-  [listener-socks accept-callbacks ctx-ptr http3-ctxs max-connections]
+   Uses the global connection counter shared with HTTP/3 accept path.
+   QUIC accept is gated in the shim; TCP accept is gated here."
+  [listener-socks accept-callbacks max-connections]
   #_{:clj-kondo/ignore [:type-mismatch]}
-  (let [http2-conn-count (+ (h2o/context-get-active-conns ctx-ptr)
-                            (h2o/context-get-shutdown-conns ctx-ptr))
-        http3-conn-count (reduce (fn [acc http3-ctx]
-                                   (if (or (nil? http3-ctx) (mem/null? http3-ctx))
-                                     acc
-                                     (+ acc (h2o/http3-num-connections http3-ctx))))
-                                 0
-                                 http3-ctxs)
-        total-conns (+ http2-conn-count http3-conn-count)
-        should-accept? (< total-conns max-connections)]
+  (let [current-conns (h2o/conn-limit-current)
+        should-accept? (or (zero? max-connections)
+                           (< current-conns max-connections))]
     (doseq [listener-idx (range (count listener-socks))]
       (let [sock-ptr (nth listener-socks listener-idx)
             accept-callback (nth accept-callbacks listener-idx)]
@@ -335,7 +330,7 @@
 
 (defn worker-loop
   [worker loop-state
-   {:keys [loop-ptr ctx-ptr listener-socks accept-callbacks http3-ctxs max-connections] :as state}]
+   {:keys [loop-ptr ctx-ptr listener-socks accept-callbacks max-connections] :as state}]
   (let [loop-state (-> loop-state
                        (check-and-initiate-shutdown! state)
                        (update-receiver-destruction worker)
@@ -351,7 +346,7 @@
                         shutting?                       10
                         :else                           base-wait)]
         (when-not shutting?
-          (update-listener-state! listener-socks accept-callbacks ctx-ptr http3-ctxs max-connections))
+          (update-listener-state! listener-socks accept-callbacks max-connections))
         (h2o/evloop-run loop-ptr (if (pos? (p/count-msgs worker)) 0 wait-ms))))
     loop-state))
 
@@ -598,9 +593,9 @@
   ([handler config]
    (when-not handler (throw (ex-info "Handler is required" {:handler handler})))
    (let [{:keys [n-workers listeners max-connections executor] :as config} (with-defaults config)
+         _                                                                 (h2o/conn-limit-set-max max-connections)
          arena                                                             (mem/shared-arena)
          {::keys [config-ptr]}                           (create-server-config arena handler config)
-         active-connections                                                (AtomicLong. 0)
          shutting-down?                                                    (AtomicBoolean. false)
 
          message-handler evloop-msg-processor
@@ -616,7 +611,7 @@
          wakeup-receivers (vec (for [ctx-ptr contexts]
                                  (h2o/mt-create-wakeup-receiver ctx-ptr)))
 
-         on-close-callback (create-connection-close-callback active-connections)
+         on-close-callback (create-connection-close-callback)
 
          listener-fds (vec (for [{:keys [port]} listeners]
                              (socket/open-master-listener {:port port})))
@@ -634,7 +629,7 @@
                                ssl-ctx-ptr))))
 
          accept-callbacks (vec (for [accept-ctx-ptr accept-ctxs]
-                                 (create-accept-callback accept-ctx-ptr active-connections (::connection-close-cb-ptr on-close-callback))))
+                                 (create-accept-callback accept-ctx-ptr (::connection-close-cb-ptr on-close-callback))))
 
          listener-sockets (vec (for [thread-idx (range n-workers)]
                                  (vec (for [listener-idx (range (count listeners))]
@@ -675,7 +670,6 @@
       ::n-workers          n-workers
       ::listeners          listeners
       ::max-connections    max-connections
-      ::active-connections active-connections
       ::shutting-down?     shutting-down?
       ::loops              loops
       ::contexts           contexts

@@ -330,3 +330,107 @@
         (is (= "text/event-stream" (get headers "content-type")))
         (is (= 200 status))
         (is (= "event: hello\ndata: first\n\nevent: close\ndata:\n\n" body))))))
+
+(deftest tcp-connection-limit-test
+  (testing "TCP connections respect global max-connections limit"
+    (let [port 17890
+          stream-duration-ms 3000
+          chunk-interval-ms 200
+          handler (fn [{emitter :ol.busker.request/emitter}]
+                    (future
+                      (h2o/emit! emitter {:status 200 :headers {"content-type" "text/plain"}})
+                      (let [num-chunks (/ stream-duration-ms chunk-interval-ms)]
+                        (doseq [idx (range num-chunks)]
+                          (h2o/emit! emitter (str "chunk-" idx "-"))
+                          (h2o/flush emitter)
+                          (Thread/sleep chunk-interval-ms)))
+                      (h2o/close emitter))
+                    {:body emitter})
+          server (server/run-server handler
+                                    {:max-connections 2
+                                     :listeners [{:port port}]})]
+      (try
+        (Thread/sleep 200)
+        ;; Start 2 long-lived HTTP/1.1 connections
+        (let [conn1 (future (util/curl :http :h1 port "/" :max-time 10))
+              conn2 (future (util/curl :http :h1 port "/" :max-time 10))]
+          ;; Wait a bit for connections to establish
+          (Thread/sleep 500)
+
+          ;; Third connection should fail (connection refused or timeout)
+          (let [conn3 (util/curl :http :h1 port "/" :max-time 1)]
+            (is (not= 0 (:exit conn3))
+                "Third TCP connection should fail when at limit"))
+
+          ;; Wait for long-lived connections to complete
+          (let [result1 (deref conn1 15000 nil)
+                result2 (deref conn2 15000 nil)]
+            (is (some? result1) "First connection should complete")
+            (is (some? result2) "Second connection should complete")
+            (when result1
+              (is (zero? (:exit result1))
+                  (str "First connection should succeed. stderr: " (:err result1))))
+            (when result2
+              (is (zero? (:exit result2))
+                  (str "Second connection should succeed. stderr: " (:err result2)))))
+
+          ;; After connections close, new connection should succeed
+          (Thread/sleep 200)
+          (let [conn4 (util/curl :http :h1 port "/" :max-time 5)]
+            (is (zero? (:exit conn4))
+                (str "New TCP connection should succeed after others close. stderr: " (:err conn4)))))
+        (finally
+          (server/stop-server server))))))
+
+(deftest tcp-and-tls-share-limit-test
+  (testing "TCP and TLS connections share the global limit"
+    (let [http-port 17891
+          https-port 17892
+          stream-duration-ms 3000
+          chunk-interval-ms 200
+          handler (fn [{emitter :ol.busker.request/emitter}]
+                    (future
+                      (h2o/emit! emitter {:status 200 :headers {"content-type" "text/plain"}})
+                      (let [num-chunks (/ stream-duration-ms chunk-interval-ms)]
+                        (doseq [idx (range num-chunks)]
+                          (h2o/emit! emitter (str "chunk-" idx "-"))
+                          (h2o/flush emitter)
+                          (Thread/sleep chunk-interval-ms)))
+                      (h2o/close emitter))
+                    {:body emitter})
+          server (server/run-server handler
+                                    {:max-connections 3
+                                     :listeners [{:port http-port}
+                                                 {:port https-port
+                                                  :tls {:cert-file cert-file
+                                                        :key-file key-file
+                                                        :http3? false}}]})]
+      (try
+        (Thread/sleep 200)
+        ;; Start 2 HTTP connections and 1 HTTPS connection
+        (let [http-conn1 (future (util/curl :http :h1 http-port "/" :max-time 10))
+              http-conn2 (future (util/curl :http :h1 http-port "/" :max-time 10))
+              https-conn (future (util/curl :https :h2 https-port "/" :max-time 10))]
+          ;; Wait a bit for connections to establish
+          (Thread/sleep 500)
+
+          ;; Fourth connection should fail
+          (let [conn4 (util/curl :http :h1 http-port "/" :max-time 1)]
+            (is (not= 0 (:exit conn4))
+                "Fourth connection should fail when at limit"))
+
+          ;; Wait for all connections to complete
+          (let [result1 (deref http-conn1 15000 nil)
+                result2 (deref http-conn2 15000 nil)
+                result3 (deref https-conn 15000 nil)]
+            (is (some? result1) "First HTTP connection should complete")
+            (is (some? result2) "Second HTTP connection should complete")
+            (is (some? result3) "HTTPS connection should complete")
+            (when result1
+              (is (zero? (:exit result1))
+                  (str "First HTTP connection should succeed. stderr: " (:err result1))))
+            (when result3
+              (is (zero? (:exit result3))
+                  (str "HTTPS connection should succeed. stderr: " (:err result3))))))
+        (finally
+          (server/stop-server server))))))

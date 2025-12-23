@@ -362,4 +362,21 @@ size_t clj_h2o_http3_num_connections(clj_http3_ctx_t *ctx);
    Note: all connections must be closed first (num_connections == 0) */
 void clj_h2o_http3_dispose_worker_ctx(clj_http3_ctx_t *ctx);
 
+/* Global connection limit API.
+   Process-global counter shared across all workers and listeners in the JVM.
+   Used for consistent enforcement of max-connections across HTTP/1.1, HTTP/2, and HTTP/3. */
+
+/* Set the maximum allowed connections. Zero means unlimited. */
+void clj_h2o_conn_limit_set_max(uint32_t max);
+
+/* Get current connection count. */
+uint32_t clj_h2o_conn_limit_current(void);
+
+/* Atomically try to acquire a connection slot.
+   Returns 1 if acquired (count was < max), 0 if at limit. */
+int clj_h2o_conn_limit_try_acquire(void);
+
+/* Release a connection slot (decrement counter). */
+void clj_h2o_conn_limit_release(void);
+
 #endif /* CLJ_H2O_SHIM_H */

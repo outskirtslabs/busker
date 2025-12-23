@@ -16,6 +16,11 @@
 
 #define REQ_ERROR "request error\n"
 
+/* Global connection limit counter and maximum.
+   Process-global, shared across all workers and listeners in the same JVM. */
+static _Atomic uint32_t clj_conn_count = 0;
+static _Atomic uint32_t clj_conn_max = 0;
+
 typedef struct {
   h2o_multithread_message_t super; /* must be first */
 } clj_mt_msg_t;
@@ -877,20 +882,51 @@ void clj_h2o_free_quicly_ctx(quicly_context_t *ctx) {
   free(wrapper);
 }
 
-/* HTTP/3 accept callback */
+/* HTTP/3 connection destroy wrapper - releases connection limit slot */
+static void clj_on_http3_conn_destroy(h2o_quic_conn_t *conn) {
+  clj_h2o_conn_limit_release();
+  H2O_HTTP3_CONN_CALLBACKS.super.destroy_connection(conn);
+}
+
+/* Wrapper callbacks for HTTP/3 connections with connection limit tracking */
+static h2o_http3_conn_callbacks_t clj_http3_conn_callbacks;
+static int clj_http3_conn_callbacks_initialized = 0;
+
+static void clj_init_http3_conn_callbacks(void) {
+  if (clj_http3_conn_callbacks_initialized)
+    return;
+  clj_http3_conn_callbacks = H2O_HTTP3_CONN_CALLBACKS;
+  clj_http3_conn_callbacks.super.destroy_connection = clj_on_http3_conn_destroy;
+  clj_http3_conn_callbacks_initialized = 1;
+}
+
+/* HTTP/3 accept callback with connection limit enforcement */
 static h2o_quic_conn_t *
 clj_on_http3_accept(h2o_quic_ctx_t *quic_ctx, quicly_address_t *destaddr,
                     quicly_address_t *srcaddr, quicly_decoded_packet_t *packet) {
   h2o_http3_server_ctx_t *h3ctx =
       H2O_STRUCT_FROM_MEMBER(h2o_http3_server_ctx_t, super, quic_ctx);
 
-  h2o_http3_conn_t *conn = h2o_http3_server_accept(
-      h3ctx, destaddr, srcaddr, packet, NULL, &H2O_HTTP3_CONN_CALLBACKS);
+  /* Enforce global connection limit before accepting */
+  if (!clj_h2o_conn_limit_try_acquire())
+    return NULL;
 
-  if (!conn)
+  clj_init_http3_conn_callbacks();
+
+  h2o_http3_conn_t *conn = h2o_http3_server_accept(
+      h3ctx, destaddr, srcaddr, packet, NULL, &clj_http3_conn_callbacks);
+
+  /* Release if accept failed without creating a connection */
+  if (!conn) {
+    clj_h2o_conn_limit_release();
     return NULL;
-  if (&conn->super == &h2o_quic_accept_conn_decryption_failed)
+  }
+  if (&conn->super == &h2o_quic_accept_conn_decryption_failed) {
+    clj_h2o_conn_limit_release();
     return NULL;
+  }
+  /* h2o_http3_accept_conn_closed means conn was created then destroyed;
+     destroy callback already fired, so don't release again */
   if (conn == &h2o_http3_accept_conn_closed)
     return NULL;
 
@@ -1012,4 +1048,37 @@ void clj_h2o_http3_dispose_worker_ctx(clj_http3_ctx_t *ctx) {
   h2o_quic_dispose_context(&ctx->h3_ctx.super);
 
   free(ctx);
+}
+
+/* Global connection limit API implementation */
+
+void clj_h2o_conn_limit_set_max(uint32_t max) {
+  atomic_store(&clj_conn_max, max);
+}
+
+uint32_t clj_h2o_conn_limit_current(void) {
+  return atomic_load(&clj_conn_count);
+}
+
+int clj_h2o_conn_limit_try_acquire(void) {
+  uint32_t max = atomic_load(&clj_conn_max);
+
+  /* Zero means unlimited */
+  if (max == 0) {
+    atomic_fetch_add(&clj_conn_count, 1);
+    return 1;
+  }
+
+  /* Atomically increment if under limit */
+  uint32_t current = atomic_load(&clj_conn_count);
+  while (current < max) {
+    if (atomic_compare_exchange_weak(&clj_conn_count, &current, current + 1)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+void clj_h2o_conn_limit_release(void) {
+  atomic_fetch_sub(&clj_conn_count, 1);
 }
