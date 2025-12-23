@@ -28,7 +28,7 @@
   ([]
    (bench {}))
   ([{:keys [metadata profile dry-run? server]
-     :or {profile :quick} :as opts}]
+     :or {profile :quick} :as _opts}]
    (let [t0 (System/currentTimeMillis)
          metadata (merge default-metadata metadata)
          system-info (u/get-system-info)

@@ -68,8 +68,8 @@
 
 ;;;; Worker factories ---------------------------------------------------------
 
-(defn- new-thread-factory [prefix]
-  (.factory (.name (Thread/ofPlatform) prefix 0)))
+#_(defn- new-thread-factory [prefix]
+    (.factory (.name (Thread/ofPlatform) prefix 0)))
 
 (defn- new-h2o-worker [_opts]
   ;; ol.busker always executes Ring handlers on virtual threads; the native workers
@@ -315,7 +315,7 @@
 ;;;; Bench execution ----------------------------------------------------------
 
 (defn bench-by-spec
-  [{:keys [metadata system-info server-opts worker-opts wrk-opts timeplan] :as spec}]
+  [{:keys [server-opts worker-opts wrk-opts] :as spec}]
   (u/throw-if-aborted)
   (let [wrk-opts-vec (if (vector? wrk-opts) wrk-opts [wrk-opts])
         total (count wrk-opts-vec)
@@ -429,34 +429,32 @@
                 :wrk-opts {:timeout timeout
                            :n-threads wrk-n
                            :n-conns conns
-                           :keep-alive? keep-alive?}})))]
-      (let [n-specs (count specs)
-            timeplan
-            (let [runtime (or runtime (str (* n-specs 15) "s"))]
-              (u/get-wrk-timeplan {:n-runs n-specs :runtime runtime}))
-            specs
-            (mapv
-             (fn [spec]
-               (-> spec
-                   (assoc :timeplan timeplan)
-                   (update :wrk-opts merge {:warm-up (:warm-up-tstr timeplan)
-                                            :duration (:duration-tstr timeplan)})))
-             specs)]
-        (u/with-appender (:instant system-info) "server.csv" (delay (as-csv-row))
-          (fn []
-            (if dry-run?
-              {:dry-run? true :n-specs n-specs :specs specs}
-              (do
-                (u/log "[bench-by-profile] executing " n-specs " specs (~" (:total-tstr timeplan) ")")
-                {:dry-run? false
-                 :n-specs n-specs
-                 :rows
-                 (u/with-os-tuning
-                   (fn []
-                     (reduce
-                      (fn [acc spec]
-                        (u/log "[bench-by-profile] spec " (:nat-idx spec) "/" n-specs ": "
-                               (select-keys spec [:server-opts :worker-opts]))
-                        (into acc (bench-by-spec spec)))
-                      []
-                      (shuffle specs))))}))))))))
+                           :keep-alive? keep-alive?}})))
+          n-specs (count specs)
+          timeplan (u/get-wrk-timeplan {:n-runs n-specs :runtime (or runtime (str (* n-specs 15) "s"))})
+          specs
+          (mapv
+           (fn [spec]
+             (-> spec
+                 (assoc :timeplan timeplan)
+                 (update :wrk-opts merge {:warm-up (:warm-up-tstr timeplan)
+                                          :duration (:duration-tstr timeplan)})))
+           specs)]
+      (u/with-appender (:instant system-info) "server.csv" (delay (as-csv-row))
+        (fn []
+          (if dry-run?
+            {:dry-run? true :n-specs n-specs :specs specs}
+            (do
+              (u/log "[bench-by-profile] executing " n-specs " specs (~" (:total-tstr timeplan) ")")
+              {:dry-run? false
+               :n-specs  n-specs
+               :rows
+               (u/with-os-tuning
+                 (fn []
+                   (reduce
+                    (fn [acc spec]
+                      (u/log "[bench-by-profile] spec " (:nat-idx spec) "/" n-specs ": "
+                             (select-keys spec [:server-opts :worker-opts]))
+                      (into acc (bench-by-spec spec)))
+                    []
+                    (shuffle specs))))})))))))

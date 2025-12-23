@@ -139,12 +139,12 @@
                       #_(response/send-ring-response! req ring-resp)))]
             (.submit executor ^Runnable request-task))
           h2o/CLJ_HANDLER_OK
-          (catch RejectedExecutionException e
+          (catch RejectedExecutionException _e
             ;; Handler never ran: remove and close local state so the shim cleanup does not see a dangling queue.
             (pi/reap-req worker req-id)
             (close-streams req emitter)
             h2o/CLJ_HANDLER_SHUTTING_DOWN)))
-      (catch InterruptedException e
+      (catch InterruptedException _e
         (.interrupt (Thread/currentThread))
         h2o/CLJ_HANDLER_SHUTTING_DOWN)
       (catch Exception e

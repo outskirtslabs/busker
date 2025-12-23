@@ -49,7 +49,7 @@
                      (take n abcs)))
 
 (deftest test-simple-request
-  (with-server [_server (test-server (fn [{:keys [uri] :as req}]
+  (with-server [_server (test-server (fn [{:keys [uri] :as _req}]
                                        (cond
                                          (= "/simple" uri)
                                          {:status  200

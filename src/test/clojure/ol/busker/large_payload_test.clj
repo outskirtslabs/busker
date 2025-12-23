@@ -93,7 +93,7 @@
                     :max-request-entity-size (* 5 gib))]
     (let [resp (st/req :get "/source" :as :stream :timeout 120000)
 
-          [sha total] (with-open [input-stream (:body resp)] (sha256-hex input-stream))]
+          [sha _total] (with-open [input-stream (:body resp)] (sha256-hex input-stream))]
       (is (= 200 (:status resp)))
       (is (= (get-in resp [:headers "x-sha256"]) sha))
       (is (= (str payload-size) (get-in resp [:headers "x-len"]))))))
