@@ -112,7 +112,7 @@
          {:doc  "Format code with cljfmt"
           :task (apply shell "cljfmt --quiet -v fix" (if (seq *command-line-args*) *command-line-args* paths))}
 
-         fmt.check
+         fmt:check
          {:doc  "Check code formatting without making changes"
           :task (apply shell "cljfmt check " paths)}
 
@@ -150,5 +150,5 @@
   ;; CI tasks
   ;; ---------------------------------------------------------------------------
          ci
-         {:doc     "Run CI pipeline"
-          :depends [build test:all lint jar:all]}}}
+         {:doc     "Ran by the CI"
+          :depends [build test:all fmt:check lint jar:all]}}}

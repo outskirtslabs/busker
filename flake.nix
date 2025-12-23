@@ -1,7 +1,8 @@
 {
   description = "dev env";
   inputs = {
-    nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1"; # tracks nixpkgs unstable branch
+    nix-agent-dev.url = "github:Ramblurr/nix-agent-dev";
+    nixpkgs.follows = "nix-agent-dev/nixpkgs";
     flakelight.url = "github:nix-community/flakelight";
     flakelight.inputs.nixpkgs.follows = "nixpkgs";
     treefmt-nix.url = "github:numtide/treefmt-nix";
@@ -89,6 +90,7 @@
             pkgs.clj-kondo
             pkgs.cljfmt
             pkgs.babashka
+            pkgs.bbin
             pkgs.git
             apple-sdk
 
@@ -99,6 +101,18 @@
           env.LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libraries;
           env.APPLE_SDK_PATH = "${apple-sdk}";
           env.ZIG_GLOBAL_CACHE_DIR = ".zig-cache-global";
+          shellHook = ''
+            if ! command -v clj-nrepl-eval &> /dev/null; then
+              bbin install https://github.com/bhauman/clojure-mcp-light.git --tag v0.2.1 --as clj-nrepl-eval --main-opts '["-m" "clojure-mcp-light.nrepl-eval"]'
+            fi
+            if ! command -v clj-paren-repair &> /dev/null; then
+              bbin install https://github.com/bhauman/clojure-mcp-light.git --tag v0.2.1 --as clj-paren-repair --main-opts '["-m" "clojure-mcp-light.paren-repair"]'
+            fi
+            mkdir -p extra/
+            pushd extra/
+            test -f seed.bb && bb ./seed.bb
+            popd
+          '';
         };
 
       flakelight.builtinFormatters = false;

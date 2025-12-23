@@ -4,7 +4,9 @@
   :bindings {kaocha.stacktrace/*stacktrace-stop-list* ["kaocha.runner"
                                                        "kaocha.plugin.capture_output"
                                                        "kaocha.testable"]}
-  :plugins [:kaocha.plugin/randomize
+
+  :plugins [:kaocha.plugin.alpha/info
+            :kaocha.plugin/randomize
             :kaocha.plugin/filter
             :kaocha.plugin/capture-output]
 
