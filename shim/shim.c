@@ -2,9 +2,17 @@
 // Intended for FFI use from Clojure (coffi/FFM).
 #include "shim.h"
 #include "h2o/multithread.h"
+#include "h2o/http3_server.h"
+#include "picotls.h"
+#include "picotls/openssl.h"
+#include "quicly.h"
+#include "quicly/defaults.h"
 #include <inttypes.h>
+#include <netinet/in.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #define REQ_ERROR "request error\n"
 
@@ -204,6 +212,8 @@ size_t clj_h2o_start_response(
     void (*on_response_generator_proceed)(clj_req_ctx_t *ctx),
     void (*on_response_generator_stop)(clj_req_ctx_t *ctx,
                                        clj_complete_reason_t reason)) {
+  (void)compress_hint; /* TODO: use for per-request compression control */
+
   if (!ctx || !ctx->req)
     return 0;
 
@@ -242,9 +252,9 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
         h2o_mem_alloc_pool(&req->pool, clj_header_t, req->headers.size);
     for (size_t i = 0; i < req->headers.size; i++) {
       h2o_header_t *h = &req->headers.entries[i];
-      headers[i].name = (const uint8_t *)h->name->base;
+      headers[i].name = h->name->base;
       headers[i].name_len = h->name->len;
-      headers[i].value = (const uint8_t *)h->value.base;
+      headers[i].value = h->value.base;
       headers[i].value_len = h->value.len;
     }
     meta->headers = headers;
@@ -696,4 +706,310 @@ void clj_h2o_free_ssl_ctx(SSL_CTX *ssl_ctx) {
   if (ssl_ctx) {
     SSL_CTX_free(ssl_ctx);
   }
+}
+
+/* HTTP/3 (QUIC) context structure holding all resources for one worker */
+struct clj_http3_ctx_t {
+  h2o_http3_server_ctx_t h3_ctx;
+  h2o_accept_ctx_t accept_ctx;
+  h2o_socket_t *udp_sock;
+  quicly_cid_plaintext_t next_cid;
+  int fd;
+};
+
+/* ALPN negotiation callback for HTTP/3 */
+static int clj_on_client_hello_cb(ptls_on_client_hello_t *self,
+                                  ptls_t *tls,
+                                  ptls_on_client_hello_parameters_t *params) {
+  (void)self;
+
+  if (params->negotiated_protocols.count == 0)
+    return 0;
+
+  /* Match against h2o_http3_alpn protocols */
+  for (size_t i = 0; i < sizeof(h2o_http3_alpn) / sizeof(h2o_http3_alpn[0]);
+       ++i) {
+    for (size_t j = 0; j < params->negotiated_protocols.count; ++j) {
+      if (h2o_memis(h2o_http3_alpn[i].base, h2o_http3_alpn[i].len,
+                    params->negotiated_protocols.list[j].base,
+                    params->negotiated_protocols.list[j].len)) {
+        ptls_set_negotiated_protocol(tls, (const char *)h2o_http3_alpn[i].base,
+                                     h2o_http3_alpn[i].len);
+        return 0;
+      }
+    }
+  }
+  return 0;
+}
+
+/* Internal structure to hold picotls context and its resources */
+typedef struct {
+  ptls_context_t ctx;
+  ptls_on_client_hello_t on_client_hello;
+  ptls_openssl_sign_certificate_t sign_certificate;
+} clj_ptls_wrapper_t;
+
+ptls_context_t *clj_h2o_create_ptls_ctx(const char *cert_file,
+                                        const char *key_file) {
+  if (!cert_file || !key_file)
+    return NULL;
+
+  clj_ptls_wrapper_t *wrapper = calloc(1, sizeof(clj_ptls_wrapper_t));
+  if (!wrapper)
+    return NULL;
+
+  wrapper->on_client_hello.cb = clj_on_client_hello_cb;
+
+  wrapper->ctx = (ptls_context_t){
+      .random_bytes = ptls_openssl_random_bytes,
+      .get_time = &ptls_get_time,
+      .key_exchanges = ptls_openssl_key_exchanges,
+      .cipher_suites = ptls_openssl_cipher_suites,
+      .on_client_hello = &wrapper->on_client_hello,
+  };
+
+  if (ptls_load_certificates(&wrapper->ctx, cert_file) != 0) {
+    DEBUG_LOG("failed to load certificates from %s", cert_file);
+    free(wrapper);
+    return NULL;
+  }
+
+  FILE *fp = fopen(key_file, "r");
+  if (!fp) {
+    DEBUG_LOG("failed to open key file: %s", key_file);
+    free(wrapper->ctx.certificates.list);
+    free(wrapper);
+    return NULL;
+  }
+
+  EVP_PKEY *pkey = PEM_read_PrivateKey(fp, NULL, NULL, NULL);
+  fclose(fp);
+  if (!pkey) {
+    DEBUG_LOG("failed to load private key from %s", key_file);
+    free(wrapper->ctx.certificates.list);
+    free(wrapper);
+    return NULL;
+  }
+
+  if (ptls_openssl_init_sign_certificate(&wrapper->sign_certificate, pkey) !=
+      0) {
+    DEBUG_LOG("failed to setup private key");
+    EVP_PKEY_free(pkey);
+    free(wrapper->ctx.certificates.list);
+    free(wrapper);
+    return NULL;
+  }
+  EVP_PKEY_free(pkey);
+
+  wrapper->ctx.sign_certificate = &wrapper->sign_certificate.super;
+
+  return &wrapper->ctx;
+}
+
+void clj_h2o_free_ptls_ctx(ptls_context_t *ctx) {
+  if (!ctx)
+    return;
+
+  clj_ptls_wrapper_t *wrapper =
+      H2O_STRUCT_FROM_MEMBER(clj_ptls_wrapper_t, ctx, ctx);
+
+  ptls_openssl_dispose_sign_certificate(&wrapper->sign_certificate);
+
+  if (wrapper->ctx.certificates.list)
+    free(wrapper->ctx.certificates.list);
+
+  free(wrapper);
+}
+
+/* Internal structure to hold quicly context and its CID encryptor */
+typedef struct {
+  quicly_context_t ctx;
+  quicly_cid_encryptor_t *cid_encryptor;
+} clj_quicly_wrapper_t;
+
+quicly_context_t *clj_h2o_create_quicly_ctx(ptls_context_t *ptls_ctx,
+                                            h2o_globalconf_t *globalconf) {
+  if (!ptls_ctx || !globalconf)
+    return NULL;
+
+  clj_quicly_wrapper_t *wrapper = calloc(1, sizeof(clj_quicly_wrapper_t));
+  if (!wrapper)
+    return NULL;
+
+  /* Generate random CID key */
+  uint8_t cid_key[32];
+  ptls_openssl_random_bytes(cid_key, sizeof(cid_key));
+
+  wrapper->ctx = quicly_spec_context;
+  wrapper->ctx.tls = ptls_ctx;
+  wrapper->ctx.now = &quicly_default_now;
+  wrapper->ctx.init_cc = &quicly_default_init_cc;
+  wrapper->ctx.crypto_engine = &quicly_default_crypto_engine;
+
+  wrapper->cid_encryptor = quicly_new_default_cid_encryptor(
+      &ptls_openssl_aes128ecb, &ptls_openssl_aes128ecb, &ptls_openssl_sha256,
+      ptls_iovec_init(cid_key, sizeof(cid_key)));
+
+  if (!wrapper->cid_encryptor) {
+    DEBUG_LOG("failed to create CID encryptor");
+    free(wrapper);
+    return NULL;
+  }
+
+  wrapper->ctx.cid_encryptor = wrapper->cid_encryptor;
+
+  quicly_amend_ptls_context(ptls_ctx);
+  h2o_http3_server_amend_quicly_context(globalconf, &wrapper->ctx);
+
+  return &wrapper->ctx;
+}
+
+void clj_h2o_free_quicly_ctx(quicly_context_t *ctx) {
+  if (!ctx)
+    return;
+
+  clj_quicly_wrapper_t *wrapper =
+      H2O_STRUCT_FROM_MEMBER(clj_quicly_wrapper_t, ctx, ctx);
+
+  if (wrapper->cid_encryptor)
+    free(wrapper->cid_encryptor);
+
+  free(wrapper);
+}
+
+/* HTTP/3 accept callback */
+static h2o_quic_conn_t *
+clj_on_http3_accept(h2o_quic_ctx_t *quic_ctx, quicly_address_t *destaddr,
+                    quicly_address_t *srcaddr, quicly_decoded_packet_t *packet) {
+  h2o_http3_server_ctx_t *h3ctx =
+      H2O_STRUCT_FROM_MEMBER(h2o_http3_server_ctx_t, super, quic_ctx);
+
+  h2o_http3_conn_t *conn = h2o_http3_server_accept(
+      h3ctx, destaddr, srcaddr, packet, NULL, &H2O_HTTP3_CONN_CALLBACKS);
+
+  if (!conn)
+    return NULL;
+  if (&conn->super == &h2o_quic_accept_conn_decryption_failed)
+    return NULL;
+  if (conn == &h2o_http3_accept_conn_closed)
+    return NULL;
+
+  return &conn->super;
+}
+
+clj_http3_ctx_t *clj_h2o_http3_create_worker_ctx(h2o_context_t *h2o_ctx,
+                                                 h2o_evloop_t *loop,
+                                                 quicly_context_t *quic_ctx,
+                                                 h2o_hostconf_t **hosts,
+                                                 const char *host,
+                                                 uint16_t port,
+                                                 uint32_t thread_id) {
+  if (!h2o_ctx || !loop || !quic_ctx || !hosts)
+    return NULL;
+
+  clj_http3_ctx_t *ctx = calloc(1, sizeof(clj_http3_ctx_t));
+  if (!ctx)
+    return NULL;
+
+  /* Create UDP socket */
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+
+  if (host && host[0] != '\0') {
+    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+      addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    }
+  } else {
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  }
+  addr.sin_port = htons(port);
+
+  int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (fd == -1) {
+    DEBUG_LOG("failed to create UDP socket: %s", strerror(errno));
+    free(ctx);
+    return NULL;
+  }
+
+  int optval = 1;
+  if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) != 0) {
+    DEBUG_LOG("setsockopt(SO_REUSEADDR) failed: %s", strerror(errno));
+    close(fd);
+    free(ctx);
+    return NULL;
+  }
+
+#ifdef IP_PKTINFO
+  if (setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &optval, sizeof(optval)) != 0) {
+    DEBUG_LOG("setsockopt(IP_PKTINFO) failed: %s", strerror(errno));
+    close(fd);
+    free(ctx);
+    return NULL;
+  }
+#endif
+
+  if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    DEBUG_LOG("bind(UDP) failed: %s", strerror(errno));
+    close(fd);
+    free(ctx);
+    return NULL;
+  }
+
+  h2o_socket_set_df_bit(fd, addr.sin_family);
+
+  /* QUIC reads datagrams directly; prevent socket layer from consuming them */
+  ctx->udp_sock = h2o_evloop_socket_create(loop, fd, H2O_SOCKET_FLAG_DONT_READ);
+  if (!ctx->udp_sock) {
+    DEBUG_LOG("failed to create evloop socket for UDP");
+    close(fd);
+    free(ctx);
+    return NULL;
+  }
+
+  ctx->fd = fd;
+
+  ctx->next_cid = (quicly_cid_plaintext_t){
+      .master_id = 0,
+      .thread_id = thread_id,
+      .node_id = 0,
+  };
+
+  ctx->accept_ctx.ctx = h2o_ctx;
+  ctx->accept_ctx.hosts = hosts;
+
+  h2o_http3_server_init_context(h2o_ctx, &ctx->h3_ctx.super, loop, ctx->udp_sock,
+                                quic_ctx, &ctx->next_cid, clj_on_http3_accept,
+                                NULL, 0);
+
+  ctx->h3_ctx.accept_ctx = &ctx->accept_ctx;
+
+  return ctx;
+}
+
+void clj_h2o_http3_stop_accepting(clj_http3_ctx_t *ctx) {
+  if (!ctx)
+    return;
+
+  /* Following h2o main.c pattern (line 4572): set acceptor to NULL to stop
+     accepting new HTTP/3 connections. New Initial packets will be rejected
+     with version negotiation. Existing connections (including handshakes in
+     progress) continue to completion. */
+  ctx->h3_ctx.super.acceptor = NULL;
+}
+
+size_t clj_h2o_http3_num_connections(clj_http3_ctx_t *ctx) {
+  if (!ctx)
+    return 0;
+  return h2o_quic_num_connections(&ctx->h3_ctx.super);
+}
+
+void clj_h2o_http3_dispose_worker_ctx(clj_http3_ctx_t *ctx) {
+  if (!ctx)
+    return;
+
+  /* h2o_quic_dispose_context closes the socket internally */
+  h2o_quic_dispose_context(&ctx->h3_ctx.super);
+
+  free(ctx);
 }

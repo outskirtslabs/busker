@@ -287,4 +287,79 @@ SSL_CTX *clj_h2o_create_ssl_ctx(const char *cert_file, const char *key_file,
 /* Free SSL_CTX created by clj_h2o_create_ssl_ctx */
 void clj_h2o_free_ssl_ctx(SSL_CTX *ssl_ctx);
 
+/* HTTP/3 support in libh2o uses picotls for TLS 1.3 (separate from OpenSSL
+ * SSL_CTX) and quicly for the QUIC transport layer. These functions manage the
+ * context lifecycle for QUIC listeners.
+ */
+
+/* Forward declarations for QUIC/HTTP3 types */
+typedef struct st_ptls_context_t ptls_context_t;
+typedef struct st_quicly_context_t quicly_context_t;
+typedef struct clj_http3_ctx_t clj_http3_ctx_t;
+
+/* Create picotls context for QUIC TLS 1.3.
+ * Uses OpenSSL-backed primitives for cryptographic operations.
+ * Configures ALPN callback for HTTP/3 protocol negotiation.
+ * Parameters:
+ *   cert_file: path to PEM certificate file
+ *   key_file: path to PEM private key file
+ * Returns: ptls_context_t pointer on success, NULL on error
+ * Note: Caller must free with clj_h2o_free_ptls_ctx when done
+ */
+ptls_context_t *clj_h2o_create_ptls_ctx(const char *cert_file,
+                                        const char *key_file);
+
+/* Free picotls context and associated resources */
+void clj_h2o_free_ptls_ctx(ptls_context_t *ctx);
+
+/* Create quicly context configured for HTTP/3.
+ * Starts from quicly_spec_context and configures:
+ *   - TLS context from ptls_ctx
+ *   - CID encryptor with random key
+ *   - HTTP/3 transport parameters via h2o_http3_server_amend_quicly_context
+ * Parameters:
+ *   ptls_ctx: picotls context from clj_h2o_create_ptls_ctx
+ *   globalconf: h2o global configuration for HTTP/3 settings
+ * Returns: quicly_context_t pointer on success, NULL on error
+ * Note: Caller must free with clj_h2o_free_quicly_ctx when done
+ */
+quicly_context_t *clj_h2o_create_quicly_ctx(ptls_context_t *ptls_ctx,
+                                            h2o_globalconf_t *globalconf);
+
+/* Free quicly context and CID encryptor */
+void clj_h2o_free_quicly_ctx(quicly_context_t *ctx);
+
+/* Create HTTP/3 worker context with UDP listener.
+ * Creates a UDP socket bound to host:port, configures it for QUIC
+ * (IP_PKTINFO, DF bit, H2O_SOCKET_FLAG_DONT_READ), and initializes
+ * the h2o_http3_server_ctx_t.
+ * Parameters:
+ *   h2o_ctx: h2o context for this worker
+ *   loop: event loop for this worker
+ *   quic_ctx: shared quicly context from clj_h2o_create_quicly_ctx
+ *   hosts: hosts array from globalconf
+ *   host: bind address (e.g., "0.0.0.0" or "127.0.0.1")
+ *   port: UDP port to bind
+ *   thread_id: unique worker thread ID for CID routing
+ * Returns: opaque context pointer on success, NULL on error
+ * Note: Caller must dispose with clj_h2o_http3_dispose_worker_ctx when done
+ */
+clj_http3_ctx_t *
+clj_h2o_http3_create_worker_ctx(h2o_context_t *h2o_ctx, h2o_evloop_t *loop,
+                                quicly_context_t *quic_ctx,
+                                h2o_hostconf_t **hosts, const char *host,
+                                uint16_t port, uint32_t thread_id);
+
+/* Stop accepting new HTTP/3 connections by setting acceptor to NULL.
+   Existing connections (including those in handshake) continue to completion.
+   Call this before requesting shutdown to prevent new connection attempts. */
+void clj_h2o_http3_stop_accepting(clj_http3_ctx_t *ctx);
+
+/* Get the number of active HTTP/3 connections on this context */
+size_t clj_h2o_http3_num_connections(clj_http3_ctx_t *ctx);
+
+/* Dispose HTTP/3 worker context and close UDP socket.
+   Note: all connections must be closed first (num_connections == 0) */
+void clj_h2o_http3_dispose_worker_ctx(clj_http3_ctx_t *ctx);
+
 #endif /* CLJ_H2O_SHIM_H */

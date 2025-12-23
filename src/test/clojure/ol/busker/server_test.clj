@@ -2,7 +2,6 @@
   (:require
    [ol.busker.protocols :as h2o]
    [babashka.http-client :as http]
-   [babashka.process :as p]
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :as test :refer [deftest is testing]]
@@ -257,16 +256,12 @@
           (is (= "Hello via http at /hello" (:body response)))))
 
       (testing "HTTPS endpoint works"
-        (let [result (p/shell {:out :string :err :string :continue true}
-                              "curl" "--insecure" "-s"
-                              "https://127.0.0.1:7891/secure")]
+        (let [result (util/curl :https :h1 7891 "/secure")]
           (is (= 0 (:exit result)) "HTTPS request should succeed")
           (is (re-find #"Hello via https at /secure" (:out result)) "HTTPS should return expected response")))
 
       (testing "HTTPS with HTTP/2 ALPN negotiation"
-        (let [result (p/shell {:out :string :err :string}
-                              "curl" "--http2" "--insecure" "-v" "-s"
-                              "https://127.0.0.1:7891/h2")]
+        (let [result (util/curl :https :h2 7891 "/h2" :args ["-v"])]
           (is (= 0 (:exit result)) "HTTP/2 request should succeed")
           (is (re-find #"Hello via https at /h2" (:out result)) "HTTP/2 should return expected response")
           (is (re-find #"ALPN.*h2" (:err result)) "Should negotiate HTTP/2 via ALPN"))))))
@@ -315,9 +310,7 @@
                                               :tls  {:cert-file cert-file
                                                      :key-file  key-file}}])]
 
-      (let [result (p/shell {:out :string :err :string}
-                            "curl" "-v" "--http2" "--insecure"
-                            "https://127.0.0.1:7891")]
+      (let [result (util/curl :https :h2 7891 "/" :args ["-v"])]
         (is (= 0 (:exit result)))
         (is (re-find #"HTTP/2 103" (:err result)))
         (is (re-find #"link: </style.css>; rel=preload; as=style" (:err result)))

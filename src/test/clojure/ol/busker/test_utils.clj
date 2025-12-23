@@ -2,7 +2,26 @@
 ;;
 ;; All rights reserved. The use and distribution terms for this software are covered by the Eclipse Public License 1.0 which can be found in the file LICENSE at the root of this distribution. By using this software in any fashion, you are agreeing to be bound by the terms of this license. You must not remove this notice, or any other, from this software.
 ;; https://github.com/clojure/tools.deps/blob/ecc80420c1b734b384f7a42df91684cdbc37ddc6/src/test/clojure/clojure/tools/deps/util.clj
-(ns ol.busker.test-utils)
+(ns ol.busker.test-utils
+  (:require
+   [babashka.process :as p]))
+
+(defn curl
+  [scheme proto port path & {:keys [host max-time args]
+                             :or {host "127.0.0.1" max-time 10}
+                             :as opts}]
+  (let [scheme (or (:scheme opts) scheme)
+        proto-args (case proto
+                     :h1 ["--http1.1"]
+                     :h2 ["--http2"]
+                     :h3 ["--http3-only"]
+                     [])
+        default-args ["-k" "-s" "--max-time" (str max-time)]
+        url (str (name scheme) "://" host ":" port path)
+        curl-args (concat proto-args default-args (or args []) [url])]
+    (apply p/shell {:out :string :err :string :continue true}
+           "curl"
+           curl-args)))
 
 (defn submap?
   "Is m1 a subset of m2?"

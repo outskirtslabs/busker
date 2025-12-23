@@ -314,7 +314,7 @@
 
 (defcfn evloop-run
   "Runs the event loop once. Returns 0 if successful, -1 on error (typically EINTR).
-   
+
    Parameters:
    - loop: pointer to h2o_evloop_t
    - max-wait: maximum time to wait in milliseconds (int32)"
@@ -359,7 +359,7 @@
 
 (defcfn context-init
   "Initialize h2o context for an event loop.
-   
+
    Parameters:
    - context: pointer to h2o_context_t
    - loop: pointer to h2o_evloop_t
@@ -379,19 +379,19 @@
 
 (defcfn evloop-socket-create
   "Create h2o socket wrapper for file descriptor.
-   
+
    Parameters:
    - loop: pointer to h2o_evloop_t
    - fd: file descriptor (int)
    - flags: socket flags (int)
-   
+
    Returns: pointer to h2o_socket_t"
   h2o_evloop_socket_create
   [::mem/pointer ::mem/int ::mem/int] ::mem/pointer)
 
 (defcfn socket-read-start
   "Start reading from socket with callback.
-   
+
    Parameters:
    - sock: pointer to h2o_socket_t
    - cb: callback function pointer"
@@ -400,7 +400,7 @@
 
 (defcfn socket-read-stop
   "Stop reading from socket.
-   
+
    Parameters:
    - sock: pointer to h2o_socket_t"
   h2o_socket_read_stop
@@ -413,7 +413,7 @@
 
 (defcfn socket-set-on-close
   "Set socket close callback for connection tracking.
-   
+
    Parameters:
    - sock: pointer to h2o_socket_t
    - callback: function pointer for on_close callback
@@ -434,7 +434,7 @@
 
 (defcfn h2o-accept
   "Pass accepted socket to h2o for HTTP handling.
-   
+
    Parameters:
    - ctx: pointer to h2o_accept_ctx_t
    - sock: pointer to h2o_socket_t"
@@ -482,6 +482,11 @@
 
    Returns map containing handler pointer and pinned callback references."
   [hostconf-ptr on-req-callback on-cleanup-callback flat-config-ptr arena]
+  {:pre [(some? hostconf-ptr) (not (mem/null? hostconf-ptr))
+         (fn? on-req-callback)
+         (fn? on-cleanup-callback)
+         (some? flat-config-ptr) (not (mem/null? flat-config-ptr))
+         (some? arena)]}
   (let [on-request-cb (fn on-request-cb [ctx-ptr]
                         (on-req-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t)))
         on-request-cb-ptr (mem/serialize on-request-cb [::ffi/fn [::mem/pointer] ::mem/int] arena)
@@ -534,7 +539,7 @@
 (defcfn cleanup-thread
   "Perform periodic cleanup tasks for a context.
    Returns maximum wait time in milliseconds before next cleanup.
-   
+
    Parameters:
    - now: current time in milliseconds (from evloop-now)
    - ctx: pointer to h2o_context_t"
@@ -558,16 +563,18 @@
 
 (defcfn create-ssl-ctx
   "Create and configure SSL_CTX for TLS listener.
+
    Parameters:
    - cert-file: path to PEM certificate file
    - key-file: path to PEM private key file
    - enable-http2: 1 to register HTTP/2 ALPN protocols, 0 for HTTP/1.1 only
+
    Returns: SSL_CTX pointer on success, NULL on error"
   clj_h2o_create_ssl_ctx
   [::mem/c-string ::mem/c-string ::mem/int] ::mem/pointer)
 
 (defcfn free-ssl-ctx
-  "Free SSL_CTX created by create-ssl-ctx"
+  "Free SSL_CTX created by [[create-ssl-ctx]]."
   clj_h2o_free_ssl_ctx
   [::mem/pointer] ::mem/void)
 
@@ -586,6 +593,9 @@
   "Create and initialize h2o context for an event loop.
    Returns pointer to h2o_context_t"
   [arena loop-ptr config-ptr]
+  {:pre [(some? arena)
+         (some? loop-ptr) (not (mem/null? loop-ptr))
+         (some? config-ptr) (not (mem/null? config-ptr))]}
   (let [size (context-size)
         ctx-ptr (mem/alloc size arena)]
     (context-init ctx-ptr loop-ptr config-ptr)
@@ -601,12 +611,17 @@
   "Create h2o contexts for the given event loops.
    Returns vector of h2o_context_t pointers"
   [arena loops config-ptr]
+  {:pre [(some? arena)
+         (seq loops)
+         (some? config-ptr) (not (mem/null? config-ptr))]}
   (vec (for [loop loops]
          (create-context arena loop config-ptr))))
 
 (defn create-socket-for-loop
   "Create h2o socket wrapper for file descriptor in event loop"
   [loop-ptr fd flags]
+  {:pre [(some? loop-ptr) (not (mem/null? loop-ptr))
+         (nat-int? fd) (>= fd 0)]}
   (evloop-socket-create loop-ptr fd flags))
 
 (defn dispose-contexts
@@ -623,15 +638,18 @@
 
 (defn create-accept-ctx
   "Create h2o_accept_ctx_t for accepting connections.
-   
+
    Parameters:
    - arena: memory arena for allocation
    - ctx-ptr: pointer to h2o_context_t
    - config-ptr: pointer to h2o_globalconf_t
    - ssl-ctx-ptr: pointer to SSL_CTX for TLS, or nil/NULL for plaintext
-   
+
    Returns: pointer to h2o_accept_ctx_t"
   [arena ctx-ptr config-ptr ssl-ctx-ptr]
+  {:pre [(some? arena)
+         (some? ctx-ptr) (not (mem/null? ctx-ptr))
+         (some? config-ptr) (not (mem/null? config-ptr))]}
   (let [hosts-ptr (globalconf-get-hosts config-ptr)
         ssl-ctx (if (and ssl-ctx-ptr (not (mem/null? ssl-ctx-ptr)))
                   ssl-ctx-ptr
@@ -666,9 +684,17 @@
                 [(str/lower-case name-str) value-str]))))))
 
 (defn build-ring-request
-  "Build a Ring request map from clj_req_meta_t.
-   input-stream is the request body, can be nil if has_body is false
-   Returns: Ring request map"
+  "Build Ring-compliant request map from h2o request metadata.
+
+   Maps h2o request structure to Ring spec with:
+   - `:server-port`, `:server-name` from authority field (host:port)
+   - `:remote-addr` from client address
+   - `:uri`, `:query-string` from request line path (split on ?)
+   - `:request-method` as keyword (lowercase)
+   - `:headers` as lowercase string keys
+   - `:body` as InputStream when `has_body` is true
+
+   Protocol version (HTTP/1.1, HTTP/2, HTTP/3) determined from `http_version` field."
   [{:keys [method method_len path path_len authority authority_len
            http_version headers headers_len has_body
            scheme scheme_len remote_addr remote_addr_len]}
@@ -709,3 +735,77 @@
      :headers headers-map
      :body (when (= 1 has_body)
              input-stream)}))
+
+(defcfn http3-create-ptls-ctx
+  "Create picotls context for QUIC TLS 1.3.
+   Uses OpenSSL-backed primitives for cryptographic operations.
+   Configures ALPN callback for HTTP/3 protocol negotiation.
+
+   Parameters:
+   - cert-file: path to PEM certificate file
+   - key-file: path to PEM private key file
+
+   Returns: ptls_context_t pointer on success, NULL on error"
+  clj_h2o_create_ptls_ctx
+  [::mem/c-string ::mem/c-string] ::mem/pointer)
+
+(defcfn http3-free-ptls-ctx
+  "Free picotls context and associated resources."
+  clj_h2o_free_ptls_ctx
+  [::mem/pointer] ::mem/void)
+
+(defcfn http3-create-quicly-ctx
+  "Create quicly context configured for HTTP/3.
+   Starts from quicly_spec_context and configures TLS, CID encryptor,
+   and HTTP/3 transport parameters.
+
+   Parameters:
+   - ptls-ctx: picotls context from [[http3-create-ptls-ctx]]
+   - globalconf: h2o global configuration for HTTP/3 settings
+
+   Returns: quicly_context_t pointer on success, NULL on error"
+  clj_h2o_create_quicly_ctx
+  [::mem/pointer ::mem/pointer] ::mem/pointer)
+
+(defcfn http3-free-quicly-ctx
+  "Free quicly context and CID encryptor."
+  clj_h2o_free_quicly_ctx
+  [::mem/pointer] ::mem/void)
+
+(defcfn http3-create-worker-ctx
+  "Create HTTP/3 worker context with UDP listener.
+   Creates a UDP socket bound to host:port, configures it for QUIC
+   (IP_PKTINFO, DF bit, H2O_SOCKET_FLAG_DONT_READ), and initializes
+   the h2o_http3_server_ctx_t.
+
+   Parameters:
+   - h2o-ctx: h2o context for this worker
+   - loop: event loop for this worker
+   - quic-ctx: shared quicly context from [[http3-create-quicly-ctx]]
+   - hosts: hosts array from globalconf
+   - host: bind address (e.g., \"0.0.0.0\" or \"127.0.0.1\")
+   - port: UDP port to bind
+   - thread-id: unique worker thread ID for CID routing
+
+   Returns: opaque context pointer on success, NULL on error"
+  clj_h2o_http3_create_worker_ctx
+  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer
+   ::mem/c-string ::mem/short ::mem/int] ::mem/pointer)
+
+(defcfn http3-stop-accepting
+  "Stop accepting new HTTP/3 connections by setting acceptor to NULL.
+   Existing connections (including those in handshake) continue to completion.
+   Call this before requesting shutdown to prevent new connection attempts."
+  clj_h2o_http3_stop_accepting
+  [::mem/pointer] ::mem/void)
+
+(defcfn http3-num-connections
+  "Get the number of active HTTP/3 connections on this context."
+  clj_h2o_http3_num_connections
+  [::mem/pointer] ::mem/long)
+
+(defcfn http3-free-worker-ctx
+  "Free HTTP/3 worker context and close UDP socket.
+   Note: all connections must be closed first (num_connections == 0)."
+  clj_h2o_http3_dispose_worker_ctx
+  [::mem/pointer] ::mem/void)

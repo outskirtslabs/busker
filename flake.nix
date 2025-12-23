@@ -102,12 +102,6 @@
           env.APPLE_SDK_PATH = "${apple-sdk}";
           env.ZIG_GLOBAL_CACHE_DIR = ".zig-cache-global";
           shellHook = ''
-            if ! command -v clj-nrepl-eval &> /dev/null; then
-              bbin install https://github.com/bhauman/clojure-mcp-light.git --tag v0.2.1 --as clj-nrepl-eval --main-opts '["-m" "clojure-mcp-light.nrepl-eval"]'
-            fi
-            if ! command -v clj-paren-repair &> /dev/null; then
-              bbin install https://github.com/bhauman/clojure-mcp-light.git --tag v0.2.1 --as clj-paren-repair --main-opts '["-m" "clojure-mcp-light.paren-repair"]'
-            fi
             mkdir -p extra/
             pushd extra/
             test -f seed.bb && bb ./seed.bb

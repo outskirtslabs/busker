@@ -212,18 +212,25 @@
 (defn update-listener-state!
   "Throttle TCP listeners by starting/stopping accept callbacks based on connection count.
    Prevents accepting new connections when at/over max-connections limit.
-   
+
    QUIC listeners (when supported) must remain active as their UDP socket handles
    all connections; only TCP listeners are throttled here."
-  [listener-socks accept-callbacks]
-  (let [;; TODO implement connection limit
-        should-accept? true]
+  [listener-socks accept-callbacks ctx-ptr http3-ctxs max-connections]
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (let [http2-conn-count (+ (h2o/context-get-active-conns ctx-ptr)
+                            (h2o/context-get-shutdown-conns ctx-ptr))
+        http3-conn-count (reduce (fn [acc http3-ctx]
+                                   (if (or (nil? http3-ctx) (mem/null? http3-ctx))
+                                     acc
+                                     (+ acc (h2o/http3-num-connections http3-ctx))))
+                                 0
+                                 http3-ctxs)
+        total-conns (+ http2-conn-count http3-conn-count)
+        should-accept? (< total-conns max-connections)]
     (doseq [listener-idx (range (count listener-socks))]
       (let [sock-ptr (nth listener-socks listener-idx)
             accept-callback (nth accept-callbacks listener-idx)]
-        #_{:clj-kondo/ignore [:type-mismatch]}
         (when-not (mem/null? sock-ptr)
-          ;; TODO: Skip QUIC listeners when implemented (check listener config)
           (if should-accept?
             ;; Below limit: ensure TCP listeners are accepting
             (when (zero? (h2o/socket-reading? sock-ptr))
@@ -233,9 +240,10 @@
               (h2o/socket-read-stop sock-ptr))))))))
 
 (defn- initiate-worker-shutdown!
-  "Phase 1-3 of graceful shutdown: stop accepting, close listeners, request context shutdown"
-  [{:keys [listener-socks loop-ptr ctx-ptr]}]
-  ;; Phase 1: Stop accepting new connections
+  "Phase 1-4 of graceful shutdown following h2o main.c pattern:
+   stop accepting TCP/HTTP3, close listeners, request context shutdown."
+  [{:keys [listener-socks loop-ptr ctx-ptr http3-ctxs]}]
+  ;; Phase 1: Stop accepting new TCP connections
   (doseq [listener-idx (range (count listener-socks))]
     (let [sock-ptr (nth listener-socks listener-idx)]
       (when (and (not (mem/null? sock-ptr))
@@ -243,81 +251,118 @@
                  (not (zero? (h2o/socket-reading? sock-ptr))))
         (h2o/socket-read-stop sock-ptr))))
 
+  ;; Phase 2: Stop accepting new HTTP/3 connections (set acceptor = NULL)
+  ;; Stops new QUIC Initial packets while allowing
+  ;; existing handshakes to complete. Unlike TCP (socket-read-stop), UDP socket
+  ;; remains open but new connection attempts receive Version Negotiation rejection.
+  (doseq [http3-ctx http3-ctxs]
+    (when (and http3-ctx (not (mem/null? http3-ctx)))
+      (h2o/http3-stop-accepting http3-ctx)))
+
   ;; Process stop events immediately
   (h2o/evloop-run loop-ptr 0)
 
-  ;; Phase 2: Close listener sockets
+  ;; Phase 3: Close listener sockets
   (doseq [listener-idx (range (count listener-socks))]
     (let [sock-ptr (nth listener-socks listener-idx)]
       (when-not (mem/null? sock-ptr)
         (h2o/socket-close sock-ptr))))
 
-  ;; Phase 3: Request graceful shutdown (sends GOAWAY to HTTP/2 clients)
+  ;; Phase 4: Request graceful shutdown (sends GOAWAY to HTTP/2 clients)
   (h2o/context-request-shutdown ctx-ptr))
 
-(defn- all-connections-drained?
-  "Check if all connections for this context are closed"
-  [ctx-ptr]
+(defn- has-active-http3-connections?
+  "Returns true if the HTTP/3 context has active connections."
+  [http3-ctx]
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (and http3-ctx
+       (not (mem/null? http3-ctx))
+       (pos? (h2o/http3-num-connections http3-ctx))))
 
+(defn- all-connections-drained?
+  "Check if all connections for this context are closed, including HTTP/3"
+  [ctx-ptr http3-ctxs]
   #_{:clj-kondo/ignore [:type-mismatch]}
   (and (zero? (h2o/context-get-active-conns ctx-ptr))
-       (zero? (h2o/context-get-shutdown-conns ctx-ptr))))
+       (zero? (h2o/context-get-shutdown-conns ctx-ptr))
+       (not-any? has-active-http3-connections? http3-ctxs)))
+
+(defn- ready-to-dispose?
+  "Returns true if all preconditions for context disposal are met."
+  [{:keys [context-disposed? shutdown-initiated? receiver-destroyed?]} {:keys [ctx-ptr http3-ctxs]}]
+  (and (not context-disposed?)
+       shutdown-initiated?
+       receiver-destroyed?
+       (all-connections-drained? ctx-ptr http3-ctxs)))
 
 (defn- check-and-initiate-shutdown!
-  "Check shutdown flag and initiate shutdown phases if needed.
-   Returns true if shutdown is active (either just initiated or already in progress)."
-  [{:keys [shutdown-initiated? shutting-down?] :as state}]
-  (let [should-shutdown? (.get ^AtomicBoolean shutting-down?)]
-    (when (and should-shutdown? (not shutdown-initiated?))
-      (initiate-worker-shutdown! state))
-    should-shutdown?))
+  "Advances shutdown initiation once the main thread has signalled it.
+   Returns updated loop-state (may flip :shutdown-initiated? to true)."
+  [loop-state {:keys [shutting-down?] :as state}]
+  (let [should-shutdown? (.get ^AtomicBoolean shutting-down?)
+        already?         (true? (:shutdown-initiated? loop-state))]
+    (when (and should-shutdown? (not already?))
+      ;; initiate-worker-shutdown! likely needs listener/callback info -> keep using `state`
+      (initiate-worker-shutdown! (assoc state :shutdown-initiated? true)))
+    (assoc loop-state :shutdown-initiated? (or already? should-shutdown?))))
 
-(defn- receiver-destroyed?*
-  "Has the wakeup receiver been removed (either already noted or cleared by the main thread)?"
-  [worker destroyed-flag]
-  (or (true? destroyed-flag)
-      (nil? (.get ^AtomicReference (:wakeup-receiver_ worker)))))
+(defn- update-receiver-destruction
+  "Returns updated loop-state (may flip :receiver-destroyed? to true once detected)."
+  [loop-state worker]
+  (cond
+    (:receiver-destroyed? loop-state)
+    loop-state
+
+    (nil? (.get ^AtomicReference (:wakeup-receiver_ worker)))
+    (assoc loop-state :receiver-destroyed? true)
+
+    :else
+    loop-state))
 
 (defn- dispose-context-if-ready
-  "If we're past shutdown initiation, the receiver is gone, and connections are drained,
-   dispose the worker's context and queue an ::stop message."
-  [worker ctx-ptr context-disposed? shutdown-initiated? receiver-destroyed?]
-  (if (or context-disposed?
-          (not shutdown-initiated?)
-          (not receiver-destroyed?)
-          (not (all-connections-drained? ctx-ptr)))
-    context-disposed?
+  "If preconditions are met, disposes ctx + http3 ctxs and queues ::stop.
+   Returns updated loop-state (may flip :context-disposed? to true)."
+  [loop-state worker {:keys [ctx-ptr http3-ctxs] :as state}]
+  (if (ready-to-dispose? loop-state state)
     (do
+      (doseq [http3-ctx http3-ctxs]
+        (when (and http3-ctx (not (mem/null? http3-ctx)))
+          (h2o/http3-free-worker-ctx http3-ctx)))
       (h2o/context-dispose ctx-ptr)
       (p/send-msg worker evloop/stop-msg)
-      true)))
+      (assoc loop-state :context-disposed? true))
+    loop-state))
 
-;; TODO this fn call is a tragedy
 (defn worker-loop
-  "Drive a worker event-loop iteration, advancing staged shutdown once the main
-   thread has signalled it. The worker moves through three phases:
-     1. `shutdown-initiated?` is recorded after we stop accepting and close listeners.
-     2. `receiver-destroyed?` flips true when stop-server destroys the wakeup receiver,
-        ensuring no more cross-thread wakeups are delivered.
-     3. Once connections drain, `context-disposed?` becomes true after the worker
-        disposes its `h2o_context_t` and posts ::stop to exit the loop."
-  [worker {:keys [shutdown-initiated? context-disposed? receiver-destroyed?] :as _loop-state}
-   {:keys [loop-ptr ctx-ptr listener-socks accept-callbacks] :as state}]
-  (let [shutdown-recorded? (true? shutdown-initiated?)
-        shutdown-initiated? (check-and-initiate-shutdown! (assoc state :shutdown-initiated? shutdown-recorded?))
-        receiver-destroyed? (receiver-destroyed?* worker receiver-destroyed?)
-        context-disposed? (dispose-context-if-ready worker ctx-ptr (true? context-disposed?) shutdown-initiated? receiver-destroyed?)]
-    (if context-disposed?
+  [worker loop-state
+   {:keys [loop-ptr ctx-ptr listener-socks accept-callbacks http3-ctxs max-connections] :as state}]
+  (let [loop-state (-> loop-state
+                       (check-and-initiate-shutdown! state)
+                       (update-receiver-destruction worker)
+                       (dispose-context-if-ready worker state))
+        disposed?  (true? (:context-disposed? loop-state))
+        shutting?  (true? (:shutdown-initiated? loop-state))]
+    (if disposed?
       (h2o/evloop-run loop-ptr 0)
-      (let [now (h2o/evloop-now loop-ptr)
-            max-wait (h2o/cleanup-thread now ctx-ptr)
-            max-wait (if (pending-response-work? worker) 5 max-wait)]
-        (when-not shutdown-initiated?
-          (update-listener-state! listener-socks accept-callbacks))
-        (h2o/evloop-run loop-ptr (if (pos? (p/count-msgs worker)) 0 max-wait))))
-    {:shutdown-initiated? shutdown-initiated?
-     :context-disposed? context-disposed?
-     :receiver-destroyed? receiver-destroyed?}))
+      (let [now       (h2o/evloop-now loop-ptr)
+            base-wait (h2o/cleanup-thread now ctx-ptr)
+            wait-ms   (cond
+                        (pending-response-work? worker) 5
+                        shutting?                       10
+                        :else                           base-wait)]
+        (when-not shutting?
+          (update-listener-state! listener-socks accept-callbacks ctx-ptr http3-ctxs max-connections))
+        (h2o/evloop-run loop-ptr (if (pos? (p/count-msgs worker)) 0 wait-ms))))
+    loop-state))
+
+(defn http3-enabled?
+  "Returns true if HTTP/3 should be enabled for this listener.
+   HTTP/3 is enabled by default for TLS listeners unless explicitly disabled
+   with :http3? false in the TLS config."
+  [listener]
+  (boolean
+   (and (:tls listener)
+        (get-in listener [:tls :http3?] true))))
 
 (defn- validate-tls-config
   "Validate TLS configuration for a listener. Throws on invalid config."
@@ -360,6 +405,72 @@
                                   :key-file key-file})))
                [idx {:ssl-ctx ssl-ctx}])))
          listeners)))
+
+(defn- create-http3-contexts
+  "Create shared HTTP/3 contexts (ptls + quicly) for each TLS listener with HTTP/3 enabled.
+   These contexts are shared across all workers.
+   Returns map: listener-index -> {:ptls-ctx ptls-ctx-ptr :quicly-ctx quicly-ctx-ptr}
+   Throws if context creation fails."
+  [listeners config-ptr]
+  (into {}
+        (keep-indexed
+         (fn [idx listener]
+           (when (http3-enabled? listener)
+             (let [{:keys [cert-file key-file]} (:tls listener)
+                   ptls-ctx (h2o/http3-create-ptls-ctx cert-file key-file)]
+               (when (or (nil? ptls-ctx) (mem/null? ptls-ctx))
+                 (throw (ex-info "Failed to create ptls context for HTTP/3"
+                                 {:listener-index idx
+                                  :cert-file cert-file
+                                  :key-file key-file})))
+               (let [quicly-ctx (h2o/http3-create-quicly-ctx ptls-ctx config-ptr)]
+                 (when (or (nil? quicly-ctx) (mem/null? quicly-ctx))
+                   (h2o/http3-free-ptls-ctx ptls-ctx)
+                   (throw (ex-info "Failed to create quicly context for HTTP/3"
+                                   {:listener-index idx})))
+                 [idx {:ptls-ctx ptls-ctx :quicly-ctx quicly-ctx}]))))
+         listeners)))
+
+(defn- create-http3-worker-contexts
+  "Create per-worker HTTP/3 contexts (UDP listeners) for each TLS listener with HTTP/3 enabled.
+
+   Returns vector of vectors: [worker-idx][listener-idx] -> http3-worker-ctx-ptr or nil
+
+   Uses nested vector structure (not map) because each worker needs its own UDP socket
+   for each HTTP/3 listener. Vector provides O(1) indexed access during worker-loop iteration."
+  [n-workers listeners loops contexts config-ptr http3-contexts]
+  (let [hosts-ptr (h2o/globalconf-get-hosts config-ptr)]
+    (vec (for [thread-idx (range n-workers)]
+           (vec (for [listener-idx (range (count listeners))]
+                  (let [listener (nth listeners listener-idx)]
+                    (when (http3-enabled? listener)
+                      (let [{:keys [quicly-ctx]} (get http3-contexts listener-idx)
+                            {:keys [port]} listener
+                            loop-ptr (nth loops thread-idx)
+                            ctx-ptr (nth contexts thread-idx)
+                            http3-ctx (h2o/http3-create-worker-ctx
+                                       ctx-ptr
+                                       loop-ptr
+                                       quicly-ctx
+                                       hosts-ptr
+                                       "0.0.0.0"
+                                       (short port)
+                                       (int thread-idx))]
+                        (when (or (nil? http3-ctx) (mem/null? http3-ctx))
+                          (throw (ex-info "Failed to create HTTP/3 worker context"
+                                          {:listener-index listener-idx
+                                           :thread-idx thread-idx
+                                           :port port})))
+                        http3-ctx)))))))))
+
+(defn- free-http3-contexts
+  "Free shared HTTP/3 contexts (quicly + ptls)."
+  [http3-contexts]
+  (doseq [[_idx {:keys [quicly-ctx ptls-ctx]}] http3-contexts]
+    (when quicly-ctx
+      (h2o/http3-free-quicly-ctx quicly-ctx))
+    (when ptls-ctx
+      (h2o/http3-free-ptls-ctx ptls-ctx))))
 
 (defn with-defaults [{:keys [n-workers listeners max-connections executor server-name
                              compress? compress-min-size compress-gzip-level output-buffer-size
@@ -499,6 +610,9 @@
          loops    (h2o/create-loops n-workers)
          contexts (h2o/create-contexts arena loops config-ptr)
 
+         http3-contexts (create-http3-contexts listeners config-ptr)
+         http3-worker-contexts (create-http3-worker-contexts n-workers listeners loops contexts config-ptr http3-contexts)
+
          wakeup-receivers (vec (for [ctx-ptr contexts]
                                  (h2o/mt-create-wakeup-receiver ctx-ptr)))
 
@@ -540,13 +654,16 @@
                               listener-socks-for-thread   (nth listener-sockets thread-idx)
                               thread-accept-callback      (::accept-cb-ptr (nth accept-callbacks thread-idx))
                               accept-callbacks-for-thread (vec (repeat (count listener-socks-for-thread)
-                                                                       thread-accept-callback))]
+                                                                       thread-accept-callback))
+                              http3-ctxs-for-thread       (nth http3-worker-contexts thread-idx)]
 
                           (evloop/start-worker!
                            (fn [worker loop-state] (worker-loop worker loop-state {:listener-socks   listener-socks-for-thread
                                                                                    :accept-callbacks accept-callbacks-for-thread
                                                                                    :loop-ptr         loop-ptr
                                                                                    :ctx-ptr          ctx-ptr
+                                                                                   :http3-ctxs       http3-ctxs-for-thread
+                                                                                   :max-connections  max-connections
                                                                                    :shutting-down?   shutting-down?}))
                            message-handler
                            (nth wakeup-receivers thread-idx)))))]
@@ -564,6 +681,8 @@
       ::contexts           contexts
       ::accept-ctxs        accept-ctxs
       ::ssl-contexts       ssl-contexts
+      ::http3-contexts     http3-contexts
+      ::http3-worker-contexts http3-worker-contexts
       ::accept-callbacks   accept-callbacks
       ::on-close-callback  on-close-callback
       ::listener-fds       listener-fds
@@ -614,7 +733,13 @@
      (.set ^AtomicReference (:wakeup-receiver_ worker) nil))
 
    ;; Wait for all workers to stop themselves after draining connections
+   ;; (workers dispose their own HTTP/3 worker contexts before exiting)
    (evloop/join-all! (::workers server))
+
+   ;; Free shared HTTP/3 contexts (quicly + ptls)
+   ;; Note: worker contexts are already disposed by workers themselves
+   (when-let [http3-contexts (::http3-contexts server)]
+     (free-http3-contexts http3-contexts))
 
    ;; All workers have exited; clean up h2o resources
    (h2o/destroy-loops (::loops server))
