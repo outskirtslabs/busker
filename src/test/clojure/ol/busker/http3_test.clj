@@ -6,6 +6,7 @@
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [ol.busker.native :as h2o]
+   [ol.busker.protocols :as proto]
    [ol.busker.server :as server]
    [ol.busker.test-utils :as util]))
 
@@ -116,20 +117,11 @@
 (deftest http3-request-with-streaming-body-test
   (testing "HTTP/3 streaming response works correctly"
     (let [port 18446
-          chunks (atom [])
           server (server/run-server
                   (fn [_]
                     {:status 200
                      :headers {"content-type" "text/plain"}
-                     :body (lazy-seq
-                            (do (swap! chunks conj "chunk1")
-                                (cons "chunk1-"
-                                      (lazy-seq
-                                       (do (swap! chunks conj "chunk2")
-                                           (cons "chunk2-"
-                                                 (lazy-seq
-                                                  (do (swap! chunks conj "chunk3")
-                                                      ["chunk3"]))))))))})
+                     :body (list "chunk1-" "chunk2-" "chunk3")})
                   {:listeners [{:port port
                                 :tls {:cert-file cert-file
                                       :key-file key-file}}]})]
@@ -147,32 +139,19 @@
   (testing "Server gracefully shuts down HTTP/3 connections"
     (let [port 18447
           first-chunk-sent (promise)
-          chunk-delay-ms 50
+          chunk-delay-ms 100
           server (server/run-server
-                  (fn [_]
-                    {:status 200
-                     :headers {"content-type" "text/plain"}
-                     :body (lazy-seq
-                            (do
-                              (deliver first-chunk-sent true)
-                              (Thread/sleep chunk-delay-ms)
-                              (cons "chunk-0-"
-                                    (lazy-seq
-                                     (do
-                                       (Thread/sleep chunk-delay-ms)
-                                       (cons "chunk-1-"
-                                             (lazy-seq
-                                              (do
-                                                (Thread/sleep chunk-delay-ms)
-                                                (cons "chunk-2-"
-                                                      (lazy-seq
-                                                       (do
-                                                         (Thread/sleep chunk-delay-ms)
-                                                         (cons "chunk-3-"
-                                                               (lazy-seq
-                                                                (do
-                                                                  (Thread/sleep chunk-delay-ms)
-                                                                  ["chunk-4-"]))))))))))))))})
+                  (fn [{emitter :ol.busker.request/emitter}]
+                    (future
+                      (proto/emit! emitter {:status 200 :headers {"content-type" "text/plain"}})
+                      (doseq [idx (range 5)]
+                        (proto/emit! emitter (str "chunk-" idx "-"))
+                        (proto/flush emitter)
+                        (when (zero? idx)
+                          (deliver first-chunk-sent true))
+                        (Thread/sleep chunk-delay-ms))
+                      (proto/close emitter))
+                    {:body emitter})
                   {:listeners [{:port port
                                 :tls {:cert-file cert-file
                                       :key-file key-file}}]})]
@@ -183,15 +162,19 @@
           ;; Wait for first chunk to be sent before initiating shutdown
           (is (deref first-chunk-sent 5000 false)
               "First chunk should be sent before shutdown")
-          ;; Initiate graceful shutdown while streaming is in progress
-          (server/stop-server server)
-          ;; Verify all chunks are received despite shutdown
-          (let [result (deref request-future 10000 nil)]
-            (is (some? result) "Request should complete during graceful shutdown")
-            (when result
-              (is (zero? (:exit result))
-                  (str "curl should exit successfully. stderr: " (:err result)))
-              (is (= "chunk-0-chunk-1-chunk-2-chunk-3-chunk-4-" (:out result))
-                  "All chunks should be received during graceful shutdown"))))
+          (let [stop-future (future
+                              (server/stop-server server 5 java.util.concurrent.TimeUnit/SECONDS))]
+            (is (= ::timeout (deref stop-future 200 ::timeout))
+                "stop-server should block while stream is in progress")
+            ;; Verify all chunks are received despite shutdown
+            (let [result (deref request-future 10000 nil)]
+              (is (some? result) "Request should complete during graceful shutdown")
+              (when result
+                (is (zero? (:exit result))
+                    (str "curl should exit successfully. stderr: " (:err result)))
+                (is (= "chunk-0-chunk-1-chunk-2-chunk-3-chunk-4-" (:out result))
+                    "All chunks should be received during graceful shutdown")))
+            (is (not= ::timeout (deref stop-future 5000 ::timeout))
+                "stop-server should complete after stream drains")))
         (finally
           nil)))))
