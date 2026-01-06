@@ -24,8 +24,11 @@ The actual state of affairs is:
 - [x] HTTP/1.1
 - [x] HTTP/2
 - [x] 103 early hints
+- [x] HTTP/3
+- [ ] 0-RTT TLS
 - [ ] Automatic HTTPS
-- [ ] HTTP/3
+- [ ] TLS STEK, pluggable ticket store
+- [ ] Metrics and observability
 - [ ] zero-downtime deployments
 - [ ] GraalVM native-image (need to wait until [coffi][coffi] supports it)
 
