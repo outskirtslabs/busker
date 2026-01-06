@@ -5,24 +5,30 @@
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .h2o = .{
-            .url = "git+https://github.com/outskirtslabs/h2o-zig.git#205d9a4c54a2aced34ee45a026296a676c297474",
-            .hash = "h2o-0.0.1-7Fp7SjtTAAB5e6UIt58y3pXk2rbsapao2lI6GMFipvDx",
+            .url = "git+https://github.com/outskirtslabs/h2o-zig.git#ba2e432867f7c8d65ebaa158be398293fc144ec9",
+            .hash = "h2o-0.0.1-7Fp7SkZbAAATLi37d7HnUibaalcn92PvubebBL-a5vgj",
         },
         .boringssl = .{
-            .url = "git+https://github.com/Ramblurr/boringssl.git#7473d0f55612bf710f132217f8f785676ad2ce2b",
-            .hash = "boringssl-0.20250514.0-EhtkNRjfAgBTl-8Mlph63-asaonR2py9B8HcBh7eMZm1",
+            .url = "git+https://github.com/ramblurr/boringssl?ref=feat/pic#cbdb66c75b27e275a3070438ad9b28d598cea23a",
+            .hash = "boringssl-0.20251124.0-EhtkNXDmAgDVvUQHUobSUEPZooJuqq_2ffzxqVPu6Sah",
+            .lazy = true,
+        },
+        .openssl = .{
+            .url = "git+https://github.com/ramblurr/openssl-zig.git?ref=update/openssl-3.6.0#b89f39f1bb8f230b448eaa5e692b5da9005ad9c7",
+            .hash = "openssl-3.6.0-YymhPg0kAQD_p6kpTbrodJ3ENoPoLzjiJlx-IqDQPoUo",
+            .lazy = true,
         },
         .zlib = .{
-            .url = "git+https://github.com/Ramblurr/zlib.git#c93c77f376b9ef61b0c15b991676c5454ca820a8",
-            .hash = "zlib-1.3.1-ZZQ7lcMNAADKpMLCgGz0ZViLit-1BmPza9I1-Pw61LKj",
+            .url = "git+https://github.com/allyourcodebase/zlib.git#3599c16d41dbe749ae51b0ff7ab864c61adc779a",
+            .hash = "zlib-1.3.1-ZZQ7lc8NAABUbHzDe_cSWboCqMbrLkVwvFkKnojgeiT2",
         },
         .zstd = .{
             .url = "git+https://github.com/allyourcodebase/zstd.git#01327d49cbc56dc24c20a167bb0055d7fc23de84",
             .hash = "zstd-1.5.7-KEItkJ8vAAC5_rRlKmLflYQ-eKXbAIQBWZNmmJtS18q0",
         },
         .brotli_build = .{
-            .url = "git+https://github.com/0x546F6D/brotli.zig#70e899c4db2d3d5a5077d88c1a0d8daf536f4f21",
-            .hash = "brotli_build-0.0.0-KJ9D28gTAADZttq4jT8OAJf7nzd4LaZIIPs3Me7mo8pE",
+            .url = "git+https://github.com/ramblurr/brotli.zig?ref=feat/pic#c473c6f511da732b7359d6b523067de09ec7d06e",
+            .hash = "brotli_build-0.0.0-KJ9D2_sUAABKsFh3cVnQac7MbuJvgmYoq7PxcRa3lY1x",
         },
     },
     .paths = .{
