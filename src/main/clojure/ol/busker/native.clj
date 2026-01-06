@@ -167,7 +167,8 @@
       [:headers_len ::mem/long]
 
       [:http_version ::mem/int]
-      [:has_body ::mem/int]]]))
+      [:has_body ::mem/short]
+      [:is_early_data ::mem/short]]]))
 #_(print-offsets-for (layout/with-c-layout
                        [::mem/struct
                         [[:authority ::mem/pointer]
@@ -693,10 +694,11 @@
    - `:request-method` as keyword (lowercase)
    - `:headers` as lowercase string keys
    - `:body` as InputStream when `has_body` is true
+   - `:ol.busker/early-data?` true when request arrived via 0-RTT
 
    Protocol version (HTTP/1.1, HTTP/2, HTTP/3) determined from `http_version` field."
   [{:keys [method method_len path path_len authority authority_len
-           http_version headers headers_len has_body
+           http_version headers headers_len has_body is_early_data
            scheme scheme_len remote_addr remote_addr_len]}
    ^InputStream input-stream]
   (let [method-str (->string method method_len)
@@ -734,7 +736,8 @@
      :protocol (str "HTTP/" (first version) "." (second version))
      :headers headers-map
      :body (when (= 1 has_body)
-             input-stream)}))
+             input-stream)
+     :ol.busker/early-data? (= 1 is_early_data)}))
 
 (defcfn http3-create-ptls-ctx
   "Create picotls context for QUIC TLS 1.3.
@@ -831,3 +834,60 @@
   "Release a connection slot (decrement counter)."
   clj_h2o_conn_limit_release
   [] ::mem/void)
+
+;; Session ticket key structure - matches C clj_session_ticket_t
+(mem/defalias ::clj-session-ticket-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:name [::mem/array ::mem/byte 16]]       ; 16 bytes key identifier
+      [:aes_key [::mem/array ::mem/byte 32]]    ; 32 bytes AES-256 key
+      [:hmac_key [::mem/array ::mem/byte 64]]   ; 64 bytes HMAC key
+      [:not_before ::mem/long]                  ; activation time (ms epoch)
+      [:not_after ::mem/long]]]))               ; expiration time (ms epoch)
+
+(def size-of-session-ticket-t (mem/size-of ::clj-session-ticket-t))
+
+(defcfn ticket-manager-create
+  "Create a new ticket manager with specified ticket lifetime.
+   Returns pointer to clj_ticket_manager_t, or NULL on failure."
+  clj_ticket_manager_create
+  [::mem/int] ::mem/pointer)
+
+(defcfn ticket-manager-destroy
+  "Destroy ticket manager and securely erase all keys."
+  clj_ticket_manager_destroy
+  [::mem/pointer] ::mem/void)
+
+(defcfn ticket-manager-set-keys
+  "Replace all keys atomically. Thread-safe via copy-on-write.
+   Returns 0 on success, -1 on error."
+  clj_ticket_manager_set_keys
+  [::mem/pointer ::mem/pointer ::mem/long] ::mem/int)
+
+(defcfn ticket-manager-key-count
+  "Get current key count (for monitoring)."
+  clj_ticket_manager_key_count
+  [::mem/pointer] ::mem/long)
+
+(defcfn ticket-manager-set-quic-tag
+  "Set the QUIC transport params hash for 0-RTT validation."
+  clj_ticket_manager_set_quic_tag
+  [::mem/pointer ::mem/pointer] ::mem/void)
+
+(defcfn ticket-manager-create-encrypt-ticket
+  "Create encrypt_ticket callback wired to manager.
+   is_quic: 1 for QUIC mode (appends transport params tag), 0 for TCP TLS."
+  clj_ticket_manager_create_encrypt_ticket
+  [::mem/pointer ::mem/int] ::mem/pointer)
+
+(defcfn ptls-ctx-set-tickets
+  "Configure ptls context for session tickets.
+   Sets encrypt_ticket callback, ticket lifetime, and max early data size."
+  clj_ptls_ctx_set_tickets
+  [::mem/pointer ::mem/pointer ::mem/int ::mem/int] ::mem/void)
+
+(defcfn ssl-ctx-set-tickets
+  "Configure SSL_CTX for TCP TLS session tickets and 0-RTT.
+   Wires the ticket manager into the OpenSSL ticket key callback."
+  clj_ssl_ctx_set_tickets
+  [::mem/pointer ::mem/pointer ::mem/int] ::mem/void)

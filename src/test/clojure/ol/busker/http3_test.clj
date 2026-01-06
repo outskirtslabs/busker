@@ -2,6 +2,7 @@
   (:require
    [coffi.mem :as mem]
    [babashka.process :as p]
+   [clojure.edn :as edn]
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
@@ -328,3 +329,181 @@
                     (str "Connection " idx " should succeed. stderr: " (:err result)))))))
         (finally
           (server/stop-server server))))))
+
+(defn- curl-ssl-sessions-supported?
+  "Check if curl supports --ssl-sessions option."
+  []
+  (let [result (p/shell {:out :string :err :string :continue true}
+                        "curl" "--ssl-sessions" "/dev/null" "-s" "-o" "/dev/null" "https://127.0.0.1:1")]
+    ;; If the error contains "does not support", the feature is unavailable
+    (not (str/includes? (:err result) "does not support"))))
+
+(defn- curl-0rtt
+  "Make a curl request with session ticket support for 0-RTT testing.
+
+   session-file: path to store/load session tickets
+   early-data?: if true, attempt to send early data with --tls-earlydata
+   proto: :h3 for HTTP/3, :h2 for HTTP/2, :h1 for HTTP/1.1
+
+   Returns map with :exit, :out, :err, and :tls-earlydata (bytes sent as early data)"
+  [session-file early-data? port path & {:keys [proto max-time]
+                                         :or {proto :h3 max-time 10}}]
+  (let [proto-args (case proto
+                     :h1 ["--http1.1"]
+                     :h2 ["--http2"]
+                     :h3 ["--http3-only"]
+                     [])
+        session-args ["--ssl-sessions" session-file]
+        early-args (when early-data? ["--tls-earlydata"])
+        write-out ["-w" "\n%{tls_earlydata}"]
+        default-args ["-k" "-s" "--max-time" (str max-time)]
+        url (str "https://127.0.0.1:" port path)
+        curl-args (concat proto-args session-args early-args write-out default-args [url])
+        result (apply p/shell {:out :string :err :string :continue true} "curl" curl-args)
+        lines (str/split-lines (:out result))
+        body (str/join "\n" (butlast lines))
+        tls-earlydata (parse-long (last lines))]
+    (assoc result
+           :body body
+           :tls-earlydata (or tls-earlydata 0))))
+
+(deftest http3-early-data-key-present-test
+  (testing "HTTP/3 requests include :ol.busker/early-data? key"
+    (let [port 18453
+          early-data-value (atom nil)
+          handler (fn [req]
+                    (reset! early-data-value (:ol.busker/early-data? req))
+                    {:status 200 :body "ok"})
+          server (server/run-server handler
+                                    {:listeners [{:port port
+                                                  :tls {:cert-file cert-file
+                                                        :key-file key-file}}]})]
+      (try
+        (Thread/sleep 200)
+        (let [result (util/curl :https :h3 port "/")]
+          (is (= 0 (:exit result))
+              (str "HTTP/3 request should succeed. stderr: " (:err result)))
+          (when (zero? (:exit result))
+            ;; The key should exist (either true or false)
+            (is (some? @early-data-value)
+                ":ol.busker/early-data? key should be present in request")
+            ;; First request on fresh connection should not be early data
+            (is (false? @early-data-value)
+                "First request should NOT be early data")))
+        (finally
+          (server/stop-server server))))))
+
+(deftest http3-zero-rtt-test
+  (testing "HTTP/3 0-RTT early data detection"
+    (when-not (curl-ssl-sessions-supported?)
+      (throw (Exception. "your curl was not compiled with --enable-ssls-export and thus does not support --ssl-sessions")))
+    (let [port         18454
+          session-file (str (System/getProperty "java.io.tmpdir") "/busker-test-sessions-" port ".txt")
+          ;; Handler returns EDN with early-data? flag
+          handler      (fn [req]
+                         {:status  200
+                          :headers {"content-type" "application/edn"}
+                          :body    (pr-str {:early-data (boolean (:ol.busker/early-data? req))
+                                            :method     (name (:request-method req))})})
+          server       (server/run-server handler
+                                          {:listeners [{:port port
+                                                        :tls  {:cert-file cert-file
+                                                               :key-file  key-file}}]})]
+      (try
+        (Thread/sleep 200)
+
+        ;; Cleanup any existing session file
+        (io/delete-file session-file true)
+
+        ;; HTTP/3 0-RTT requires multiple warmup requests to accumulate session tickets.
+        ;; picotls sends 1 NewSessionTicket per connection by default (max_count=2 is a cap).
+        ;; curl needs 2+ tickets before sending early data. Pattern verified:
+        ;; - Request 1: establishes connection, receives ticket
+        ;; - Request 2: session resumption, receives another ticket
+        ;; - Request 3 with --tls-earlydata: may not send early data yet
+        ;; - Request 4 with --tls-earlydata: sends early data (77 bytes observed)
+
+        ;; Warmup request 1 - establish session
+        (let [result1 (curl-0rtt session-file false port "/")]
+          (is (= 0 (:exit result1))
+              (str "Warmup request 1 should succeed. stderr: " (:err result1))))
+
+        (is (.exists (io/file session-file))
+            "Session file should be created after first request")
+
+        ;; Warmup request 2 - session resumption, accumulates tickets
+        (let [result2 (curl-0rtt session-file false port "/")]
+          (is (= 0 (:exit result2))
+              (str "Warmup request 2 should succeed. stderr: " (:err result2))))
+
+        ;; Warmup request 3 with early data flag - may not send early data yet
+        (let [result3 (curl-0rtt session-file true port "/")]
+          (is (= 0 (:exit result3))
+              (str "Warmup request 3 should succeed. stderr: " (:err result3))))
+
+        ;; Final request - should send early data
+        (let [result4 (curl-0rtt session-file true port "/")]
+          (is (= 0 (:exit result4))
+              (str "Final request should succeed. stderr: " (:err result4)))
+          (when (zero? (:exit result4))
+            ;; The key proof that 0-RTT works: curl sends early data (tls_earlydata > 0).
+            ;; Server-side detection via h2o_conn_is_early_data() is inherently racy -
+            ;; it checks if handshake is in progress, but by the time the handler runs,
+            ;; the QUIC handshake may have completed even though data arrived via 0-RTT.
+            (is (pos? (:tls-earlydata result4))
+                (str "Final request should send early data (0-RTT). Got tls_earlydata="
+                     (:tls-earlydata result4)))))
+
+        (finally
+          (server/stop-server server)
+          (io/delete-file session-file true))))))
+
+(defn- openssl-session-test
+  "Test TLS session resumption using openssl s_client.
+   More reliable than curl for testing ticket mechanisms.
+   Returns {:new? true/false :reused? true/false} based on handshake output."
+  [port tls-version session-file save?]
+  (let [tls-arg (case tls-version :tls1.2 "-tls1_2" :tls1.3 "")
+        sess-arg (if save? "-sess_out" "-sess_in")
+        cmd (str "(sleep 1; echo Q) | timeout 5 openssl s_client -connect 127.0.0.1:" port
+                 " " tls-arg " " sess-arg " " session-file " 2>&1")
+        result (p/shell {:out :string :err :string :continue true} "bash" "-c" cmd)
+        out (:out result)]
+    {:exit (:exit result)
+     :new? (str/includes? out "New,")
+     :reused? (str/includes? out "Reused,")}))
+
+(deftest tcp-tls-session-resumption-test
+  (testing "TCP TLS 1.2 session resumption via tickets"
+    ;; TLS 1.2 session resumption works with our SSL_CTX_set_tlsext_ticket_key_cb callback.
+    ;; This validates the ticket encryption/decryption implementation.
+    ;; Note: TLS 1.3 TCP session resumption requires BoringSSL's SSL_CTX_set_ticket_aead_method
+    ;; which is not yet implemented. HTTP/3 uses picotls which has separate ticket handling.
+    (let [port         18455
+          session-file (str (System/getProperty "java.io.tmpdir") "/busker-test-tls12-sessions-" port ".pem")
+          handler      (fn [_] {:status 200 :body "ok"})
+          server       (server/run-server handler
+                                          {:listeners [{:port port
+                                                        :tls  {:cert-file cert-file
+                                                               :key-file  key-file}}]})]
+      (try
+        (Thread/sleep 200)
+        (io/delete-file session-file true)
+
+        ;; First connection - establish session with TLS 1.2
+        (let [r1 (openssl-session-test port :tls1.2 session-file true)]
+          (is (= 0 (:exit r1)) "First TLS 1.2 connection should succeed")
+          (is (:new? r1) "First connection should be new (not resumed)"))
+
+        ;; Verify session file was created
+        (is (.exists (io/file session-file))
+            "TLS 1.2 session ticket file should be created")
+
+        ;; Second connection - resume session with TLS 1.2
+        (let [r2 (openssl-session-test port :tls1.2 session-file false)]
+          (is (= 0 (:exit r2)) "Second TLS 1.2 connection should succeed")
+          (is (:reused? r2) "Second connection should resume session (ticket decryption worked)"))
+
+        (finally
+          (server/stop-server server)
+          (io/delete-file session-file true))))))

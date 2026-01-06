@@ -64,7 +64,12 @@
             # Java Clojure
             clojure
             jdk
-            pkgs.curl
+            (pkgs.curlFull.overrideAttrs (prev: {
+              pname = prev.pname + "-ssls";
+              configureFlags = prev.configureFlags or [ ] ++ [
+                "--enable-ssls-export"
+              ];
+            }))
 
             # H2O build dependencies from it's package.nix
             pkgs.cmake

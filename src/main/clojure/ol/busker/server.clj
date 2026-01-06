@@ -10,7 +10,8 @@
    [ol.busker.native :as h2o]
    [ol.busker.native.socket :as socket]
    [ol.busker.request :as request]
-   [ol.busker.response-queue :as response-queue])
+   [ol.busker.response-queue :as response-queue]
+   [ol.busker.tickets :as tickets])
   (:import
    [java.util.concurrent ExecutorService Executors TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
@@ -404,9 +405,9 @@
 (defn- create-http3-contexts
   "Create shared HTTP/3 contexts (ptls + quicly) for each TLS listener with HTTP/3 enabled.
    These contexts are shared across all workers.
-   Returns map: listener-index -> {:ptls-ctx ptls-ctx-ptr :quicly-ctx quicly-ctx-ptr}
+   Returns map: listener-index -> {:ptls-ctx ptls-ctx-ptr :quicly-ctx quicly-ctx-ptr :encrypt-ticket encrypt-ticket-ptr}
    Throws if context creation fails."
-  [listeners config-ptr]
+  [listeners config-ptr ticket-mgr-ptr ticket-lifetime-seconds]
   (into {}
         (keep-indexed
          (fn [idx listener]
@@ -418,12 +419,24 @@
                                  {:listener-index idx
                                   :cert-file cert-file
                                   :key-file key-file})))
-               (let [quicly-ctx (h2o/http3-create-quicly-ctx ptls-ctx config-ptr)]
+               ;; Wire ticket manager into ptls context for session tickets
+               (let [encrypt-ticket (when (and ticket-mgr-ptr (not (mem/null? ticket-mgr-ptr)))
+                                      (h2o/ticket-manager-create-encrypt-ticket ticket-mgr-ptr 1))
+                     _ (when encrypt-ticket
+                         (h2o/ptls-ctx-set-tickets ptls-ctx encrypt-ticket
+                                                   ticket-lifetime-seconds
+                                                   8192))  ; CLJ_MAX_EARLY_DATA_SIZE
+                     quicly-ctx (h2o/http3-create-quicly-ctx ptls-ctx config-ptr)]
                  (when (or (nil? quicly-ctx) (mem/null? quicly-ctx))
                    (h2o/http3-free-ptls-ctx ptls-ctx)
                    (throw (ex-info "Failed to create quicly context for HTTP/3"
                                    {:listener-index idx})))
-                 [idx {:ptls-ctx ptls-ctx :quicly-ctx quicly-ctx}]))))
+                 ;; Set QUIC tag for 0-RTT validation after quicly context is created
+                 (when (and ticket-mgr-ptr (not (mem/null? ticket-mgr-ptr)))
+                   (h2o/ticket-manager-set-quic-tag ticket-mgr-ptr quicly-ctx))
+                 [idx {:ptls-ctx ptls-ctx
+                       :quicly-ctx quicly-ctx
+                       :encrypt-ticket encrypt-ticket}]))))
          listeners)))
 
 (defn- create-http3-worker-contexts
@@ -469,7 +482,8 @@
 
 (defn with-defaults [{:keys [n-workers listeners max-connections executor server-name
                              compress? compress-min-size compress-gzip-level output-buffer-size
-                             compress-brotli-level compress-zstd-level buffer-pool]
+                             compress-brotli-level compress-zstd-level buffer-pool
+                             session-ticket-lifetime-seconds]
                       :or {compress-brotli-level 1
                            compress-gzip-level 1
                            compress-min-size 100
@@ -480,7 +494,8 @@
                            max-connections default-max-connections
                            n-workers 1
                            output-buffer-size 32768
-                           server-name "ol.busker/dev"}
+                           server-name "ol.busker/dev"
+                           session-ticket-lifetime-seconds tickets/default-ticket-lifetime-seconds}
                       :as config}]
 
   (let [validated-listeners (mapv validate-listener listeners)]
@@ -495,7 +510,8 @@
                    :max-connections max-connections
                    :n-workers n-workers
                    :output-buffer-size output-buffer-size
-                   :server-name server-name})))
+                   :server-name server-name
+                   :session-ticket-lifetime-seconds session-ticket-lifetime-seconds})))
 
 (defn run-server
   "Start an h2o webserver to serve the given Ring handler according to the
@@ -605,7 +621,25 @@
          loops    (h2o/create-loops n-workers)
          contexts (h2o/create-contexts arena loops config-ptr)
 
-         http3-contexts (create-http3-contexts listeners config-ptr)
+         ;; Session ticket management for TLS resumption and 0-RTT
+         ;; Create ticket manager for any TLS listener (needed for both TCP TLS and HTTP/3)
+         has-tls-listeners? (some :tls listeners)
+         session-ticket-lifetime-seconds (:session-ticket-lifetime-seconds config)
+         ticket-store (tickets/memory-ticket-store)
+         native-ticket-mgr (when has-tls-listeners?
+                             (h2o/ticket-manager-create session-ticket-lifetime-seconds))
+         key-manager (when native-ticket-mgr
+                       (-> (tickets/create-key-manager ticket-store native-ticket-mgr config)
+                           (tickets/start-key-manager!)))
+
+         ;; Wire ticket manager into TCP TLS contexts (SSL_CTX) for session resumption and 0-RTT
+         _ (when native-ticket-mgr
+             (doseq [[_idx {:keys [ssl-ctx]}] ssl-contexts]
+               (when ssl-ctx
+                 (h2o/ssl-ctx-set-tickets ssl-ctx native-ticket-mgr 8192))))
+
+         http3-contexts (create-http3-contexts listeners config-ptr
+                                               native-ticket-mgr session-ticket-lifetime-seconds)
          http3-worker-contexts (create-http3-worker-contexts n-workers listeners loops contexts config-ptr http3-contexts)
 
          wakeup-receivers (vec (for [ctx-ptr contexts]
@@ -683,7 +717,10 @@
       ::wakeup-receivers   wakeup-receivers
       ::dup-fds            dup-fds
       ::listener-sockets   listener-sockets
-      ::workers            workers})))
+      ::workers            workers
+      ::ticket-store       ticket-store
+      ::native-ticket-mgr  native-ticket-mgr
+      ::key-manager        key-manager})))
 
 (defn stop-server
   "Synchronously shut down the server, blocking until all requests and native
@@ -705,6 +742,10 @@
      (h2o/handler-set-shutting-down handler-ptr 1))
    ;; Signal shutdown to all workers
    (.set ^AtomicBoolean (::shutting-down? server) true)
+
+   ;; Stop key manager rotation thread early
+   (when-let [key-mgr (::key-manager server)]
+     (tickets/stop-key-manager! key-mgr))
 
    ;; Wake up all workers so they see the shutdown signal
    (evloop/broadcast-wake! (::workers server))
@@ -734,6 +775,10 @@
    ;; Note: worker contexts are already disposed by workers themselves
    (when-let [http3-contexts (::http3-contexts server)]
      (free-http3-contexts http3-contexts))
+
+   ;; Destroy native ticket manager after HTTP/3 contexts
+   (when-let [ticket-mgr (::native-ticket-mgr server)]
+     (h2o/ticket-manager-destroy ticket-mgr))
 
    ;; All workers have exited; clean up h2o resources
    (h2o/destroy-loops (::loops server))

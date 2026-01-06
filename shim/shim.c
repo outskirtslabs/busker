@@ -10,9 +10,21 @@
 #include <inttypes.h>
 #include <netinet/in.h>
 #include <openssl/err.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
 #include <openssl/ssl.h>
+#include <pthread.h>
+#include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
+
+/* Fallback for platforms without explicit_bzero */
+#if !defined(__GLIBC__) && !defined(__FreeBSD__) && !defined(__OpenBSD__)
+#include <openssl/crypto.h>
+#define explicit_bzero(s, n) OPENSSL_cleanse(s, n)
+#endif
 
 #define REQ_ERROR "request error\n"
 
@@ -270,6 +282,7 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
   }
 
   meta->has_body = (req->entity.base != NULL && req->entity.len > 0) ? 1 : 0;
+  meta->is_early_data = h2o_conn_is_early_data(req->conn) ? 1 : 0;
 
   if (req->scheme) {
     meta->scheme = (const uint8_t *)req->scheme->name.base;
@@ -1081,4 +1094,405 @@ int clj_h2o_conn_limit_try_acquire(void) {
 
 void clj_h2o_conn_limit_release(void) {
   atomic_fetch_sub(&clj_conn_count, 1);
+}
+
+/* Thread-safe key manager structure */
+struct clj_ticket_manager {
+    pthread_rwlock_t rwlock;
+    clj_session_ticket_t *keys;
+    size_t num_keys;
+    size_t capacity;
+    uint32_t ticket_lifetime_seconds;
+
+    /* QUIC transport params hash for 0-RTT validation */
+    uint8_t quic_tp_tag[8];
+    int quic_tp_tag_valid;
+};
+
+/* Wrapper for ptls encrypt_ticket callback */
+struct clj_encrypt_ticket {
+    ptls_encrypt_ticket_t super;  /* Must be first (callback interface) */
+    clj_ticket_manager_t *mgr;    /* Key manager reference */
+    uint8_t is_quic;              /* QUIC mode flag */
+};
+
+/* Thread-local to pass manager to OpenSSL callback */
+static __thread clj_ticket_manager_t *tls_current_mgr;
+
+/* Get current time in milliseconds */
+static uint64_t current_time_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+/* Generate initial random key with configured lifetime */
+static void generate_random_key(clj_session_ticket_t *key, uint64_t now_ms,
+                                uint32_t lifetime_seconds) {
+    ptls_openssl_random_bytes(key->name, CLJ_TICKET_KEY_NAME_LEN);
+    ptls_openssl_random_bytes(key->aes_key, CLJ_TICKET_AES_KEY_LEN);
+    ptls_openssl_random_bytes(key->hmac_key, CLJ_TICKET_HMAC_KEY_LEN);
+    key->not_before = now_ms;
+    key->not_after = now_ms + (uint64_t)lifetime_seconds * 1000 - 1;
+}
+
+clj_ticket_manager_t *clj_ticket_manager_create(uint32_t ticket_lifetime_seconds) {
+    clj_ticket_manager_t *mgr = calloc(1, sizeof(*mgr));
+    if (!mgr) return NULL;
+
+    if (pthread_rwlock_init(&mgr->rwlock, NULL) != 0) {
+        free(mgr);
+        return NULL;
+    }
+
+    mgr->ticket_lifetime_seconds = ticket_lifetime_seconds;
+    mgr->quic_tp_tag_valid = 0;
+
+    /* Generate initial key so server is ready immediately */
+    clj_session_ticket_t initial_key;
+    generate_random_key(&initial_key, current_time_ms(), ticket_lifetime_seconds);
+
+    mgr->keys = malloc(sizeof(initial_key));
+    if (!mgr->keys) {
+        pthread_rwlock_destroy(&mgr->rwlock);
+        free(mgr);
+        return NULL;
+    }
+    memcpy(mgr->keys, &initial_key, sizeof(initial_key));
+    mgr->num_keys = 1;
+    mgr->capacity = 1;
+
+    /* Secure erase the stack copy */
+    explicit_bzero(&initial_key, sizeof(initial_key));
+
+    return mgr;
+}
+
+void clj_ticket_manager_destroy(clj_ticket_manager_t *mgr) {
+    if (!mgr) return;
+
+    pthread_rwlock_wrlock(&mgr->rwlock);
+
+    /* Secure erase all keys */
+    if (mgr->keys) {
+        explicit_bzero(mgr->keys, mgr->num_keys * sizeof(*mgr->keys));
+        free(mgr->keys);
+    }
+
+    /* Secure erase QUIC tag */
+    explicit_bzero(mgr->quic_tp_tag, sizeof(mgr->quic_tp_tag));
+
+    pthread_rwlock_unlock(&mgr->rwlock);
+    pthread_rwlock_destroy(&mgr->rwlock);
+
+    free(mgr);
+}
+
+int clj_ticket_manager_set_keys(
+    clj_ticket_manager_t *mgr,
+    const clj_session_ticket_t *new_keys,
+    size_t num_keys)
+{
+    if (!mgr || (num_keys > 0 && !new_keys)) return -1;
+
+    /* Allocate new array outside lock */
+    clj_session_ticket_t *copy = NULL;
+    if (num_keys > 0) {
+        copy = malloc(num_keys * sizeof(*copy));
+        if (!copy) return -1;
+        memcpy(copy, new_keys, num_keys * sizeof(*copy));
+    }
+
+    /* Atomic swap under write lock */
+    pthread_rwlock_wrlock(&mgr->rwlock);
+    clj_session_ticket_t *old = mgr->keys;
+    size_t old_count = mgr->num_keys;
+    mgr->keys = copy;
+    mgr->num_keys = num_keys;
+    mgr->capacity = num_keys;
+    pthread_rwlock_unlock(&mgr->rwlock);
+
+    /* Secure erase and free old keys after unlock */
+    if (old) {
+        explicit_bzero(old, old_count * sizeof(*old));
+        free(old);
+    }
+
+    return 0;
+}
+
+size_t clj_ticket_manager_key_count(clj_ticket_manager_t *mgr) {
+    if (!mgr) return 0;
+
+    pthread_rwlock_rdlock(&mgr->rwlock);
+    size_t count = mgr->num_keys;
+    pthread_rwlock_unlock(&mgr->rwlock);
+
+    return count;
+}
+
+void clj_ticket_manager_set_quic_tag(
+    clj_ticket_manager_t *mgr,
+    const quicly_context_t *quic_ctx)
+{
+    if (!mgr || !quic_ctx) return;
+
+    /* Hash transport parameters that affect 0-RTT compatibility.
+       Uses first 8 bytes of SHA256 hash. */
+    uint64_t params[6] = {
+        quic_ctx->transport_params.max_streams_bidi,
+        quic_ctx->transport_params.max_streams_uni,
+        quic_ctx->transport_params.max_stream_data.bidi_local,
+        quic_ctx->transport_params.max_stream_data.bidi_remote,
+        quic_ctx->transport_params.max_stream_data.uni,
+        quic_ctx->transport_params.max_data
+    };
+
+    uint8_t hash[32];
+    if (ptls_calc_hash(&ptls_openssl_sha256, hash, params, sizeof(params)) != 0)
+        return;
+
+    pthread_rwlock_wrlock(&mgr->rwlock);
+    memcpy(mgr->quic_tp_tag, hash, 8);
+    mgr->quic_tp_tag_valid = 1;
+    pthread_rwlock_unlock(&mgr->rwlock);
+}
+
+/* OpenSSL ticket key callback - supplies key material; picotls does crypto */
+static int clj_ticket_key_callback(
+    unsigned char *key_name,   /* IN (decrypt) or OUT (encrypt): 16-byte key ID */
+    unsigned char *iv,         /* IN (decrypt) or OUT (encrypt): IV */
+    EVP_CIPHER_CTX *ctx,       /* OUT: initialized cipher context */
+    HMAC_CTX *hctx,            /* OUT: initialized HMAC context */
+    int enc)                   /* 1 = encrypt, 0 = decrypt */
+{
+    clj_ticket_manager_t *mgr = tls_current_mgr;
+    if (!mgr) return 0;
+
+    clj_session_ticket_t *key = NULL;
+
+    pthread_rwlock_rdlock(&mgr->rwlock);
+
+    if (enc) {
+        /* Encryption: find newest valid key */
+        uint64_t now = current_time_ms();
+        for (size_t i = 0; i < mgr->num_keys; i++) {
+            if (mgr->keys[i].not_before <= now && now < mgr->keys[i].not_after) {
+                key = &mgr->keys[i];
+                break;
+            }
+        }
+        if (!key) {
+            pthread_rwlock_unlock(&mgr->rwlock);
+            return 0;  /* No valid key */
+        }
+
+        /* Output key name, generate random IV */
+        memcpy(key_name, key->name, 16);
+        RAND_bytes(iv, EVP_MAX_IV_LENGTH);
+
+    } else {
+        /* Decryption: lookup key by name from ticket */
+        for (size_t i = 0; i < mgr->num_keys; i++) {
+            if (memcmp(mgr->keys[i].name, key_name, 16) == 0) {
+                key = &mgr->keys[i];
+                break;
+            }
+        }
+        if (!key) {
+            pthread_rwlock_unlock(&mgr->rwlock);
+            return 0;  /* Unknown key = ticket invalid */
+        }
+    }
+
+    /* Initialize OpenSSL contexts with key material.
+       OpenSSL copies key bytes internally so safe to unlock after. */
+    EVP_CipherInit_ex(ctx, EVP_aes_256_cbc(), NULL, key->aes_key, iv, enc);
+    HMAC_Init_ex(hctx, key->hmac_key, CLJ_TICKET_HMAC_KEY_LEN, EVP_sha256(), NULL);
+
+    pthread_rwlock_unlock(&mgr->rwlock);
+    return 1;
+}
+
+/* picotls encrypt_ticket callback (layers 1-3).
+   Thin wrapper that handles QUIC tag and delegates to picotls. */
+static int clj_encrypt_ticket_cb(
+    ptls_encrypt_ticket_t *_self,
+    ptls_t *tls,
+    int is_encrypt,
+    ptls_buffer_t *dst,
+    ptls_iovec_t src)
+{
+    (void)tls;  /* unused */
+    clj_encrypt_ticket_t *self = (clj_encrypt_ticket_t *)_self;
+    clj_ticket_manager_t *mgr = self->mgr;
+
+    /* Pass manager to callback via thread-local */
+    tls_current_mgr = mgr;
+
+    if (is_encrypt) {
+        /* Append QUIC transport params tag if QUIC mode */
+        ptls_iovec_t plaintext = src;
+        uint8_t *buf = NULL;
+
+        if (self->is_quic && mgr->quic_tp_tag_valid) {
+            buf = malloc(src.len + 8);
+            if (!buf) {
+                tls_current_mgr = NULL;
+                return PTLS_ERROR_NO_MEMORY;
+            }
+            memcpy(buf, src.base, src.len);
+            pthread_rwlock_rdlock(&mgr->rwlock);
+            memcpy(buf + src.len, mgr->quic_tp_tag, 8);
+            pthread_rwlock_unlock(&mgr->rwlock);
+            plaintext = (ptls_iovec_t){buf, src.len + 8};
+        }
+
+        /* Delegate to picotls - does AES-CBC + HMAC */
+        int ret = ptls_openssl_encrypt_ticket(dst, plaintext, clj_ticket_key_callback);
+
+        if (buf) free(buf);
+        tls_current_mgr = NULL;
+        return ret;
+
+    } else {
+        /* Delegate decryption to picotls */
+        size_t start_off = dst->off;
+        int ret = ptls_openssl_decrypt_ticket(dst, src, clj_ticket_key_callback);
+
+        tls_current_mgr = NULL;
+
+        if (ret != 0)
+            return ret;
+
+        /* Validate and strip QUIC tag if present */
+        if (self->is_quic && mgr->quic_tp_tag_valid) {
+            size_t decrypted_len = dst->off - start_off;
+            if (decrypted_len < 8)
+                return PTLS_ALERT_DECODE_ERROR;
+
+            dst->off -= 8;
+            pthread_rwlock_rdlock(&mgr->rwlock);
+            int tag_match = (memcmp(dst->base + dst->off, mgr->quic_tp_tag, 8) == 0);
+            pthread_rwlock_unlock(&mgr->rwlock);
+
+            if (!tag_match)
+                return PTLS_ERROR_REJECT_EARLY_DATA;  /* Config changed, reject 0-RTT */
+        }
+
+        return 0;
+    }
+}
+
+clj_encrypt_ticket_t *clj_ticket_manager_create_encrypt_ticket(
+    clj_ticket_manager_t *mgr,
+    int is_quic)
+{
+    if (!mgr) return NULL;
+
+    clj_encrypt_ticket_t *enc = calloc(1, sizeof(*enc));
+    if (!enc) return NULL;
+
+    enc->super.cb = clj_encrypt_ticket_cb;
+    enc->mgr = mgr;
+    enc->is_quic = is_quic ? 1 : 0;
+
+    return enc;
+}
+
+void clj_ptls_ctx_set_tickets(
+    ptls_context_t *ctx,
+    clj_encrypt_ticket_t *encrypt_ticket,
+    uint32_t ticket_lifetime,
+    uint32_t max_early_data_size)
+{
+    if (!ctx) return;
+
+    if (encrypt_ticket) {
+        ctx->encrypt_ticket = &encrypt_ticket->super;
+    }
+    ctx->ticket_lifetime = ticket_lifetime;
+    ctx->max_early_data_size = max_early_data_size;
+
+    /* Send 2 NewSessionTicket messages (like Cloudflare).
+       This gives client redundancy and curl seems to need 2 before sending early data. */
+    ctx->ticket_requests.server.max_count = 2;
+}
+
+/* SSL_CTX ticket manager storage for TCP TLS.
+   Uses ex_data to store the ticket manager pointer per SSL_CTX. */
+static int ssl_ctx_ticket_mgr_index = -1;
+static pthread_once_t ssl_ctx_ticket_mgr_once = PTHREAD_ONCE_INIT;
+
+static void init_ssl_ctx_ticket_mgr_index(void) {
+    ssl_ctx_ticket_mgr_index = SSL_CTX_get_ex_new_index(0, NULL, NULL, NULL, NULL);
+}
+
+/* OpenSSL ticket key callback for TCP TLS - retrieves manager from SSL_CTX ex_data */
+static int clj_ssl_ctx_ticket_key_callback(
+    SSL *ssl,
+    unsigned char *key_name,
+    unsigned char *iv,
+    EVP_CIPHER_CTX *ctx,
+    HMAC_CTX *hctx,
+    int enc)
+{
+    SSL_CTX *ssl_ctx = SSL_get_SSL_CTX(ssl);
+    clj_ticket_manager_t *mgr = SSL_CTX_get_ex_data(ssl_ctx, ssl_ctx_ticket_mgr_index);
+
+    if (!mgr) return 0;
+
+    /* Set thread-local for clj_ticket_key_callback */
+    tls_current_mgr = mgr;
+    int ret = clj_ticket_key_callback(key_name, iv, ctx, hctx, enc);
+    tls_current_mgr = NULL;
+
+    return ret;
+}
+
+void clj_ssl_ctx_set_tickets(
+    SSL_CTX *ctx,
+    clj_ticket_manager_t *mgr,
+    uint32_t max_early_data_size)
+{
+    if (!ctx || !mgr) return;
+
+    /* Initialize ex_data index once */
+    pthread_once(&ssl_ctx_ticket_mgr_once, init_ssl_ctx_ticket_mgr_index);
+    if (ssl_ctx_ticket_mgr_index < 0) {
+        fprintf(stderr, "[TICKET] ERROR: failed to get SSL_CTX ex_data index\n");
+        return;
+    }
+
+    /* Store manager in SSL_CTX ex_data */
+    SSL_CTX_set_ex_data(ctx, ssl_ctx_ticket_mgr_index, mgr);
+
+    /* Enable session resumption via stateless tickets (not server-side cache).
+       SSL_SESS_CACHE_SERVER enables ticket generation, NO_AUTO_CLEAR prevents
+       automatic purging of the internal cache (not needed for stateless). */
+    SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_SERVER | SSL_SESS_CACHE_NO_AUTO_CLEAR);
+
+    /* Session ID context identifies this server - required for session resumption.
+       Use a fixed value since all listeners share the same ticket keys. */
+    static const unsigned char session_id_ctx[] = "busker-h2o";
+    SSL_CTX_set_session_id_context(ctx, session_id_ctx, sizeof(session_id_ctx) - 1);
+
+    /* Set session timeout from ticket manager lifetime */
+    SSL_CTX_set_timeout(ctx, mgr->ticket_lifetime_seconds);
+
+    /* Set ticket key callback for TLS 1.2 and earlier.
+       For TLS 1.3, session tickets use PSK-based resumption but still need this
+       callback to encrypt/decrypt the ticket contents. */
+    SSL_CTX_set_tlsext_ticket_key_cb(ctx, clj_ssl_ctx_ticket_key_callback);
+
+    /* TLS 1.3: Set number of NewSessionTicket messages to send (default is 2).
+       BoringSSL uses this to control ticket issuance. */
+    SSL_CTX_set_num_tickets(ctx, 2);
+
+    /* Enable early data (0-RTT) - available in OpenSSL 1.1.1+ / BoringSSL */
+#ifdef SSL_CTX_set_max_early_data
+    SSL_CTX_set_max_early_data(ctx, max_early_data_size);
+#else
+    (void)max_early_data_size;  /* Suppress unused warning for older OpenSSL */
+#endif
 }

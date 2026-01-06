@@ -64,6 +64,7 @@ typedef struct {
 
   int http_version;
   short int has_body;
+  short int is_early_data;  /* 1 if request arrived via 0-RTT */
 } clj_req_meta_t;
 
 typedef struct clj_req_ctx_t clj_req_ctx_t;
@@ -297,6 +298,25 @@ typedef struct st_ptls_context_t ptls_context_t;
 typedef struct st_quicly_context_t quicly_context_t;
 typedef struct clj_http3_ctx_t clj_http3_ctx_t;
 
+/* Session ticket key constants */
+#define CLJ_TICKET_KEY_NAME_LEN 16   /* bytes */
+#define CLJ_TICKET_AES_KEY_LEN  32   /* bytes (AES-256) */
+#define CLJ_TICKET_HMAC_KEY_LEN 64   /* bytes (SHA-256 block size) */
+#define CLJ_MAX_EARLY_DATA_SIZE 8192 /* bytes, matches h2o */
+
+/* Session ticket key - matches Clojure key map */
+typedef struct clj_session_ticket {
+    uint8_t name[CLJ_TICKET_KEY_NAME_LEN];   /* Key identifier (in ticket header) */
+    uint8_t aes_key[CLJ_TICKET_AES_KEY_LEN]; /* AES-256 encryption key */
+    uint8_t hmac_key[CLJ_TICKET_HMAC_KEY_LEN]; /* HMAC-SHA256 key */
+    uint64_t not_before;                     /* Activation time (ms since epoch) */
+    uint64_t not_after;                      /* Expiration time (ms since epoch) */
+} clj_session_ticket_t;
+
+/* Forward declarations for ticket manager types */
+typedef struct clj_ticket_manager clj_ticket_manager_t;
+typedef struct clj_encrypt_ticket clj_encrypt_ticket_t;
+
 /* Create picotls context for QUIC TLS 1.3.
  * Uses OpenSSL-backed primitives for cryptographic operations.
  * Configures ALPN callback for HTTP/3 protocol negotiation.
@@ -378,5 +398,49 @@ int clj_h2o_conn_limit_try_acquire(void);
 
 /* Release a connection slot (decrement counter). */
 void clj_h2o_conn_limit_release(void);
+
+/* Session ticket manager lifecycle */
+
+/* Create a new ticket manager. Returns NULL on allocation failure. */
+clj_ticket_manager_t *clj_ticket_manager_create(uint32_t ticket_lifetime_seconds);
+
+/* Destroy ticket manager and securely erase all keys. */
+void clj_ticket_manager_destroy(clj_ticket_manager_t *mgr);
+
+/* Replace all keys atomically. Thread-safe via copy-on-write.
+   Keys are copied, caller retains ownership of input array. */
+int clj_ticket_manager_set_keys(
+    clj_ticket_manager_t *mgr,
+    const clj_session_ticket_t *keys,
+    size_t num_keys);
+
+/* Get current key count (for monitoring). */
+size_t clj_ticket_manager_key_count(clj_ticket_manager_t *mgr);
+
+/* Set the QUIC transport params hash. Called after quicly_context creation. */
+void clj_ticket_manager_set_quic_tag(
+    clj_ticket_manager_t *mgr,
+    const quicly_context_t *quic_ctx);
+
+/* Wire ticket manager into ptls context for session tickets.
+   Creates encrypt_ticket callback structure and configures ticket lifetime. */
+clj_encrypt_ticket_t *clj_ticket_manager_create_encrypt_ticket(
+    clj_ticket_manager_t *mgr,
+    int is_quic);
+
+/* Configure ptls context for session tickets.
+   Sets encrypt_ticket callback, ticket lifetime, and max early data size. */
+void clj_ptls_ctx_set_tickets(
+    ptls_context_t *ctx,
+    clj_encrypt_ticket_t *encrypt_ticket,
+    uint32_t ticket_lifetime,
+    uint32_t max_early_data_size);
+
+/* Configure SSL_CTX for TCP TLS session tickets and 0-RTT.
+   Wires the ticket manager into the OpenSSL ticket key callback. */
+void clj_ssl_ctx_set_tickets(
+    SSL_CTX *ctx,
+    clj_ticket_manager_t *mgr,
+    uint32_t max_early_data_size);
 
 #endif /* CLJ_H2O_SHIM_H */
