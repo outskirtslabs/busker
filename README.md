@@ -61,21 +61,9 @@ com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.1"}
 
 Busker is distributed under the [EUPL-1.2](https://spdx.org/licenses/EUPL-1.2.html).
 
-Copyright © 2025 Casey Link <casey@outskirtslabs.com>
+Copyright © 2025-2026 Casey Link
 
-Some files included in this project are from third-party sources and retain their original licenses as indicated in per-file license headers.
-
-Binary distributions (JAR files on Clojars and GitHub releases) bundle the following third-party projects:
-
-- [h2o](https://github.com/h2o/h2o) is licensed under the MIT License and copyright [DeNA Co., Ltd.](http://dena.com/), [Kazuho Oku](https://github.com/kazuho/), and contributors.
-
-- [Brotli](https://github.com/google/brotli) is licensed under the MIT License and copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
-
-- [Zstandard (zstd)](https://github.com/facebook/zstd) is licensed under the BSD License and copyright (c) Meta Platforms, Inc.
-
-- [OpenSSL](https://github.com/openssl/openssl) is licensed under the Apache 2.0 License and copyright (c) 1998-2025 The OpenSSL Project Authors, and copyright (c) 1995-1998 Eric A. Young, Tim J. Hudson.
-
-
-
+Some files included in this project and in binary distributions (JAR files on Clojars and GitHub releases)
+are from third-party sources and retain their original licenses as indicated in [NOTICE](./NOTICE).
 
 [coffi]: https://github.com/IGJoshua/coffi
