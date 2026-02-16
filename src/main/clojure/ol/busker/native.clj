@@ -599,58 +599,87 @@
           {:ptr ptr :len len}))
       {:ptr mem/null :len 0})))
 
+(defn- write-tls-native-outputs!
+  [cert-out-seg cert-len-out-seg key-out-seg key-len-out-seg
+   cert-chain-pem private-key-pem]
+  (let [{cert-ptr :ptr cert-len :len}
+        (string->tls-native-bytes cert-chain-pem)
+        {key-ptr :ptr key-len :len}
+        (string->tls-native-bytes private-key-pem)
+        valid? (and (not (mem/null? cert-ptr))
+                    (not (mem/null? key-ptr))
+                    (pos? cert-len)
+                    (pos? key-len))]
+    (mem/write-address cert-out-seg cert-ptr)
+    (mem/write-long cert-len-out-seg 0 (long cert-len))
+    (mem/write-address key-out-seg key-ptr)
+    (mem/write-long key-len-out-seg 0 (long key-len))
+    (if valid? 1 -1)))
+
+(defn- reset-tls-native-outputs!
+  [cert-out-seg cert-len-out-seg key-out-seg key-len-out-seg]
+  (mem/write-address cert-out-seg mem/null)
+  (mem/write-long cert-len-out-seg 0 0)
+  (mem/write-address key-out-seg mem/null)
+  (mem/write-long key-len-out-seg 0 0))
+
 (defn build-tls-lookup-callback
   "Build Clojure callback pointer for native TLS handshakes.
-   lookup-fn takes hostname and returns either:
+   `lookup-fn` takes hostname and returns either:
    - nil for miss
    - {:cert-chain-pem \"...\" :private-key-pem \"...\"} for success
+
+   Hostname is nil when client hello omits SNI.
 
    Returns pinned callback refs that must be retained while server runs.
    This function does not mutate process-global native state."
   [lookup-fn]
   {:pre [(ifn? lookup-fn)]}
-  (let [cb (fn [sni sni-len cert-out cert-len-out key-out key-len-out _user-ctx]
-             (let [sni-len (long sni-len)
-                   hostname (when (and sni
-                                       (not (mem/null? sni))
-                                       (pos? sni-len))
-                              (String. (mem/read-bytes (mem/reinterpret sni sni-len) sni-len)
-                                       "UTF-8"))
-                   cert-out-seg (mem/reinterpret cert-out mem/pointer-size)
-                   cert-len-out-seg (mem/reinterpret cert-len-out (mem/size-of ::mem/long))
-                   key-out-seg (mem/reinterpret key-out mem/pointer-size)
-                   key-len-out-seg (mem/reinterpret key-len-out (mem/size-of ::mem/long))]
-               (mem/write-address cert-out-seg mem/null)
-               (mem/write-long cert-len-out-seg 0 0)
-               (mem/write-address key-out-seg mem/null)
-               (mem/write-long key-len-out-seg 0 0)
-               (try
-                 (if-let [{:keys [cert-chain-pem private-key-pem]} (and hostname (lookup-fn hostname))]
-                   (if (and (string? cert-chain-pem) (string? private-key-pem))
-                     (let [{cert-ptr :ptr cert-len :len}
-                           (string->tls-native-bytes cert-chain-pem)
-                           {key-ptr :ptr key-len :len}
-                           (string->tls-native-bytes private-key-pem)]
-                       (mem/write-address cert-out-seg cert-ptr)
-                       (mem/write-long cert-len-out-seg 0 (long cert-len))
-                       (mem/write-address key-out-seg key-ptr)
-                       (mem/write-long key-len-out-seg 0 (long key-len))
-                       (if (or (mem/null? cert-ptr)
-                               (mem/null? key-ptr)
-                               (not (pos? cert-len))
-                               (not (pos? key-len)))
-                         -1
-                         1))
-                     -1)
-                   0)
-                 (catch Throwable _
-                   -1))))
+  (let [cb     (fn [sni sni-len cert-out cert-len-out key-out key-len-out _user-ctx]
+                 (try
+                   (let [sni-len          (long sni-len)
+                         hostname         (when (pos? sni-len)
+                                            (let [sni-seg (mem/reinterpret sni sni-len)]
+                                              (when-not (mem/null? sni-seg)
+                                                (String. (mem/read-bytes sni-seg sni-len)
+                                                         "UTF-8"))))
+                         cert-out-seg     (mem/reinterpret cert-out mem/pointer-size)
+                         cert-len-out-seg (mem/reinterpret cert-len-out (mem/size-of ::mem/long))
+                         key-out-seg      (mem/reinterpret key-out mem/pointer-size)
+                         key-len-out-seg  (mem/reinterpret key-len-out (mem/size-of ::mem/long))]
+                     (reset-tls-native-outputs! cert-out-seg
+                                                cert-len-out-seg
+                                                key-out-seg
+                                                key-len-out-seg)
+                     (if-let [{:keys [cert-chain-pem private-key-pem]} (lookup-fn hostname)]
+                       (if (and (string? cert-chain-pem) (string? private-key-pem))
+                         (write-tls-native-outputs! cert-out-seg
+                                                    cert-len-out-seg
+                                                    key-out-seg
+                                                    key-len-out-seg
+                                                    cert-chain-pem
+                                                    private-key-pem)
+                         -1)
+                       0))
+                   (catch Throwable _
+                     (try
+                       (let [cert-out-seg     (mem/reinterpret cert-out mem/pointer-size)
+                             cert-len-out-seg (mem/reinterpret cert-len-out (mem/size-of ::mem/long))
+                             key-out-seg      (mem/reinterpret key-out mem/pointer-size)
+                             key-len-out-seg  (mem/reinterpret key-len-out (mem/size-of ::mem/long))]
+                         (reset-tls-native-outputs! cert-out-seg
+                                                    cert-len-out-seg
+                                                    key-out-seg
+                                                    key-len-out-seg))
+                       (catch Throwable _
+                         nil))
+                     -1)))
         cb-ptr (mem/serialize cb [::ffi/fn [::mem/pointer ::mem/long
                                             ::mem/pointer ::mem/pointer
                                             ::mem/pointer ::mem/pointer
                                             ::mem/pointer]
                                   ::mem/int])]
-    {:callback cb
+    {:callback     cb
      :callback-ptr cb-ptr}))
 
 #_(defcfn req-print-offsets

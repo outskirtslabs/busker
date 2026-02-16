@@ -4,6 +4,14 @@
    [ol.busker.config :as cfg]
    [ol.busker.specs :as specs]))
 
+(defn- load-errors
+  [config]
+  (try
+    (cfg/load! config)
+    nil
+    (catch clojure.lang.ExceptionInfo e
+      (:errors (ex-data e)))))
+
 (deftest bind-address-valid-test
   (testing "accepts supported bind address forms"
     (doseq [addr [":8080"
@@ -274,6 +282,38 @@
       (is (= 2 (count errors)))
       (is (every? #(= ::cfg/entrypoint-bind-address-invalid (:error %)) errors)))))
 
+(deftest validate-default-domain-test
+  (testing "rejects blank default-domain with dedicated error"
+    (let [errors (load-errors {:entrypoints [{:name :web
+                                              :bind ":8080"
+                                              :http3? false}]
+                               :default-domain "   "})]
+      (is (some #(= ::cfg/default-domain-blank (:error %)) errors))))
+  (testing "rejects default-domain not present in domains"
+    (let [errors (load-errors {:entrypoints [{:name :web
+                                              :bind ":8080"
+                                              :http3? false}]
+                               :domains ["example.com"]
+                               :default-domain "fallback.example"})]
+      (is (= [{:msg "Default domain must be present in :domains when domains are configured."
+               :error ::cfg/default-domain-not-in-domains
+               :data {:default-domain "fallback.example"
+                      :domains ["example.com"]}}]
+             errors))))
+  (testing "accepts default-domain when present in domains"
+    (let [config (cfg/load! {:entrypoints [{:name :web
+                                            :bind ":8080"
+                                            :http3? false}]
+                             :domains ["fallback.example" "example.com"]
+                             :default-domain "fallback.example"})]
+      (is (= "fallback.example" (:default-domain config)))))
+  (testing "accepts default-domain when domains are not configured"
+    (let [config (cfg/load! {:entrypoints [{:name :web
+                                            :bind ":8080"
+                                            :http3? false}]
+                             :default-domain "fallback.example"})]
+      (is (= "fallback.example" (:default-domain config))))))
+
 (deftest load!-test
   (testing "returns config with defaults on valid input"
     (let [config (cfg/load! {:entrypoints [{:name :web :bind ":8080" :http3? false}]})]
@@ -329,4 +369,6 @@
   (testing "spec namespace exposes config defaults used by config loader"
     (is (= 1 (:n-workers specs/default-config)))
     (is (= 1024 (:max-connections specs/default-config)))
-    (is (= 86400 (:session-ticket-lifetime-seconds specs/default-config)))))
+    (is (= 86400 (:session-ticket-lifetime-seconds specs/default-config))))
+  (testing "default-config does not auto-populate :default-domain"
+    (is (not (contains? specs/default-config :default-domain)))))

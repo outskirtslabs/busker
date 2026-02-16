@@ -1,14 +1,15 @@
 (ns ol.busker.server-test
   (:require
-   [ol.busker.protocols :as h2o]
-   [coffi.mem :as mem]
    [babashka.http-client :as http]
+   [babashka.process :as p]
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :as test :refer [deftest is testing]]
-   [ol.busker.native :as native]
-   [ol.busker.server :as server]
+   [coffi.mem :as mem]
    [ol.busker.clave-adapter :as clave-adapter]
+   [ol.busker.native :as native]
+   [ol.busker.protocols :as h2o]
+   [ol.busker.server :as server]
    [ol.busker.test-utils :as util]
    [ol.clave.certificate :as clave-certificate])
   (:import
@@ -34,6 +35,15 @@
                         {:uri (str base path)
                          :method method}))
    (dissoc :request)))
+
+(defn- openssl-no-sni-request
+  [port path & {:keys [timeout-seconds]
+                :or {timeout-seconds 5}}]
+  (let [cmd (format
+             "printf 'GET %s HTTP/1.1\\r\\nHost: fallback.example\\r\\nConnection: close\\r\\n\\r\\n' | timeout %d openssl s_client -connect 127.0.0.1:%d -noservername -quiet 2>&1"
+             path timeout-seconds port)]
+    (p/shell {:out :string :err :string :continue true}
+             "bash" "-lc" cmd)))
 
 (defmacro with-server
   {:clj-kondo/lint-as 'clojure.core/with-open}
@@ -252,6 +262,11 @@
   []
   (with-open [in (io/input-stream cert-file)]
     (.generateCertificate (CertificateFactory/getInstance "X.509") in)))
+
+(defn- fixture-tls-bundle
+  []
+  {:certificate [(slurp cert-file)]
+   :private-key (slurp key-file)})
 
 (deftest test-tls-listener
   (testing "TLS listener with HTTPS connections"
@@ -505,8 +520,8 @@
                                  :tls {:cert-file cert-file
                                        :key-file key-file}}]}
           lookup-fn (with-redefs [clave-adapter/lookup-certificate (fn [_runtime _hostname]
-                                                                      (swap! clave-calls inc)
-                                                                      nil)]
+                                                                     (swap! clave-calls inc)
+                                                                     nil)]
                       (#'server/build-tls-lookup-fn config {:system {:id ::runtime}}))
           result (lookup-fn "example.com")]
       (is (= 0 @clave-calls) "Static cert should short-circuit clave lookup")
@@ -538,6 +553,41 @@
         (is (str/includes? (:cert-chain-pem result) "BEGIN CERTIFICATE"))
         (is (str/includes? (:private-key-pem result) "BEGIN PRIVATE KEY"))))))
 
+(deftest tls-lookup-no-sni-uses-default-domain-test
+  (testing "lookup function routes missing SNI to :default-domain"
+    (let [calls (atom [])
+          expected-material {:cert-chain-pem (slurp cert-file)
+                             :private-key-pem (slurp key-file)}
+          config {:default-domain "fallback.example"
+                  :entrypoints [{:name :https
+                                 :bind "127.0.0.1:8443"
+                                 :http3? false
+                                 :tls {:issuers [{:directory-url "https://acme.example/directory"}]}}]}
+          lookup-fn (#'server/build-tls-lookup-fn
+                     config
+                     {:lookup-fn (fn [hostname]
+                                   (swap! calls conj hostname)
+                                   (when (= hostname "fallback.example")
+                                     (fixture-tls-bundle)))})
+          result (lookup-fn nil)]
+      (is (= ["fallback.example"] @calls))
+      (is (= expected-material result)))))
+
+(deftest tls-lookup-no-sni-miss-without-default-domain-test
+  (testing "lookup function returns miss when SNI is missing and :default-domain is absent"
+    (let [calls (atom [])
+          config {:entrypoints [{:name :https
+                                 :bind "127.0.0.1:8443"
+                                 :http3? false
+                                 :tls {:issuers [{:directory-url "https://acme.example/directory"}]}}]}
+          lookup-fn (#'server/build-tls-lookup-fn
+                     config
+                     {:lookup-fn (fn [hostname]
+                                   (swap! calls conj hostname)
+                                   (fixture-tls-bundle))})]
+      (is (nil? (lookup-fn nil)))
+      (is (empty? @calls)))))
+
 (deftest tls-lookup-callback-lifecycle-test
   (testing "server builds lookup callback at startup"
     (let [calls (atom [])]
@@ -562,3 +612,67 @@
                                                                 :key-file key-file}}])]
           (is (= 200 (:status (req :get "/")))))
         (is (= 1 (count (filter #(= :register (first %)) @calls))))))))
+
+(deftest tcp-tls-no-sni-default-domain-success-test
+  (testing "TCP TLS handshake without SNI succeeds when :default-domain is configured"
+    (let [port 17991
+          runtime {:system {:id ::runtime}
+                   :lookup-fn (fn [hostname]
+                                (when (= hostname "fallback.example")
+                                  (fixture-tls-bundle)))}]
+      (with-redefs [clave-adapter/build-managed-plan
+                    (fn [_]
+                      {:domains ["fallback.example"]
+                       :managed-entrypoints [{:name :tls
+                                              :bind (str "127.0.0.1:" port)
+                                              :http3? false
+                                              :tls {:issuers [{:directory-url "https://acme.example/directory"}]}}]
+                       :clave-config {:issuers [{:directory-url "https://acme.example/directory"}]}})
+                    clave-adapter/start! (fn [_] runtime)
+                    clave-adapter/wrap-handler (fn [handler _] handler)
+                    clave-adapter/stop! (fn [_] nil)]
+        (with-server [_server (server/run-server (fn [_] {:status 200 :body "fallback-ok"})
+                                                 {:default-domain "fallback.example"
+                                                  :domains ["fallback.example"]
+                                                  :entrypoints [{:name :tls
+                                                                 :bind (str "127.0.0.1:" port)
+                                                                 :http3? false
+                                                                 :tls {:issuers [{:directory-url "https://acme.example/directory"}]}}]})]
+          (Thread/sleep 200)
+          (let [result (openssl-no-sni-request port "/")]
+            (is (= {:exit 0
+                    :status-line? true
+                    :body? true}
+                   {:exit (:exit result)
+                    :status-line? (str/includes? (:out result) "HTTP/1.1 200")
+                    :body? (str/includes? (:out result) "fallback-ok")})
+                (str "No-SNI handshake should succeed. stderr: "
+                     (:err result)
+                     " output: "
+                     (:out result)))))))))
+
+(deftest tcp-tls-no-sni-default-domain-miss-test
+  (testing "TCP TLS handshake without SNI fails when :default-domain is absent"
+    (let [port 17992
+          runtime {:system {:id ::runtime}
+                   :lookup-fn (fn [_hostname] nil)}]
+      (with-redefs [clave-adapter/build-managed-plan
+                    (fn [_]
+                      {:domains ["fallback.example"]
+                       :managed-entrypoints [{:name :tls
+                                              :bind (str "127.0.0.1:" port)
+                                              :http3? false
+                                              :tls {:issuers [{:directory-url "https://acme.example/directory"}]}}]
+                       :clave-config {:issuers [{:directory-url "https://acme.example/directory"}]}})
+                    clave-adapter/start! (fn [_] runtime)
+                    clave-adapter/wrap-handler (fn [handler _] handler)
+                    clave-adapter/stop! (fn [_] nil)]
+        (with-server [_server (server/run-server (fn [_] {:status 200 :body "unexpected"})
+                                                 {:entrypoints [{:name :tls
+                                                                 :bind (str "127.0.0.1:" port)
+                                                                 :http3? false
+                                                                 :tls {:issuers [{:directory-url "https://acme.example/directory"}]}}]})]
+          (Thread/sleep 200)
+          (let [result (openssl-no-sni-request port "/")]
+            (is (not= 0 (:exit result))
+                (str "No-SNI handshake should fail without :default-domain. output: " (:out result)))))))))

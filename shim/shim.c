@@ -707,8 +707,6 @@ static int clj_tls_lookup_pem_for_sni(clj_tls_lookup_cb lookup_cb,
                                       size_t *cert_chain_pem_len_out,
                                       uint8_t **private_key_pem_out,
                                       size_t *private_key_pem_len_out) {
-  if (sni_hostname == NULL || sni_hostname_len == 0)
-    return 0;
   if (lookup_cb == NULL)
     return 0;
 
@@ -716,7 +714,14 @@ static int clj_tls_lookup_pem_for_sni(clj_tls_lookup_cb lookup_cb,
   uint8_t *private_key_pem = NULL;
   size_t cert_chain_pem_len = 0;
   size_t private_key_pem_len = 0;
-  int status = lookup_cb(sni_hostname, sni_hostname_len,
+  const uint8_t *lookup_hostname = sni_hostname;
+  size_t lookup_hostname_len = sni_hostname_len;
+  if (lookup_hostname == NULL)
+    lookup_hostname_len = 0;
+  if (lookup_hostname_len == 0)
+    lookup_hostname = NULL;
+
+  int status = lookup_cb(lookup_hostname, lookup_hostname_len,
                   &cert_chain_pem, &cert_chain_pem_len, &private_key_pem,
                   &private_key_pem_len, lookup_user_ctx);
 
@@ -738,6 +743,17 @@ static int clj_tls_lookup_pem_for_sni(clj_tls_lookup_cb lookup_cb,
   *private_key_pem_out = private_key_pem;
   *private_key_pem_len_out = private_key_pem_len;
   return 1;
+}
+
+static int clj_bytes_equal(const uint8_t *lhs, size_t lhs_len,
+                           const uint8_t *rhs, size_t rhs_len) {
+  if (lhs_len != rhs_len)
+    return 0;
+  if (lhs_len == 0)
+    return 1;
+  if (lhs == NULL || rhs == NULL)
+    return 0;
+  return memcmp(lhs, rhs, lhs_len) == 0;
 }
 
 static int clj_ssl_use_chain_from_pem(SSL *ssl, const uint8_t *cert_chain_pem,
@@ -841,19 +857,19 @@ static int clj_ssl_select_certificate_cb(SSL *ssl, void *arg) {
   }
 
   const char *server_name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
-  if (server_name == NULL || server_name[0] == '\0') {
-    /* TODO: allow configurable default certificate when client omits SNI. */
-    return 0;
+  const uint8_t *server_name_bytes = NULL;
+  size_t server_name_len = 0;
+  if (server_name != NULL && server_name[0] != '\0') {
+    server_name_bytes = (const uint8_t *)server_name;
+    server_name_len = strlen(server_name);
   }
-
-  size_t server_name_len = strlen(server_name);
   uint8_t *cert_chain_pem = NULL;
   uint8_t *private_key_pem = NULL;
   size_t cert_chain_pem_len = 0;
   size_t private_key_pem_len = 0;
   int status = clj_tls_lookup_pem_for_sni(binding->cb, binding->user_ctx,
-                                          (const uint8_t *)server_name,
-                                          server_name_len, &cert_chain_pem,
+                                          server_name_bytes, server_name_len,
+                                          &cert_chain_pem,
                                           &cert_chain_pem_len,
                                           &private_key_pem,
                                           &private_key_pem_len);
@@ -982,17 +998,16 @@ static int clj_on_client_hello_cb(ptls_on_client_hello_t *self,
       H2O_STRUCT_FROM_MEMBER(clj_ptls_wrapper_t, on_client_hello, self);
 
   if (wrapper->lookup_cb != NULL) {
-    if (params->server_name.base == NULL || params->server_name.len == 0) {
-      /* TODO: allow configurable default certificate when client omits SNI. */
-      return PTLS_ALERT_UNRECOGNIZED_NAME;
+    const uint8_t *hostname = NULL;
+    size_t hostname_len = 0;
+    if (params->server_name.base != NULL && params->server_name.len != 0) {
+      if (ptls_set_server_name(tls, (const char *)params->server_name.base,
+                               params->server_name.len) != 0)
+        return PTLS_ALERT_INTERNAL_ERROR;
+      hostname = (const uint8_t *)params->server_name.base;
+      hostname_len = params->server_name.len;
     }
 
-    if (ptls_set_server_name(tls, (const char *)params->server_name.base,
-                             params->server_name.len) != 0)
-      return PTLS_ALERT_INTERNAL_ERROR;
-
-    const uint8_t *hostname = (const uint8_t *)params->server_name.base;
-    size_t hostname_len = params->server_name.len;
     uint8_t *cert_chain_pem = NULL;
     uint8_t *private_key_pem = NULL;
     size_t cert_chain_pem_len = 0;
@@ -1009,8 +1024,8 @@ static int clj_on_client_hello_cb(ptls_on_client_hello_t *self,
 
     clj_ptls_identity_cache_entry_t *entry = wrapper->cache_head;
     while (entry != NULL) {
-      if (entry->hostname_len == hostname_len &&
-          memcmp(entry->hostname, hostname, hostname_len) == 0)
+      if (clj_bytes_equal(entry->hostname, entry->hostname_len, hostname,
+                          hostname_len))
         break;
       entry = entry->next;
     }
@@ -1030,13 +1045,15 @@ static int clj_on_client_hello_cb(ptls_on_client_hello_t *self,
         return PTLS_ALERT_INTERNAL_ERROR;
       }
 
-      new_entry->hostname = clj_h2o_tls_memdup(hostname, hostname_len);
-      if (new_entry->hostname == NULL) {
-        pthread_mutex_unlock(&wrapper->cache_mutex);
-        free(cert_chain_pem);
-        free(private_key_pem);
-        free(new_entry);
-        return PTLS_ALERT_INTERNAL_ERROR;
+      if (hostname_len != 0) {
+        new_entry->hostname = clj_h2o_tls_memdup(hostname, hostname_len);
+        if (new_entry->hostname == NULL) {
+          pthread_mutex_unlock(&wrapper->cache_mutex);
+          free(cert_chain_pem);
+          free(private_key_pem);
+          free(new_entry);
+          return PTLS_ALERT_INTERNAL_ERROR;
+        }
       }
       new_entry->hostname_len = hostname_len;
 

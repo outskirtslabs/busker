@@ -1,10 +1,11 @@
 (ns ol.busker.http3-test
   (:require
-   [coffi.mem :as mem]
    [babashka.process :as p]
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
+   [coffi.mem :as mem]
+   [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as proto]
    [ol.busker.server :as server]
@@ -13,6 +14,11 @@
 (def cert-file (.getAbsolutePath (io/file "src/test/fixtures/server.crt")))
 (def key-file (.getAbsolutePath (io/file "src/test/fixtures/server.key")))
 (def tls-sni-host "localhost.examp1e.net")
+
+(defn- fixture-tls-bundle
+  []
+  {:certificate [(slurp cert-file)]
+   :private-key (slurp key-file)})
 
 (defn- udp-port-bound?
   "Check if a UDP socket is bound on the given port.
@@ -119,6 +125,41 @@
               "HTTP/3 response body should match expected"))
         (finally
           (server/stop-server server))))))
+
+(deftest http3-no-sni-default-domain-success-test
+  (testing "HTTP/3 handshake without SNI succeeds when :default-domain is configured"
+    (let [port 18456
+          runtime {:system {:id ::runtime}
+                   :lookup-fn (fn [hostname]
+                                (when (= hostname "fallback.example")
+                                  (fixture-tls-bundle)))}]
+      (with-redefs [clave-adapter/build-managed-plan
+                    (fn [_]
+                      {:domains ["fallback.example"]
+                       :managed-entrypoints [{:name :tls
+                                              :bind (str "127.0.0.1:" port)
+                                              :http3? true
+                                              :tls {:issuers [{:directory-url "https://acme.example/directory"}]}}]
+                       :clave-config {:issuers [{:directory-url "https://acme.example/directory"}]}})
+                    clave-adapter/start! (fn [_] runtime)
+                    clave-adapter/wrap-handler (fn [handler _] handler)
+                    clave-adapter/stop! (fn [_] nil)]
+        (let [server (server/run-server (fn [_] {:status 200 :body "h3-fallback-ok"})
+                                        {:default-domain "fallback.example"
+                                         :domains ["fallback.example"]
+                                         :entrypoints [{:name :tls
+                                                        :bind (str "127.0.0.1:" port)
+                                                        :http3? true
+                                                        :tls {:issuers [{:directory-url "https://acme.example/directory"}]}}]})]
+          (try
+            (Thread/sleep 200)
+            (let [result (util/curl :https :h3 port "/" :host "127.0.0.1" :max-time 5)]
+              (is (= 0 (:exit result))
+                  (str "HTTP/3 no-SNI request should succeed. stderr: " (:err result)))
+              (when (zero? (:exit result))
+                (is (= "h3-fallback-ok" (:out result)))))
+            (finally
+              (server/stop-server server))))))))
 
 (deftest http3-request-with-streaming-body-test
   (testing "HTTP/3 streaming response works correctly"

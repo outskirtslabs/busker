@@ -29,7 +29,7 @@
         cmd (into ["clojure" "-M:dev" "-m" "ol.busker.main"] args)]
     (try
       (let [{:keys [exit]} (apply p/shell {:continue true :extra-env extra-env}
-                                 cmd)]
+                                  cmd)]
         (when-not (zero? exit)
           (throw (ex-info "Managed TLS smoke run failed." {:exit exit}))))
       (finally

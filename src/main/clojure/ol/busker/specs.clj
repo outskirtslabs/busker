@@ -308,6 +308,12 @@
    :default nil})
 (s/def ::domains (s/coll-of non-blank-string? :kind vector?))
 
+(def default-domain
+  {:key ::default-domain
+   :doc "Fallback domain name used when TLS SNI is not present."
+   :default nil})
+(s/def ::default-domain non-blank-string?)
+
 (def n-workers
   {:key ::n-workers
    :doc "Event loop worker thread count."
@@ -513,6 +519,7 @@
 (s/def ::config
   (s/keys :req-un [::entrypoints]
           :opt-un [::domains
+                   ::default-domain
                    ::n-workers
                    ::executor
                    ::max-connections
@@ -586,6 +593,7 @@
    clave-config
    managed-plan
    domains
+   default-domain
    n-workers
    executor
    max-connections

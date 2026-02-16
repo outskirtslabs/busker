@@ -291,24 +291,44 @@
 
 (defn validate-config
   "Validate entire config, returning vector of all errors."
-  [config]
-  (let [entrypoints (:entrypoints config)
-        missing-entrypoints? (or (nil? entrypoints) (empty? entrypoints))
-        spec-errors (when (and (not missing-entrypoints?)
-                               (not (specs/valid-config? config)))
-                      [{:msg "Config failed spec validation."
-                        :error ::config-spec-invalid
-                        :data {:problems (-> config
-                                             specs/explain-config
-                                             :clojure.spec.alpha/problems)}}])]
+  [{:keys [entrypoints default-domain domains] :as config}]
+  (let [missing-entrypoints?    (or (nil? entrypoints) (empty? entrypoints))
+        default-domain-present? (contains? config :default-domain)
+        domains-present?        (contains? config :domains)
+        blank-default-domain?   (and (string? default-domain)
+                                     (str/blank? default-domain))
+        default-domain-membership-invalid?
+        (and default-domain-present?
+             (string? default-domain)
+             (not (str/blank? default-domain))
+             domains-present?
+             (not-any? #(= default-domain %) domains))
+        spec-errors             (when (and (not missing-entrypoints?)
+                                           (not (specs/valid-config? config)))
+                                  [{:msg   "Config failed spec validation."
+                                    :error ::config-spec-invalid
+                                    :data  {:problems (-> config
+                                                          specs/explain-config
+                                                          :clojure.spec.alpha/problems)}}])]
     (cond-> (vec spec-errors)
       missing-entrypoints?
-      (conj {:msg "Config must include at least one entrypoint."
+      (conj {:msg   "Config must include at least one entrypoint."
              :error ::config-no-entrypoints
-             :data {}})
+             :data  {}})
 
       (and (vector? entrypoints) (seq entrypoints))
-      (into (mapcat #(validate-entrypoint [] %) entrypoints)))))
+      (into (mapcat #(validate-entrypoint [] %) entrypoints))
+
+      blank-default-domain?
+      (conj {:msg   "Default domain must not be blank."
+             :error ::default-domain-blank
+             :data  {:default-domain default-domain}})
+
+      default-domain-membership-invalid?
+      (conj {:msg   "Default domain must be present in :domains when domains are configured."
+             :error ::default-domain-not-in-domains
+             :data  {:default-domain default-domain
+                     :domains        (vec domains)}}))))
 
 (defn load!
   "Load and validate config.

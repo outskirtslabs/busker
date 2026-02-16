@@ -199,6 +199,7 @@
         acme-trust-store-pass (env "BUSKER_ACME_TRUST_STORE_PASS" "changeit")
         acme-storage-dir (env "BUSKER_ACME_STORAGE_DIR" "target/busker-main-acme")
         s (server/run-server router {:domains [domain]
+                                     :default-domain domain
                                      :compress-brotli-level 11
                                      :compress-gzip-level 5
                                      :entrypoints [{:name :http
@@ -214,6 +215,7 @@
     (println "Server started with managed TLS")
     (println "HTTP bind:" http-bind "HTTPS bind:" https-bind)
     (println "Managed domain:" domain)
+    (println "Default domain:" domain)
     (println "ACME directory:" acme-directory-url)
     (println "ACME trust store:" acme-trust-store)
     (println "ACME storage dir:" acme-storage-dir)

@@ -280,6 +280,9 @@ void clj_h2o_create_globalconf(h2o_globalconf_t *globalconf,
  *   0  certificate not found
  *  -1  internal error
  *
+ * The server name can be omitted by clients. In that case:
+ *   sni_hostname == NULL and sni_hostname_len == 0.
+ *
  * Ownership:
  *   On success, cert_chain_pem_out and private_key_pem_out must point to heap
  *   memory allocated by clj_h2o_tls_memdup (or malloc-compatible allocator).

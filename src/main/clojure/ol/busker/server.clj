@@ -13,7 +13,8 @@
    [ol.busker.request :as request]
    [ol.busker.response-queue :as response-queue]
    [ol.busker.tickets :as tickets]
-   [ol.clave.certificate :as clave-certificate])
+   [ol.clave.certificate :as clave-certificate]
+   [taoensso.trove :as trove])
   (:import
    [java.security.cert X509Certificate]
    [java.util Base64]
@@ -435,18 +436,35 @@
 
 (defn- build-tls-lookup-fn
   [config clave-runtime]
-  (let [static-material (find-static-tls-material config)
+  (let [default-domain  (:default-domain config)
+        static-material (find-static-tls-material config)
         clave-lookup-fn
         (or (:lookup-fn clave-runtime)
             (let [lookup-certificate clave-adapter/lookup-certificate]
               (fn [hostname]
                 (lookup-certificate clave-runtime hostname))))]
     (fn [hostname]
-      (or static-material
-          (some-> (and (string? hostname)
-                       (not (.isEmpty ^String hostname))
-                       (clave-lookup-fn hostname))
-                  clave-bundle->tls-material)))))
+      (let [sni-hostname (when (and (string? hostname)
+                                    (not (.isEmpty ^String hostname)))
+                           hostname)]
+        (cond
+          static-material
+          static-material
+
+          sni-hostname
+          (some-> (clave-lookup-fn sni-hostname)
+                  clave-bundle->tls-material)
+
+          default-domain
+          (some-> (clave-lookup-fn default-domain)
+                  clave-bundle->tls-material)
+
+          :else
+          (do
+            (trove/log! {:level :trace
+                         :id    ::tls-lookup-no-sni-miss
+                         :data  {}})
+            nil))))))
 
 (defn- init-tls-lookup-state
   [{::keys [config clave-runtime] :as state}]
@@ -491,8 +509,8 @@
            (when (http3-enabled? listener)
              (let [{:keys [cert-file key-file]} (:tls listener)
                    ptls-ctx (h2o/http3-create-ptls-ctx nil nil
-                                                      (or tls-lookup-callback-ptr mem/null)
-                                                      mem/null)]
+                                                       (or tls-lookup-callback-ptr mem/null)
+                                                       mem/null)]
                (when (or (nil? ptls-ctx) (mem/null? ptls-ctx))
                  (throw (ex-info "Failed to create ptls context for HTTP/3"
                                  {:listener-index idx
@@ -619,7 +637,7 @@
       (doseq [ssl-ctx-ptr ssl-ctx-ptrs]
         (when ssl-ctx-ptr
           (h2o/ssl-ctx-set-tickets ssl-ctx-ptr native-ticket-mgr 8192))))
-      (let [http3-contexts        (create-http3-contexts listeners
+    (let [http3-contexts        (create-http3-contexts listeners
                                                        config-ptr
                                                        native-ticket-mgr
                                                        session-ticket-lifetime-seconds
@@ -681,19 +699,19 @@
             tls-lookup-callback]
     :as    state}]
   (let [tls-lookup-callback-ptr (:callback-ptr tls-lookup-callback)]
-  (-> state
-      ::config
-      :entrypoints
-      (->> (into [] (mapcat config/entrypoint->listeners))
-           (mapv #(init-single-listener-state %
-                                              n-workers
-                                              loops
-                                              contexts
-                                              arena
-                                              config-ptr
-                                              on-close-callback
-                                              tls-lookup-callback-ptr)))
-      (->> (assoc state ::listener-runtimes)))))
+    (-> state
+        ::config
+        :entrypoints
+        (->> (into [] (mapcat config/entrypoint->listeners))
+             (mapv #(init-single-listener-state %
+                                                n-workers
+                                                loops
+                                                contexts
+                                                arena
+                                                config-ptr
+                                                on-close-callback
+                                                tls-lookup-callback-ptr)))
+        (->> (assoc state ::listener-runtimes)))))
 
 (defn- init-worker-state
   [{::keys [n-workers loops contexts listener-runtimes http3-worker-contexts

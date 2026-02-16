@@ -85,7 +85,7 @@
         (p/sh {:continue true
                :out :string
                :err :string
-              :extra-env {"PEBBLE_VA_NOSLEEP" (env "PEBBLE_VA_NOSLEEP" "1")
+               :extra-env {"PEBBLE_VA_NOSLEEP" (env "PEBBLE_VA_NOSLEEP" "1")
                            "PEBBLE_VA_ALWAYS_VALID"
                            (env "PEBBLE_VA_ALWAYS_VALID" "1")}}
               "bash" "-lc"
