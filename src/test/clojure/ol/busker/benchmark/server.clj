@@ -105,7 +105,9 @@
                                u/num-cores) u/num-cores)
             _ (prof/start)
             server (h2o-server/run-server handler
-                                          {:listeners [{:port port}]
+                                          {:entrypoints [{:name :bench
+                                                          :bind (str "127.0.0.1:" port)
+                                                          :http3? false}]
                                            :n-workers n-workers
                                            :server-name "ol.busker/bench"
                                            :executor pool})]

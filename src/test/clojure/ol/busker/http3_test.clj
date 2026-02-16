@@ -73,9 +73,11 @@
   (testing "Server with TLS listener creates UDP socket on same port"
     (let [port 18443
           server (server/run-server (fn [_] {:status 200 :body "ok"})
-                                    {:listeners [{:port port
-                                                  :tls {:cert-file cert-file
-                                                        :key-file key-file}}]})]
+                                    {:entrypoints [{:name :tls
+                                                    :bind (str "127.0.0.1:" port)
+                                                    :http3? true
+                                                    :tls {:cert-file cert-file
+                                                          :key-file key-file}}]})]
       (try
         (Thread/sleep 100) ; Give server time to bind sockets
         (is (udp-port-bound? port)
@@ -87,10 +89,11 @@
   (testing "Server with :http3? false does not create UDP socket"
     (let [port 18444
           server (server/run-server (fn [_] {:status 200 :body "ok"})
-                                    {:listeners [{:port port
-                                                  :tls {:cert-file cert-file
-                                                        :key-file key-file
-                                                        :http3? false}}]})]
+                                    {:entrypoints [{:name :tls
+                                                    :bind (str "127.0.0.1:" port)
+                                                    :http3? false
+                                                    :tls {:cert-file cert-file
+                                                          :key-file key-file}}]})]
       (try
         (Thread/sleep 100) ; Give server time to bind sockets
         (is (not (udp-port-bound? port))
@@ -102,9 +105,11 @@
   (testing "HTTP/3 request receives correct response"
     (let [port 18445
           server (server/run-server (fn [_] {:status 200 :body "hello http3"})
-                                    {:listeners [{:port port
-                                                  :tls {:cert-file cert-file
-                                                        :key-file key-file}}]})]
+                                    {:entrypoints [{:name :tls
+                                                    :bind (str "127.0.0.1:" port)
+                                                    :http3? true
+                                                    :tls {:cert-file cert-file
+                                                          :key-file key-file}}]})]
       (try
         (Thread/sleep 200) ; Give server time to bind sockets
         (let [result (util/curl :https :h3 port "/" :max-time 5)]
@@ -123,9 +128,11 @@
                     {:status 200
                      :headers {"content-type" "text/plain"}
                      :body (list "chunk1-" "chunk2-" "chunk3")})
-                  {:listeners [{:port port
-                                :tls {:cert-file cert-file
-                                      :key-file key-file}}]})]
+                  {:entrypoints [{:name :tls
+                                  :bind (str "127.0.0.1:" port)
+                                  :http3? true
+                                  :tls {:cert-file cert-file
+                                        :key-file key-file}}]})]
       (try
         (Thread/sleep 200)
         (let [result (util/curl :https :h3 port "/")]
@@ -153,9 +160,11 @@
                         (Thread/sleep chunk-delay-ms))
                       (proto/close emitter))
                     {:body emitter})
-                  {:listeners [{:port port
-                                :tls {:cert-file cert-file
-                                      :key-file key-file}}]})]
+                  {:entrypoints [{:name :tls
+                                  :bind (str "127.0.0.1:" port)
+                                  :http3? true
+                                  :tls {:cert-file cert-file
+                                        :key-file key-file}}]})]
       (try
         (Thread/sleep 200)
         (let [request-future (future
@@ -198,9 +207,11 @@
                     {:body emitter})
           server (server/run-server handler
                                     {:max-connections 2
-                                     :listeners [{:port port
-                                                  :tls {:cert-file cert-file
-                                                        :key-file key-file}}]})]
+                                     :entrypoints [{:name :tls
+                                                    :bind (str "127.0.0.1:" port)
+                                                    :http3? true
+                                                    :tls {:cert-file cert-file
+                                                          :key-file key-file}}]})]
       (try
         (Thread/sleep 200)
         ;; Start 2 long-lived HTTP/3 connections
@@ -251,9 +262,11 @@
                     {:body emitter})
           server (server/run-server handler
                                     {:max-connections 3
-                                     :listeners [{:port port
-                                                  :tls {:cert-file cert-file
-                                                        :key-file key-file}}]})]
+                                     :entrypoints [{:name :tls
+                                                    :bind (str "127.0.0.1:" port)
+                                                    :http3? true
+                                                    :tls {:cert-file cert-file
+                                                          :key-file key-file}}]})]
       (try
         (Thread/sleep 200)
         ;; Start 2 HTTP/3 connections and 1 HTTP/2 connection
@@ -304,9 +317,11 @@
           server (server/run-server handler
                                     {:n-workers 2
                                      :max-connections 4
-                                     :listeners [{:port port
-                                                  :tls {:cert-file cert-file
-                                                        :key-file key-file}}]})]
+                                     :entrypoints [{:name :tls
+                                                    :bind (str "127.0.0.1:" port)
+                                                    :http3? true
+                                                    :tls {:cert-file cert-file
+                                                          :key-file key-file}}]})]
       (try
         (Thread/sleep 200)
         ;; Start 4 connections (should reach limit)
@@ -375,9 +390,11 @@
                     (reset! early-data-value (:ol.busker/early-data? req))
                     {:status 200 :body "ok"})
           server (server/run-server handler
-                                    {:listeners [{:port port
-                                                  :tls {:cert-file cert-file
-                                                        :key-file key-file}}]})]
+                                    {:entrypoints [{:name :tls
+                                                    :bind (str "127.0.0.1:" port)
+                                                    :http3? true
+                                                    :tls {:cert-file cert-file
+                                                          :key-file key-file}}]})]
       (try
         (Thread/sleep 200)
         (let [result (util/curl :https :h3 port "/")]
@@ -406,9 +423,11 @@
                           :body    (pr-str {:early-data (boolean (:ol.busker/early-data? req))
                                             :method     (name (:request-method req))})})
           server       (server/run-server handler
-                                          {:listeners [{:port port
-                                                        :tls  {:cert-file cert-file
-                                                               :key-file  key-file}}]})]
+                                          {:entrypoints [{:name :tls
+                                                          :bind (str "127.0.0.1:" port)
+                                                          :http3? true
+                                                          :tls {:cert-file cert-file
+                                                                :key-file key-file}}]})]
       (try
         (Thread/sleep 200)
 
@@ -483,9 +502,11 @@
           session-file (str (System/getProperty "java.io.tmpdir") "/busker-test-tls12-sessions-" port ".pem")
           handler      (fn [_] {:status 200 :body "ok"})
           server       (server/run-server handler
-                                          {:listeners [{:port port
-                                                        :tls  {:cert-file cert-file
-                                                               :key-file  key-file}}]})]
+                                          {:entrypoints [{:name :tls
+                                                          :bind (str "127.0.0.1:" port)
+                                                          :http3? true
+                                                          :tls {:cert-file cert-file
+                                                                :key-file key-file}}]})]
       (try
         (Thread/sleep 200)
         (io/delete-file session-file true)

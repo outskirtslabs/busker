@@ -13,7 +13,9 @@
 (def base (str "http://127.0.0.1:" plain-port))
 
 (defn test-server [handler & {:as opts}]
-  (server/run-server handler (merge {:listeners [{:port plain-port}]
+  (server/run-server handler (merge {:entrypoints [{:name :test-plain
+                                                    :bind (str "127.0.0.1:" plain-port)
+                                                    :http3? false}]
                                      :compress-min-size 10
                                      :max-connections 1024}
                                     opts)))
@@ -246,10 +248,14 @@
                              {:status  200
                               :headers {"content-type" "text/plain"}
                               :body    (str "Hello via " (name scheme) " at " uri)})
-                           :listeners [{:port plain-port}
-                                       {:port 7891
-                                        :tls  {:cert-file cert-file
-                                               :key-file  key-file}}])]
+                           :entrypoints [{:name :plain
+                                          :bind (str "127.0.0.1:" plain-port)
+                                          :http3? false}
+                                         {:name :tls
+                                          :bind "127.0.0.1:7891"
+                                          :http3? false
+                                          :tls {:cert-file cert-file
+                                                :key-file key-file}}])]
       (testing "plaintext HTTP endpoint works"
         (let [response (req :get "/hello")]
           (is (= 200 (:status response)))
@@ -290,10 +296,14 @@
                                    (future
                                      (h2o/emit! emitter {:status 200 :body "Hello Async"}))
                                    {:body emitter})
-                                 {:listeners [{:port plain-port}
-                                              {:port 7891
-                                               :tls  {:cert-file cert-file
-                                                      :key-file  key-file}}]})]
+                                 {:entrypoints [{:name :plain
+                                                 :bind (str "127.0.0.1:" plain-port)
+                                                 :http3? false}
+                                                {:name :tls
+                                                 :bind "127.0.0.1:7891"
+                                                 :http3? false
+                                                 :tls {:cert-file cert-file
+                                                       :key-file key-file}}]})]
       (let [{:keys [status body]} (req :get "/")]
         (is (= 200 status))
         (is (= "Hello Async" body)))))
@@ -305,10 +315,14 @@
                                      (h2o/emit! emitter "<!doctype html><h1>Hello world</h1>")
                                      (h2o/close emitter))
                                    {:body emitter})
-                                 :listeners [{:port plain-port}
-                                             {:port 7891
-                                              :tls  {:cert-file cert-file
-                                                     :key-file  key-file}}])]
+                                 :entrypoints [{:name :plain
+                                                :bind (str "127.0.0.1:" plain-port)
+                                                :http3? false}
+                                               {:name :tls
+                                                :bind "127.0.0.1:7891"
+                                                :http3? false
+                                                :tls {:cert-file cert-file
+                                                      :key-file key-file}}])]
 
       (let [result (util/curl :https :h2 7891 "/" :args ["-v"])]
         (is (= 0 (:exit result)))
@@ -348,7 +362,9 @@
                     {:body emitter})
           server (server/run-server handler
                                     {:max-connections 2
-                                     :listeners [{:port port}]})]
+                                     :entrypoints [{:name :test
+                                                    :bind (str "127.0.0.1:" port)
+                                                    :http3? false}]})]
       (try
         (Thread/sleep 200)
         ;; Start 2 long-lived HTTP/1.1 connections
@@ -400,11 +416,14 @@
                     {:body emitter})
           server (server/run-server handler
                                     {:max-connections 3
-                                     :listeners [{:port http-port}
-                                                 {:port https-port
-                                                  :tls {:cert-file cert-file
-                                                        :key-file key-file
-                                                        :http3? false}}]})]
+                                     :entrypoints [{:name :http
+                                                    :bind (str "127.0.0.1:" http-port)
+                                                    :http3? false}
+                                                   {:name :https
+                                                    :bind (str "127.0.0.1:" https-port)
+                                                    :http3? false
+                                                    :tls {:cert-file cert-file
+                                                          :key-file key-file}}]})]
       (try
         (Thread/sleep 200)
         ;; Start 2 HTTP connections and 1 HTTPS connection

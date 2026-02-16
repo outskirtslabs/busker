@@ -8,9 +8,6 @@
                              [babashka.tasks :refer [shell]])
                   :init     (do (def paths ["src" "dev"]))
 
-                  ;; ---------------------------------------------------------------------------
-                  ;; Build tasks
-                  ;; ---------------------------------------------------------------------------
                   build:shim
                   {:doc  "Compile C shim library"
                    :task (shell {:dir "shim"} "zig build -Doptimize=Debug")}
@@ -83,16 +80,10 @@
                    :task    (doseq [dir (conj build/lib-dirs ".")]
                               (build/lib-publish! dir))}
 
-                  ;; ---------------------------------------------------------------------------
-                  ;; Dev tasks
-                  ;; ---------------------------------------------------------------------------
                   dev
                   {:doc  "Start a local development repl"
                    :task (apply clojure "-M:dev:repl/dev" *command-line-args*)}
 
-                  ;; ---------------------------------------------------------------------------
-                  ;; Test tasks
-                  ;; ---------------------------------------------------------------------------
                   test
                   {:doc  "Run tests"
                    :task (apply clojure "-M:dev:test:kaocha" *command-line-args*)}
@@ -104,10 +95,6 @@
                   test:all
                   {:doc     "Run all the tests"
                    :depends [test test:large-payloads]}
-
-                  ;; ---------------------------------------------------------------------------
-                  ;; Lint tasks
-                  ;; ---------------------------------------------------------------------------
 
                   fmt
                   {:doc  "Format code with cljfmt"
@@ -129,16 +116,10 @@
                                        (str " --lint " (first *command-line-args*))
                                        " --lint src")))}
 
-                  ;; ---------------------------------------------------------------------------
-                  ;; Bench tasks
-                  ;; ---------------------------------------------------------------------------
                   bench
                   {:doc  "Run the benchmark suite (wraps `clojure -M:dev:bench -m ol.busker.benchmark`)"
                    :task (apply clojure "-M:dev:bench" "-m" "ol.busker.benchmark" *command-line-args*)}
 
-                  ;; ---------------------------------------------------------------------------
-                  ;; Utility tasks
-                  ;; ---------------------------------------------------------------------------
                   deps-tree
                   {:doc  "Show dependency tree"
                    :task (clojure "-X:deps tree :aliases '[:dev]'")}
@@ -147,9 +128,6 @@
                   {:doc     "Run full quality assurance: format, lint, and test"
                    :depends [build lint test:all test]}
 
-                  ;; ---------------------------------------------------------------------------
-                  ;; CI tasks
-                  ;; ---------------------------------------------------------------------------
                   ci
                   {:doc     "Ran by the CI"
                    :depends [build test:all fmt:check lint jar:all]}}}

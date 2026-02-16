@@ -1,10 +1,10 @@
 (ns ol.busker.server
   (:require
-   [clojure.java.io :as io]
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]
    [ol.busker.buffer-pool :as bp]
    [ol.busker.byte-bounded-queue :as bbq]
+   [ol.busker.config :as config]
    [ol.busker.evloop :as evloop]
    [ol.busker.internal.protocols :as p]
    [ol.busker.native :as h2o]
@@ -13,12 +13,10 @@
    [ol.busker.response-queue :as response-queue]
    [ol.busker.tickets :as tickets])
   (:import
-   [java.util.concurrent ExecutorService Executors TimeUnit]
+   [java.util.concurrent ExecutorService TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
 
 (set! *warn-on-reflection* true)
-
-(def ^:const default-max-connections 1024)
 
 (defn- response-state-pending?
   [st]
@@ -255,7 +253,7 @@
     (when (and http3-ctx (not (mem/null? http3-ctx)))
       (h2o/http3-stop-accepting http3-ctx)))
 
-  ;; Process stop events immediately
+  ;; then process stop events immediately
   (h2o/evloop-run loop-ptr 0)
 
   ;; Phase 3: Close listener sockets
@@ -360,27 +358,6 @@
    (and (:tls listener)
         (get-in listener [:tls :http3?] true))))
 
-(defn- validate-tls-config
-  "Validate TLS configuration for a listener. Throws on invalid config."
-  [{:keys [cert-file key-file] :as tls-config}]
-  (when-not (and cert-file key-file)
-    (throw (ex-info "TLS config requires both :cert-file and :key-file" {:tls-config tls-config})))
-  (when-not (.exists (io/file cert-file))
-    (throw (ex-info "TLS certificate file not found" {:cert-file cert-file})))
-  (when-not (.exists (io/file key-file))
-    (throw (ex-info "TLS private key file not found" {:key-file key-file})))
-  tls-config)
-
-(defn- validate-listener
-  "Validate a single listener configuration. Throws on invalid config."
-  [{:keys [port tls] :as listener}]
-  (when-not (and (int? port) (pos? port) (<= port 65535))
-    (throw (ex-info "Listener port must be integer between 1 and 65535"
-                    {:listener listener})))
-  (when tls
-    (validate-tls-config tls))
-  listener)
-
 (defn- create-ssl-contexts
   "Create SSL_CTX for each TLS listener.
    Returns map: listener-index -> {:ssl-ctx ssl-ctx-ptr}
@@ -480,46 +457,13 @@
     (when ptls-ctx
       (h2o/http3-free-ptls-ctx ptls-ctx))))
 
-(defn with-defaults [{:keys [n-workers listeners max-connections executor server-name
-                             compress? compress-min-size compress-gzip-level output-buffer-size
-                             compress-brotli-level compress-zstd-level buffer-pool
-                             session-ticket-lifetime-seconds]
-                      :or {compress-brotli-level 1
-                           compress-gzip-level 1
-                           compress-min-size 100
-                           compress? true
-                           compress-zstd-level 3
-                           executor (Executors/newVirtualThreadPerTaskExecutor)
-                           listeners [{:port 8080}]
-                           max-connections default-max-connections
-                           n-workers 1
-                           output-buffer-size 32768
-                           server-name "ol.busker/dev"
-                           session-ticket-lifetime-seconds tickets/default-ticket-lifetime-seconds}
-                      :as config}]
-
-  (let [validated-listeners (mapv validate-listener listeners)]
-    (merge config {:buffer-pool (or buffer-pool (bp/make-bytebuffer-pool {}))
-                   :compress-brotli-level compress-brotli-level
-                   :compress? compress?
-                   :compress-gzip-level compress-gzip-level
-                   :compress-min-size compress-min-size
-                   :compress-zstd-level compress-zstd-level
-                   :executor executor
-                   :listeners validated-listeners
-                   :max-connections max-connections
-                   :n-workers n-workers
-                   :output-buffer-size output-buffer-size
-                   :server-name server-name
-                   :session-ticket-lifetime-seconds session-ticket-lifetime-seconds})))
-
 (defn run-server
   "Start an h2o webserver to serve the given Ring handler according to the
   supplied options:
 
   Core Options:
+  :domains
   :listeners              - vector of listener maps, each with :port (required)
-                            (defaults to [{:port 8080}])
   :n-workers              - number of event loop worker threads
                             (defaults to available CPU cores)
   :executor               - ExecutorService for handler execution
@@ -608,7 +552,8 @@
    (run-server handler {}))
   ([handler config]
    (when-not handler (throw (ex-info "Handler is required" {:handler handler})))
-   (let [{:keys [n-workers listeners max-connections executor] :as config} (with-defaults config)
+   (let [{:keys [n-workers listeners max-connections executor] :as config}
+         (-> config config/load! config/config->listeners)
          _                                                                 (h2o/conn-limit-set-max max-connections)
          arena                                                             (mem/shared-arena)
          {::keys [config-ptr]}                           (create-server-config arena handler config)
