@@ -29,3 +29,20 @@
       (is (empty? missing)
           (str "missing descriptor vars for keys: " missing)))))
 
+(deftest managed-plan-spec-test
+  (testing "managed plan conforms when using managed TLS entrypoints"
+    (let [plan {:domains ["example.com"]
+                :managed-entrypoints [{:name :https
+                                       :bind ":443"
+                                       :tls {:issuers [{:directory-url "https://acme.example/directory"}]}}]
+                :clave-config {:issuers [{:directory-url "https://acme.example/directory"}]}}]
+      (is (s/valid? ::specs/managed-plan plan))))
+
+  (testing "managed plan rejects entrypoints without issuers"
+    (let [plan {:domains ["example.com"]
+                :managed-entrypoints [{:name :https
+                                       :bind ":443"
+                                       :tls {:cert-file "cert.pem"
+                                             :key-file "key.pem"}}]
+                :clave-config {:issuers [{:directory-url "https://acme.example/directory"}]}}]
+      (is (not (s/valid? ::specs/managed-plan plan))))))

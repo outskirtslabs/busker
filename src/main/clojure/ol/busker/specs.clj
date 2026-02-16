@@ -16,6 +16,12 @@
   (and (string? v)
        (not (str/blank? v))))
 
+(defn- managed-entrypoint?
+  [entrypoint]
+  (let [tls (:tls entrypoint)]
+    (and (map? tls)
+         (seq (:issuers tls)))))
+
 (def key-source
   {:key     ::key-source
    :doc     "Component that generates or obtains session ticket encryption keys."
@@ -260,6 +266,41 @@
 (s/def ::entrypoints
   (s/and vector?
          (s/coll-of ::entrypoint :kind vector? :min-count 1)))
+
+(def managed-entrypoints
+  {:key ::managed-entrypoints
+   :doc "Managed TLS entrypoints with ACME issuers configured."
+   :default nil})
+(s/def ::managed-entrypoints
+  (s/and vector?
+         (s/coll-of ::entrypoint :kind vector? :min-count 1)
+         #(every? managed-entrypoint?
+                  (map (partial s/unform ::entrypoint) %))))
+
+(def clave-config
+  {:key ::clave-config
+   :doc "Clave automation config extracted from managed TLS settings."
+   :default nil})
+(s/def ::clave-config
+  (s/keys :req-un [::issuers]
+          :opt-un [::storage
+                   ::issuer-selection
+                   ::key-type
+                   ::key-reuse
+                   ::cache-capacity
+                   ::solvers
+                   ::ocsp
+                   ::config-fn
+                   ::http-client]))
+
+(def managed-plan
+  {:key ::managed-plan
+   :doc "Managed TLS runtime plan for Clave lifecycle and HTTP-01 middleware."
+   :default nil})
+(s/def ::managed-plan
+  (s/keys :req-un [::domains
+                   ::managed-entrypoints
+                   ::clave-config]))
 
 (def domains
   {:key ::domains
@@ -541,6 +582,9 @@
    http3?
    entrypoint
    entrypoints
+   managed-entrypoints
+   clave-config
+   managed-plan
    domains
    n-workers
    executor

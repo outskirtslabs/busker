@@ -11,6 +11,7 @@
    [ol.busker.native.socket :as socket]
    [ol.busker.request :as request]
    [ol.busker.response-queue :as response-queue]
+   [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.tickets :as tickets])
   (:import
    [java.util.concurrent ExecutorService TimeUnit]
@@ -459,14 +460,18 @@
 (defn- prepare-server-state
   [ring-handler user-config]
   (let [{:keys [n-workers max-connections executor] :as config}
-        (config/load! user-config)]
+        (config/load! user-config)
+        clave-runtime (clave-adapter/start! (clave-adapter/build-managed-plan config))
+        ring-handler  (clave-adapter/wrap-handler ring-handler clave-runtime)]
     {::ring-handler    ring-handler
      ::config          config
+     ::clave-runtime   clave-runtime
+     ::message-handler evloop-msg-processor
+     ::shutting-down?  (AtomicBoolean. false)
+     ;; TODO the following are already in config, why duplicate them here?
      ::n-workers       n-workers
      ::max-connections max-connections
-     ::executor        executor
-     ::message-handler evloop-msg-processor
-     ::shutting-down?  (AtomicBoolean. false)}))
+     ::executor        executor}))
 
 (defn- init-core-state
   [{::keys [ring-handler config n-workers max-connections] :as state}]
@@ -620,12 +625,17 @@
    (run-server handler {}))
   ([handler user-config]
    (when-not handler (throw (ex-info "Handler is required" {:handler handler})))
-   (-> (prepare-server-state handler user-config)
-       (init-core-state)
-       (init-listener-state)
-       (init-tls-http3-state)
-       (init-worker-state)
-       (finalize-server-state))))
+   (let [prepared-state (prepare-server-state handler user-config)]
+     (try
+       (-> prepared-state
+           (init-core-state)
+           (init-listener-state)
+           (init-tls-http3-state)
+           (init-worker-state)
+           (finalize-server-state))
+       (catch Throwable t
+         (clave-adapter/stop! (::clave-runtime prepared-state))
+         (throw t))))))
 
 (defn stop-server
   "Synchronously shut down the server, blocking until all requests and native
@@ -647,6 +657,9 @@
      (h2o/handler-set-shutting-down handler-ptr 1))
    ;; Signal shutdown to all workers
    (.set ^AtomicBoolean (::shutting-down? server) true)
+
+   ;; Stop managed TLS automation lifecycle
+   (clave-adapter/stop! (::clave-runtime server))
 
    ;; Stop key manager rotation thread early
    (when-let [key-mgr (::key-manager server)]

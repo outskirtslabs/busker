@@ -6,6 +6,7 @@
    [clojure.string :as str]
    [clojure.test :as test :refer [deftest is testing]]
    [ol.busker.server :as server]
+   [ol.busker.tls.clave-adapter :as clave-adapter]
    [ol.busker.test-utils :as util]))
 
 (def plain-port 7890)
@@ -453,3 +454,33 @@
                   (str "HTTPS connection should succeed. stderr: " (:err result3))))))
         (finally
           (server/stop-server server))))))
+
+(deftest managed-clave-lifecycle-test
+  (testing "server starts/stops managed clave runtime with server lifecycle"
+    (let [calls (atom [])
+          plan {:domains ["example.com"]
+                :clave-config {:issuers [{:directory-url "https://acme.example/directory"}]}}
+          runtime {:system {:id ::managed-system}
+                   :domains ["example.com"]
+                   :http-solver {:registry (atom {})}
+                   :lookup-fn (fn [_] nil)}]
+      (with-redefs [clave-adapter/build-managed-plan (fn [config]
+                                                       (swap! calls conj [:build (:domains config)])
+                                                       plan)
+                    clave-adapter/start! (fn [managed-plan]
+                                           (swap! calls conj [:start managed-plan])
+                                           runtime)
+                    clave-adapter/wrap-handler (fn [handler managed-runtime]
+                                                 (swap! calls conj [:wrap managed-runtime])
+                                                 handler)
+                    clave-adapter/stop! (fn [managed-runtime]
+                                          (swap! calls conj [:stop managed-runtime])
+                                          nil)]
+        (with-server [_server (test-server (fn [_] {:status 200 :body "ok"})
+                                           :domains ["example.com"])]
+          (is (= 200 (:status (req :get "/")))))
+        (is (= [[:build ["example.com"]]
+                [:start plan]
+                [:wrap runtime]
+                [:stop runtime]]
+               @calls))))))

@@ -2,17 +2,18 @@
 
 > *Busker* is your Clojure web server that plays live on the open web
 
-Busker is a Clojure HTTP server library built directly on [libh2o](https://github.com/h2o/h2o) (the web server that powers Fastly). It brings HTTP/1.1, HTTP/2, and HTTP/3 support to the JVM through Panama FFI and Loom Virtual Threads.
+Busker is a Clojure HTTP server library built directly on [libh2o](https://github.com/h2o/h2o) (the web server that powers Fastly).
+It brings HTTP/1.1, HTTP/2, and HTTP/3 support to the JVM making extensive use of Panama FFI and virtual threads.
 
 - Busker provides full modern HTTP support including HTTP/1.1, HTTP/2, and HTTP/3 with features like 103 Early Hints and HTTP/2 streams
 - Busker handles automatic HTTPS certificate management and renewal
 - Busker simplifies deployment by eliminating nginx/caddy and Docker, just deploy your uberjar directly with systemd
 - Busker delivers predictable performance under load with sensible production-ready defaults
 
-**Requirements**
+Platform Requirements:
 
-- Busker requires JDK version 21 or higher (JDK 25 or higher for GraalVM native-image builds).
-- Busker has out-of-the-box support for Linux and macOS on aarch64 and x86-64.
+- requires JDK version 21 or higher (JDK 25 or higher for GraalVM native-image builds).
+- pre-built jars containing the native binaries are available for Linux and macOS on aarch64 and x86-64.
 
 ## Roadmap
 
@@ -41,9 +42,12 @@ com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
                           :git/sha "cf53e8e003f66b32d3fc3b0b456f764cc665b308"}
 ```
 
+When using busker as a git dep always run `clj -Xdeps prep` after bumping the git sha.
+
 ...and you need (at least) one of the native dependencies below.
 
-The native dependency that matches your target platform is required. If multiple native deps are included, the right one will automatically be chosen (though your uber-jar size will be fatter than necessary):
+The native dependency that matches your target platform is required.
+If multiple native deps are included, the right one will automatically be chosen (though your uber-jar size will be fatter than necessary):
 
 ``` clojure
 # Linux
@@ -55,7 +59,6 @@ com.outskirtslabs.busker/macos-x86-64 {:mvn/version "0.0.1"}
 com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.1"}
 ```
 
-**Important**: When using busker as a git dep always run `clj -Xdeps prep` after bumping the git sha.
 
 ## License
 

@@ -182,7 +182,7 @@
      :cloexec?    (default true)
   returns fd (int). Caller owns fd and must close on error."
   [{:keys [host port backlog reuseaddr? reuseport? nonblock? cloexec?]
-    :or {host "0.0.0.0" backlog 65535 reuseaddr? true reuseport? false nonblock? true cloexec? true}}]
+    :or   {host "0.0.0.0" backlog 65535 reuseaddr? true reuseport? false nonblock? true cloexec? true}}]
   (when-not (int? port)
     (throw (ex-info "port must be int" {:port port})))
   (let [fd (socket AF_INET SOCK_STREAM 0)]
@@ -205,7 +205,7 @@
           (when (neg? (listen fd (int backlog)))
             (throw (ex-info-with-errno
                     (str "listen() failed for " host ":" port)
-                                       {:host host :port port :backlog backlog})))))
+                    {:host host :port port :backlog backlog})))))
       fd
       (catch Throwable t
         (try (close fd) (catch Throwable _))
