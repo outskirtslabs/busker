@@ -18,11 +18,11 @@
 
 (defn start!
   []
-  (p/shell "./scripts/pebble-fixture.sh" "start"))
+  (p/shell "bb" "pebble:start"))
 
 (defn stop!
   []
-  (p/shell "./scripts/pebble-fixture.sh" "stop"))
+  (p/shell "bb" "pebble:stop"))
 
 (defn fixture
   [f]

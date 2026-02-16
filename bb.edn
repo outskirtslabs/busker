@@ -4,6 +4,8 @@
                   lambdaisland/kaocha  {:mvn/version "1.91.1392"}}
  :tasks          {:requires ([babashka.fs :as fs]
                              [tasks.build  :as build]
+                             [tasks.pebble :as pebble]
+                             [tasks.smoke  :as smoke]
                              [clojure.string :as str]
                              [babashka.tasks :refer [shell]])
                   :init     (do (def paths ["src" "dev"]))
@@ -83,6 +85,26 @@
                   dev
                   {:doc  "Start a local development repl"
                    :task (apply clojure "-M:dev:repl/dev" *command-line-args*)}
+
+                  pebble:start
+                  {:doc  "Start local Pebble ACME fixture in the background"
+                   :task (pebble/start!)}
+
+                  pebble:stop
+                  {:doc  "Stop local Pebble ACME fixture"
+                   :task (pebble/stop!)}
+
+                  pebble:status
+                  {:doc  "Show local Pebble ACME fixture status"
+                   :task (pebble/status!)}
+
+                  pebble:logs
+                  {:doc  "Tail local Pebble ACME fixture logs"
+                   :task (pebble/logs!)}
+
+                  smoke:managed
+                  {:doc  "Run ol.busker.main with local Pebble managed TLS fixture"
+                   :task (apply smoke/smoke-managed! *command-line-args*)}
 
                   test
                   {:doc  "Run tests"

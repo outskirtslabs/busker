@@ -5,10 +5,9 @@
    [borkdude.rewrite-edn :as r]
    [clojure.edn          :as edn]))
 
-;; -----------------------------------------------------------------------------
 ;; Util
-;; -----------------------------------------------------------------------------
-(def main-lib-dir                                ".")
+
+(def main-lib-dir ".")
 
 (def lib-dirs
   ["shim/linux-aarch64"
@@ -23,9 +22,8 @@
      com.outskirtslabs.busker/macos-aarch64
      com.outskirtslabs.busker/macos-x86-64})
 
-;; -----------------------------------------------------------------------------
 ;; Tasks
-;; -----------------------------------------------------------------------------
+
 (defn ->deps-file [lib-dir]
   (-> lib-dir
       (fs/path "deps.edn")

@@ -1,9 +1,9 @@
 (ns ol.busker.main
   (:require
-   [clojure.java.io :as io]
-   [ol.busker.protocols :as h2o]
    [clojure.string :as str]
-   [ol.busker.server :as server]))
+   [ol.busker.protocols :as h2o]
+   [ol.busker.server :as server]
+   [ol.clave.storage.file :as file-storage]))
 
 (def gib (* 1024 1024 1024))
 (def mib (* 1024 1024))
@@ -181,20 +181,42 @@
              :headers {"content-type" "text/plain"}
              :body "Not Found"})))
 
-(def  cert-file (.getAbsolutePath (io/file "src/test/fixtures/server.crt")))
-(def  key-file (.getAbsolutePath (io/file "src/test/fixtures/server.key")))
+(defn- env
+  [name default]
+  (let [value (System/getenv name)]
+    (if (str/blank? value)
+      default
+      value)))
 
 (defn -main [& _]
-  (let [s (server/run-server router {:compress-brotli-level 11
+  (let [domain (env "BUSKER_SMOKE_DOMAIN" "example.com")
+        http-bind (env "BUSKER_HTTP_BIND" ":8081")
+        https-bind (env "BUSKER_HTTPS_BIND" ":8082")
+        acme-directory-url (env "BUSKER_ACME_DIRECTORY_URL"
+                                "https://localhost:14000/dir")
+        acme-trust-store (env "BUSKER_ACME_TRUST_STORE"
+                              "src/test/fixtures/pebble-truststore.p12")
+        acme-trust-store-pass (env "BUSKER_ACME_TRUST_STORE_PASS" "changeit")
+        acme-storage-dir (env "BUSKER_ACME_STORAGE_DIR" "target/busker-main-acme")
+        s (server/run-server router {:domains [domain]
+                                     :compress-brotli-level 11
                                      :compress-gzip-level 5
                                      :entrypoints [{:name :http
-                                                    :bind ":8081"
+                                                    :bind http-bind
                                                     :tls false}
                                                    {:name :https
-                                                    :bind ":8082"
-                                                    :tls {:cert-file cert-file
-                                                          :key-file  key-file}}]})]
-    (println "Server started on ports 8081 (HTTP) and 8082 (HTTPS)")
+                                                    :bind https-bind
+                                                    :tls {:issuers [{:directory-url acme-directory-url}]
+                                                          :http-client {:ssl-context
+                                                                        {:trust-store acme-trust-store
+                                                                         :trust-store-pass acme-trust-store-pass}}
+                                                          :storage (file-storage/file-storage acme-storage-dir)}}]})]
+    (println "Server started with managed TLS")
+    (println "HTTP bind:" http-bind "HTTPS bind:" https-bind)
+    (println "Managed domain:" domain)
+    (println "ACME directory:" acme-directory-url)
+    (println "ACME trust store:" acme-trust-store)
+    (println "ACME storage dir:" acme-storage-dir)
     (println "Listening for connections...")
     (println "\nAvailable endpoints:")
     (println "  GET  /              - Hello World")
