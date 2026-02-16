@@ -161,6 +161,22 @@
             (finally
               (server/stop-server server))))))))
 
+(deftest http3-no-sni-default-domain-miss-no-crash-test
+  (testing "HTTP/3 no-SNI miss fails closed without crashing the server process"
+    (let [result (p/shell {:out :string :err :string :continue true}
+                          "timeout" "20s"
+                          "clojure" "-M:dev:test"
+                          "-m" "ol.busker.http3-no-sni-miss-repro")]
+      (is (= 0 (:exit result))
+          (str "No-SNI miss subprocess should exit cleanly. stdout: "
+               (:out result)
+               " stderr: "
+               (:err result)))
+      (is (str/includes? (:out result) "curl-exit")
+          (str "Expected subprocess to print curl outcome. stdout: " (:out result)))
+      (is (not (str/includes? (:out result) "curl-exit 0"))
+          (str "No-SNI miss should fail closed. stdout: " (:out result))))))
+
 (deftest http3-request-with-streaming-body-test
   (testing "HTTP/3 streaming response works correctly"
     (let [port 18446

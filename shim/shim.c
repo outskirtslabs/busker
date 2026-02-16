@@ -1016,9 +1016,9 @@ static int clj_on_client_hello_cb(ptls_on_client_hello_t *self,
         wrapper->lookup_cb, wrapper->lookup_user_ctx, hostname, hostname_len,
         &cert_chain_pem,
         &cert_chain_pem_len, &private_key_pem, &private_key_pem_len);
+    /* Return miss to fail closed without triggering the HTTP/3 close-path crash. */
     if (status != 1)
-      return status == 0 ? PTLS_ALERT_UNRECOGNIZED_NAME
-                         : PTLS_ALERT_INTERNAL_ERROR;
+      return 0;
 
     pthread_mutex_lock(&wrapper->cache_mutex);
 
