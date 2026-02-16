@@ -101,7 +101,7 @@
                    INADDR_ANY
                    (with-open [tmp-arena (mem/confined-arena)]
                      #_{:clj-kondo/ignore [:type-mismatch]}
-                     (let [dst (mem/alloc ::in_addr tmp-arena)
+                     (let [dst (mem/alloc-instance ::in_addr tmp-arena)
                            r   (inet_pton AF_INET host dst)]
                        (when (neg? r)
                          (throw (ex-info "inet_pton error" {:host host :port port})))

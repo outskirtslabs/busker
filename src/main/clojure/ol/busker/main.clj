@@ -187,10 +187,12 @@
 (defn -main [& _]
   (let [s (server/run-server router {:compress-brotli-level 15
                                      :compress-gzip-level 5
-                                     :listeners [{:port 8080}
-                                                 {:port 8081
-                                                  :tls  {:cert-file cert-file
-                                                         :key-file  key-file}}]})]
+                                     :entrypoints [{:name :http
+                                                    :bind ":8080"}
+                                                   {:name :https
+                                                    :bind ":8081"
+                                                    :tls {:cert-file cert-file
+                                                          :key-file  key-file}}]})]
     (println "Server started on port 8080")
     (println "Listening for connections...")
     (println "\nAvailable endpoints:")

@@ -424,7 +424,8 @@
                   (let [listener (nth listeners listener-idx)]
                     (when (http3-enabled? listener)
                       (let [{:keys [quicly-ctx]} (get http3-contexts listener-idx)
-                            {:keys [port]} listener
+                            {:keys [host port]} listener
+                            bind-host (or host "0.0.0.0")
                             loop-ptr (nth loops thread-idx)
                             ctx-ptr (nth contexts thread-idx)
                             http3-ctx (h2o/http3-create-worker-ctx
@@ -432,7 +433,7 @@
                                        loop-ptr
                                        quicly-ctx
                                        hosts-ptr
-                                       "0.0.0.0"
+                                       bind-host
                                        (short port)
                                        (int thread-idx))]
                         (when (or (nil? http3-ctx) (mem/null? http3-ctx))
@@ -453,12 +454,11 @@
 
 (defn- prepare-server-state
   [ring-handler user-config]
-  (let [{:keys [n-workers listeners max-connections executor] :as config}
-        (-> user-config config/load! config/config->listeners)]
+  (let [{:keys [n-workers max-connections executor] :as config}
+        (config/load! user-config)]
     {::ring-handler    ring-handler
      ::config          config
      ::n-workers       n-workers
-     ::listeners       listeners
      ::max-connections max-connections
      ::executor        executor
      ::message-handler evloop-msg-processor
@@ -486,9 +486,10 @@
            ::on-close-callback on-close-callback)))
 
 (defn- init-tls-http3-state
-  [{::keys [listeners listener-runtimes config config-ptr n-workers loops contexts]
+  [{::keys [listener-runtimes config config-ptr n-workers loops contexts]
     :as state}]
-  (let [ssl-ctx-ptrs                    (mapv :ssl-ctx-ptr listener-runtimes)
+  (let [listeners                       (mapv :listener listener-runtimes)
+        ssl-ctx-ptrs                    (mapv :ssl-ctx-ptr listener-runtimes)
         has-tls-listeners?              (some :tls listeners)
         session-ticket-lifetime-seconds (:session-ticket-lifetime-seconds config)
         ticket-store                    (tickets/memory-ticket-store)
@@ -524,7 +525,13 @@
 (defn- init-single-listener-state
   [listener n-workers loops contexts arena config-ptr on-close-callback]
   (let [ssl-ctx-ptr   (create-ssl-context listener)
-        listener-fd   (socket/open-master-listener {:port (:port listener)})
+        listener-fd   (if-let [unix-path (:unix listener)]
+                        (throw (ex-info "Unix listeners are not yet supported by server startup."
+                                        {:listener listener
+                                         :unix-path unix-path}))
+                        (socket/open-master-listener
+                         (cond-> {:port (:port listener)}
+                           (:host listener) (assoc :host (:host listener)))))
         dup-fds       (socket/dup-for-threads listener-fd n-workers)
         thread-states (vec
                        (for [thread-idx (range n-workers)]
@@ -554,46 +561,48 @@
      :thread-states thread-states}))
 
 (defn- init-listener-state
-  [{::keys [listeners n-workers loops contexts arena config-ptr on-close-callback]
+  [{::keys [n-workers loops contexts arena config-ptr on-close-callback]
     :as    state}]
-  (let [listener-runtimes
-        (mapv #(init-single-listener-state %
-                                           n-workers
-                                           loops
-                                           contexts
-                                           arena
-                                           config-ptr
-                                           on-close-callback)
-              listeners)]
-    (assoc state ::listener-runtimes listener-runtimes)))
+  (-> state
+      ::config
+      :entrypoints
+      (->> (into [] (mapcat config/entrypoint->listeners))
+           (mapv #(init-single-listener-state %
+                                              n-workers
+                                              loops
+                                              contexts
+                                              arena
+                                              config-ptr
+                                              on-close-callback)))
+      (->> (assoc state ::listener-runtimes))))
 
 (defn- init-worker-state
   [{::keys [n-workers loops contexts listener-runtimes http3-worker-contexts
             max-connections shutting-down?
             message-handler wakeup-receivers]
-    :as state}]
+    :as    state}]
   (let [workers
         (vec
          (for [thread-idx (range n-workers)]
-           (let [loop-ptr (nth loops thread-idx)
-                 ctx-ptr (nth contexts thread-idx)
+           (let [loop-ptr                  (nth loops thread-idx)
+                 ctx-ptr                   (nth contexts thread-idx)
                  thread-listener-states
                  (mapv #(nth (:thread-states %) thread-idx) listener-runtimes)
                  listener-socks-for-thread (mapv :socket thread-listener-states)
                  accept-callbacks-for-thread
                  (mapv :accept-callback-ptr thread-listener-states)
-                 http3-ctxs-for-thread (nth http3-worker-contexts thread-idx)]
+                 http3-ctxs-for-thread     (nth http3-worker-contexts thread-idx)]
              (evloop/start-worker!
               (fn [worker loop-state]
                 (worker-loop worker
                              loop-state
-                             {:listener-socks listener-socks-for-thread
+                             {:listener-socks   listener-socks-for-thread
                               :accept-callbacks accept-callbacks-for-thread
-                              :loop-ptr loop-ptr
-                              :ctx-ptr ctx-ptr
-                              :http3-ctxs http3-ctxs-for-thread
-                              :max-connections max-connections
-                              :shutting-down? shutting-down?}))
+                              :loop-ptr         loop-ptr
+                              :ctx-ptr          ctx-ptr
+                              :http3-ctxs       http3-ctxs-for-thread
+                              :max-connections  max-connections
+                              :shutting-down?   shutting-down?}))
               message-handler
               (nth wakeup-receivers thread-idx)))))]
     (assoc state ::workers workers)))
