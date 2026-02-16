@@ -1,6 +1,6 @@
 (ns ol.busker.native.socket
-  "Low-level socket helpers via coffi/FFM.
-   Responsibilities:
+  "low-level socket helpers via coffi/FFM.
+
    - Build sockaddr_in (IPv4) from host/port
    - open/bind/listen a nonblocking CLOEXEC master listener
    - duplicate the listener per worker thread (ownership: native side after handoff)
@@ -12,8 +12,8 @@
 
 (set! *warn-on-reflection* true)
 
-;; Minimal constants (POSIX/Linux values)
-;; If you support additional OSes, consider split-by-target or detect at runtime.
+;; minimal constants (POSIX/Linux values)
+;; TODO: check on macos
 
 (def ^:private AF_INET 2)
 (def ^:private SOCK_STREAM 1)
@@ -28,8 +28,6 @@
 (def ^:private FD_CLOEXEC 1)
 
 (def ^:private INADDR_ANY 0x00000000)
-
-;; coffi type aliases
 
 ;; struct in_addr { uint32_t s_addr; };
 (mem/defalias ::in_addr
@@ -63,23 +61,80 @@
 (defcfn close "close" [::mem/int] ::mem/int)
 (defcfn htons "htons" [::mem/short] ::mem/short) ;; network byte order
 
-;; Optional: inet_pton for non-ANY binds; keeping IPv4 only here
+;; optional: inet_pton for non-ANY binds; keeping IPv4 only here
 (defcfn inet_pton "inet_pton" [::mem/int ::mem/c-string ::mem/pointer] ::mem/int)
+(defcfn strerror "strerror" [::mem/int] ::mem/c-string)
 
 ;; helpers
+
+(def ^:private errno-location-symbols
+  ["__errno_location" "__error"])
+
+(def ^:private errno-location-fn
+  (delay
+    (some (fn [sym]
+            (when-let [addr (ffi/find-symbol sym)]
+              (ffi/make-downcall addr [] ::mem/pointer)))
+          errno-location-symbols)))
+
+(def ^:private errno->keyword
+  {9 :ebadf
+   13 :eacces
+   22 :einval
+   23 :enfile
+   24 :emfile
+   88 :enotsock
+   93 :eprotonosupport
+   95 :eopnotsupp
+   97 :eafnosupport
+   98 :eaddrinuse
+   99 :eaddrnotavail})
+
+(defn- errno-details
+  []
+  (if-let [get-errno* @errno-location-fn]
+    (let [errno-ptr (get-errno*)
+          errno-int (if errno-ptr
+                      (-> errno-ptr
+                          (mem/reinterpret 4)
+                          (mem/read-int 0))
+                      -1)
+          errno-key (get errno->keyword errno-int :unknown-errno)
+          errno-msg (try
+                      (strerror errno-int)
+                      (catch Throwable _
+                        nil))]
+      {:errno-int errno-int
+       :errno errno-key
+       :errno-message errno-msg})
+    {:errno-int nil
+     :errno :unknown-errno
+     :errno-message nil}))
+
+(defn- ex-info-with-errno
+  [message data]
+  (let [{:keys [errno errno-int errno-message]} (errno-details)
+        msg (if errno-message
+              (str message " (" errno-message ")")
+              message)]
+    (ex-info msg
+             (merge data
+                    {:errno errno
+                     :errno-int errno-int
+                     :errno-message errno-message}))))
 
 #_{:clj-kondo/ignore [:type-mismatch]}
 (defn- set-nonblocking! [fd]
   (let [flags (fcntl fd F_GETFL 0)]
     (when (neg? flags)
-      (throw (ex-info "fcntl(F_GETFL) failed" {:fd fd})))
+      (throw (ex-info-with-errno "fcntl(F_GETFL) failed" {:fd fd})))
     (when (neg? (fcntl fd F_SETFL (bit-or flags O_NONBLOCK)))
-      (throw (ex-info "fcntl(F_SETFL,O_NONBLOCK) failed" {:fd fd})))))
+      (throw (ex-info-with-errno "fcntl(F_SETFL,O_NONBLOCK) failed" {:fd fd})))))
 
 #_{:clj-kondo/ignore [:type-mismatch]}
 (defn- set-cloexec! [fd]
   (when (neg? (fcntl fd F_SETFD FD_CLOEXEC))
-    (throw (ex-info "fcntl(F_SETFD,FD_CLOEXEC) failed" {:fd fd}))))
+    (throw (ex-info-with-errno "fcntl(F_SETFD,FD_CLOEXEC) failed" {:fd fd}))))
 
 #_{:clj-kondo/ignore [:type-mismatch]}
 (defn- set-bool-sockopt! [fd level opt on?]
@@ -88,7 +143,8 @@
           ptr (mem/alloc-instance ::mem/int arena)]
       (mem/write-int ptr 0 v)
       (when (neg? (setsockopt fd level opt ptr 4))
-        (throw (ex-info "setsockopt failed" {:fd fd :level level :opt opt :val v}))))))
+        (throw (ex-info-with-errno "setsockopt failed"
+                                   {:fd fd :level level :opt opt :val v}))))))
 
 (defn- sockaddr-in
   "Build a sockaddr_in for IPv4.
@@ -114,8 +170,6 @@
                   :sin_zero   [0 0 0 0 0 0 0 0]}]
       (mem/serialize data ::sockaddr_in arena))))
 
-;; public API
-
 (defn open-master-listener
   "Create a master TCP socket, set NB/CLOEXEC and options, bind + listen.
    opts:
@@ -134,7 +188,7 @@
   (let [fd (socket AF_INET SOCK_STREAM 0)]
     #_{:clj-kondo/ignore [:type-mismatch]}
     (when (neg? fd)
-      (throw (ex-info "socket() failed" {:errno :check-errno})))
+      (throw (ex-info-with-errno "socket() failed" {})))
     (try
       (when cloexec? (set-cloexec! fd))
       (when nonblock? (set-nonblocking! fd))
@@ -145,9 +199,13 @@
         (let [addr    (sockaddr-in {:host host :port port} arena)
               addrlen (int (mem/size-of ::sockaddr_in))]
           (when (neg? (bind fd addr addrlen))
-            (throw (ex-info "bind() failed" {:host host :port port :errno :check-errno})))
+            (throw (ex-info-with-errno
+                    (str "bind() failed for " host ":" port)
+                    {:host host :port port})))
           (when (neg? (listen fd (int backlog)))
-            (throw (ex-info "listen() failed" {:host host :port port :backlog backlog :errno :check-errno})))))
+            (throw (ex-info-with-errno
+                    (str "listen() failed for " host ":" port)
+                                       {:host host :port port :backlog backlog})))))
       fd
       (catch Throwable t
         (try (close fd) (catch Throwable _))
@@ -166,7 +224,7 @@
      #_{:clj-kondo/ignore [:type-mismatch]}
      (let [d (dup master-fd)]
        (when (neg? d)
-         (throw (ex-info "dup() failed" {:master-fd master-fd :errno :check-errno})))
+         (throw (ex-info-with-errno "dup() failed" {:master-fd master-fd})))
        (set-cloexec! d)
        d))))
 
