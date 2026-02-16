@@ -457,6 +457,167 @@
     (when ptls-ctx
       (h2o/http3-free-ptls-ctx ptls-ctx))))
 
+(defn- prepare-server-state
+  [ring-handler user-config]
+  (let [{:keys [n-workers listeners max-connections executor] :as config}
+        (-> user-config config/load! config/config->listeners)]
+    {::ring-handler    ring-handler
+     ::config          config
+     ::n-workers       n-workers
+     ::listeners       listeners
+     ::max-connections max-connections
+     ::executor        executor
+     ::message-handler evloop-msg-processor
+     ::shutting-down?  (AtomicBoolean. false)}))
+
+(defn- init-core-state
+  [{::keys [ring-handler config n-workers max-connections] :as state}]
+  (let [arena             (mem/shared-arena)
+        _                 (h2o/conn-limit-set-max max-connections)
+        server-config     (create-server-config arena ring-handler config)
+        config-ptr        (::config-ptr server-config)
+        loops             (h2o/create-loops n-workers)
+        contexts          (h2o/create-contexts arena loops config-ptr)
+        wakeup-receivers  (vec (for [ctx-ptr contexts]
+                                 (h2o/mt-create-wakeup-receiver ctx-ptr)))
+        on-close-callback (create-connection-close-callback)]
+    (assoc state
+           ::arena arena
+           ::server-config server-config
+           ::config-ptr config-ptr
+           ::handler (::handler server-config)
+           ::loops loops
+           ::contexts contexts
+           ::wakeup-receivers wakeup-receivers
+           ::on-close-callback on-close-callback)))
+
+(defn- init-tls-http3-state
+  [{::keys [listeners config config-ptr n-workers loops contexts] :as state}]
+  (let [ssl-contexts                    (create-ssl-contexts listeners)
+        has-tls-listeners?              (some :tls listeners)
+        session-ticket-lifetime-seconds (:session-ticket-lifetime-seconds config)
+        ticket-store                    (tickets/memory-ticket-store)
+        native-ticket-mgr               (when has-tls-listeners?
+                                          (h2o/ticket-manager-create
+                                           session-ticket-lifetime-seconds))
+        key-manager                     (when native-ticket-mgr
+                                          (-> (tickets/create-key-manager ticket-store
+                                                                          native-ticket-mgr
+                                                                          config)
+                                              (tickets/start-key-manager!)))]
+    (when native-ticket-mgr
+      (doseq [[_idx {:keys [ssl-ctx]}] ssl-contexts]
+        (when ssl-ctx
+          (h2o/ssl-ctx-set-tickets ssl-ctx native-ticket-mgr 8192))))
+    (let [http3-contexts        (create-http3-contexts listeners
+                                                       config-ptr
+                                                       native-ticket-mgr
+                                                       session-ticket-lifetime-seconds)
+          http3-worker-contexts (create-http3-worker-contexts n-workers
+                                                              listeners
+                                                              loops
+                                                              contexts
+                                                              config-ptr
+                                                              http3-contexts)]
+      (assoc state
+             ::ssl-contexts ssl-contexts
+             ::ticket-store ticket-store
+             ::native-ticket-mgr native-ticket-mgr
+             ::key-manager key-manager
+             ::http3-contexts http3-contexts
+             ::http3-worker-contexts http3-worker-contexts))))
+
+(defn- callback-index
+  [listener-count thread-idx listener-idx]
+  (+ (* thread-idx listener-count) listener-idx))
+
+(defn- init-listener-state
+  [{::keys [listeners n-workers loops contexts arena config-ptr ssl-contexts
+            on-close-callback]
+    :as    state}]
+  (let [listener-count   (count listeners)
+        listener-fds     (vec (for [{:keys [port]} listeners]
+                                (socket/open-master-listener {:port port})))
+        dup-fds          (vec (for [master-fd listener-fds]
+                                (socket/dup-for-threads master-fd n-workers)))
+        accept-ctxs      (vec (for [thread-idx   (range n-workers)
+                                    listener-idx (range listener-count)]
+                                (let [ssl-ctx-ptr (get-in ssl-contexts
+                                                          [listener-idx :ssl-ctx])]
+                                  (h2o/create-accept-ctx arena
+                                                         (nth contexts thread-idx)
+                                                         config-ptr
+                                                         ssl-ctx-ptr))))
+        accept-callbacks (vec (for [accept-ctx-ptr accept-ctxs]
+                                (create-accept-callback
+                                 accept-ctx-ptr
+                                 (::connection-close-cb-ptr
+                                  on-close-callback))))
+        accept-callbacks-by-thread
+        (vec
+         (for [thread-idx (range n-workers)]
+           (vec
+            (for [listener-idx (range listener-count)]
+              (->> (callback-index listener-count thread-idx listener-idx)
+                   (nth accept-callbacks)
+                   ::accept-cb-ptr)))))
+        listener-sockets
+        (vec
+         (for [thread-idx (range n-workers)]
+           (vec
+            (for [listener-idx (range listener-count)]
+              (let [fd       (nth (nth dup-fds listener-idx) thread-idx)
+                    sock-ptr (h2o/create-socket-for-loop
+                              (nth loops thread-idx)
+                              fd
+                              h2o/H2O_SOCKET_FLAG_DONT_READ)
+                    callback (nth (nth accept-callbacks-by-thread thread-idx)
+                                  listener-idx)]
+                (h2o/socket-read-start sock-ptr callback)
+                sock-ptr)))))]
+    (assoc state
+           ::listener-fds listener-fds
+           ::dup-fds dup-fds
+           ::accept-ctxs accept-ctxs
+           ::accept-callbacks accept-callbacks
+           ::accept-callbacks-by-thread accept-callbacks-by-thread
+           ::listener-sockets listener-sockets)))
+
+(defn- init-worker-state
+  [{::keys [n-workers loops contexts listener-sockets accept-callbacks-by-thread
+            http3-worker-contexts max-connections shutting-down?
+            message-handler wakeup-receivers]
+    :as state}]
+  (let [workers
+        (vec
+         (for [thread-idx (range n-workers)]
+           (let [loop-ptr (nth loops thread-idx)
+                 ctx-ptr (nth contexts thread-idx)
+                 listener-socks-for-thread (nth listener-sockets thread-idx)
+                 accept-callbacks-for-thread
+                 (nth accept-callbacks-by-thread thread-idx)
+                 http3-ctxs-for-thread (nth http3-worker-contexts thread-idx)]
+             (evloop/start-worker!
+              (fn [worker loop-state]
+                (worker-loop worker
+                             loop-state
+                             {:listener-socks listener-socks-for-thread
+                              :accept-callbacks accept-callbacks-for-thread
+                              :loop-ptr loop-ptr
+                              :ctx-ptr ctx-ptr
+                              :http3-ctxs http3-ctxs-for-thread
+                              :max-connections max-connections
+                              :shutting-down? shutting-down?}))
+              message-handler
+              (nth wakeup-receivers thread-idx)))))]
+    (assoc state ::workers workers)))
+
+(defn- finalize-server-state
+  [state]
+  (-> state
+      (dissoc ::message-handler)
+      (dissoc ::accept-callbacks-by-thread)))
+
 (defn run-server
   "Start an h2o webserver to serve the given Ring handler according to the
   supplied options:
@@ -550,122 +711,14 @@
   Returns a server map that can be passed to stop-server."
   ([handler]
    (run-server handler {}))
-  ([handler config]
+  ([handler user-config]
    (when-not handler (throw (ex-info "Handler is required" {:handler handler})))
-   (let [{:keys [n-workers listeners max-connections executor] :as config}
-         (-> config config/load! config/config->listeners)
-         _                                                                 (h2o/conn-limit-set-max max-connections)
-         arena                                                             (mem/shared-arena)
-         {::keys [config-ptr]}                           (create-server-config arena handler config)
-         shutting-down?                                                    (AtomicBoolean. false)
-
-         message-handler evloop-msg-processor
-
-         ssl-contexts (create-ssl-contexts listeners)
-
-         loops    (h2o/create-loops n-workers)
-         contexts (h2o/create-contexts arena loops config-ptr)
-
-         ;; Session ticket management for TLS resumption and 0-RTT
-         ;; Create ticket manager for any TLS listener (needed for both TCP TLS and HTTP/3)
-         has-tls-listeners? (some :tls listeners)
-         session-ticket-lifetime-seconds (:session-ticket-lifetime-seconds config)
-         ticket-store (tickets/memory-ticket-store)
-         native-ticket-mgr (when has-tls-listeners?
-                             (h2o/ticket-manager-create session-ticket-lifetime-seconds))
-         key-manager (when native-ticket-mgr
-                       (-> (tickets/create-key-manager ticket-store native-ticket-mgr config)
-                           (tickets/start-key-manager!)))
-
-         ;; Wire ticket manager into TCP TLS contexts (SSL_CTX) for session resumption and 0-RTT
-         _ (when native-ticket-mgr
-             (doseq [[_idx {:keys [ssl-ctx]}] ssl-contexts]
-               (when ssl-ctx
-                 (h2o/ssl-ctx-set-tickets ssl-ctx native-ticket-mgr 8192))))
-
-         http3-contexts (create-http3-contexts listeners config-ptr
-                                               native-ticket-mgr session-ticket-lifetime-seconds)
-         http3-worker-contexts (create-http3-worker-contexts n-workers listeners loops contexts config-ptr http3-contexts)
-
-         wakeup-receivers (vec (for [ctx-ptr contexts]
-                                 (h2o/mt-create-wakeup-receiver ctx-ptr)))
-
-         on-close-callback (create-connection-close-callback)
-
-         listener-fds (vec (for [{:keys [port]} listeners]
-                             (socket/open-master-listener {:port port})))
-
-         dup-fds (vec (for [master-fd listener-fds]
-                        (socket/dup-for-threads master-fd n-workers)))
-
-         accept-ctxs (vec (for [thread-idx   (range n-workers)
-                                listener-idx (range (count listeners))]
-                            (let [ssl-ctx-ptr (get-in ssl-contexts [listener-idx :ssl-ctx])]
-                              (h2o/create-accept-ctx
-                               arena
-                               (nth contexts thread-idx)
-                               config-ptr
-                               ssl-ctx-ptr))))
-
-         accept-callbacks (vec (for [accept-ctx-ptr accept-ctxs]
-                                 (create-accept-callback accept-ctx-ptr (::connection-close-cb-ptr on-close-callback))))
-
-         listener-sockets (vec (for [thread-idx (range n-workers)]
-                                 (vec (for [listener-idx (range (count listeners))]
-                                        (let [fd       (nth (nth dup-fds listener-idx) thread-idx)
-                                              sock-ptr (h2o/create-socket-for-loop
-                                                        (nth loops thread-idx)
-                                                        fd
-                                                        h2o/H2O_SOCKET_FLAG_DONT_READ)
-                                              cb-idx   (+ (* thread-idx (count listeners)) listener-idx)
-                                              callback (::accept-cb-ptr (nth accept-callbacks cb-idx))]
-                                          (h2o/socket-read-start sock-ptr callback)
-                                          sock-ptr)))))
-
-         workers (vec (for [thread-idx (range n-workers)]
-                        (let [loop-ptr                    (nth loops thread-idx)
-                              ctx-ptr                     (nth contexts thread-idx)
-                              listener-socks-for-thread   (nth listener-sockets thread-idx)
-                              thread-accept-callback      (::accept-cb-ptr (nth accept-callbacks thread-idx))
-                              accept-callbacks-for-thread (vec (repeat (count listener-socks-for-thread)
-                                                                       thread-accept-callback))
-                              http3-ctxs-for-thread       (nth http3-worker-contexts thread-idx)]
-
-                          (evloop/start-worker!
-                           (fn [worker loop-state] (worker-loop worker loop-state {:listener-socks   listener-socks-for-thread
-                                                                                   :accept-callbacks accept-callbacks-for-thread
-                                                                                   :loop-ptr         loop-ptr
-                                                                                   :ctx-ptr          ctx-ptr
-                                                                                   :http3-ctxs       http3-ctxs-for-thread
-                                                                                   :max-connections  max-connections
-                                                                                   :shutting-down?   shutting-down?}))
-                           message-handler
-                           (nth wakeup-receivers thread-idx)))))]
-     {::arena    arena
-      ::config   config
-      ::handler  handler
-      ::executor executor
-
-      ::n-workers          n-workers
-      ::listeners          listeners
-      ::max-connections    max-connections
-      ::shutting-down?     shutting-down?
-      ::loops              loops
-      ::contexts           contexts
-      ::accept-ctxs        accept-ctxs
-      ::ssl-contexts       ssl-contexts
-      ::http3-contexts     http3-contexts
-      ::http3-worker-contexts http3-worker-contexts
-      ::accept-callbacks   accept-callbacks
-      ::on-close-callback  on-close-callback
-      ::listener-fds       listener-fds
-      ::wakeup-receivers   wakeup-receivers
-      ::dup-fds            dup-fds
-      ::listener-sockets   listener-sockets
-      ::workers            workers
-      ::ticket-store       ticket-store
-      ::native-ticket-mgr  native-ticket-mgr
-      ::key-manager        key-manager})))
+   (-> (prepare-server-state handler user-config)
+       (init-core-state)
+       (init-tls-http3-state)
+       (init-listener-state)
+       (init-worker-state)
+       (finalize-server-state))))
 
 (defn stop-server
   "Synchronously shut down the server, blocking until all requests and native
