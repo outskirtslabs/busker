@@ -12,10 +12,8 @@
 
 (set! *warn-on-reflection* true)
 
-;; ------------------------------------------------------------
 ;; Minimal constants (POSIX/Linux values)
 ;; If you support additional OSes, consider split-by-target or detect at runtime.
-;; ------------------------------------------------------------
 
 (def ^:private AF_INET 2)
 (def ^:private SOCK_STREAM 1)
@@ -31,9 +29,7 @@
 
 (def ^:private INADDR_ANY 0x00000000)
 
-;; ------------------------------------------------------------
 ;; coffi type aliases
-;; ------------------------------------------------------------
 
 ;; struct in_addr { uint32_t s_addr; };
 (mem/defalias ::in_addr
@@ -56,9 +52,7 @@
       [:sin_addr ::in_addr]
       [:sin_zero [::mem/array ::mem/byte 8]]]]))
 
-;; ------------------------------------------------------------
 ;; libc bindings (thin)
-;; ------------------------------------------------------------
 
 (defcfn socket "socket" [::mem/int ::mem/int ::mem/int] ::mem/int)
 (defcfn setsockopt "setsockopt" [::mem/int ::mem/int ::mem/int ::mem/pointer ::mem/int] ::mem/int)
@@ -72,9 +66,7 @@
 ;; Optional: inet_pton for non-ANY binds; keeping IPv4 only here
 (defcfn inet_pton "inet_pton" [::mem/int ::mem/c-string ::mem/pointer] ::mem/int)
 
-;; ------------------------------------------------------------
 ;; helpers
-;; ------------------------------------------------------------
 
 #_{:clj-kondo/ignore [:type-mismatch]}
 (defn- set-nonblocking! [fd]
@@ -122,9 +114,7 @@
                   :sin_zero   [0 0 0 0 0 0 0 0]}]
       (mem/serialize data ::sockaddr_in arena))))
 
-;; ------------------------------------------------------------
 ;; public API
-;; ------------------------------------------------------------
 
 (defn open-master-listener
   "Create a master TCP socket, set NB/CLOEXEC and options, bind + listen.
@@ -184,9 +174,7 @@
   (when (pos? fd)
     (close fd)))
 
-;; ------------------------------------------------------------
 ;; how this integrates with h2o
-;; ------------------------------------------------------------
 ;; For each worker i:
 ;;   - allocate an h2o_evloop_t
 ;;   - pass (dup’d-fds[i]) to h2o_evloop_socket_create(loop, fd, H2O_SOCKET_FLAG_DONT_READ)
