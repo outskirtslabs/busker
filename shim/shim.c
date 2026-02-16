@@ -8,12 +8,15 @@
 #include "quicly.h"
 #include "quicly/defaults.h"
 #include <inttypes.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <openssl/err.h>
 #include <openssl/hmac.h>
+#include <openssl/pem.h>
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
@@ -29,7 +32,9 @@
 #define REQ_ERROR "request error\n"
 
 /* Global connection limit counter and maximum.
-   Process-global, shared across all workers and listeners in the same JVM. */
+   Process-global, shared across all workers and listeners in the same JVM.
+   TODO: refactor connection limit accounting to be per-server rather than
+   process-global so multiple embedded servers can coexist safely. */
 static _Atomic uint32_t clj_conn_count = 0;
 static _Atomic uint32_t clj_conn_max = 0;
 
@@ -49,6 +54,11 @@ typedef enum {
   SERVICE_UNAVAILABLE = 503,
   GATEWAY_TIMEOUT = 504
 } http_status_code_t;
+
+typedef struct {
+  clj_tls_lookup_cb cb;
+  void *user_ctx;
+} clj_tls_lookup_binding_t;
 
 static const char *status_code_to_string(http_status_code_t status_code) {
   const char *ret;
@@ -74,6 +84,18 @@ static const char *status_code_to_string(http_status_code_t status_code) {
   }
 
   return ret;
+}
+
+void *clj_h2o_tls_memdup(const void *value, size_t value_len) {
+  if (value == NULL || value_len == 0)
+    return NULL;
+
+  uint8_t *dup = malloc(value_len);
+  if (dup == NULL)
+    return NULL;
+
+  memcpy(dup, value, value_len);
+  return dup;
 }
 void send_error(http_status_code_t status_code, const char *body,
                 h2o_req_t *req) {
@@ -677,10 +699,193 @@ void clj_h2o_create_globalconf(h2o_globalconf_t *conf,
 
 /* TLS/SSL Support Implementation */
 
+static int clj_tls_lookup_pem_for_sni(clj_tls_lookup_cb lookup_cb,
+                                      void *lookup_user_ctx,
+                                      const uint8_t *sni_hostname,
+                                      size_t sni_hostname_len,
+                                      uint8_t **cert_chain_pem_out,
+                                      size_t *cert_chain_pem_len_out,
+                                      uint8_t **private_key_pem_out,
+                                      size_t *private_key_pem_len_out) {
+  if (sni_hostname == NULL || sni_hostname_len == 0)
+    return 0;
+  if (lookup_cb == NULL)
+    return 0;
+
+  uint8_t *cert_chain_pem = NULL;
+  uint8_t *private_key_pem = NULL;
+  size_t cert_chain_pem_len = 0;
+  size_t private_key_pem_len = 0;
+  int status = lookup_cb(sni_hostname, sni_hostname_len,
+                  &cert_chain_pem, &cert_chain_pem_len, &private_key_pem,
+                  &private_key_pem_len, lookup_user_ctx);
+
+  if (status != 1) {
+    free(cert_chain_pem);
+    free(private_key_pem);
+    return status;
+  }
+
+  if (cert_chain_pem == NULL || cert_chain_pem_len == 0 ||
+      private_key_pem == NULL || private_key_pem_len == 0) {
+    free(cert_chain_pem);
+    free(private_key_pem);
+    return -1;
+  }
+
+  *cert_chain_pem_out = cert_chain_pem;
+  *cert_chain_pem_len_out = cert_chain_pem_len;
+  *private_key_pem_out = private_key_pem;
+  *private_key_pem_len_out = private_key_pem_len;
+  return 1;
+}
+
+static int clj_ssl_use_chain_from_pem(SSL *ssl, const uint8_t *cert_chain_pem,
+                                      size_t cert_chain_pem_len) {
+  int ok = 0;
+  BIO *cert_bio = NULL;
+  X509 *leaf = NULL;
+
+  if (cert_chain_pem_len > INT_MAX)
+    return 0;
+
+  cert_bio = BIO_new_mem_buf(cert_chain_pem, (int)cert_chain_pem_len);
+  if (cert_bio == NULL)
+    goto Exit;
+
+  leaf = PEM_read_bio_X509_AUX(cert_bio, NULL, NULL, NULL);
+  if (leaf == NULL)
+    goto Exit;
+
+  if (SSL_use_certificate(ssl, leaf) != 1)
+    goto Exit;
+
+#if OPENSSL_VERSION_NUMBER >= 0x10002000L
+  SSL_clear_chain_certs(ssl);
+#endif
+
+  while (1) {
+    X509 *chain_cert = PEM_read_bio_X509(cert_bio, NULL, NULL, NULL);
+    if (chain_cert == NULL) {
+      ERR_clear_error(); /* EOF on PEM chain */
+      break;
+    }
+    if (SSL_add1_chain_cert(ssl, chain_cert) != 1) {
+      X509_free(chain_cert);
+      goto Exit;
+    }
+    X509_free(chain_cert);
+  }
+
+  ok = 1;
+
+Exit:
+  if (leaf != NULL)
+    X509_free(leaf);
+  if (cert_bio != NULL)
+    BIO_free(cert_bio);
+  return ok;
+}
+
+static int clj_ssl_use_private_key_from_pem(SSL *ssl,
+                                            const uint8_t *private_key_pem,
+                                            size_t private_key_pem_len) {
+  int ok = 0;
+  BIO *key_bio = NULL;
+  EVP_PKEY *pkey = NULL;
+
+  if (private_key_pem_len > INT_MAX)
+    return 0;
+
+  key_bio = BIO_new_mem_buf(private_key_pem, (int)private_key_pem_len);
+  if (key_bio == NULL)
+    goto Exit;
+
+  pkey = PEM_read_bio_PrivateKey(key_bio, NULL, NULL, NULL);
+  if (pkey == NULL)
+    goto Exit;
+
+  if (SSL_use_PrivateKey(ssl, pkey) != 1)
+    goto Exit;
+  if (SSL_check_private_key(ssl) != 1)
+    goto Exit;
+
+  ok = 1;
+
+Exit:
+  if (pkey != NULL)
+    EVP_PKEY_free(pkey);
+  if (key_bio != NULL)
+    BIO_free(key_bio);
+  return ok;
+}
+
+static int clj_ssl_apply_pem_identity(SSL *ssl, const uint8_t *cert_chain_pem,
+                                      size_t cert_chain_pem_len,
+                                      const uint8_t *private_key_pem,
+                                      size_t private_key_pem_len) {
+  if (!clj_ssl_use_chain_from_pem(ssl, cert_chain_pem, cert_chain_pem_len))
+    return 0;
+  if (!clj_ssl_use_private_key_from_pem(ssl, private_key_pem,
+                                        private_key_pem_len))
+    return 0;
+  return 1;
+}
+
+static int clj_ssl_select_certificate_cb(SSL *ssl, void *arg) {
+  clj_tls_lookup_binding_t *binding = (clj_tls_lookup_binding_t *)arg;
+
+  if (binding == NULL || binding->cb == NULL) {
+    /* Legacy/manual mode: no dynamic callback, use cert loaded on SSL_CTX. */
+    return SSL_get_certificate(ssl) != NULL ? 1 : 0;
+  }
+
+  const char *server_name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+  if (server_name == NULL || server_name[0] == '\0') {
+    /* TODO: allow configurable default certificate when client omits SNI. */
+    return 0;
+  }
+
+  size_t server_name_len = strlen(server_name);
+  uint8_t *cert_chain_pem = NULL;
+  uint8_t *private_key_pem = NULL;
+  size_t cert_chain_pem_len = 0;
+  size_t private_key_pem_len = 0;
+  int status = clj_tls_lookup_pem_for_sni(binding->cb, binding->user_ctx,
+                                          (const uint8_t *)server_name,
+                                          server_name_len, &cert_chain_pem,
+                                          &cert_chain_pem_len,
+                                          &private_key_pem,
+                                          &private_key_pem_len);
+  if (status != 1)
+    return 0;
+
+  int ok = clj_ssl_apply_pem_identity(ssl, cert_chain_pem, cert_chain_pem_len,
+                                      private_key_pem, private_key_pem_len);
+  free(cert_chain_pem);
+  free(private_key_pem);
+  return ok ? 1 : 0;
+}
+
 SSL_CTX *clj_h2o_create_ssl_ctx(const char *cert_file, const char *key_file,
-                                int enable_http2) {
-  if (!cert_file || !key_file)
+                                int enable_http2, clj_tls_lookup_cb lookup_cb,
+                                void *lookup_user_ctx) {
+  int has_static_identity =
+      cert_file != NULL && cert_file[0] != '\0' && key_file != NULL &&
+      key_file[0] != '\0';
+  int has_partial_identity =
+      (cert_file != NULL && cert_file[0] != '\0') ^
+      (key_file != NULL && key_file[0] != '\0');
+
+  if (has_partial_identity)
     return NULL;
+
+  clj_tls_lookup_binding_t *binding =
+      calloc(1, sizeof(clj_tls_lookup_binding_t));
+  if (binding == NULL)
+    return NULL;
+  binding->cb = lookup_cb;
+  binding->user_ctx = lookup_user_ctx;
 
   SSL_load_error_strings();
   SSL_library_init();
@@ -689,23 +894,33 @@ SSL_CTX *clj_h2o_create_ssl_ctx(const char *cert_file, const char *key_file,
   SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_server_method());
   if (!ssl_ctx) {
     ERR_print_errors_fp(stderr);
+    free(binding);
     return NULL;
   }
 
   SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 |
                                    SSL_OP_NO_COMPRESSION);
 
-  if (SSL_CTX_use_certificate_chain_file(ssl_ctx, cert_file) != 1) {
-    ERR_print_errors_fp(stderr);
-    SSL_CTX_free(ssl_ctx);
-    return NULL;
+  if (has_static_identity) {
+    if (SSL_CTX_use_certificate_chain_file(ssl_ctx, cert_file) != 1) {
+      ERR_print_errors_fp(stderr);
+      SSL_CTX_free(ssl_ctx);
+      free(binding);
+      return NULL;
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(ssl_ctx, key_file, SSL_FILETYPE_PEM) != 1) {
+      ERR_print_errors_fp(stderr);
+      SSL_CTX_free(ssl_ctx);
+      free(binding);
+      return NULL;
+    }
   }
 
-  if (SSL_CTX_use_PrivateKey_file(ssl_ctx, key_file, SSL_FILETYPE_PEM) != 1) {
-    ERR_print_errors_fp(stderr);
-    SSL_CTX_free(ssl_ctx);
-    return NULL;
-  }
+  SSL_CTX_set_app_data(ssl_ctx, binding);
+
+  /* Per-handshake cert selection from dynamic lookup callback. */
+  SSL_CTX_set_cert_cb(ssl_ctx, clj_ssl_select_certificate_cb, binding);
 
   /* Mozilla Intermediate cipher suite (modern, widely compatible) */
   SSL_CTX_set_cipher_list(
@@ -722,6 +937,8 @@ SSL_CTX *clj_h2o_create_ssl_ctx(const char *cert_file, const char *key_file,
 
 void clj_h2o_free_ssl_ctx(SSL_CTX *ssl_ctx) {
   if (ssl_ctx) {
+    free(SSL_CTX_get_app_data(ssl_ctx));
+    SSL_CTX_set_app_data(ssl_ctx, NULL);
     SSL_CTX_free(ssl_ctx);
   }
 }
@@ -735,11 +952,196 @@ struct clj_http3_ctx_t {
   int fd;
 };
 
+typedef struct clj_ptls_identity_cache_entry {
+  uint8_t *hostname;
+  size_t hostname_len;
+  uint8_t *cert_chain_pem;
+  size_t cert_chain_pem_len;
+  uint8_t *private_key_pem;
+  size_t private_key_pem_len;
+  ptls_context_t ctx;
+  ptls_openssl_sign_certificate_t sign_certificate;
+  struct clj_ptls_identity_cache_entry *next;
+} clj_ptls_identity_cache_entry_t;
+
+typedef struct clj_ptls_wrapper_t {
+  ptls_context_t ctx;
+  ptls_on_client_hello_t on_client_hello;
+  ptls_openssl_sign_certificate_t sign_certificate;
+  clj_tls_lookup_cb lookup_cb;
+  void *lookup_user_ctx;
+  clj_ptls_identity_cache_entry_t *cache_head;
+  pthread_mutex_t cache_mutex;
+} clj_ptls_wrapper_t;
+
 /* ALPN negotiation callback for HTTP/3 */
 static int clj_on_client_hello_cb(ptls_on_client_hello_t *self,
                                   ptls_t *tls,
                                   ptls_on_client_hello_parameters_t *params) {
-  (void)self;
+  clj_ptls_wrapper_t *wrapper =
+      H2O_STRUCT_FROM_MEMBER(clj_ptls_wrapper_t, on_client_hello, self);
+
+  if (wrapper->lookup_cb != NULL) {
+    if (params->server_name.base == NULL || params->server_name.len == 0) {
+      /* TODO: allow configurable default certificate when client omits SNI. */
+      return PTLS_ALERT_UNRECOGNIZED_NAME;
+    }
+
+    if (ptls_set_server_name(tls, (const char *)params->server_name.base,
+                             params->server_name.len) != 0)
+      return PTLS_ALERT_INTERNAL_ERROR;
+
+    const uint8_t *hostname = (const uint8_t *)params->server_name.base;
+    size_t hostname_len = params->server_name.len;
+    uint8_t *cert_chain_pem = NULL;
+    uint8_t *private_key_pem = NULL;
+    size_t cert_chain_pem_len = 0;
+    size_t private_key_pem_len = 0;
+    int status = clj_tls_lookup_pem_for_sni(
+        wrapper->lookup_cb, wrapper->lookup_user_ctx, hostname, hostname_len,
+        &cert_chain_pem,
+        &cert_chain_pem_len, &private_key_pem, &private_key_pem_len);
+    if (status != 1)
+      return status == 0 ? PTLS_ALERT_UNRECOGNIZED_NAME
+                         : PTLS_ALERT_INTERNAL_ERROR;
+
+    pthread_mutex_lock(&wrapper->cache_mutex);
+
+    clj_ptls_identity_cache_entry_t *entry = wrapper->cache_head;
+    while (entry != NULL) {
+      if (entry->hostname_len == hostname_len &&
+          memcmp(entry->hostname, hostname, hostname_len) == 0)
+        break;
+      entry = entry->next;
+    }
+
+    if (entry == NULL || entry->cert_chain_pem_len != cert_chain_pem_len ||
+        memcmp(entry->cert_chain_pem, cert_chain_pem, cert_chain_pem_len) !=
+            0 ||
+        entry->private_key_pem_len != private_key_pem_len ||
+        memcmp(entry->private_key_pem, private_key_pem, private_key_pem_len) !=
+            0) {
+      clj_ptls_identity_cache_entry_t *new_entry =
+          calloc(1, sizeof(clj_ptls_identity_cache_entry_t));
+      if (new_entry == NULL) {
+        pthread_mutex_unlock(&wrapper->cache_mutex);
+        free(cert_chain_pem);
+        free(private_key_pem);
+        return PTLS_ALERT_INTERNAL_ERROR;
+      }
+
+      new_entry->hostname = clj_h2o_tls_memdup(hostname, hostname_len);
+      if (new_entry->hostname == NULL) {
+        pthread_mutex_unlock(&wrapper->cache_mutex);
+        free(cert_chain_pem);
+        free(private_key_pem);
+        free(new_entry);
+        return PTLS_ALERT_INTERNAL_ERROR;
+      }
+      new_entry->hostname_len = hostname_len;
+
+      new_entry->cert_chain_pem = cert_chain_pem;
+      new_entry->cert_chain_pem_len = cert_chain_pem_len;
+      new_entry->private_key_pem = private_key_pem;
+      new_entry->private_key_pem_len = private_key_pem_len;
+      new_entry->ctx = wrapper->ctx;
+      new_entry->ctx.certificates.list = NULL;
+      new_entry->ctx.certificates.count = 0;
+      new_entry->ctx.sign_certificate = NULL;
+
+      if (new_entry->cert_chain_pem_len > INT_MAX ||
+          new_entry->private_key_pem_len > INT_MAX) {
+        pthread_mutex_unlock(&wrapper->cache_mutex);
+        free(new_entry->hostname);
+        free(new_entry->cert_chain_pem);
+        free(new_entry->private_key_pem);
+        free(new_entry);
+        return PTLS_ALERT_INTERNAL_ERROR;
+      }
+
+      BIO *cert_bio = BIO_new_mem_buf(new_entry->cert_chain_pem,
+                                      (int)new_entry->cert_chain_pem_len);
+      BIO *key_bio = NULL;
+      X509 *leaf = NULL;
+      STACK_OF(X509) *chain = NULL;
+      EVP_PKEY *pkey = NULL;
+      int init_ok = 0;
+
+      if (cert_bio != NULL) {
+        leaf = PEM_read_bio_X509_AUX(cert_bio, NULL, NULL, NULL);
+        if (leaf != NULL) {
+          chain = sk_X509_new_null();
+          if (chain != NULL) {
+            while (1) {
+              X509 *extra = PEM_read_bio_X509(cert_bio, NULL, NULL, NULL);
+              if (extra == NULL) {
+                ERR_clear_error();
+                break;
+              }
+              if (sk_X509_push(chain, extra) == 0) {
+                X509_free(extra);
+                break;
+              }
+            }
+            if (ptls_openssl_load_certificates(&new_entry->ctx, leaf, chain) ==
+                0) {
+              key_bio =
+                  BIO_new_mem_buf(new_entry->private_key_pem,
+                                  (int)new_entry->private_key_pem_len);
+              if (key_bio != NULL) {
+                pkey = PEM_read_bio_PrivateKey(key_bio, NULL, NULL, NULL);
+                if (pkey != NULL &&
+                    ptls_openssl_init_sign_certificate(
+                        &new_entry->sign_certificate, pkey) == 0) {
+                  new_entry->ctx.sign_certificate =
+                      &new_entry->sign_certificate.super;
+                  init_ok = 1;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (pkey != NULL)
+        EVP_PKEY_free(pkey);
+      if (key_bio != NULL)
+        BIO_free(key_bio);
+      if (chain != NULL)
+        sk_X509_pop_free(chain, X509_free);
+      if (leaf != NULL)
+        X509_free(leaf);
+      if (cert_bio != NULL)
+        BIO_free(cert_bio);
+
+      if (!init_ok) {
+        pthread_mutex_unlock(&wrapper->cache_mutex);
+        if (new_entry->ctx.certificates.list != NULL) {
+          for (size_t i = 0; i != new_entry->ctx.certificates.count; ++i)
+            free(new_entry->ctx.certificates.list[i].base);
+          free(new_entry->ctx.certificates.list);
+        }
+        free(new_entry->hostname);
+        free(new_entry->cert_chain_pem);
+        free(new_entry->private_key_pem);
+        free(new_entry);
+        return PTLS_ALERT_INTERNAL_ERROR;
+      }
+
+      new_entry->next = wrapper->cache_head;
+      wrapper->cache_head = new_entry;
+      entry = new_entry;
+    } else {
+      free(cert_chain_pem);
+      free(private_key_pem);
+    }
+
+    ptls_set_context(tls, &entry->ctx);
+    pthread_mutex_unlock(&wrapper->cache_mutex);
+  } else if (wrapper->ctx.sign_certificate == NULL ||
+             wrapper->ctx.certificates.list == NULL) {
+    return PTLS_ALERT_UNRECOGNIZED_NAME;
+  }
 
   if (params->negotiated_protocols.count == 0)
     return 0;
@@ -760,23 +1162,29 @@ static int clj_on_client_hello_cb(ptls_on_client_hello_t *self,
   return 0;
 }
 
-/* Internal structure to hold picotls context and its resources */
-typedef struct {
-  ptls_context_t ctx;
-  ptls_on_client_hello_t on_client_hello;
-  ptls_openssl_sign_certificate_t sign_certificate;
-} clj_ptls_wrapper_t;
-
 ptls_context_t *clj_h2o_create_ptls_ctx(const char *cert_file,
-                                        const char *key_file) {
-  if (!cert_file || !key_file)
+                                        const char *key_file,
+                                        clj_tls_lookup_cb lookup_cb,
+                                        void *lookup_user_ctx) {
+  int has_static_identity =
+      cert_file != NULL && cert_file[0] != '\0' && key_file != NULL &&
+      key_file[0] != '\0';
+  int has_partial_identity =
+      (cert_file != NULL && cert_file[0] != '\0') ^
+      (key_file != NULL && key_file[0] != '\0');
+
+  if (has_partial_identity)
     return NULL;
 
   clj_ptls_wrapper_t *wrapper = calloc(1, sizeof(clj_ptls_wrapper_t));
   if (!wrapper)
     return NULL;
 
+  pthread_mutex_init(&wrapper->cache_mutex, NULL);
+
   wrapper->on_client_hello.cb = clj_on_client_hello_cb;
+  wrapper->lookup_cb = lookup_cb;
+  wrapper->lookup_user_ctx = lookup_user_ctx;
 
   wrapper->ctx = (ptls_context_t){
       .random_bytes = ptls_openssl_random_bytes,
@@ -786,40 +1194,46 @@ ptls_context_t *clj_h2o_create_ptls_ctx(const char *cert_file,
       .on_client_hello = &wrapper->on_client_hello,
   };
 
-  if (ptls_load_certificates(&wrapper->ctx, cert_file) != 0) {
-    DEBUG_LOG("failed to load certificates from %s", cert_file);
-    free(wrapper);
-    return NULL;
-  }
+  if (has_static_identity) {
+    if (ptls_load_certificates(&wrapper->ctx, cert_file) != 0) {
+      DEBUG_LOG("failed to load certificates from %s", cert_file);
+      pthread_mutex_destroy(&wrapper->cache_mutex);
+      free(wrapper);
+      return NULL;
+    }
 
-  FILE *fp = fopen(key_file, "r");
-  if (!fp) {
-    DEBUG_LOG("failed to open key file: %s", key_file);
-    free(wrapper->ctx.certificates.list);
-    free(wrapper);
-    return NULL;
-  }
+    FILE *fp = fopen(key_file, "r");
+    if (!fp) {
+      DEBUG_LOG("failed to open key file: %s", key_file);
+      free(wrapper->ctx.certificates.list);
+      pthread_mutex_destroy(&wrapper->cache_mutex);
+      free(wrapper);
+      return NULL;
+    }
 
-  EVP_PKEY *pkey = PEM_read_PrivateKey(fp, NULL, NULL, NULL);
-  fclose(fp);
-  if (!pkey) {
-    DEBUG_LOG("failed to load private key from %s", key_file);
-    free(wrapper->ctx.certificates.list);
-    free(wrapper);
-    return NULL;
-  }
+    EVP_PKEY *pkey = PEM_read_PrivateKey(fp, NULL, NULL, NULL);
+    fclose(fp);
+    if (!pkey) {
+      DEBUG_LOG("failed to load private key from %s", key_file);
+      free(wrapper->ctx.certificates.list);
+      pthread_mutex_destroy(&wrapper->cache_mutex);
+      free(wrapper);
+      return NULL;
+    }
 
-  if (ptls_openssl_init_sign_certificate(&wrapper->sign_certificate, pkey) !=
-      0) {
-    DEBUG_LOG("failed to setup private key");
+    if (ptls_openssl_init_sign_certificate(&wrapper->sign_certificate, pkey) !=
+        0) {
+      DEBUG_LOG("failed to setup private key");
+      EVP_PKEY_free(pkey);
+      free(wrapper->ctx.certificates.list);
+      pthread_mutex_destroy(&wrapper->cache_mutex);
+      free(wrapper);
+      return NULL;
+    }
     EVP_PKEY_free(pkey);
-    free(wrapper->ctx.certificates.list);
-    free(wrapper);
-    return NULL;
-  }
-  EVP_PKEY_free(pkey);
 
-  wrapper->ctx.sign_certificate = &wrapper->sign_certificate.super;
+    wrapper->ctx.sign_certificate = &wrapper->sign_certificate.super;
+  }
 
   return &wrapper->ctx;
 }
@@ -831,10 +1245,32 @@ void clj_h2o_free_ptls_ctx(ptls_context_t *ctx) {
   clj_ptls_wrapper_t *wrapper =
       H2O_STRUCT_FROM_MEMBER(clj_ptls_wrapper_t, ctx, ctx);
 
-  ptls_openssl_dispose_sign_certificate(&wrapper->sign_certificate);
+  if (wrapper->ctx.sign_certificate != NULL)
+    ptls_openssl_dispose_sign_certificate(&wrapper->sign_certificate);
 
-  if (wrapper->ctx.certificates.list)
+  if (wrapper->ctx.certificates.list) {
+    for (size_t i = 0; i != wrapper->ctx.certificates.count; ++i)
+      free(wrapper->ctx.certificates.list[i].base);
     free(wrapper->ctx.certificates.list);
+  }
+
+  clj_ptls_identity_cache_entry_t *entry = wrapper->cache_head;
+  while (entry != NULL) {
+    clj_ptls_identity_cache_entry_t *next = entry->next;
+    ptls_openssl_dispose_sign_certificate(&entry->sign_certificate);
+    if (entry->ctx.certificates.list != NULL) {
+      for (size_t i = 0; i != entry->ctx.certificates.count; ++i)
+        free(entry->ctx.certificates.list[i].base);
+      free(entry->ctx.certificates.list);
+    }
+    free(entry->hostname);
+    free(entry->cert_chain_pem);
+    free(entry->private_key_pem);
+    free(entry);
+    entry = next;
+  }
+
+  pthread_mutex_destroy(&wrapper->cache_mutex);
 
   free(wrapper);
 }
@@ -903,6 +1339,9 @@ static void clj_on_http3_conn_destroy(h2o_quic_conn_t *conn) {
 
 /* Wrapper callbacks for HTTP/3 connections with connection limit tracking */
 static h2o_http3_conn_callbacks_t clj_http3_conn_callbacks;
+/* TODO: refactor HTTP/3 callback init state to be per-server instead of
+   process-global, so multiple servers in one process do not share mutable
+   callback initialization state. */
 static int clj_http3_conn_callbacks_initialized = 0;
 
 static void clj_init_http3_conn_callbacks(void) {

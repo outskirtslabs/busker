@@ -3,7 +3,7 @@
    [clojure.spec.alpha :as s]
    [clojure.test :refer [deftest is testing]]
    [ol.busker.specs :as specs]
-   [ol.busker.tls.clave-adapter :as adapter]
+   [ol.busker.clave-adapter :as adapter]
    [ol.clave.acme.solver.http :as http-solver]
    [ol.clave.automation :as automation]
    [ol.clave.storage.file :as file-storage])

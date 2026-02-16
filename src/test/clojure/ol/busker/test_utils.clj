@@ -11,6 +11,15 @@
                              :or {host "127.0.0.1" max-time 10}
                              :as opts}]
   (let [scheme (or (:scheme opts) scheme)
+        https? (= :https scheme)
+        explicit-host? (contains? opts :host)
+        host (if (and https? (not explicit-host?) (= "127.0.0.1" host))
+               "localhost.examp1e.net"
+               host)
+        sni-resolve-args (if (and https? (not explicit-host?)
+                                  (= "localhost.examp1e.net" host))
+                           ["--resolve" (str host ":" port ":127.0.0.1")]
+                           [])
         proto-args (case proto
                      :h1 ["--http1.1"]
                      :h2 ["--http2"]
@@ -18,7 +27,11 @@
                      [])
         default-args ["-k" "-s" "--max-time" (str max-time)]
         url (str (name scheme) "://" host ":" port path)
-        curl-args (concat proto-args default-args (or args []) [url])]
+        curl-args (concat proto-args
+                          default-args
+                          sni-resolve-args
+                          (or args [])
+                          [url])]
     (apply p/shell {:out :string :err :string :continue true}
            "curl"
            curl-args)))

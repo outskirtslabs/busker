@@ -2,7 +2,6 @@
   (:require
    [coffi.mem :as mem]
    [babashka.process :as p]
-   [clojure.edn :as edn]
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
@@ -13,6 +12,7 @@
 
 (def cert-file (.getAbsolutePath (io/file "src/test/fixtures/server.crt")))
 (def key-file (.getAbsolutePath (io/file "src/test/fixtures/server.key")))
+(def tls-sni-host "localhost.examp1e.net")
 
 (defn- udp-port-bound?
   "Check if a UDP socket is bound on the given port.
@@ -43,7 +43,7 @@
 
 (deftest create-ptls-context-test
   (testing "ptls context creation succeeds with valid cert/key"
-    (let [ctx (h2o/http3-create-ptls-ctx cert-file key-file)]
+    (let [ctx (h2o/http3-create-ptls-ctx cert-file key-file mem/null mem/null)]
       (is (some? ctx) "http3-create-ptls-ctx should return non-nil context")
       (is (not (mem/null? ctx)) "http3-create-ptls-ctx should return non-null pointer")
       (when (and ctx (not (mem/null? ctx)))
@@ -51,13 +51,13 @@
 
 (deftest create-ptls-context-invalid-cert-test
   (testing "ptls context creation returns nil with invalid cert"
-    (let [ctx (h2o/http3-create-ptls-ctx "nonexistent.crt" "nonexistent.key")]
+    (let [ctx (h2o/http3-create-ptls-ctx "nonexistent.crt" "nonexistent.key" mem/null mem/null)]
       (is (or (nil? ctx) (mem/null? ctx))
           "http3-create-ptls-ctx should return nil or null for invalid cert/key"))))
 
 (deftest create-quicly-context-test
   (testing "quicly context creation succeeds with valid ptls context"
-    (let [ptls-ctx (h2o/http3-create-ptls-ctx cert-file key-file)]
+    (let [ptls-ctx (h2o/http3-create-ptls-ctx cert-file key-file mem/null mem/null)]
       (when (and ptls-ctx (not (mem/null? ptls-ctx)))
         (let [globalconf-ptr (mem/alloc (h2o/globalconf-size))
               _ (h2o/create-global-conf globalconf-ptr nil)
@@ -372,8 +372,10 @@
         early-args (when early-data? ["--tls-earlydata"])
         write-out ["-w" "\n%{tls_earlydata}"]
         default-args ["-k" "-s" "--max-time" (str max-time)]
-        url (str "https://127.0.0.1:" port path)
-        curl-args (concat proto-args session-args early-args write-out default-args [url])
+        resolve-args ["--resolve" (str tls-sni-host ":" port ":127.0.0.1")]
+        url (str "https://" tls-sni-host ":" port path)
+        curl-args (concat proto-args session-args early-args write-out
+                          default-args resolve-args [url])
         result (apply p/shell {:out :string :err :string :continue true} "curl" curl-args)
         lines (str/split-lines (:out result))
         body (str/join "\n" (butlast lines))
@@ -485,6 +487,7 @@
   (let [tls-arg (case tls-version :tls1.2 "-tls1_2" :tls1.3 "")
         sess-arg (if save? "-sess_out" "-sess_in")
         cmd (str "(sleep 1; echo Q) | timeout 5 openssl s_client -connect 127.0.0.1:" port
+                 " -servername " tls-sni-host
                  " " tls-arg " " sess-arg " " session-file " 2>&1")
         result (p/shell {:out :string :err :string :continue true} "bash" "-c" cmd)
         out (:out result)]

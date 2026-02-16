@@ -4,6 +4,7 @@
    [coffi.mem :as mem]
    [ol.busker.buffer-pool :as bp]
    [ol.busker.byte-bounded-queue :as bbq]
+   [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.config :as config]
    [ol.busker.evloop :as evloop]
    [ol.busker.internal.protocols :as p]
@@ -11,9 +12,11 @@
    [ol.busker.native.socket :as socket]
    [ol.busker.request :as request]
    [ol.busker.response-queue :as response-queue]
-   [ol.busker.clave-adapter :as clave-adapter]
-   [ol.busker.tickets :as tickets])
+   [ol.busker.tickets :as tickets]
+   [ol.clave.certificate :as clave-certificate])
   (:import
+   [java.security.cert X509Certificate]
+   [java.util Base64]
    [java.util.concurrent ExecutorService TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
 
@@ -355,21 +358,119 @@
    HTTP/3 is enabled by default for TLS listeners unless explicitly disabled
    with :http3? false in the TLS config."
   [listener]
-  (let [{:keys [cert-file key-file http3?] :as tls} (:tls listener)]
+  (let [{:keys [cert-file key-file issuers http3?] :as tls} (:tls listener)
+        has-static-cert? (and cert-file key-file)
+        has-managed-cert? (seq issuers)]
     (boolean
      (and (map? tls)
-          cert-file
-          key-file
+          (or has-static-cert? has-managed-cert?)
           (not= false http3?)))))
+
+(defn- x509-certificate->pem
+  [^X509Certificate cert]
+  (let [line-separator (byte-array [(byte 10)])
+        encoder (Base64/getMimeEncoder 64 line-separator)
+        cert-b64 (.encodeToString encoder (.getEncoded cert))]
+    (str "-----BEGIN CERTIFICATE-----\n"
+         cert-b64
+         "\n-----END CERTIFICATE-----\n")))
+
+(defn- certificate->pem
+  [certificate]
+  (cond
+    (string? certificate)
+    certificate
+
+    (instance? X509Certificate certificate)
+    (x509-certificate->pem certificate)
+
+    :else
+    (throw (ex-info "Unsupported certificate value in TLS lookup bundle."
+                    {:certificate-type (some-> certificate class .getName)}))))
+
+(defn- private-key->pem
+  [private-key]
+  (cond
+    (nil? private-key)
+    nil
+
+    (string? private-key)
+    private-key
+
+    :else
+    (clave-certificate/private-key->pem private-key)))
+
+(defn- clave-bundle->tls-material
+  [bundle]
+  (let [certificates (:certificate bundle)
+        cert-chain (cond
+                     (nil? certificates) nil
+                     (sequential? certificates) certificates
+                     :else [certificates])
+        private-key-pem (private-key->pem (:private-key bundle))]
+    (when (and (seq cert-chain) private-key-pem)
+      {:cert-chain-pem (apply str (map certificate->pem cert-chain))
+       :private-key-pem private-key-pem})))
+
+(defn- find-static-tls-material
+  [config]
+  (some
+   (fn [entrypoint]
+     (let [{:keys [cert-file key-file]} (:tls entrypoint)]
+       (when (and cert-file key-file)
+         {:cert-chain-pem (slurp cert-file)
+          :private-key-pem (slurp key-file)})))
+   (:entrypoints config)))
+
+(defn- tls-callback-required?
+  [config]
+  (boolean
+   (some
+    (fn [entrypoint]
+      (let [{:keys [cert-file key-file issuers] :as tls} (:tls entrypoint)]
+        (and (map? tls)
+             (or (and cert-file key-file)
+                 (seq issuers)))))
+    (:entrypoints config))))
+
+(defn- build-tls-lookup-fn
+  [config clave-runtime]
+  (let [static-material (find-static-tls-material config)
+        clave-lookup-fn
+        (or (:lookup-fn clave-runtime)
+            (let [lookup-certificate clave-adapter/lookup-certificate]
+              (fn [hostname]
+                (lookup-certificate clave-runtime hostname))))]
+    (fn [hostname]
+      (or static-material
+          (some-> (and (string? hostname)
+                       (not (.isEmpty ^String hostname))
+                       (clave-lookup-fn hostname))
+                  clave-bundle->tls-material)))))
+
+(defn- init-tls-lookup-state
+  [{::keys [config clave-runtime] :as state}]
+  (if (tls-callback-required? config)
+    (let [lookup-fn (build-tls-lookup-fn config clave-runtime)
+          callback-refs (h2o/build-tls-lookup-callback lookup-fn)]
+      (assoc state
+             ::tls-lookup-fn lookup-fn
+             ::tls-lookup-callback callback-refs))
+    state))
 
 (defn- create-ssl-context
   "Create SSL_CTX for a TLS listener, or nil for non-TLS listeners."
-  [listener]
-  (let [{:keys [cert-file key-file protocols] :as tls} (:tls listener)]
-    (when (and (map? tls) cert-file key-file)
+  [listener tls-lookup-callback-ptr]
+  (let [{:keys [cert-file key-file issuers protocols] :as tls} (:tls listener)
+        has-static-cert? (and cert-file key-file)
+        has-managed-cert? (seq issuers)]
+    (when (and (map? tls) (or has-static-cert? has-managed-cert?))
       (let [enable-http2? (or (nil? protocols)
                               (contains? (set protocols) :http2))
-            ssl-ctx (h2o/create-ssl-ctx cert-file key-file (if enable-http2? 1 0))]
+            ssl-ctx (h2o/create-ssl-ctx nil nil
+                                        (if enable-http2? 1 0)
+                                        (or tls-lookup-callback-ptr mem/null)
+                                        mem/null)]
         (when (mem/null? ssl-ctx)
           (throw (ex-info "Failed to create SSL_CTX (check OpenSSL errors in stderr)"
                           {:listener (dissoc listener :tls)
@@ -383,13 +484,15 @@
    These contexts are shared across all workers.
    Returns map: listener-index -> {:ptls-ctx ptls-ctx-ptr :quicly-ctx quicly-ctx-ptr :encrypt-ticket encrypt-ticket-ptr}
    Throws if context creation fails."
-  [listeners config-ptr ticket-mgr-ptr ticket-lifetime-seconds]
+  [listeners config-ptr ticket-mgr-ptr ticket-lifetime-seconds tls-lookup-callback-ptr]
   (into {}
         (keep-indexed
          (fn [idx listener]
            (when (http3-enabled? listener)
              (let [{:keys [cert-file key-file]} (:tls listener)
-                   ptls-ctx (h2o/http3-create-ptls-ctx cert-file key-file)]
+                   ptls-ctx (h2o/http3-create-ptls-ctx nil nil
+                                                      (or tls-lookup-callback-ptr mem/null)
+                                                      mem/null)]
                (when (or (nil? ptls-ctx) (mem/null? ptls-ctx))
                  (throw (ex-info "Failed to create ptls context for HTTP/3"
                                  {:listener-index idx
@@ -495,11 +598,13 @@
            ::on-close-callback on-close-callback)))
 
 (defn- init-tls-http3-state
-  [{::keys [listener-runtimes config config-ptr n-workers loops contexts]
+  [{::keys [listener-runtimes config config-ptr n-workers loops contexts
+            tls-lookup-callback]
     :as state}]
   (let [listeners                       (mapv :listener listener-runtimes)
         ssl-ctx-ptrs                    (mapv :ssl-ctx-ptr listener-runtimes)
         has-tls-listeners?              (some some? ssl-ctx-ptrs)
+        tls-lookup-callback-ptr         (:callback-ptr tls-lookup-callback)
         session-ticket-lifetime-seconds (:session-ticket-lifetime-seconds config)
         ticket-store                    (tickets/memory-ticket-store)
         native-ticket-mgr               (when has-tls-listeners?
@@ -514,10 +619,11 @@
       (doseq [ssl-ctx-ptr ssl-ctx-ptrs]
         (when ssl-ctx-ptr
           (h2o/ssl-ctx-set-tickets ssl-ctx-ptr native-ticket-mgr 8192))))
-    (let [http3-contexts        (create-http3-contexts listeners
+      (let [http3-contexts        (create-http3-contexts listeners
                                                        config-ptr
                                                        native-ticket-mgr
-                                                       session-ticket-lifetime-seconds)
+                                                       session-ticket-lifetime-seconds
+                                                       tls-lookup-callback-ptr)
           http3-worker-contexts (create-http3-worker-contexts n-workers
                                                               listeners
                                                               loops
@@ -532,8 +638,9 @@
              ::http3-worker-contexts http3-worker-contexts))))
 
 (defn- init-single-listener-state
-  [listener n-workers loops contexts arena config-ptr on-close-callback]
-  (let [ssl-ctx-ptr   (create-ssl-context listener)
+  [listener n-workers loops contexts arena config-ptr on-close-callback
+   tls-lookup-callback-ptr]
+  (let [ssl-ctx-ptr   (create-ssl-context listener tls-lookup-callback-ptr)
         listener-fd   (if-let [unix-path (:unix listener)]
                         (throw (ex-info "Unix listeners are not yet supported by server startup."
                                         {:listener listener
@@ -570,8 +677,10 @@
      :thread-states thread-states}))
 
 (defn- init-listener-state
-  [{::keys [n-workers loops contexts arena config-ptr on-close-callback]
+  [{::keys [n-workers loops contexts arena config-ptr on-close-callback
+            tls-lookup-callback]
     :as    state}]
+  (let [tls-lookup-callback-ptr (:callback-ptr tls-lookup-callback)]
   (-> state
       ::config
       :entrypoints
@@ -582,8 +691,9 @@
                                               contexts
                                               arena
                                               config-ptr
-                                              on-close-callback)))
-      (->> (assoc state ::listener-runtimes))))
+                                              on-close-callback
+                                              tls-lookup-callback-ptr)))
+      (->> (assoc state ::listener-runtimes)))))
 
 (defn- init-worker-state
   [{::keys [n-workers loops contexts listener-runtimes http3-worker-contexts
@@ -628,6 +738,7 @@
    (let [prepared-state (prepare-server-state handler user-config)]
      (try
        (-> prepared-state
+           (init-tls-lookup-state)
            (init-core-state)
            (init-listener-state)
            (init-tls-http3-state)
@@ -658,9 +769,6 @@
    ;; Signal shutdown to all workers
    (.set ^AtomicBoolean (::shutting-down? server) true)
 
-   ;; Stop managed TLS automation lifecycle
-   (clave-adapter/stop! (::clave-runtime server))
-
    ;; Stop key manager rotation thread early
    (when-let [key-mgr (::key-manager server)]
      (tickets/stop-key-manager! key-mgr))
@@ -688,6 +796,9 @@
    ;; Wait for all workers to stop themselves after draining connections
    ;; (workers dispose their own HTTP/3 worker contexts before exiting)
    (evloop/join-all! (::workers server))
+
+   ;; Stop managed TLS automation lifecycle after callback use has fully quiesced.
+   (clave-adapter/stop! (::clave-runtime server))
 
    ;; Free shared HTTP/3 contexts (quicly + ptls)
    ;; Note: worker contexts are already disposed by workers themselves

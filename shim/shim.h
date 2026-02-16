@@ -274,16 +274,39 @@ void clj_h2o_mt_wakeup(clj_mt_receiver_t *wr);
 void clj_h2o_create_globalconf(h2o_globalconf_t *globalconf,
                                const clj_h2o_flat_globalconf_t *flat);
 
+/* TLS certificate lookup callback used during handshake.
+ * Return values:
+ *   1  success (all out pointers and lengths must be set)
+ *   0  certificate not found
+ *  -1  internal error
+ *
+ * Ownership:
+ *   On success, cert_chain_pem_out and private_key_pem_out must point to heap
+ *   memory allocated by clj_h2o_tls_memdup (or malloc-compatible allocator).
+ *   Native side frees those pointers with free(3) after use.
+ */
+typedef int (*clj_tls_lookup_cb)(
+    const uint8_t *sni_hostname, size_t sni_hostname_len,
+    uint8_t **cert_chain_pem_out, size_t *cert_chain_pem_len_out,
+    uint8_t **private_key_pem_out, size_t *private_key_pem_len_out,
+    void *user_ctx);
+
+/* Heap helpers for Clojure callback marshalling. */
+void *clj_h2o_tls_memdup(const void *value, size_t value_len);
+
 /* Create and configure SSL_CTX for TLS listener.
  * Parameters:
- *   cert_file: path to PEM certificate file
- *   key_file: path to PEM private key file
+ *   cert_file: path to PEM certificate file (optional, must pair with key_file)
+ *   key_file: path to PEM private key file (optional, must pair with cert_file)
  *   enable_http2: 1 to register HTTP/2 ALPN protocols, 0 for HTTP/1.1 only
+ *   lookup_cb: TLS lookup callback for SNI handshakes, or NULL to disable
+ *   lookup_user_ctx: opaque user context passed to lookup_cb
  * Returns: SSL_CTX pointer on success, NULL on error
  * Note: Caller must free with clj_h2o_free_ssl_ctx when done
  */
 SSL_CTX *clj_h2o_create_ssl_ctx(const char *cert_file, const char *key_file,
-                                int enable_http2);
+                                int enable_http2, clj_tls_lookup_cb lookup_cb,
+                                void *lookup_user_ctx);
 
 /* Free SSL_CTX created by clj_h2o_create_ssl_ctx */
 void clj_h2o_free_ssl_ctx(SSL_CTX *ssl_ctx);
@@ -321,13 +344,17 @@ typedef struct clj_encrypt_ticket clj_encrypt_ticket_t;
  * Uses OpenSSL-backed primitives for cryptographic operations.
  * Configures ALPN callback for HTTP/3 protocol negotiation.
  * Parameters:
- *   cert_file: path to PEM certificate file
- *   key_file: path to PEM private key file
+ *   cert_file: path to PEM certificate file (optional, must pair with key_file)
+ *   key_file: path to PEM private key file (optional, must pair with cert_file)
+ *   lookup_cb: TLS lookup callback for SNI handshakes, or NULL to disable
+ *   lookup_user_ctx: opaque user context passed to lookup_cb
  * Returns: ptls_context_t pointer on success, NULL on error
  * Note: Caller must free with clj_h2o_free_ptls_ctx when done
  */
 ptls_context_t *clj_h2o_create_ptls_ctx(const char *cert_file,
-                                        const char *key_file);
+                                        const char *key_file,
+                                        clj_tls_lookup_cb lookup_cb,
+                                        void *lookup_user_ctx);
 
 /* Free picotls context and associated resources */
 void clj_h2o_free_ptls_ctx(ptls_context_t *ctx);

@@ -1,13 +1,18 @@
 (ns ol.busker.server-test
   (:require
    [ol.busker.protocols :as h2o]
+   [coffi.mem :as mem]
    [babashka.http-client :as http]
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :as test :refer [deftest is testing]]
+   [ol.busker.native :as native]
    [ol.busker.server :as server]
-   [ol.busker.tls.clave-adapter :as clave-adapter]
-   [ol.busker.test-utils :as util]))
+   [ol.busker.clave-adapter :as clave-adapter]
+   [ol.busker.test-utils :as util]
+   [ol.clave.certificate :as clave-certificate])
+  (:import
+   [java.security.cert CertificateFactory X509Certificate]))
 
 (def plain-port 7890)
 
@@ -241,6 +246,12 @@
 
 (def  cert-file (.getAbsolutePath (io/file "src/test/fixtures/server.crt")))
 (def  key-file (.getAbsolutePath (io/file "src/test/fixtures/server.key")))
+
+(defn- load-fixture-certificate
+  ^X509Certificate
+  []
+  (with-open [in (io/input-stream cert-file)]
+    (.generateCertificate (CertificateFactory/getInstance "X.509") in)))
 
 (deftest test-tls-listener
   (testing "TLS listener with HTTPS connections"
@@ -484,3 +495,70 @@
                 [:wrap runtime]
                 [:stop runtime]]
                @calls))))))
+
+(deftest tls-lookup-prefers-static-certificate-test
+  (testing "lookup function returns static cert/key material before clave lookup"
+    (let [clave-calls (atom 0)
+          config {:entrypoints [{:name :https
+                                 :bind "127.0.0.1:8443"
+                                 :http3? false
+                                 :tls {:cert-file cert-file
+                                       :key-file key-file}}]}
+          lookup-fn (with-redefs [clave-adapter/lookup-certificate (fn [_runtime _hostname]
+                                                                      (swap! clave-calls inc)
+                                                                      nil)]
+                      (#'server/build-tls-lookup-fn config {:system {:id ::runtime}}))
+          result (lookup-fn "example.com")]
+      (is (= 0 @clave-calls) "Static cert should short-circuit clave lookup")
+      (is (string? (:cert-chain-pem result)))
+      (is (string? (:private-key-pem result)))
+      (is (str/includes? (:cert-chain-pem result) "BEGIN CERTIFICATE"))
+      (is (or (str/includes? (:private-key-pem result) "BEGIN PRIVATE KEY")
+              (str/includes? (:private-key-pem result) "BEGIN RSA PRIVATE KEY"))))))
+
+(deftest tls-lookup-falls-back-to-clave-test
+  (testing "lookup function uses clave bundle when no static cert material exists"
+    (let [runtime {:system {:id ::runtime}}
+          cert (load-fixture-certificate)
+          keypair (clave-certificate/keypair :p256)
+          config {:entrypoints [{:name :https
+                                 :bind "127.0.0.1:8443"
+                                 :http3? false
+                                 :tls {:issuers [{:directory-url "https://acme.example/directory"}]}}]}
+          lookup-fn (with-redefs [clave-adapter/lookup-certificate
+                                  (fn [_ hostname]
+                                    (when (= hostname "hit.example")
+                                      {:certificate [cert]
+                                       :private-key (.getPrivate keypair)}))]
+                      (#'server/build-tls-lookup-fn config runtime))]
+      (is (nil? (lookup-fn "miss.example")))
+      (let [result (lookup-fn "hit.example")]
+        (is (string? (:cert-chain-pem result)))
+        (is (string? (:private-key-pem result)))
+        (is (str/includes? (:cert-chain-pem result) "BEGIN CERTIFICATE"))
+        (is (str/includes? (:private-key-pem result) "BEGIN PRIVATE KEY"))))))
+
+(deftest tls-lookup-callback-lifecycle-test
+  (testing "server builds lookup callback at startup"
+    (let [calls (atom [])]
+      (with-redefs [native/build-tls-lookup-callback
+                    (fn [lookup-fn]
+                      (swap! calls conj [:register (ifn? lookup-fn)])
+                      {:lookup-fn lookup-fn
+                       :callback-ptr (mem/as-segment 1)
+                       :callback (fn [& _] nil)})
+                    clave-adapter/build-managed-plan (fn [_] nil)
+                    clave-adapter/start! (fn [_] nil)
+                    clave-adapter/wrap-handler (fn [handler _] handler)
+                    clave-adapter/stop! (fn [_] nil)]
+        (with-server [_server (test-server (fn [_] {:status 200 :body "ok"})
+                                           :entrypoints [{:name :plain
+                                                          :bind (str "127.0.0.1:" plain-port)
+                                                          :http3? false}
+                                                         {:name :tls
+                                                          :bind "127.0.0.1:7891"
+                                                          :http3? false
+                                                          :tls {:cert-file cert-file
+                                                                :key-file key-file}}])]
+          (is (= 200 (:status (req :get "/")))))
+        (is (= 1 (count (filter #(= :register (first %)) @calls))))))))

@@ -566,18 +566,92 @@
   "Create and configure SSL_CTX for TLS listener.
 
    Parameters:
-   - cert-file: path to PEM certificate file
-   - key-file: path to PEM private key file
+   - cert-file: path to PEM certificate file (optional, must pair with key-file)
+   - key-file: path to PEM private key file (optional, must pair with cert-file)
    - enable-http2: 1 to register HTTP/2 ALPN protocols, 0 for HTTP/1.1 only
+   - tls-lookup-cb-ptr: callback pointer for SNI lookup, or NULL
+   - tls-lookup-user-ctx: user context pointer passed to callback, or NULL
 
    Returns: SSL_CTX pointer on success, NULL on error"
   clj_h2o_create_ssl_ctx
-  [::mem/c-string ::mem/c-string ::mem/int] ::mem/pointer)
+  [::mem/c-string ::mem/c-string ::mem/int ::mem/pointer ::mem/pointer] ::mem/pointer)
 
 (defcfn free-ssl-ctx
   "Free SSL_CTX created by [[create-ssl-ctx]]."
   clj_h2o_free_ssl_ctx
   [::mem/pointer] ::mem/void)
+
+(defcfn tls-bytes-dup
+  "Duplicate a byte buffer onto native heap."
+  clj_h2o_tls_memdup
+  [::mem/pointer ::mem/long] ::mem/pointer)
+
+(defn- string->tls-native-bytes
+  [^String s]
+  (let [bytes (.getBytes s "UTF-8")
+        len (alength ^bytes bytes)]
+    (if (pos? len)
+      (with-open [arena (mem/confined-arena)]
+        (let [source (MemorySegment/ofArray bytes)
+              staged (mem/alloc len arena)
+              _ (MemorySegment/copy source 0 staged 0 len)
+              ptr (tls-bytes-dup staged len)]
+          {:ptr ptr :len len}))
+      {:ptr mem/null :len 0})))
+
+(defn build-tls-lookup-callback
+  "Build Clojure callback pointer for native TLS handshakes.
+   lookup-fn takes hostname and returns either:
+   - nil for miss
+   - {:cert-chain-pem \"...\" :private-key-pem \"...\"} for success
+
+   Returns pinned callback refs that must be retained while server runs.
+   This function does not mutate process-global native state."
+  [lookup-fn]
+  {:pre [(ifn? lookup-fn)]}
+  (let [cb (fn [sni sni-len cert-out cert-len-out key-out key-len-out _user-ctx]
+             (let [sni-len (long sni-len)
+                   hostname (when (and sni
+                                       (not (mem/null? sni))
+                                       (pos? sni-len))
+                              (String. (mem/read-bytes (mem/reinterpret sni sni-len) sni-len)
+                                       "UTF-8"))
+                   cert-out-seg (mem/reinterpret cert-out mem/pointer-size)
+                   cert-len-out-seg (mem/reinterpret cert-len-out (mem/size-of ::mem/long))
+                   key-out-seg (mem/reinterpret key-out mem/pointer-size)
+                   key-len-out-seg (mem/reinterpret key-len-out (mem/size-of ::mem/long))]
+               (mem/write-address cert-out-seg mem/null)
+               (mem/write-long cert-len-out-seg 0 0)
+               (mem/write-address key-out-seg mem/null)
+               (mem/write-long key-len-out-seg 0 0)
+               (try
+                 (if-let [{:keys [cert-chain-pem private-key-pem]} (and hostname (lookup-fn hostname))]
+                   (if (and (string? cert-chain-pem) (string? private-key-pem))
+                     (let [{cert-ptr :ptr cert-len :len}
+                           (string->tls-native-bytes cert-chain-pem)
+                           {key-ptr :ptr key-len :len}
+                           (string->tls-native-bytes private-key-pem)]
+                       (mem/write-address cert-out-seg cert-ptr)
+                       (mem/write-long cert-len-out-seg 0 (long cert-len))
+                       (mem/write-address key-out-seg key-ptr)
+                       (mem/write-long key-len-out-seg 0 (long key-len))
+                       (if (or (mem/null? cert-ptr)
+                               (mem/null? key-ptr)
+                               (not (pos? cert-len))
+                               (not (pos? key-len)))
+                         -1
+                         1))
+                     -1)
+                   0)
+                 (catch Throwable _
+                   -1))))
+        cb-ptr (mem/serialize cb [::ffi/fn [::mem/pointer ::mem/long
+                                            ::mem/pointer ::mem/pointer
+                                            ::mem/pointer ::mem/pointer
+                                            ::mem/pointer]
+                                  ::mem/int])]
+    {:callback cb
+     :callback-ptr cb-ptr}))
 
 #_(defcfn req-print-offsets
     "Debug helper: print h2o_req_t field offsets to stderr for struct layout verification"
@@ -745,12 +819,14 @@
    Configures ALPN callback for HTTP/3 protocol negotiation.
 
    Parameters:
-   - cert-file: path to PEM certificate file
-   - key-file: path to PEM private key file
+   - cert-file: path to PEM certificate file (optional, must pair with key-file)
+   - key-file: path to PEM private key file (optional, must pair with cert-file)
+   - tls-lookup-cb-ptr: callback pointer for SNI lookup, or NULL
+   - tls-lookup-user-ctx: user context pointer passed to callback, or NULL
 
    Returns: ptls_context_t pointer on success, NULL on error"
   clj_h2o_create_ptls_ctx
-  [::mem/c-string ::mem/c-string] ::mem/pointer)
+  [::mem/c-string ::mem/c-string ::mem/pointer ::mem/pointer] ::mem/pointer)
 
 (defcfn http3-free-ptls-ctx
   "Free picotls context and associated resources."

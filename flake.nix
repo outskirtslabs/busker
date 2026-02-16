@@ -61,6 +61,8 @@
         in
         {
           packages = [
+            pkgs.pebble
+            pkgs.cfssl
             # Java Clojure
             clojure
             jdk
