@@ -4,7 +4,8 @@
    [coffi.ffi :as ffi :refer [defcfn]]
    [coffi.layout :as layout]
    [coffi.mem :as mem]
-   [ol.busker.native.loader])
+   [ol.busker.native.loader]
+   [taoensso.trove :as trove])
   (:import
    [java.io InputStream]
    [java.lang.foreign MemorySegment]))
@@ -661,8 +662,12 @@
                                                     private-key-pem)
                          -1)
                        0))
-                   (catch Throwable _
+                   (catch Throwable t
                      (try
+                       (trove/log! {:level :error
+                                    :id    ::tls-lookup-callback-exception
+                                    :ex    t
+                                    :data  {:sni-len sni-len}})
                        (let [cert-out-seg     (mem/reinterpret cert-out mem/pointer-size)
                              cert-len-out-seg (mem/reinterpret cert-len-out (mem/size-of ::mem/long))
                              key-out-seg      (mem/reinterpret key-out mem/pointer-size)
