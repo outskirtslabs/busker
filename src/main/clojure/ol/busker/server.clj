@@ -354,24 +354,28 @@
    HTTP/3 is enabled by default for TLS listeners unless explicitly disabled
    with :http3? false in the TLS config."
   [listener]
-  (boolean
-   (and (:tls listener)
-        (get-in listener [:tls :http3?] true))))
+  (let [{:keys [cert-file key-file http3?] :as tls} (:tls listener)]
+    (boolean
+     (and (map? tls)
+          cert-file
+          key-file
+          (not= false http3?)))))
 
 (defn- create-ssl-context
   "Create SSL_CTX for a TLS listener, or nil for non-TLS listeners."
   [listener]
-  (when-let [{:keys [cert-file key-file protocols]} (:tls listener)]
-    (let [enable-http2? (or (nil? protocols)
-                            (contains? (set protocols) :http2))
-          ssl-ctx (h2o/create-ssl-ctx cert-file key-file (if enable-http2? 1 0))]
-      (when (mem/null? ssl-ctx)
-        (throw (ex-info "Failed to create SSL_CTX (check OpenSSL errors in stderr)"
-                        {:listener (dissoc listener :tls)
-                         :listener-tls (:tls listener)
-                         :cert-file cert-file
-                         :key-file key-file})))
-      ssl-ctx)))
+  (let [{:keys [cert-file key-file protocols] :as tls} (:tls listener)]
+    (when (and (map? tls) cert-file key-file)
+      (let [enable-http2? (or (nil? protocols)
+                              (contains? (set protocols) :http2))
+            ssl-ctx (h2o/create-ssl-ctx cert-file key-file (if enable-http2? 1 0))]
+        (when (mem/null? ssl-ctx)
+          (throw (ex-info "Failed to create SSL_CTX (check OpenSSL errors in stderr)"
+                          {:listener (dissoc listener :tls)
+                           :listener-tls (:tls listener)
+                           :cert-file cert-file
+                           :key-file key-file})))
+        ssl-ctx))))
 
 (defn- create-http3-contexts
   "Create shared HTTP/3 contexts (ptls + quicly) for each TLS listener with HTTP/3 enabled.
@@ -490,7 +494,7 @@
     :as state}]
   (let [listeners                       (mapv :listener listener-runtimes)
         ssl-ctx-ptrs                    (mapv :ssl-ctx-ptr listener-runtimes)
-        has-tls-listeners?              (some :tls listeners)
+        has-tls-listeners?              (some some? ssl-ctx-ptrs)
         session-ticket-lifetime-seconds (:session-ticket-lifetime-seconds config)
         ticket-store                    (tickets/memory-ticket-store)
         native-ticket-mgr               (when has-tls-listeners?

@@ -200,17 +200,19 @@
   "Validate TLS config for an entrypoint, returning errors vector.
   Skips cert-file/key-file validation when:
   - All bindings are internal (will use auto-generated self-signed certs)
-  - ACME issuers are configured (certs will be obtained automatically)"
+  - ACME issuers are configured (certs will be obtained automatically)
+  - No explicit cert/key files are configured (automatic provisioning mode)"
   [errors entrypoint]
   (let [tls (:tls entrypoint)]
-    (if (nil? tls)
+    (if-not (map? tls)
       errors
       (let [cert-file (:cert-file tls)
             key-file (:key-file tls)
             has-issuers? (seq (:issuers tls))
             internal? (all-binds-internal? entrypoint)
+            manual-cert-mode? (or cert-file key-file)
             ;; Manual mode requires cert files unless internal or ACME
-            needs-cert-files? (and (not internal?) (not has-issuers?))]
+            needs-cert-files? (and manual-cert-mode? (not internal?) (not has-issuers?))]
         (-> errors
             (maybe-add-entrypoint-error
              (and needs-cert-files? (nil? cert-file))
@@ -247,7 +249,7 @@
          {:bind (vec binds)})
         (maybe-add-entrypoint-error
          (and http3?
-              (nil? (:tls entrypoint))
+              (not (map? (:tls entrypoint)))
               (not (all-binds-internal? entrypoint)))
          entrypoint
          ::entrypoint-http3-requires-tls
@@ -266,7 +268,15 @@
 (defn apply-entrypoint-defaults
   "Apply default values to an entrypoint map."
   [entrypoint]
-  (merge (:default specs/entrypoint) entrypoint))
+  (let [tls-overridden? (contains? entrypoint :tls)
+        http3-overridden? (contains? entrypoint :http3?)
+        entrypoint (merge (:default specs/entrypoint) entrypoint)
+        entrypoint (if tls-overridden?
+                     entrypoint
+                     (assoc entrypoint :tls (:default specs/tls)))]
+    (if http3-overridden?
+      entrypoint
+      (assoc entrypoint :http3? (map? (:tls entrypoint))))))
 
 (defn apply-config-defaults
   "Apply default values to config map, including runtime objects."

@@ -176,8 +176,17 @@
              (cfg/validate-entrypoint [] entrypoint))))))
 
 (deftest apply-entrypoint-defaults-test
-  (testing "applies defaults to entrypoint"
+  (testing "applies defaults to non-tls entrypoint"
     (let [entrypoint {:name :web :bind ":8080"}
+          result (cfg/apply-entrypoint-defaults entrypoint)]
+      (is (= true (:http1? result)))
+      (is (= true (:http2? result)))
+      (is (= true (:http3? result)))))
+  (testing "defaults http3 to true for tls entrypoint"
+    (let [entrypoint {:name :web
+                      :bind ":8443"
+                      :tls {:cert-file "server.crt"
+                            :key-file "server.key"}}
           result (cfg/apply-entrypoint-defaults entrypoint)]
       (is (= true (:http1? result)))
       (is (= true (:http2? result)))
@@ -188,6 +197,17 @@
       (is (= false (:http1? result)))
       (is (= true (:http2? result)))
       (is (= false (:http3? result))))))
+
+(deftest tls-false-entrypoint-test
+  (testing "accepts explicit tls disable and defaults http3 to false"
+    (let [config (cfg/load! {:entrypoints [{:name :web
+                                            :bind ":8080"
+                                            :tls false}]})
+          ep (first (:entrypoints config))]
+      (is (= false (:tls ep)))
+      (is (= false (:http3? ep)))
+      (is (= true (:http1? ep)))
+      (is (= true (:http2? ep))))))
 
 (deftest apply-config-defaults-test
   (testing "applies defaults to config"
@@ -304,7 +324,7 @@
   (testing "spec namespace exposes entrypoint defaults"
     (is (= {:http1? true
             :http2? true
-            :http3? true}
+            :tls {}}
            (:default specs/entrypoint))))
   (testing "spec namespace exposes config defaults used by config loader"
     (is (= 1 (:n-workers specs/default-config)))

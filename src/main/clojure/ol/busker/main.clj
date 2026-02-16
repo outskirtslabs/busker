@@ -185,15 +185,16 @@
 (def  key-file (.getAbsolutePath (io/file "src/test/fixtures/server.key")))
 
 (defn -main [& _]
-  (let [s (server/run-server router {:compress-brotli-level 15
+  (let [s (server/run-server router {:compress-brotli-level 11
                                      :compress-gzip-level 5
                                      :entrypoints [{:name :http
-                                                    :bind ":8080"}
-                                                   {:name :https
                                                     :bind ":8081"
+                                                    :tls false}
+                                                   {:name :https
+                                                    :bind ":8082"
                                                     :tls {:cert-file cert-file
                                                           :key-file  key-file}}]})]
-    (println "Server started on port 8080")
+    (println "Server started on ports 8081 (HTTP) and 8082 (HTTPS)")
     (println "Listening for connections...")
     (println "\nAvailable endpoints:")
     (println "  GET  /              - Hello World")

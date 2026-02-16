@@ -176,23 +176,25 @@
 
 (def tls
   {:key ::tls
-   :doc "TLS subsystem configuration for an entrypoint."
-   :default nil})
+   :doc "TLS subsystem configuration for an entrypoint, or false to disable TLS explicitly."
+   :default {}})
 (s/def ::tls
-  (s/keys :opt-un [::cache-capacity
-                   ::session-tickets
-                   ::cert-file
-                   ::key-file
-                   ::storage
-                   ::issuers
-                   ::issuer-selection
-                   ::key-type
-                   ::key-reuse
-                   ::tls-compatibility-mode
-                   ::solvers
-                   ::ocsp
-                   ::config-fn
-                   ::http-client]))
+  (s/or :enabled
+        (s/keys :opt-un [::cache-capacity
+                         ::session-tickets
+                         ::cert-file
+                         ::key-file
+                         ::storage
+                         ::issuers
+                         ::issuer-selection
+                         ::key-type
+                         ::key-reuse
+                         ::tls-compatibility-mode
+                         ::solvers
+                         ::ocsp
+                         ::config-fn
+                         ::http-client])
+        :disabled false?))
 
 (def bind-address
   {:key ::bind-address
@@ -231,8 +233,8 @@
 
 (def http3?
   {:key ::http3?
-   :doc "Enable HTTP/3 for an entrypoint."
-   :default true})
+   :doc "Enable HTTP/3 for an entrypoint. When omitted, config defaults to true if TLS is enabled and false otherwise."
+   :default nil})
 (s/def ::http3? boolean?)
 
 (def entrypoint
@@ -240,7 +242,7 @@
    :doc "Entrypoint definition including bind, protocol toggles, and TLS."
    :default {:http1? true
              :http2? true
-             :http3? true}})
+             :tls (:default tls)}})
 (s/def ::entrypoint
   (s/keys :req-un [::name ::bind]
           :opt-un [::http1? ::http2? ::http3? ::tls]))
