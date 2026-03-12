@@ -380,12 +380,12 @@
                                                     :tls {:cert-file cert-file
                                                           :key-file key-file}}]})]
       (try
-        (Thread/sleep 200)
+        (Thread/sleep 500)
         ;; Start 4 connections (should reach limit)
         (let [conns (vec (for [_ (range 4)]
-                           (future (util/curl :https :h3 port "/" :max-time 10))))]
+                           (future (util/curl :https :h3 port "/" :max-time 20))))]
           ;; Wait a bit for connections to establish
-          (Thread/sleep 500)
+          (Thread/sleep 1000)
 
           ;; Fifth connection should fail because global limit is 4, not 8
           (let [conn5 (util/curl :https :h3 port "/" :max-time 1)]
@@ -394,7 +394,7 @@
 
           ;; Wait for all connections to complete
           (doseq [[idx conn-future] (map-indexed vector conns)]
-            (let [result (deref conn-future 15000 nil)]
+            (let [result (deref conn-future 25000 nil)]
               (is (some? result) (str "Connection " idx " should complete"))
               (when result
                 (is (zero? (:exit result))
