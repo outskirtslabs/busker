@@ -1,13 +1,16 @@
 {:min-bb-version "0.8.156"
  :paths          ["src/bb"]
- :deps           {borkdude/rewrite-edn {:mvn/version "0.4.9"}
-                  lambdaisland/kaocha  {:mvn/version "1.91.1392"}}
+ :deps           {borkdude/rewrite-edn   {:mvn/version "0.4.9"}
+                  lambdaisland/kaocha    {:mvn/version "1.91.1392"}
+                  outskirtslabs/bb-tasks {:git/url "https://github.com/outskirtslabs/bb-tasks"
+                                          :git/sha "b224881d5f6d4ae72c514faede9a5eb0b5f627a8"}}
  :tasks          {:requires ([babashka.fs :as fs]
                              [tasks.build  :as build]
                              [tasks.pebble :as pebble]
                              [tasks.smoke  :as smoke]
                              [clojure.string :as str]
-                             [babashka.tasks :refer [shell]])
+                             [babashka.tasks :refer [shell]]
+                             [ol.bb-tasks.publish-clojars :as publish-clojars])
                   :init     (do (def paths ["src" "dev"]))
 
                   build:shim
@@ -58,7 +61,7 @@
                   publish
                   {:doc     "Publish the clojure libs to clojars"
                    :depends [jar:all]
-                   :task    (clojure "-T:build deploy")}
+                   :task    (publish-clojars/publish!)}
 
                   set-version
                   {:doc  "Set the version in all libs"
