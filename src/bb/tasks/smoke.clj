@@ -26,7 +26,7 @@
                    (env "BUSKER_ACME_TRUST_STORE" "src/test/fixtures/pebble-truststore.p12")
                    "BUSKER_ACME_TRUST_STORE_PASS"
                    (env "BUSKER_ACME_TRUST_STORE_PASS" "changeit")}
-        cmd (into ["clojure" "-M:dev" "-m" "ol.busker.main"] args)]
+        cmd (into ["clojure" "-M:dev" "-m" "smoke"] args)]
     (try
       (let [{:keys [exit]} (apply p/shell {:continue true :extra-env extra-env}
                                   cmd)]

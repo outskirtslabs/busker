@@ -106,7 +106,7 @@
                    :task (pebble/logs!)}
 
                   smoke:managed
-                  {:doc  "Run ol.busker.main with local Pebble managed TLS fixture"
+                  {:doc  "Run smoke with local Pebble managed TLS fixture"
                    :task (apply smoke/smoke-managed! *command-line-args*)}
 
                   test

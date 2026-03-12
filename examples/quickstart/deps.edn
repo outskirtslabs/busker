@@ -1,0 +1,9 @@
+{:paths ["."]
+ :deps {org.clojure/clojure {:mvn/version "1.12.3"}
+        com.outskirtslabs/busker {:local/root "../../"}
+        com.outskirtslabs.busker/linux-x86-64 {:local/root "../../shim/linux-x86-64"}
+        com.outskirtslabs.busker/linux-aarch64 {:local/root "../../shim/linux-aarch64"}
+        com.outskirtslabs.busker/macos-x86-64 {:local/root "../../shim/macos-x86-64"}
+        com.outskirtslabs.busker/macos-aarch64 {:local/root "../../shim/macos-aarch64"}}
+ :aliases {:run {:main-opts ["-m" "main"]
+                 :jvm-opts ["--enable-native-access=ALL-UNNAMED"]}}}
