@@ -470,8 +470,11 @@
   [::mem/pointer] ::mem/int)
 
 (defn report-almost-fatal-error [msg e]
-  #p msg
-  #p e)
+  (binding [*out* *err*]
+    (tap> [msg e])
+    (println msg)
+    (when e
+      (.printStackTrace ^Throwable e ^java.io.PrintWriter *err*))))
 
 (defcfn create-handler*
   "FFI binding for handler construction."
