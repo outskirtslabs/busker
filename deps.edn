@@ -1,7 +1,9 @@
 {:paths   ["src/main/clojure" "target/classes"]
  :deps    {;; busker tries to minimize dependencies
-           ;; busker requires coffi for interacting with native layer via panama ffi/ffm
-           io.github.IGJoshua/coffi                  {:git/sha "ae3e38a449c88b998db98b0d4bffa9908dea1c79"}
+           ;; coffi is vendored because clj-nix does not resolve its git dep reliably
+           org.suskalo/coffi                         {:local/root "vendor/coffi/coffi-ae3e38a449c88b998db98b0d4bffa9908dea1c79.jar"}
+           ;; insn is a coffi dep and must be declared explicitly when using the vendored jar
+           insn/insn                                 {:mvn/version "0.5.4"}
            ;; busker requires trove for its light pluggiable logging facade
            com.taoensso/trove                        {:mvn/version "1.1.0"}
            ;; busker requires clave, an ACME client, to power its auto https features
