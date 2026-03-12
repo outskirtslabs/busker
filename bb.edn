@@ -15,7 +15,7 @@
 
                   build:shim
                   {:doc  "Compile C shim library"
-                   :task (shell {:dir "shim"} "zig build -Doptimize=Debug")}
+                   :task (shell {:dir "shim"} "zig build -Doptimize=ReleaseFast")}
 
                   prep
                   {:doc  "Prepare the clojure deps"
