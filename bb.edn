@@ -21,25 +21,25 @@
                   {:doc  "Prepare the clojure deps"
                    :task (clojure "-Xdeps prep :aliases '[:dev :test]'")}
 
-                  build
-                  {:doc     "Compile all the things"
-                   :depends [build:shim prep]}
-
                   jar:native
-                  {:depends [clean build]
+                  {:depends [clean prep build:shim]
                    :doc     "Build native dep jars"
                    :task    (let [arch-dirs ["shim/linux-x86-64" "shim/macos-x86-64" "shim/macos-aarch64"]]
                               (doseq [dir arch-dirs]
                                 (println (str "Building jar for " dir))
                                 (shell {:dir dir} "clj -T:build jar")))}
 
+                  build
+                  {:doc     "Compile all the things"
+                   :depends [build:shim prep jar:native]}
+
                   jar:lib
-                  {:depends [jar:native]
+                  {:depends [build]
                    :doc     "Build the jar for busker"
                    :task    (shell "clojure -T:build jar")}
 
                   jar:all
-                  {:depends [jar:native jar:lib]
+                  {:depends [build jar:lib]
                    :doc     "Build the jars"}
 
                   clean

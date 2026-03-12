@@ -93,7 +93,9 @@ zig2nixEnv.package {
     }:$PATH"
   '';
   zigBuildFlags = [
-    "-Doptimize=ReleaseSafe"
+    # TODO: re-enable safe build when this is fixed
+    #"-Doptimize=ReleaseSafe"
+    "-Doptimize=ReleaseFast"
   ];
   postInstall = ''
     export HOME="${deps-cache}"

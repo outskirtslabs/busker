@@ -17,6 +17,7 @@ let
         base == ".git"
         || rel == "result"
         || pkgs.lib.hasPrefix "target/" rel
+        || pkgs.lib.hasPrefix "bb.edn" rel
         || pkgs.lib.hasPrefix ".clj-kondo/.cache/" rel
         || pkgs.lib.hasPrefix ".cpcache/" rel
         || pkgs.lib.hasPrefix ".gitlibs/" rel
@@ -25,7 +26,6 @@ let
         || pkgs.lib.hasPrefix "shim/.zig-cache-global/" rel
         || pkgs.lib.hasPrefix "shim/zig-cache/" rel
         || pkgs.lib.hasPrefix "shim/zig-out/" rel
-        || pkgs.lib.hasPrefix "shim/tmp/" rel
         || pkgs.lib.hasPrefix "shim/linux-x86-64/.cpcache/" rel
         || pkgs.lib.hasPrefix "shim/linux-x86-64/resources/" rel
         || pkgs.lib.hasPrefix "shim/linux-x86-64/target/" rel
