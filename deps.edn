@@ -7,7 +7,7 @@
            ;; busker requires trove for its light pluggiable logging facade
            com.taoensso/trove                        {:mvn/version "1.1.0"}
            ;; busker requires clave, an ACME client, to power its auto https features
-           com.outskirtslabs/clave                   {:local/root "../../ramblurr/clave-private"}
+           io.github.outskirtslabs/clave             {:git/sha "c47cededac7d920e9056d8a1b4c2e3d54885af22"}
            ;; busker requires charred because implementing ACME requires speaking JSON, and clave makes it a peer dep
            com.cnuernber/charred                     {:mvn/version "1.037"}
            ;; busker requires the ring protocols to provide interopability to the ring ecosystem
