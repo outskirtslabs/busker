@@ -10,13 +10,22 @@
 (def project (-> (edn/read-string (slurp "deps.edn"))
                  :aliases :neil :project))
 (def cwd (-> (java.io.File. ".")  .getCanonicalFile .getName))
-(def rev (str/trim (b/git-process {:git-args "rev-parse HEAD"})))
+(defn- git-rev []
+  (or (some-> (System/getenv "GIT_REV")
+              str/trim
+              not-empty)
+      (some-> (b/git-process {:git-args "rev-parse HEAD"})
+              str/trim
+              not-empty)))
+
+(def rev (git-rev))
 (def lib (:name project))
 (def version (:version project))
 (def description (:description project))
 (assert lib ":name must be set in deps.edn under the :neil alias")
 (assert version ":version must be set in deps.edn under the :neil alias")
 (assert description ":description must be set in deps.edn under the :neil alias")
+(assert rev "Either GIT_REV must be set or git rev-parse HEAD must succeed")
 
 (def class-dir "target/classes")
 (def basis (delay (b/create-basis {:project "deps.edn"})))
@@ -63,4 +72,3 @@
            :pom-file (b/pom-path {:lib lib :class-dir class-dir})}
           opts))
   opts)
-

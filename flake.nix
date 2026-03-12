@@ -1,79 +1,96 @@
 {
-  description = "dev env";
+  description = "Busker development environment and package";
+
   inputs = {
-    nix-agent-dev.url = "github:Ramblurr/nix-agent-dev";
-    nixpkgs.follows = "nix-agent-dev/nixpkgs";
-    flakelight.url = "github:nix-community/flakelight";
-    flakelight.inputs.nixpkgs.follows = "nixpkgs";
-    treefmt-nix.url = "github:numtide/treefmt-nix";
-    zig.url = "github:mitchellh/zig-overlay";
+    nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1";
+    devshell.url = "github:numtide/devshell";
+    devshell.inputs.nixpkgs.follows = "nixpkgs";
+    devenv.url = "https://flakehub.com/f/ramblurr/nix-devenv/*";
+    devenv.inputs.nixpkgs.follows = "nixpkgs";
+    clj-nix.url = "github:jlesquembre/clj-nix";
+    clj-nix.inputs.nixpkgs.follows = "nixpkgs";
+    zig2nix.url = "github:Cloudef/zig2nix";
+    zig2nix.inputs.nixpkgs.follows = "nixpkgs";
+    h2o-zig.url = "github:outskirtslabs/h2o-zig";
+    h2o-zig.inputs.nixpkgs.follows = "nixpkgs";
+    h2o-zig.inputs.zig2nix.follows = "zig2nix";
   };
+
   outputs =
-    {
+    inputs@{
       self,
-      flakelight,
-      treefmt-nix,
-      zig,
+      clj-nix,
+      devenv,
+      devshell,
+      h2o-zig,
+      zig2nix,
       ...
     }:
-    let
-      treefmtEval = pkgs: treefmt-nix.lib.evalModule pkgs ./.treefmt.nix;
-    in
-    flakelight ./. {
+    devenv.lib.mkFlake ./. {
+      inherit inputs;
       systems = [
         "x86_64-linux"
         "aarch64-linux"
         "x86_64-darwin"
         "aarch64-darwin"
       ];
-      nixpkgs.config = {
-        allowUnsupportedSystem = true;
-      };
-      legacyPackages = pkgs: pkgs;
-      packages = {
-        apple-sdk =
-          pkgs:
-          pkgs.stdenv.mkDerivation {
-            name = "apple-sdk_15.2";
-            src = pkgs.fetchzip {
-              url = "https://github.com/joseluisq/macosx-sdks/releases/download/15.2/MacOSX15.2.sdk.tar.xz";
-              sha256 = "sha256:0fgj0pvjclq2pfsq3f3wjj39906xyj6bsgx1da933wyc918p4zi3";
+      nixpkgs.config.allowUnsupportedSystem = true;
+      withOverlays = [
+        devshell.overlays.default
+        devenv.overlays.default
+        clj-nix.overlays.default
+      ];
+
+      packages =
+        let
+          gitRev =
+            if self ? rev then
+              self.rev
+            else if self ? dirtyRev then
+              self.dirtyRev
+            else
+              "dirty";
+        in
+        rec {
+          apple-sdk = pkgs: pkgs.callPackage ./pkgs/apple-sdk.nix { };
+          shim =
+            pkgs:
+            pkgs.callPackage ./pkgs/shim.nix {
+              inherit gitRev zig2nix;
+              apple-sdk = self.packages.${pkgs.system}.apple-sdk;
             };
-            phases = [ "installPhase" ];
-            installPhase = ''
-              mkdir -p "$out"
-              cp -r "$src"/* "$out"
-              ls "$out"
-            '';
-          };
-      };
+          busker =
+            pkgs:
+            pkgs.callPackage ./pkgs/busker.nix {
+              inherit gitRev;
+              shim = self.packages.${pkgs.system}.shim;
+            };
+          default = busker;
+        };
 
       devShell =
         pkgs:
         let
+          zig = zig2nix.packages.${pkgs.system}."zig-0_15_2";
+          zig2nixEnv = zig2nix.outputs.zig-env.${pkgs.system} { inherit zig; };
+          apple-sdk = self.packages.${pkgs.system}.apple-sdk;
           javaVersion = "25";
           jdk = pkgs."jdk${javaVersion}";
           clojure = pkgs.clojure.override { inherit jdk; };
-          zigpkgs = zig.packages.${pkgs.system};
-          apple-sdk = (self.packages.${pkgs.system}.apple-sdk);
-          libraries = [
-          ];
         in
         {
           packages = [
             pkgs.pebble
             pkgs.cfssl
-            # Java Clojure
             clojure
             jdk
+            pkgs.deps-lock
             (pkgs.curlFull.overrideAttrs (prev: {
               pname = prev.pname + "-ssls";
               configureFlags = prev.configureFlags or [ ] ++ [
                 "--enable-ssls-export"
               ];
             }))
-
-            # H2O build dependencies from it's package.nix
             pkgs.cmake
             pkgs.ninja
             pkgs.pkg-config
@@ -84,12 +101,13 @@
             pkgs.libuv
             pkgs.perl
             pkgs.zlib
+            pkgs.zstd
             pkgs.wslay
             pkgs.bison
             pkgs.ruby
             pkgs.liburing
-            # Development tools
-            zigpkgs."0.15.2"
+            zig
+            zig2nixEnv.zig2nix
             pkgs.gdb
             pkgs.clojure-lsp
             pkgs.jdt-language-server
@@ -100,12 +118,9 @@
             pkgs.bbin
             pkgs.git
             apple-sdk
-
-            # HTTP Benchmarking
             pkgs.wrk
-            pkgs.nghttp2 # provides h2load
+            pkgs.nghttp2
           ];
-          env.LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libraries;
           env.APPLE_SDK_PATH = "${apple-sdk}";
           env.ZIG_GLOBAL_CACHE_DIR = ".zig-cache-global";
           shellHook = ''
@@ -115,13 +130,5 @@
             popd
           '';
         };
-
-      flakelight.builtinFormatters = false;
-      formatter =
-        pkgs:
-        let
-          trfmt = treefmtEval pkgs;
-        in
-        trfmt.config.build.wrapper;
     };
 }
