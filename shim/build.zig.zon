@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .h2o = .{
-            .url = "git+https://github.com/outskirtslabs/h2o-zig.git?ref=main#c76294cd9faf227a80f1f81710f2d84206cbe938",
-            .hash = "h2o-0.0.1-7Fp7SixcAADLqEPBMz-e1GJKqHwXTLuWV4ezfzc8ppo9",
+            .url = "git+https://github.com/outskirtslabs/h2o-zig.git?ref=main#6f1be4d7e96eb242f77f04d6cb863a04bfa9f9df",
+            .hash = "h2o-0.0.1-7Fp7StleAAAR_roWJiFQugGBLn8C-KL6pNM8EJuKbXVN",
         },
         .boringssl = .{
             .url = "git+https://github.com/Ramblurr/boringssl.git?ref=update/boringssl-0.20260211.0#e07b2a9bbf7dc0e93f122f61b579f648e066b3a1",
