@@ -40,25 +40,28 @@
   (deref proc 10000 {:exit :timeout}))
 
 (defn- wait-for-server!
-  [proc port]
-  (loop [attempt 0]
-    (when-let [proc-result (deref proc 0 nil)]
-      (throw (ex-info "Example server exited early" proc-result)))
-    (let [result (util/curl :http :h1 port "/" :max-time 1)]
-      (cond
-        (zero? (:exit result))
-        nil
+  ([proc port]
+   (wait-for-server! proc port "/"))
+  ([proc port path]
+   (loop [attempt 0]
+     (when-let [proc-result (deref proc 0 nil)]
+       (throw (ex-info "Example server exited early" proc-result)))
+     (let [result (util/curl :http :h1 port path :max-time 1)]
+       (cond
+         (zero? (:exit result))
+         nil
 
-        (< attempt 120)
-        (do
-          (Thread/sleep 250)
-          (recur (inc attempt)))
+         (< attempt 120)
+         (do
+           (Thread/sleep 250)
+           (recur (inc attempt)))
 
-        :else
-        (throw (ex-info "Example server did not start"
-                        {:port port
-                         :proc (deref proc 0 nil)
-                         :result result}))))))
+         :else
+         (throw (ex-info "Example server did not start"
+                         {:port port
+                          :path path
+                          :proc (deref proc 0 nil)
+                          :result result})))))))
 
 (defn- curl*
   [scheme proto port path & {:as opts}]
@@ -146,7 +149,7 @@
   (let [{:keys [http https]} (example-ports "sse")
         proc (start-example! "sse")]
     (try
-      (wait-for-server! proc http)
+      (wait-for-server! proc http "/missing")
       (testing "events stream"
         (let [stream (curl* :http :h1 http "/"
                             :max-time 3
@@ -163,9 +166,9 @@
           (is (= "br" (header-value (:out stream) "content-encoding")))
           (is (re-find #"data: \(ns main" (:out stream)))))
       (testing "protocol headers"
-        (let [h1 (curl* :http :h1 http "/" :args ["-D" "-" "-o" "/dev/null"])
-              h2 (curl* :https :h2 https "/" :args ["-D" "-" "-o" "/dev/null"])
-              h3 (curl* :https :h3 https "/" :args ["-D" "-" "-o" "/dev/null"])]
+        (let [h1 (curl* :http :h1 http "/missing" :args ["-D" "-" "-o" "/dev/null"])
+              h2 (curl* :https :h2 https "/missing" :args ["-D" "-" "-o" "/dev/null"])
+              h3 (curl* :https :h3 https "/missing" :args ["-D" "-" "-o" "/dev/null"])]
           (is (= "HTTP/1.1" (header-value (:out h1) "x-protocol")))
           (is (= "HTTP/2.0" (header-value (:out h2) "x-protocol")))
           (is (= "HTTP/3.0" (header-value (:out h3) "x-protocol")))))
