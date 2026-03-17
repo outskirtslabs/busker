@@ -29,9 +29,13 @@ The actual state of affairs is:
 - [ ] 0-RTT TLS
 - [ ] Automatic HTTPS
 - [ ] TLS STEK, pluggable ticket store
-- [ ] Metrics and observability
-- [ ] zero-downtime deployments
+- [ ] Metrics/signals w/out the abominable otel
+- [ ] Reverse proxying
+- [ ] Standlone operation mode w/ config file
+- [ ] Zero-downtime deployments w/ systemd
 - [ ] GraalVM native-image (need to wait until [coffi][coffi] supports it)
+
+See [ROADMAP](./ROADMAP.md) for more info
 
 ## Usage
 
