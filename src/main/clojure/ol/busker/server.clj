@@ -1,5 +1,7 @@
 (ns ol.busker.server
   (:require
+   [clojure.java.io :as io]
+   [clojure.string :as str]
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]
    [ol.busker.buffer-pool :as bp]
@@ -16,7 +18,9 @@
    [ol.clave.certificate :as clave-certificate]
    [taoensso.trove :as trove])
   (:import
+   [java.io File]
    [java.security.cert X509Certificate]
+   [java.security.cert CertificateFactory]
    [java.util Base64]
    [java.util.concurrent ExecutorService TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
@@ -359,13 +363,10 @@
    HTTP/3 is enabled by default for TLS listeners unless explicitly disabled
    with :http3? false in the TLS config."
   [listener]
-  (let [{:keys [cert-file key-file issuers http3?] :as tls} (:tls listener)
-        has-static-cert? (and cert-file key-file)
-        has-managed-cert? (seq issuers)]
-    (boolean
+  (boolean
+   (when-let [tls (:tls listener)]
      (and (map? tls)
-          (or has-static-cert? has-managed-cert?)
-          (not= false http3?)))))
+          (not= false (:http3? tls))))))
 
 (defn- x509-certificate->pem
   [^X509Certificate cert]
@@ -413,31 +414,129 @@
       {:cert-chain-pem (apply str (map certificate->pem cert-chain))
        :private-key-pem private-key-pem})))
 
-(defn- find-static-tls-material
+(defn- read-certificates
+  [cert-file]
+  (with-open [in (io/input-stream cert-file)]
+    (vec (.generateCertificates (CertificateFactory/getInstance "X.509") in))))
+
+(defn- certificate-subject-names
+  [^X509Certificate certificate]
+  (let [sans (or (.getSubjectAlternativeNames certificate) [])
+        san-names (->> sans
+                       (keep (fn [entry]
+                               (let [entry-type (.get ^java.util.List entry 0)
+                                     value (.get ^java.util.List entry 1)]
+                                 (when (or (= entry-type 2)
+                                           (= entry-type 7))
+                                   (str value)))))
+                       distinct
+                       vec)]
+    (if (seq san-names)
+      san-names
+      (when-let [[_ cn] (re-find #"CN=([^,]+)"
+                                 (.getName (.getSubjectX500Principal
+                                            certificate)))]
+        [cn]))))
+
+(defn- wildcard-subject-name?
+  [subject-name]
+  (and (string? subject-name)
+       (str/starts-with? subject-name "*.")))
+
+(defn- subject-name-matches-hostname?
+  [subject-name hostname]
+  (cond
+    (or (nil? subject-name) (nil? hostname))
+    false
+
+    (= subject-name hostname)
+    true
+
+    (wildcard-subject-name? subject-name)
+    (let [suffix (subs subject-name 1)
+          hostname-parts (str/split hostname #"\.")
+          suffix-parts (str/split (subs subject-name 2) #"\.")]
+      (and (str/ends-with? hostname suffix)
+           (= (count hostname-parts)
+              (inc (count suffix-parts)))))
+
+    :else
+    false))
+
+(defn- tls-material-from-files
+  [cert-file key-file]
+  (let [certificates (read-certificates cert-file)]
+    {:names (or (some-> certificates first certificate-subject-names)
+                [])
+     :material {:cert-chain-pem (slurp cert-file)
+                :private-key-pem (slurp key-file)}}))
+
+(defn- directory-pem-pair
+  [^File dir]
+  (let [cert-pem (io/file dir "cert.pem")
+        key-pem (io/file dir "key.pem")
+        fullchain-pem (io/file dir "fullchain.pem")
+        privkey-pem (io/file dir "privkey.pem")]
+    (cond
+      (and (.isFile cert-pem) (.isFile key-pem))
+      {:cert-file (.getPath cert-pem)
+       :key-file (.getPath key-pem)}
+
+      (and (.isFile fullchain-pem) (.isFile privkey-pem))
+      {:cert-file (.getPath fullchain-pem)
+       :key-file (.getPath privkey-pem)}
+
+      :else
+      nil)))
+
+(defn- load-folder-tls-materials
+  [path]
+  (->> (file-seq (io/file path))
+       (filter #(.isDirectory ^File %))
+       (keep directory-pem-pair)
+       (mapv (fn [{:keys [cert-file key-file]}]
+               (tls-material-from-files cert-file key-file)))))
+
+(defn- load-static-tls-materials
   [config]
-  (some
-   (fn [entrypoint]
-     (let [{:keys [cert-file key-file]} (:tls entrypoint)]
-       (when (and cert-file key-file)
-         {:cert-chain-pem (slurp cert-file)
-          :private-key-pem (slurp key-file)})))
-   (:entrypoints config)))
+  (->> (get-in config [:tls :certificates :load])
+       (mapcat (fn [{:keys [type path cert-file key-file]}]
+                 (case type
+                   :folder (load-folder-tls-materials path)
+                   :pem [(tls-material-from-files cert-file key-file)]
+                   [])))
+       vec))
+
+(defn- first-static-tls-identity
+  [config]
+  (some (fn [{:keys [type path cert-file key-file]}]
+          (case type
+            :pem
+            (when (and cert-file key-file)
+              {:cert-file cert-file
+               :key-file key-file})
+
+            :folder
+            (some->> (file-seq (io/file path))
+                     (filter #(.isDirectory ^File %))
+                     (keep directory-pem-pair)
+                     first)
+
+            nil))
+        (get-in config [:tls :certificates :load])))
 
 (defn- tls-callback-required?
   [config]
   (boolean
-   (some
-    (fn [entrypoint]
-      (let [{:keys [cert-file key-file issuers] :as tls} (:tls entrypoint)]
-        (and (map? tls)
-             (or (and cert-file key-file)
-                 (seq issuers)))))
-    (:entrypoints config))))
+   (some (fn [[_ entrypoint]]
+           (map? (:tls entrypoint)))
+         (:entrypoints config))))
 
 (defn- build-tls-lookup-fn
   [config clave-runtime]
-  (let [default-domain  (:default-domain config)
-        static-material (find-static-tls-material config)
+  (let [static-materials (load-static-tls-materials config)
+        fallback-material (some-> static-materials first :material)
+        fallback-subject-name (first (:subject-names clave-runtime))
         clave-lookup-fn
         (or (:lookup-fn clave-runtime)
             (let [lookup-certificate clave-adapter/lookup-certificate]
@@ -446,17 +545,28 @@
     (fn [hostname]
       (let [sni-hostname (when (and (string? hostname)
                                     (not (.isEmpty ^String hostname)))
-                           hostname)]
+                           hostname)
+            static-match (when sni-hostname
+                           (some (fn [{:keys [names material]}]
+                                   (when (some #(subject-name-matches-hostname?
+                                                 %
+                                                 sni-hostname)
+                                               names)
+                                     material))
+                                 static-materials))]
         (cond
-          static-material
-          static-material
+          static-match
+          static-match
 
           sni-hostname
           (some-> (clave-lookup-fn sni-hostname)
                   clave-bundle->tls-material)
 
-          default-domain
-          (some-> (clave-lookup-fn default-domain)
+          fallback-material
+          fallback-material
+
+          fallback-subject-name
+          (some-> (clave-lookup-fn fallback-subject-name)
                   clave-bundle->tls-material)
 
           :else
@@ -479,12 +589,9 @@
 (defn- create-ssl-context
   "Create SSL_CTX for a TLS listener, or nil for non-TLS listeners."
   [listener tls-lookup-callback-ptr]
-  (let [{:keys [cert-file key-file issuers protocols] :as tls} (:tls listener)
-        has-static-cert? (and cert-file key-file)
-        has-managed-cert? (seq issuers)]
-    (when (and (map? tls) (or has-static-cert? has-managed-cert?))
-      (let [enable-http2? (or (nil? protocols)
-                              (contains? (set protocols) :http2))
+  (when-let [tls (:tls listener)]
+    (when (map? tls)
+      (let [enable-http2? true
             ssl-ctx (h2o/create-ssl-ctx nil nil
                                         (if enable-http2? 1 0)
                                         (or tls-lookup-callback-ptr mem/null)
@@ -492,9 +599,7 @@
         (when (mem/null? ssl-ctx)
           (throw (ex-info "Failed to create SSL_CTX (check OpenSSL errors in stderr)"
                           {:listener (dissoc listener :tls)
-                           :listener-tls (:tls listener)
-                           :cert-file cert-file
-                           :key-file key-file})))
+                           :listener-tls (:tls listener)})))
         ssl-ctx))))
 
 (defn- create-http3-contexts
@@ -502,39 +607,39 @@
    These contexts are shared across all workers.
    Returns map: listener-index -> {:ptls-ctx ptls-ctx-ptr :quicly-ctx quicly-ctx-ptr :encrypt-ticket encrypt-ticket-ptr}
    Throws if context creation fails."
-  [listeners config-ptr ticket-mgr-ptr ticket-lifetime-seconds tls-lookup-callback-ptr]
-  (into {}
-        (keep-indexed
-         (fn [idx listener]
-           (when (http3-enabled? listener)
-             (let [{:keys [cert-file key-file]} (:tls listener)
-                   ptls-ctx (h2o/http3-create-ptls-ctx nil nil
-                                                       (or tls-lookup-callback-ptr mem/null)
-                                                       mem/null)]
-               (when (or (nil? ptls-ctx) (mem/null? ptls-ctx))
-                 (throw (ex-info "Failed to create ptls context for HTTP/3"
-                                 {:listener-index idx
-                                  :cert-file cert-file
-                                  :key-file key-file})))
+  [listeners config config-ptr ticket-mgr-ptr ticket-lifetime-seconds tls-lookup-callback-ptr]
+  (let [{:keys [cert-file key-file]} (first-static-tls-identity config)]
+    (into {}
+          (keep-indexed
+           (fn [idx listener]
+             (when (http3-enabled? listener)
+               (let [ptls-ctx (h2o/http3-create-ptls-ctx cert-file key-file
+                                                         (or tls-lookup-callback-ptr mem/null)
+                                                         mem/null)]
+                 (when (or (nil? ptls-ctx) (mem/null? ptls-ctx))
+                   (throw (ex-info "Failed to create ptls context for HTTP/3"
+                                   {:listener-index idx
+                                    :cert-file cert-file
+                                    :key-file key-file})))
                ;; Wire ticket manager into ptls context for session tickets
-               (let [encrypt-ticket (when (and ticket-mgr-ptr (not (mem/null? ticket-mgr-ptr)))
-                                      (h2o/ticket-manager-create-encrypt-ticket ticket-mgr-ptr 1))
-                     _ (when encrypt-ticket
-                         (h2o/ptls-ctx-set-tickets ptls-ctx encrypt-ticket
-                                                   ticket-lifetime-seconds
-                                                   8192))  ; CLJ_MAX_EARLY_DATA_SIZE
-                     quicly-ctx (h2o/http3-create-quicly-ctx ptls-ctx config-ptr)]
-                 (when (or (nil? quicly-ctx) (mem/null? quicly-ctx))
-                   (h2o/http3-free-ptls-ctx ptls-ctx)
-                   (throw (ex-info "Failed to create quicly context for HTTP/3"
-                                   {:listener-index idx})))
+                 (let [encrypt-ticket (when (and ticket-mgr-ptr (not (mem/null? ticket-mgr-ptr)))
+                                        (h2o/ticket-manager-create-encrypt-ticket ticket-mgr-ptr 1))
+                       _ (when encrypt-ticket
+                           (h2o/ptls-ctx-set-tickets ptls-ctx encrypt-ticket
+                                                     ticket-lifetime-seconds
+                                                     8192))  ; CLJ_MAX_EARLY_DATA_SIZE
+                       quicly-ctx (h2o/http3-create-quicly-ctx ptls-ctx config-ptr)]
+                   (when (or (nil? quicly-ctx) (mem/null? quicly-ctx))
+                     (h2o/http3-free-ptls-ctx ptls-ctx)
+                     (throw (ex-info "Failed to create quicly context for HTTP/3"
+                                     {:listener-index idx})))
                  ;; Set QUIC tag for 0-RTT validation after quicly context is created
-                 (when (and ticket-mgr-ptr (not (mem/null? ticket-mgr-ptr)))
-                   (h2o/ticket-manager-set-quic-tag ticket-mgr-ptr quicly-ctx))
-                 [idx {:ptls-ctx ptls-ctx
-                       :quicly-ctx quicly-ctx
-                       :encrypt-ticket encrypt-ticket}]))))
-         listeners)))
+                   (when (and ticket-mgr-ptr (not (mem/null? ticket-mgr-ptr)))
+                     (h2o/ticket-manager-set-quic-tag ticket-mgr-ptr quicly-ctx))
+                   [idx {:ptls-ctx ptls-ctx
+                         :quicly-ctx quicly-ctx
+                         :encrypt-ticket encrypt-ticket}]))))
+           listeners))))
 
 (defn- create-http3-worker-contexts
   "Create per-worker HTTP/3 contexts (UDP listeners) for each TLS listener with HTTP/3 enabled.
@@ -579,11 +684,13 @@
       (h2o/http3-free-ptls-ctx ptls-ctx))))
 
 (defn- prepare-server-state
-  [ring-handler user-config]
+  [user-config]
   (let [{:keys [n-workers max-connections executor] :as config}
         (config/load! user-config)
         clave-runtime (clave-adapter/start! (clave-adapter/build-managed-plan config))
-        ring-handler  (clave-adapter/wrap-handler ring-handler clave-runtime)]
+        ring-handler  (-> config
+                          config/dispatch-handler
+                          (clave-adapter/wrap-handler clave-runtime))]
     {::ring-handler    ring-handler
      ::config          config
      ::clave-runtime   clave-runtime
@@ -623,7 +730,10 @@
         ssl-ctx-ptrs                    (mapv :ssl-ctx-ptr listener-runtimes)
         has-tls-listeners?              (some some? ssl-ctx-ptrs)
         tls-lookup-callback-ptr         (:callback-ptr tls-lookup-callback)
-        session-ticket-lifetime-seconds (:session-ticket-lifetime-seconds config)
+        session-ticket-lifetime-seconds (get-in config
+                                                [:tls
+                                                 :session-tickets
+                                                 :lifetime-seconds])
         ticket-store                    (tickets/memory-ticket-store)
         native-ticket-mgr               (when has-tls-listeners?
                                           (h2o/ticket-manager-create
@@ -638,6 +748,7 @@
         (when ssl-ctx-ptr
           (h2o/ssl-ctx-set-tickets ssl-ctx-ptr native-ticket-mgr 8192))))
     (let [http3-contexts        (create-http3-contexts listeners
+                                                       config
                                                        config-ptr
                                                        native-ticket-mgr
                                                        session-ticket-lifetime-seconds
@@ -749,22 +860,19 @@
   (dissoc state ::message-handler))
 
 (defn run-server
-  ([handler]
-   (run-server handler {}))
-  ([handler user-config]
-   (when-not handler (throw (ex-info "Handler is required" {:handler handler})))
-   (let [prepared-state (prepare-server-state handler user-config)]
-     (try
-       (-> prepared-state
-           (init-tls-lookup-state)
-           (init-core-state)
-           (init-listener-state)
-           (init-tls-http3-state)
-           (init-worker-state)
-           (finalize-server-state))
-       (catch Throwable t
-         (clave-adapter/stop! (::clave-runtime prepared-state))
-         (throw t))))))
+  [user-config]
+  (let [prepared-state (prepare-server-state user-config)]
+    (try
+      (-> prepared-state
+          (init-tls-lookup-state)
+          (init-core-state)
+          (init-listener-state)
+          (init-tls-http3-state)
+          (init-worker-state)
+          (finalize-server-state))
+      (catch Throwable t
+        (clave-adapter/stop! (::clave-runtime prepared-state))
+        (throw t)))))
 
 (defn stop-server
   "Synchronously shut down the server, blocking until all requests and native

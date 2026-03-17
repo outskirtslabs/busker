@@ -4,7 +4,48 @@
 ;; https://github.com/clojure/tools.deps/blob/ecc80420c1b734b384f7a42df91684cdbc37ddc6/src/test/clojure/clojure/tools/deps/util.clj
 (ns ol.busker.test-utils
   (:require
-   [babashka.process :as p]))
+   [babashka.process :as p]
+   [clojure.java.io :as io]))
+
+(defn fixture-cert-path
+  []
+  (.getAbsolutePath (io/file "src/test/fixtures/server.crt")))
+
+(defn fixture-key-path
+  []
+  (.getAbsolutePath (io/file "src/test/fixtures/server.key")))
+
+(def static-tls
+  {:certificates {:load [{:type :pem
+                          :cert-file (fixture-cert-path)
+                          :key-file (fixture-key-path)}]}})
+
+(defn fixture-cert-pem
+  []
+  (slurp (fixture-cert-path)))
+
+(defn fixture-key-pem
+  []
+  (slurp (fixture-key-path)))
+
+(defn fixture-tls-bundle
+  []
+  {:certificate [(fixture-cert-pem)]
+   :private-key (fixture-key-pem)})
+
+(defn deep-merge
+  [& values]
+  (if (every? map? values)
+    (apply merge-with deep-merge values)
+    (last values)))
+
+(defn with-static-tls
+  [config]
+  (update config :tls #(deep-merge static-tls (or % {}))))
+
+(defn with-handler
+  [handler config]
+  (assoc config :dispatch [{:handler handler}]))
 
 (defn curl
   [scheme proto port path & {:keys [host max-time args]

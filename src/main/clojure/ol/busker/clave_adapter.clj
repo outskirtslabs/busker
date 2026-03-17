@@ -30,15 +30,9 @@
 
 (declare lookup-certificate)
 
-(defn- managed-tls-entrypoint?
-  [entrypoint]
-  (let [tls (:tls entrypoint)]
-    (and (map? tls)
-         (seq (:issuers tls)))))
-
-(defn- distinct-domains
-  [domains]
-  (->> domains
+(defn- distinct-subject-names
+  [subject-names]
+  (->> subject-names
        (filter string?)
        distinct
        vec))
@@ -55,24 +49,22 @@
 
 (defn build-managed-plan
   [config]
-  (let [managed-entrypoints (->> (:entrypoints config)
-                                 (filter managed-tls-entrypoint?)
-                                 vec)]
-    (when (seq managed-entrypoints)
-      (let [tls-config (-> managed-entrypoints first :tls)]
-        (assert-managed-plan!
-         {:domains (distinct-domains (:domains config))
-          :managed-entrypoints managed-entrypoints
-          :clave-config (select-keys tls-config clave-config-keys)})))))
+  (let [tls-config (:tls config)
+        subject-names (distinct-subject-names
+                       (get-in tls-config [:certificates :manage]))]
+    (when (seq subject-names)
+      (assert-managed-plan!
+       {:subject-names subject-names
+        :clave-config (select-keys tls-config clave-config-keys)}))))
 
-(defn- pending-domains
-  [system domains]
-  (reduce (fn [pending domain]
-            (if (automation/lookup-cert system domain)
+(defn- pending-subject-names
+  [system subject-names]
+  (reduce (fn [pending subject-name]
+            (if (automation/lookup-cert system subject-name)
               pending
-              (conj pending domain)))
+              (conj pending subject-name)))
           #{}
-          domains))
+          subject-names))
 
 (defn- certificate-failed-event?
   [event pending]
@@ -80,18 +72,18 @@
        (contains? pending (get-in event [:data :domain]))))
 
 (defn- wait-for-initial-certificates!
-  [system domains]
-  (when (seq domains)
+  [system subject-names]
+  (when (seq subject-names)
     (let [queue (automation/get-event-queue system)
           deadline-ms (+ (System/currentTimeMillis) initial-cert-wait-timeout-ms)]
-      (loop [pending (pending-domains system domains)]
+      (loop [pending (pending-subject-names system subject-names)]
         (when (seq pending)
           (let [now-ms (System/currentTimeMillis)
                 remaining-ms (- deadline-ms now-ms)]
             (when (<= remaining-ms 0)
               (throw
                (ex-info "Timed out waiting for initial certificates"
-                        {:pending-domains (vec (sort pending))
+                        {:pending-subject-names (vec (sort pending))
                          :timeout-ms initial-cert-wait-timeout-ms})))
             (let [poll-ms (long (max 1 (min event-poll-timeout-ms remaining-ms)))
                   event (.poll queue poll-ms TimeUnit/MILLISECONDS)]
@@ -99,24 +91,26 @@
                 (throw
                  (ex-info "Initial certificate obtain failed"
                           {:event event
-                           :pending-domains (vec (sort pending))}))))
-            (recur (pending-domains system pending))))))))
+                           :pending-subject-names (vec (sort pending))}))))
+            (recur (pending-subject-names system pending))))))))
 
 (defn start!
   [managed-plan]
   (when managed-plan
-    (let [{:keys [domains clave-config]} (assert-managed-plan! managed-plan)
+    (let [{:keys [subject-names clave-config]}
+          (assert-managed-plan! managed-plan)
           http01-solver (http-solver/solver)
           clave-config (update clave-config :solvers
                                (fn [solvers]
-                                 (assoc (or solvers {}) :http-01 http01-solver)))
+                                 (assoc (or solvers {})
+                                        :http-01 http01-solver)))
           system (automation/create clave-config)]
       (try
         (automation/start! system)
-        (automation/manage-domains system domains)
-        (wait-for-initial-certificates! system domains)
+        (automation/manage-domains system subject-names)
+        (wait-for-initial-certificates! system subject-names)
         (let [runtime {:system system
-                       :domains domains
+                       :subject-names subject-names
                        :http-solver http01-solver}]
           (assoc runtime :lookup-fn
                  (fn [hostname]

@@ -150,24 +150,22 @@
                               "src/test/fixtures/pebble-truststore.p12")
         acme-trust-store-pass (env "BUSKER_ACME_TRUST_STORE_PASS" "changeit")
         acme-storage-dir (env "BUSKER_ACME_STORAGE_DIR" "target/busker-main-acme")
-        s (server/run-server router {:domains [domain]
-                                     :default-domain domain
-                                     :compress-brotli-level 11
-                                     :compress-gzip-level 5
-                                     :entrypoints [{:name :http
-                                                    :bind http-bind
-                                                    :tls false}
-                                                   {:name :https
-                                                    :bind https-bind
-                                                    :tls {:issuers [{:directory-url acme-directory-url}]
-                                                          :http-client {:ssl-context
-                                                                        {:trust-store acme-trust-store
-                                                                         :trust-store-pass acme-trust-store-pass}}
-                                                          :storage (file-storage/file-storage acme-storage-dir)}}]})]
+        s (server/run-server {:compress-brotli-level 11
+                              :compress-gzip-level 5
+                              :tls {:storage (file-storage/file-storage {:root acme-storage-dir})
+                                    :certificates {:manage [domain]}
+                                    :issuers [{:directory-url acme-directory-url}]
+                                    :http-client {:ssl-context
+                                                  {:trust-store acme-trust-store
+                                                   :trust-store-pass acme-trust-store-pass}}}
+                              :entrypoints {:http {:bind http-bind
+                                                   :tls false}
+                                            :https {:bind https-bind
+                                                    :tls {:tls-compatibility-mode :modern}}}
+                              :dispatch [{:handler router}]})]
     (println "Server started with managed TLS")
     (println "HTTP bind:" http-bind "HTTPS bind:" https-bind)
     (println "Managed domain:" domain)
-    (println "Default domain:" domain)
     (println "ACME directory:" acme-directory-url)
     (println "ACME trust store:" acme-trust-store)
     (println "ACME storage dir:" acme-storage-dir)

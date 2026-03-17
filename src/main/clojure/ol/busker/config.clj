@@ -1,13 +1,12 @@
 (ns ol.busker.config
-  "Configuration parsing, defaults, and validation for Busker."
+  "Configuration parsing, defaults, validation, and dispatch compilation for Busker."
   (:require
    [clojure.string :as str]
    [ol.busker.buffer-pool :as bp]
    [ol.busker.specs :as specs]
-   [ol.clave.crypto.impl.parse-ip :as parse-ip])
+   [ol.clave.storage :as storage])
   (:import
    [java.io File]
-   [java.net InetAddress]
    [java.util.concurrent Executors]))
 
 (defn port-string?
@@ -29,10 +28,12 @@
       (str/starts-with? s ":")
       (when-let [port (parse-port (subs s 1))]
         {:address nil :port port})
+
       (str/starts-with? s "[")
       (when-let [[_ host port] (re-matches #"\[([^\]]+)\]:(\d+)" s)]
         (when-let [port (parse-port port)]
           {:address host :port port}))
+
       :else
       (let [idx (.lastIndexOf ^String s ":")]
         (when (pos? idx)
@@ -63,277 +64,563 @@
   [s]
   (some? (parse-bind-address s)))
 
-(def ^:private internal-suffixes
-  "Domain suffixes that are internal and cannot get public certs.
-  Matches certmagic's SubjectIsInternal logic."
-  #{".localhost" ".local" ".internal" ".home.arpa"})
-
-(defn- internal-ip?
-  "Returns true if the IP address is internal (loopback, private, link-local, ULA).
-  Matches certmagic's isInternalIP logic."
-  [^InetAddress addr]
-  (or (.isLoopbackAddress addr)      ;; 127.0.0.0/8, ::1
-      (.isLinkLocalAddress addr)     ;; 169.254.0.0/16, fe80::/10
-      (.isSiteLocalAddress addr)     ;; 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-      (.isAnyLocalAddress addr)      ;; 0.0.0.0, ::
-      ;; IPv6 ULA (fc00::/7) - not covered by isSiteLocalAddress
-      (let [bytes (.getAddress addr)]
-        (and (= 16 (alength bytes))
-             (let [first-byte (bit-and (aget bytes 0) 0xfe)]
-               (= first-byte 0xfc))))))
-
-(defn internal-host?
-  "Returns true if the hostname/IP is internal per certmagic's SubjectIsInternal.
-  Internal subjects cannot get public certs and use self-signed instead."
-  [host]
-  (when (and (string? host) (not (str/blank? host)))
-    (let [host-lower (-> host str/lower-case (str/replace #"\.$" ""))]
-      (or (= "localhost" host-lower)
-          (some #(str/ends-with? host-lower %) internal-suffixes)
-          (when-let [inet-addr (parse-ip/from-string host)]
-            (internal-ip? inet-addr))))))
-
-(defn internal-address?
-  "Returns true if the bind address is internal.
-  Internal addresses qualify for auto-generated self-signed certificates."
-  [addr]
-  (when-let [parsed (parse-bind-address addr)]
-    (cond
-      ;; Unix sockets are internal
-      (:unix parsed)
-      true
-
-      ;; nil host means all interfaces (e.g., \":8080\") - not internal
-      (nil? (:address parsed))
-      false
-
-      ;; Check if the host is internal
-      :else
-      (internal-host? (:address parsed)))))
-
 (defn parse-bind
   [bind]
   (let [binds (cond
                 (string? bind) [bind]
                 (vector? bind) bind
-                :else (throw (ex-info "Invalid :bind value." {:bind bind})))]
+                :else (throw (ex-info "Invalid :bind value."
+                                      {:bind bind})))]
     (when (empty? binds)
-      (throw (ex-info "Bind must include at least one address." {:bind bind})))
+      (throw (ex-info "Bind must include at least one address."
+                      {:bind bind})))
     (mapv (fn [addr]
             (or (parse-bind-address addr)
-                (throw (ex-info "Invalid bind address." {:bind addr}))))
+                (throw (ex-info "Invalid bind address."
+                                {:bind addr}))))
           binds)))
 
-(defn entrypoint-error
-  [entrypoint error msg data]
-  {:msg msg
-   :error error
-   :data (merge {:entrypoint (:name entrypoint)} data)})
+(defn- qualified-symbol-ref?
+  [v]
+  (and (symbol? v)
+       (namespace v)
+       (name v)))
 
-(defn maybe-add-entrypoint-error
-  [errors pred entrypoint error msg data]
-  (if pred
-    (conj errors (entrypoint-error entrypoint error msg data))
-    errors))
+(defn- callable-value?
+  [v]
+  (and (ifn? v)
+       (not (vector? v))
+       (not (map? v))
+       (not (set? v))
+       (not (symbol? v))
+       (not (keyword? v))
+       (not (string? v))))
 
-(defn bind-values
+(defn- deep-merge
+  [& values]
+  (if (every? map? values)
+    (apply merge-with deep-merge values)
+    (last values)))
+
+(defn- bind-values
   [bind]
   (cond
     (string? bind) [bind]
     (vector? bind) bind
     :else nil))
 
-(defn all-binds-internal?
-  "Returns true if all bind addresses in the entrypoint are internal."
-  [entrypoint]
-  (let [binds (bind-values (:bind entrypoint))]
-    (and (seq binds)
-         (every? internal-address? binds))))
+(defn- config-error
+  [error msg data]
+  {:msg msg
+   :error error
+   :data data})
+
+(defn- entrypoint-error
+  [entrypoint-id error msg data]
+  {:msg msg
+   :error error
+   :data (merge {:entrypoint entrypoint-id} data)})
+
+(defn- maybe-add-error
+  [errors pred error-fn]
+  (if pred
+    (conj errors (error-fn))
+    errors))
 
 (defn validate-bind-address
-  [errors entrypoint idx addr]
+  [errors entrypoint-id idx addr]
   (cond
     (not (string? addr))
-    (conj errors (entrypoint-error entrypoint
+    (conj errors (entrypoint-error entrypoint-id
                                    ::entrypoint-bind-address-type
                                    "Bind address must be a string."
                                    {:bind addr
                                     :index idx
                                     :type (.getName (class addr))}))
+
     (str/blank? addr)
-    (conj errors (entrypoint-error entrypoint
+    (conj errors (entrypoint-error entrypoint-id
                                    ::entrypoint-bind-address-blank
                                    "Bind address must not be blank."
                                    {:bind addr
                                     :index idx}))
+
     (bind-address? addr)
     errors
+
     :else
-    (conj errors (entrypoint-error entrypoint
+    (conj errors (entrypoint-error entrypoint-id
                                    ::entrypoint-bind-address-invalid
                                    "Bind address must be a valid address string."
                                    {:bind addr
                                     :index idx}))))
 
 (defn validate-bind
-  [errors entrypoint]
+  [errors entrypoint-id entrypoint]
   (let [bind (:bind entrypoint)
         binds (bind-values bind)]
     (cond
       (nil? binds)
-      (conj errors (entrypoint-error entrypoint
+      (conj errors (entrypoint-error entrypoint-id
                                      ::entrypoint-bind-type
                                      "Bind must be a string or vector of strings."
                                      {:bind bind}))
+
       (empty? binds)
-      (conj errors (entrypoint-error entrypoint
+      (conj errors (entrypoint-error entrypoint-id
                                      ::entrypoint-bind-empty
                                      "Bind must include at least one address."
                                      {:bind bind}))
+
       :else
       (reduce-kv (fn [errs idx addr]
-                   (validate-bind-address errs entrypoint idx addr))
+                   (validate-bind-address errs entrypoint-id idx addr))
                  errors
                  (vec binds)))))
 
-(defn validate-tls
-  "Validate TLS config for an entrypoint, returning errors vector.
-  Skips cert-file/key-file validation when:
-  - All bindings are internal (will use auto-generated self-signed certs)
-  - ACME issuers are configured (certs will be obtained automatically)
-  - No explicit cert/key files are configured (automatic provisioning mode)"
-  [errors entrypoint]
-  (let [tls (:tls entrypoint)]
-    (if-not (map? tls)
-      errors
-      (let [cert-file (:cert-file tls)
-            key-file (:key-file tls)
-            has-issuers? (seq (:issuers tls))
-            internal? (all-binds-internal? entrypoint)
-            manual-cert-mode? (or cert-file key-file)
-            ;; Manual mode requires cert files unless internal or ACME
-            needs-cert-files? (and manual-cert-mode? (not internal?) (not has-issuers?))]
-        (-> errors
-            (maybe-add-entrypoint-error
-             (and needs-cert-files? (nil? cert-file))
-             entrypoint ::tls-missing-cert-file
-             "TLS config requires :cert-file for non-internal addresses without ACME issuers." {})
-            (maybe-add-entrypoint-error
-             (and needs-cert-files? (nil? key-file))
-             entrypoint ::tls-missing-key-file
-             "TLS config requires :key-file for non-internal addresses without ACME issuers." {})
-            (maybe-add-entrypoint-error
-             (and cert-file (not (.exists (File. ^String cert-file))))
-             entrypoint ::tls-cert-file-not-found
-             "TLS certificate file not found." {:cert-file cert-file})
-            (maybe-add-entrypoint-error
-             (and key-file (not (.exists (File. ^String key-file))))
-             entrypoint ::tls-key-file-not-found
-             "TLS private key file not found." {:key-file key-file}))))))
+(defn- wildcard-host?
+  [host]
+  (or (nil? host)
+      (= host "0.0.0.0")
+      (= host "::")))
+
+(defn- bind-conflict?
+  [a b]
+  (cond
+    (and (:unix a) (:unix b))
+    (= (:unix a) (:unix b))
+
+    (or (:unix a) (:unix b))
+    false
+
+    :else
+    (and (= (:port a) (:port b))
+         (or (= (:address a) (:address b))
+             (wildcard-host? (:address a))
+             (wildcard-host? (:address b))))))
+
+(defn- validate-entrypoint-conflicts
+  [entrypoints]
+  (let [parsed (mapcat (fn [[entrypoint-id entrypoint]]
+                         (map (fn [bind]
+                                {:entrypoint entrypoint-id
+                                 :bind bind
+                                 :parsed (parse-bind-address bind)})
+                              (or (bind-values (:bind entrypoint)) [])))
+                       entrypoints)]
+    (loop [errors []
+           [current & remaining] parsed]
+      (if-not current
+        errors
+        (let [conflicts (filter #(bind-conflict? (:parsed current)
+                                                 (:parsed %))
+                                remaining)
+              errors (into errors
+                           (map (fn [conflict]
+                                  (entrypoint-error
+                                   (:entrypoint current)
+                                   ::entrypoint-bind-conflict
+                                   "Entrypoints must not bind conflicting addresses."
+                                   {:bind (:bind current)
+                                    :conflict-entrypoint (:entrypoint conflict)
+                                    :conflict-bind (:bind conflict)}))
+                                conflicts))]
+          (recur errors remaining))))))
+
+(defn- validate-tls-load-entry
+  [errors entry]
+  (let [{:keys [type path cert-file key-file]} entry]
+    (case type
+      :folder
+      (-> errors
+          (maybe-add-error
+           (not (string? path))
+           #(config-error ::tls-folder-path-missing
+                          "TLS folder entries require :path."
+                          {:entry entry}))
+          (maybe-add-error
+           (and (string? path)
+                (not (.isDirectory (File. ^String path))))
+           #(config-error ::tls-folder-not-found
+                          "TLS certificate folder was not found."
+                          {:path path})))
+
+      :pem
+      (-> errors
+          (maybe-add-error
+           (not (string? cert-file))
+           #(config-error ::tls-missing-cert-file
+                          "TLS PEM entries require :cert-file."
+                          {:entry entry}))
+          (maybe-add-error
+           (not (string? key-file))
+           #(config-error ::tls-missing-key-file
+                          "TLS PEM entries require :key-file."
+                          {:entry entry}))
+          (maybe-add-error
+           (and (string? cert-file)
+                (not (.exists (File. ^String cert-file))))
+           #(config-error ::tls-cert-file-not-found
+                          "TLS certificate file not found."
+                          {:cert-file cert-file}))
+          (maybe-add-error
+           (and (string? key-file)
+                (not (.exists (File. ^String key-file))))
+           #(config-error ::tls-key-file-not-found
+                          "TLS private key file not found."
+                          {:key-file key-file})))
+
+      (conj errors
+            (config-error ::tls-load-type-invalid
+                          "TLS certificate load entries must use :type :folder or :pem."
+                          {:entry entry})))))
+
+(defn- global-certificates-present?
+  [config]
+  (let [tls (:tls config)]
+    (or (seq (get-in tls [:certificates :load]))
+        (seq (get-in tls [:certificates :manage])))))
 
 (defn validate-entrypoint
-  [errors entrypoint]
+  [errors entrypoint-id entrypoint config]
   (let [errors (or errors [])
-        errors (validate-bind errors entrypoint)
+        errors (validate-bind errors entrypoint-id entrypoint)
         binds (bind-values (:bind entrypoint))
         http1? (:http1? entrypoint)
         http2? (:http2? entrypoint)
         http3? (:http3? entrypoint)
+        tls-enabled? (map? (:tls entrypoint))
         unix? (boolean (some unix-bind-address? binds))]
     (-> errors
-        (maybe-add-entrypoint-error
+        (maybe-add-error
          (and http3? unix?)
-         entrypoint
-         ::entrypoint-http3-unix
-         "HTTP/3 is not supported for unix domain sockets."
-         {:bind (vec binds)})
-        (maybe-add-entrypoint-error
-         (and http3?
-              (not (map? (:tls entrypoint)))
-              (not (all-binds-internal? entrypoint)))
-         entrypoint
-         ::entrypoint-http3-requires-tls
-         "HTTP/3 requires TLS configuration for non-internal addresses."
-         {})
-        (maybe-add-entrypoint-error
+         #(entrypoint-error entrypoint-id
+                            ::entrypoint-http3-unix
+                            "HTTP/3 is not supported for unix domain sockets."
+                            {:bind (vec binds)}))
+        (maybe-add-error
+         (and http3? (not tls-enabled?))
+         #(entrypoint-error entrypoint-id
+                            ::entrypoint-http3-requires-tls
+                            "HTTP/3 requires TLS on the entrypoint."
+                            {}))
+        (maybe-add-error
          (not (or http1? http2? http3?))
-         entrypoint
-         ::entrypoint-no-protocols
-         "Entrypoint must enable at least one HTTP protocol."
-         {:http1? http1?
-          :http2? http2?
-          :http3? http3?})
-        (validate-tls entrypoint))))
+         #(entrypoint-error entrypoint-id
+                            ::entrypoint-no-protocols
+                            "Entrypoint must enable at least one HTTP protocol."
+                            {:http1? http1?
+                             :http2? http2?
+                             :http3? http3?}))
+        (maybe-add-error
+         (and tls-enabled?
+              (not (global-certificates-present? config)))
+         #(entrypoint-error entrypoint-id
+                            ::tls-missing-certificates
+                            "TLS entrypoints require top-level :tls :certificates configuration."
+                            {})))))
 
 (defn apply-entrypoint-defaults
-  "Apply default values to an entrypoint map."
   [entrypoint]
   (let [tls-overridden? (contains? entrypoint :tls)
         http3-overridden? (contains? entrypoint :http3?)
         entrypoint (merge (:default specs/entrypoint) entrypoint)
         entrypoint (if tls-overridden?
                      entrypoint
-                     (assoc entrypoint :tls (:default specs/tls)))]
+                     (assoc entrypoint :tls false))]
     (if http3-overridden?
       entrypoint
       (assoc entrypoint :http3? (map? (:tls entrypoint))))))
 
 (defn apply-config-defaults
-  "Apply default values to config map, including runtime objects."
-  [config]
-  (let [config (merge specs/default-config config)]
+  [user-config]
+  (let [config (merge specs/default-config (dissoc user-config :tls))
+        config (assoc config :tls (deep-merge (:tls specs/default-config)
+                                              (or (:tls user-config) {})))
+        config (update config :entrypoints
+                       (fn [entrypoints]
+                         (when entrypoints
+                           (into (empty entrypoints)
+                                 (map (fn [[entrypoint-id entrypoint]]
+                                        [entrypoint-id
+                                         (apply-entrypoint-defaults entrypoint)]))
+                                 entrypoints))))]
     (-> config
-        (cond-> (not (contains? config :executor))
+        (cond-> (not (contains? user-config :executor))
           (assoc :executor (Executors/newVirtualThreadPerTaskExecutor)))
-        (cond-> (not (contains? config :buffer-pool))
-          (assoc :buffer-pool (bp/make-bytebuffer-pool {})))
-        (update :entrypoints #(mapv apply-entrypoint-defaults %)))))
+        (cond-> (not (contains? user-config :buffer-pool))
+          (assoc :buffer-pool (bp/make-bytebuffer-pool {}))))))
 
 (defn validate-config
-  "Validate entire config, returning vector of all errors."
-  [{:keys [entrypoints default-domain domains] :as config}]
-  (let [missing-entrypoints?    (or (nil? entrypoints) (empty? entrypoints))
-        default-domain-present? (contains? config :default-domain)
-        domains-present?        (contains? config :domains)
-        blank-default-domain?   (and (string? default-domain)
-                                     (str/blank? default-domain))
-        default-domain-membership-invalid?
-        (and default-domain-present?
-             (string? default-domain)
-             (not (str/blank? default-domain))
-             domains-present?
-             (not-any? #(= default-domain %) domains))
-        spec-errors             (when (and (not missing-entrypoints?)
-                                           (not (specs/valid-config? config)))
-                                  [{:msg   "Config failed spec validation."
-                                    :error ::config-spec-invalid
-                                    :data  {:problems (-> config
-                                                          specs/explain-config
-                                                          :clojure.spec.alpha/problems)}}])]
+  [{:keys [entrypoints dispatch tls] :as config}]
+  (let [missing-entrypoints? (or (nil? entrypoints) (empty? entrypoints))
+        missing-dispatch? (or (nil? dispatch) (empty? dispatch))
+        spec-errors (when (and (not missing-entrypoints?)
+                               (not missing-dispatch?)
+                               (not (specs/valid-config? config)))
+                      [(config-error
+                        ::config-spec-invalid
+                        "Config failed spec validation."
+                        {:problems (-> config
+                                       specs/explain-config
+                                       :clojure.spec.alpha/problems)})])
+        dispatch-errors
+        (mapcat (fn [{:keys [entrypoints] :as dispatcher}]
+                  (keep (fn [entrypoint-id]
+                          (when-not (contains? (:entrypoints config) entrypoint-id)
+                            (config-error
+                             ::dispatch-entrypoint-missing
+                             "Dispatcher references an unknown entrypoint."
+                             {:dispatcher dispatcher
+                              :entrypoint entrypoint-id})))
+                        entrypoints))
+                (or dispatch []))
+        tls-errors
+        (-> []
+            (into (mapcat (partial validate-tls-load-entry [])
+                          (get-in tls [:certificates :load])))
+            (maybe-add-error
+             (and (seq (get-in tls [:certificates :manage]))
+                  (not (seq (:issuers tls))))
+             #(config-error
+               ::tls-manage-requires-issuers
+               "Managed certificates require top-level :tls :issuers."
+               {:manage (vec (get-in tls [:certificates :manage]))})))]
     (cond-> (vec spec-errors)
       missing-entrypoints?
-      (conj {:msg   "Config must include at least one entrypoint."
-             :error ::config-no-entrypoints
-             :data  {}})
+      (conj (config-error
+             ::config-no-entrypoints
+             "Config must include at least one entrypoint."
+             {}))
 
-      (and (vector? entrypoints) (seq entrypoints))
-      (into (mapcat #(validate-entrypoint [] %) entrypoints))
+      missing-dispatch?
+      (conj (config-error
+             ::config-no-dispatch
+             "Config must include at least one dispatcher."
+             {}))
 
-      blank-default-domain?
-      (conj {:msg   "Default domain must not be blank."
-             :error ::default-domain-blank
-             :data  {:default-domain default-domain}})
+      (and (map? entrypoints) (seq entrypoints))
+      (into (mapcat (fn [[entrypoint-id entrypoint]]
+                      (validate-entrypoint [] entrypoint-id entrypoint config))
+                    entrypoints))
 
-      default-domain-membership-invalid?
-      (conj {:msg   "Default domain must be present in :domains when domains are configured."
-             :error ::default-domain-not-in-domains
-             :data  {:default-domain default-domain
-                     :domains        (vec domains)}}))))
+      (and (map? entrypoints) (seq entrypoints))
+      (into (validate-entrypoint-conflicts entrypoints))
+
+      (seq dispatch-errors)
+      (into dispatch-errors)
+
+      (seq tls-errors)
+      (into tls-errors))))
+
+(defn- resolve-function-ref
+  [value kind]
+  (cond
+    (nil? value)
+    nil
+
+    (callable-value? value)
+    value
+
+    (qualified-symbol-ref? value)
+    (let [resolved (requiring-resolve value)]
+      (when-not (ifn? resolved)
+        (throw (ex-info "Resolved value is not callable."
+                        {:kind kind
+                         :value value})))
+      resolved)
+
+    :else
+    (throw (ex-info "Config value must be a function or qualified symbol."
+                    {:kind kind
+                     :value value}))))
+
+(defn- resolve-storage
+  [value]
+  (cond
+    (nil? value)
+    nil
+
+    (satisfies? storage/Storage value)
+    value
+
+    (map? value)
+    (let [factory (resolve-function-ref (:factory value) :storage-factory)
+          initial-instance (try
+                             (factory value)
+                             (catch Throwable _
+                               ::retry))
+          instance (if (and (= ::retry initial-instance)
+                            (contains? value :root))
+                     (factory (:root value))
+                     (if (and (nil? initial-instance)
+                              (contains? value :root))
+                       (factory (:root value))
+                       initial-instance))]
+      (when-not (satisfies? storage/Storage instance)
+        (throw (ex-info "Storage factory must return a Storage implementation."
+                        {:value value
+                         :instance instance})))
+      instance)
+
+    :else
+    (throw (ex-info "Invalid :tls :storage value."
+                    {:value value}))))
+
+(defn- compile-middleware-entry
+  [entry]
+  (cond
+    (vector? entry)
+    (let [[wrap-ref opts] entry
+          wrap-fn (resolve-function-ref wrap-ref :middleware)]
+      (fn [handler]
+        (if (some? opts)
+          (wrap-fn handler opts)
+          (wrap-fn handler))))
+
+    (or (callable-value? entry) (qualified-symbol-ref? entry))
+    (let [wrap-fn (resolve-function-ref entry :middleware)]
+      (fn [handler]
+        (wrap-fn handler)))
+
+    :else
+    (throw (ex-info "Invalid middleware entry."
+                    {:entry entry}))))
+
+(defn- compile-dispatcher
+  [dispatcher]
+  (let [match-fn (resolve-function-ref (:match dispatcher) :match)
+        base-handler (or (resolve-function-ref (:handler dispatcher) :handler)
+                         (fn [_] {:status 200}))
+        middleware (map compile-middleware-entry (:middleware dispatcher))
+        handler (reduce (fn [handler middleware-fn]
+                          (middleware-fn handler))
+                        base-handler
+                        middleware)]
+    (assoc dispatcher
+           :match-fn match-fn
+           :compiled-handler handler)))
+
+(defn entrypoint->listeners
+  [[entrypoint-id entrypoint]]
+  (let [{:keys [bind http3? tls]} entrypoint
+        binds (bind-values bind)]
+    (mapv (fn [addr]
+            (let [parsed (parse-bind-address addr)
+                  base (cond
+                         (:unix parsed)
+                         {:entrypoint entrypoint-id
+                          :unix (:unix parsed)}
+
+                         (:address parsed)
+                         {:entrypoint entrypoint-id
+                          :host (:address parsed)
+                          :port (:port parsed)}
+
+                         :else
+                         {:entrypoint entrypoint-id
+                          :port (:port parsed)})]
+              (if (map? tls)
+                (assoc base :tls (assoc tls :http3? http3?))
+                base)))
+          binds)))
+
+(defn config->listeners
+  [config]
+  (assoc config
+         :listeners
+         (into []
+               (mapcat entrypoint->listeners)
+               (:entrypoints config))))
+
+(defn- entrypoint-scheme
+  [[_ entrypoint]]
+  (if (map? (:tls entrypoint))
+    :https
+    :http))
+
+(defn- build-entrypoint-resolver
+  [entrypoints]
+  (let [listeners (into [] (mapcat entrypoint->listeners) entrypoints)
+        by-port (into {}
+                      (keep (fn [{:keys [entrypoint port]}]
+                              (when port
+                                [port entrypoint])))
+                      listeners)
+        by-scheme (reduce (fn [acc pair]
+                            (update acc (entrypoint-scheme pair)
+                                    (fnil conj [])
+                                    (first pair)))
+                          {}
+                          entrypoints)
+        singletons (into {}
+                         (keep (fn [[scheme ids]]
+                                 (when (= 1 (count ids))
+                                   [scheme (first ids)])))
+                         by-scheme)
+        fallback (ffirst entrypoints)]
+    (fn [req]
+      (or (:ol.busker/entrypoint req)
+          (get by-port (:server-port req))
+          (get singletons (:scheme req))
+          fallback))))
+
+(defn- build-dispatch-handler
+  [config]
+  (let [resolve-entrypoint (build-entrypoint-resolver (:entrypoints config))
+        dispatchers (mapv compile-dispatcher (:dispatch config))]
+    (fn [req]
+      (loop [current (assoc req :ol.busker/entrypoint
+                            (resolve-entrypoint req))
+             matched-groups #{}
+             matched? false
+             [dispatcher & more] dispatchers]
+        (if-not dispatcher
+          (if matched?
+            current
+            {:status 200})
+          (let [{:keys [entrypoints group match-fn compiled-handler terminal?]}
+                dispatcher
+                entrypoint-id (:ol.busker/entrypoint current)
+                bound? (if (contains? dispatcher :entrypoints)
+                         (contains? entrypoints entrypoint-id)
+                         true)
+                group-available? (or (nil? group)
+                                     (not (contains? matched-groups group)))
+                matches? (or (nil? match-fn)
+                             (match-fn current))]
+            (if (and bound? group-available? matches?)
+              (let [result (compiled-handler current)
+                    matched-groups (cond-> matched-groups
+                                     group (conj group))]
+                (if terminal?
+                  result
+                  (recur result matched-groups true more)))
+              (recur current matched-groups matched? more))))))))
+
+(def ^:private dispatch-handler-key
+  ::dispatch-handler)
+
+(defn dispatch-handler
+  [config]
+  (or (get config dispatch-handler-key)
+      (throw (ex-info "Config has not been compiled."
+                      {:config-keys (keys config)}))))
+
+(defn- compile-config
+  [config]
+  (let [config (update config :tls
+                       (fn [tls]
+                         (if (map? tls)
+                           (-> tls
+                               (update :storage resolve-storage)
+                               (update :config-fn
+                                       #(when % (resolve-function-ref % :config-fn))))
+                           tls)))
+        handler (build-dispatch-handler config)]
+    (assoc config dispatch-handler-key handler)))
 
 (defn load!
-  "Load and validate config.
-  Returns validated config map with defaults applied and runtime objects created.
-  Throws ex-info with :errors key containing all validation errors on failure."
   [user-config]
   (let [config (apply-config-defaults user-config)
         errors (validate-config config)]
@@ -341,44 +628,17 @@
       (throw (ex-info "Invalid configuration"
                       {:errors errors
                        :config config})))
-    config))
-
-(defn entrypoint->listeners
-  "Convert an entrypoint to the internal listener format used by the server.
-  Each bind address in the entrypoint becomes a separate listener.
-  The :http3? flag is moved into :tls for compatibility with http3-enabled?."
-  [entrypoint]
-  (let [{:keys [bind http3? tls]} entrypoint
-        binds (bind-values bind)]
-    (mapv (fn [addr]
-            (let [parsed (parse-bind-address addr)
-                  base (cond
-                         (:unix parsed)
-                         {:unix (:unix parsed)}
-
-                         (:address parsed)
-                         {:host (:address parsed) :port (:port parsed)}
-
-                         :else
-                         {:port (:port parsed)})]
-              (if tls
-                (assoc base :tls (assoc tls :http3? http3?))
-                base)))
-          binds)))
-
-(defn config->listeners
-  "Convert config with :entrypoints to internal :listeners format.
-  This flattens all entrypoints' bind addresses into a single listeners vector."
-  [config]
-  (let [entrypoints (:entrypoints config)
-        listeners (into [] (mapcat entrypoint->listeners) entrypoints)]
-    (assoc config :listeners listeners)))
+    (try
+      (compile-config config)
+      (catch clojure.lang.ExceptionInfo e
+        (throw (ex-info "Invalid configuration"
+                        {:errors [(config-error
+                                   ::config-compile-invalid
+                                   (.getMessage e)
+                                   (ex-data e))]
+                         :config config}
+                        e))))))
 
 (comment
   (load! {})
-  (->
-   (apply-config-defaults {})
-   :entrypoints)
-
-;
-  )
+  (config->listeners (apply-config-defaults {})))

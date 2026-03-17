@@ -111,10 +111,12 @@
 
                   test
                   {:doc  "Run tests"
+                   :depends [build:shim]
                    :task (apply clojure "-M:dev:test:kaocha" *command-line-args*)}
 
                   test:large-payloads
                   {:doc  "Run large payload tests"
+                   :depends [build:shim]
                    :task (clojure "-J-Xmx2g" "-J-Xms2g" "-M:dev:test:kaocha" "--no-capture-output" "--focus" "ol.busker.large-payload-test")}
 
                   test:all

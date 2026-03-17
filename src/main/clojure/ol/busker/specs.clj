@@ -1,6 +1,6 @@
 (ns ol.busker.specs
   "clojure.spec definitions and descriptor metadata for Busker configuration."
-  (:refer-clojure :exclude [name])
+  (:refer-clojure :exclude [type load])
   (:require
    [clojure.spec.alpha :as s]
    [clojure.string :as str]
@@ -16,15 +16,20 @@
   (and (string? v)
        (not (str/blank? v))))
 
-(defn- managed-entrypoint?
-  [entrypoint]
-  (let [tls (:tls entrypoint)]
-    (and (map? tls)
-         (seq (:issuers tls)))))
+(defn- qualified-symbol-ref?
+  [v]
+  (and (symbol? v)
+       (namespace v)
+       (name v)))
+
+(defn- function-ref?
+  [v]
+  (or (fn? v)
+      (qualified-symbol-ref? v)))
 
 (def key-source
-  {:key     ::key-source
-   :doc     "Component that generates or obtains session ticket encryption keys."
+  {:key ::key-source
+   :doc "Component that generates or obtains session ticket encryption keys."
    :default nil})
 (s/def ::key-source any?)
 
@@ -52,28 +57,29 @@
    :default false})
 (s/def ::disabled? boolean?)
 
+(def lifetime-seconds
+  {:key ::lifetime-seconds
+   :doc "TLS session ticket lifetime in seconds."
+   :default 86400})
+(s/def ::lifetime-seconds pos-int?)
+
 (def session-tickets
   {:key ::session-tickets
    :doc "TLS session ticket configuration for resumption and 0-RTT."
-   :default nil})
+   :default {:lifetime-seconds (:default lifetime-seconds)}})
 (s/def ::session-tickets
-  (s/keys :req-un [::key-source]
-          :opt-un [::rotation-interval
+  (s/keys :opt-un [::key-source
+                   ::rotation-interval
                    ::max-keys
                    ::rotation-disabled?
-                   ::disabled?]))
+                   ::disabled?
+                   ::lifetime-seconds]))
 
 (def key-type
   {:key ::key-type
    :doc "Algorithm for generating certificate keys."
    :default :p256})
 (s/def ::key-type #{:p256 :p384 :rsa2048 :rsa4096 :rsa8192 :ed25519})
-
-(def protocol-version
-  {:key ::protocol-version
-   :doc "HTTP protocol version."
-   :default nil})
-(s/def ::protocol-version #{:h1 :h2 :h2c :h3})
 
 (def issuer-selection
   {:key ::issuer-selection
@@ -144,11 +150,69 @@
    :default nil})
 (s/def ::key-file non-blank-string?)
 
+(def path
+  {:key ::path
+   :doc "Filesystem path for a TLS certificate source."
+   :default nil})
+(s/def ::path non-blank-string?)
+
+(def type
+  {:key ::type
+   :doc "Type discriminator for data-driven config entries."
+   :default nil})
+(s/def ::type keyword?)
+
+(def load
+  {:key ::load
+   :doc "Certificate sources that Busker should load at startup."
+   :default []})
+
+(def manage
+  {:key ::manage
+   :doc "Subject names that Busker should manage automatically."
+   :default []})
+
+(def certificate-source
+  {:key ::certificate-source
+   :doc "One certificate source entry in :tls :certificates :load."
+   :default nil})
+(s/def ::certificate-source
+  (s/keys :req-un [::type]
+          :opt-un [::path
+                   ::cert-file
+                   ::key-file]))
+
+(s/def ::load (s/coll-of ::certificate-source :kind vector?))
+(s/def ::manage (s/coll-of non-blank-string? :kind vector?))
+
+(def certificates
+  {:key ::certificates
+   :doc "Static and managed certificate configuration."
+   :default {:load []
+             :manage []}})
+(s/def ::certificates
+  (s/keys :opt-un [::load ::manage]))
+
+(def factory
+  {:key ::factory
+   :doc "Factory function or qualified symbol used to build a config-backed value."
+   :default nil})
+(s/def ::factory function-ref?)
+
+(def storage-config
+  {:key ::storage-config
+   :doc "Config map for constructing a Storage implementation."
+   :default nil})
+(s/def ::storage-config
+  (s/keys :req-un [::factory]))
+
 (def storage
   {:key ::storage
    :doc "Persistence layer for certificates and ACME account data."
    :default nil})
-(s/def ::storage #(satisfies? storage/Storage %))
+(s/def ::storage
+  (s/or :instance #(satisfies? storage/Storage %)
+        :config ::storage-config))
 
 (def key-reuse
   {:key ::key-reuse
@@ -170,9 +234,9 @@
 
 (def config-fn
   {:key ::config-fn
-   :doc "Function mapping domain to per-domain configuration overrides."
+   :doc "Function mapping subject name to per-name configuration overrides."
    :default nil})
-(s/def ::config-fn ifn?)
+(s/def ::config-fn function-ref?)
 
 (def http-client
   {:key ::http-client
@@ -182,24 +246,23 @@
 
 (def tls
   {:key ::tls
-   :doc "TLS subsystem configuration for an entrypoint, or false to disable TLS explicitly."
-   :default {}})
+   :doc "Global TLS subsystem configuration, or entrypoint-specific TLS settings when used under an entrypoint."
+   :default {:session-tickets (:default session-tickets)}})
 (s/def ::tls
-  (s/or :enabled
-        (s/keys :opt-un [::cache-capacity
+  (s/or :global
+        (s/keys :opt-un [::storage
+                         ::certificates
                          ::session-tickets
-                         ::cert-file
-                         ::key-file
-                         ::storage
                          ::issuers
                          ::issuer-selection
                          ::key-type
                          ::key-reuse
-                         ::tls-compatibility-mode
+                         ::cache-capacity
                          ::solvers
                          ::ocsp
                          ::config-fn
-                         ::http-client])
+                         ::http-client
+                         ::tls-compatibility-mode])
         :disabled false?))
 
 (def bind-address
@@ -219,11 +282,11 @@
                                     :kind vector?
                                     :min-count 1))))
 
-(def name
-  {:key ::name
+(def entrypoint-id
+  {:key ::entrypoint-id
    :doc "Keyword identifier for an entrypoint."
    :default nil})
-(s/def ::name keyword?)
+(s/def ::entrypoint-id keyword?)
 
 (def http1?
   {:key ::http1?
@@ -245,41 +308,102 @@
 
 (def entrypoint
   {:key ::entrypoint
-   :doc "Entrypoint definition including bind, protocol toggles, and TLS."
+   :doc "Entrypoint definition including bind, protocol toggles, and entrypoint-local TLS settings."
    :default {:http1? true
              :http2? true
-             :tls (:default tls)}})
+             :tls false}})
 (s/def ::entrypoint
-  (s/keys :req-un [::name ::bind]
+  (s/keys :req-un [::bind]
           :opt-un [::http1? ::http2? ::http3? ::tls]))
 
 (def entrypoints
   {:key ::entrypoints
-   :doc "Vector of entrypoint definitions."
-   :default [{:name :http
-              :bind ["127.0.0.1:8080" "[::1]:8080"]
-              :http3? false}
-             {:name :https
-              :bind ["127.0.0.1:8443" "[::1]:8443"]
-              :http3? true}]})
-
+   :doc "Entrypoint definitions keyed by entrypoint id."
+   :default {:http {:bind ["127.0.0.1:8080" "[::1]:8080"]
+                    :tls false}
+             :https {:bind ["127.0.0.1:8443" "[::1]:8443"]
+                     :tls {:tls-compatibility-mode :modern}}}})
 (s/def ::entrypoints
-  (s/and vector?
-         (s/coll-of ::entrypoint :kind vector? :min-count 1)))
+  (s/or :config-map
+        (s/and map?
+               seq
+               (s/map-of ::entrypoint-id ::entrypoint))
+        :dispatcher-binding
+        (s/coll-of ::entrypoint-id :kind set?)))
 
-(def managed-entrypoints
-  {:key ::managed-entrypoints
-   :doc "Managed TLS entrypoints with ACME issuers configured."
+(def group
+  {:key ::group
+   :doc "Group key for mutually exclusive dispatchers."
    :default nil})
-(s/def ::managed-entrypoints
+(s/def ::group some?)
+
+(def match
+  {:key ::match
+   :doc "Predicate function or qualified symbol used to decide whether a dispatcher matches."
+   :default nil})
+(s/def ::match function-ref?)
+
+(def handler
+  {:key ::handler
+   :doc "Terminal handler function or qualified symbol for a dispatcher."
+   :default nil})
+(s/def ::handler function-ref?)
+
+(def middleware-entry
+  {:key ::middleware-entry
+   :doc "One data-driven middleware declaration."
+   :default nil})
+(s/def ::middleware-entry
+  (s/or :direct function-ref?
+        :configured (s/and vector?
+                           #(<= 1 (count %) 2)
+                           (fn [[wrap-fn]]
+                             (function-ref? wrap-fn)))))
+
+(def middleware
+  {:key ::middleware
+   :doc "Vector of middleware entries compiled around a dispatcher handler."
+   :default []})
+(s/def ::middleware
+  (s/coll-of ::middleware-entry :kind vector?))
+
+(def terminal?
+  {:key ::terminal?
+   :doc "When true, no later dispatchers run after this dispatcher matches."
+   :default false})
+(s/def ::terminal? boolean?)
+
+(def dispatcher
+  {:key ::dispatcher
+   :doc "A single dispatcher in the ordered :dispatch pipeline."
+   :default {}})
+(s/def ::dispatcher
+  (s/keys :opt-un [::entrypoints
+                   ::group
+                   ::match
+                   ::handler
+                   ::middleware
+                   ::terminal?]))
+
+(def dispatch
+  {:key ::dispatch
+   :doc "Ordered dispatch pipeline."
+   :default [{}]})
+(s/def ::dispatch
   (s/and vector?
-         (s/coll-of ::entrypoint :kind vector? :min-count 1)
-         #(every? managed-entrypoint?
-                  (map (partial s/unform ::entrypoint) %))))
+         (s/coll-of ::dispatcher :kind vector?)))
+
+(def subject-names
+  {:key ::subject-names
+   :doc "Subject names that a managed TLS plan should obtain and renew."
+   :default nil})
+(s/def ::subject-names
+  (s/and vector?
+         (s/coll-of non-blank-string? :kind vector? :min-count 1)))
 
 (def clave-config
   {:key ::clave-config
-   :doc "Clave automation config extracted from managed TLS settings."
+   :doc "Clave automation config extracted from top-level TLS settings."
    :default nil})
 (s/def ::clave-config
   (s/keys :req-un [::issuers]
@@ -298,21 +422,8 @@
    :doc "Managed TLS runtime plan for Clave lifecycle and HTTP-01 middleware."
    :default nil})
 (s/def ::managed-plan
-  (s/keys :req-un [::domains
-                   ::managed-entrypoints
+  (s/keys :req-un [::subject-names
                    ::clave-config]))
-
-(def domains
-  {:key ::domains
-   :doc "Domain names this server handles."
-   :default nil})
-(s/def ::domains (s/coll-of non-blank-string? :kind vector?))
-
-(def default-domain
-  {:key ::default-domain
-   :doc "Fallback domain name used when TLS SNI is not present."
-   :default nil})
-(s/def ::default-domain non-blank-string?)
 
 (def n-workers
   {:key ::n-workers
@@ -322,7 +433,7 @@
 
 (def executor
   {:key ::executor
-   :doc "ExecutorService for Ring handler execution."
+   :doc "ExecutorService for request execution."
    :default nil})
 (s/def ::executor #(instance? ExecutorService %))
 
@@ -500,12 +611,6 @@
    :default 3})
 (s/def ::compress-zstd-level int?)
 
-(def session-ticket-lifetime-seconds
-  {:key ::session-ticket-lifetime-seconds
-   :doc "TLS session ticket lifetime in seconds."
-   :default 86400})
-(s/def ::session-ticket-lifetime-seconds pos-int?)
-
 (def buffer-pool
   {:key ::buffer-pool
    :doc "ByteBuffer pool for response buffering."
@@ -517,9 +622,9 @@
    :doc "Top-level Busker configuration map."
    :default nil})
 (s/def ::config
-  (s/keys :req-un [::entrypoints]
-          :opt-un [::domains
-                   ::default-domain
+  (s/keys :req-un [::entrypoints
+                   ::dispatch]
+          :opt-un [::tls
                    ::n-workers
                    ::executor
                    ::max-connections
@@ -551,7 +656,6 @@
                    ::compress-gzip-level
                    ::compress-brotli-level
                    ::compress-zstd-level
-                   ::session-ticket-lifetime-seconds
                    ::buffer-pool]))
 
 (def all-descriptors
@@ -560,9 +664,9 @@
    max-keys
    rotation-disabled?
    disabled?
+   lifetime-seconds
    session-tickets
    key-type
-   protocol-version
    issuer-selection
    email
    eab
@@ -574,6 +678,14 @@
    cache-capacity
    cert-file
    key-file
+   path
+   type
+   load
+   manage
+   certificate-source
+   certificates
+   factory
+   storage-config
    storage
    key-reuse
    tls-compatibility-mode
@@ -583,17 +695,23 @@
    tls
    bind-address
    bind
-   name
+   entrypoint-id
    http1?
    http2?
    http3?
    entrypoint
    entrypoints
-   managed-entrypoints
+   group
+   match
+   handler
+   middleware-entry
+   middleware
+   terminal?
+   dispatcher
+   dispatch
+   subject-names
    clave-config
    managed-plan
-   domains
-   default-domain
    n-workers
    executor
    max-connections
@@ -625,18 +743,16 @@
    compress-gzip-level
    compress-brotli-level
    compress-zstd-level
-   session-ticket-lifetime-seconds
    buffer-pool
    config])
 
 (def descriptor-by-key
   (into {} (map (juxt :key identity) all-descriptors)))
 
-(def default-entrypoint
-  (:default entrypoint))
-
 (def default-config
-  {:entrypoints (:default entrypoints)
+  {:tls {:session-tickets (:default session-tickets)}
+   :entrypoints (:default entrypoints)
+   :dispatch (:default dispatch)
    :n-workers (:default n-workers)
    :max-connections (:default max-connections)
    :output-buffer-size (:default output-buffer-size)
@@ -646,9 +762,7 @@
    :compress-gzip-level (:default compress-gzip-level)
    :compress-brotli-level (:default compress-brotli-level)
    :compress-zstd-level (:default compress-zstd-level)
-   :http1-upgrade? (:default http1-upgrade?)
-   :session-ticket-lifetime-seconds
-   (:default session-ticket-lifetime-seconds)})
+   :http1-upgrade? (:default http1-upgrade?)})
 
 (defn valid-config?
   [config]

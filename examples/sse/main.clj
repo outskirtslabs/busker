@@ -5,26 +5,10 @@
    [ol.busker.protocols :as proto]
    [ol.busker.server :as busker]))
 
-(def tls
-  {:cert-file (.getPath (io/file "../../src/test/fixtures/server.crt"))
-   :key-file (.getPath (io/file "../../src/test/fixtures/server.key"))})
-
 (defn env
   [name default]
   (let [value (System/getenv name)]
     (if (str/blank? value) default value)))
-
-(def config
-  {:compress? true
-   :compress-min-size 1
-   :compress-brotli-level 4
-   :entrypoints [{:name :http
-                  :bind (env "BUSKER_HTTP_BIND" "127.0.0.1:8082")
-                  :http3? false
-                  :tls false}
-                 {:name :https
-                  :bind (env "BUSKER_HTTPS_BIND" "127.0.0.1:8443")
-                  :tls tls}]})
 
 (def source-lines
   (delay (vec (line-seq (io/reader (io/file "main.clj"))))))
@@ -59,9 +43,24 @@
     "/" (stream req)
     (respond req 404 "Not found")))
 
+(def config
+  {:compress? true
+   :compress-min-size 1
+   :compress-brotli-level 4
+   :tls {:certificates
+         {:load [{:type :pem
+                  :cert-file (.getPath (io/file "../../src/test/fixtures/server.crt"))
+                  :key-file (.getPath (io/file "../../src/test/fixtures/server.key"))}]}}
+   :entrypoints {:http {:bind (env "BUSKER_HTTP_BIND" "127.0.0.1:8082")
+                        :http3? false
+                        :tls false}
+                 :https {:bind (env "BUSKER_HTTPS_BIND" "127.0.0.1:8443")
+                         :tls {:tls-compatibility-mode :modern}}}
+   :dispatch [{:handler handler}]})
+
 (defn -main
   [& _]
-  (let [server (busker/run-server handler config)]
+  (let [server (busker/run-server config)]
     (.addShutdownHook
      (Runtime/getRuntime)
      (Thread. #(busker/stop-server server)))

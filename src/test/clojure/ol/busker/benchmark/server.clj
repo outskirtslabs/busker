@@ -104,13 +104,14 @@
                                (:n-threads worker-opts)
                                u/num-cores) u/num-cores)
             _ (prof/start)
-            server (h2o-server/run-server handler
-                                          {:entrypoints [{:name :bench
-                                                          :bind (str "127.0.0.1:" port)
-                                                          :http3? false}]
-                                           :n-workers n-workers
-                                           :server-name "ol.busker/bench"
-                                           :executor pool})]
+            server (h2o-server/run-server
+                    {:entrypoints {:bench {:bind (str "127.0.0.1:" port)
+                                           :http3? false
+                                           :tls false}}
+                     :dispatch [{:handler handler}]
+                     :n-workers n-workers
+                     :server-name "ol.busker/bench"
+                     :executor pool})]
         (reset! state_
                 {:server server
                  :pool pool

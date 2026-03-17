@@ -2,8 +2,8 @@
   (:require
    [clojure.spec.alpha :as s]
    [clojure.test :refer [deftest is testing]]
-   [ol.busker.specs :as specs]
    [ol.busker.clave-adapter :as adapter]
+   [ol.busker.specs :as specs]
    [ol.clave.acme.solver.http :as http-solver]
    [ol.clave.automation :as automation]
    [ol.clave.storage.file :as file-storage])
@@ -11,53 +11,38 @@
    [java.util.concurrent LinkedBlockingQueue]))
 
 (deftest build-managed-plan-test
-  (testing "returns nil when no managed tls entrypoints exist"
+  (testing "returns nil when no managed subject names exist"
     (is (nil? (adapter/build-managed-plan
-               {:domains ["example.com"]
-                :entrypoints [{:name :http
-                               :bind ":8080"
-                               :http3? false
-                               :tls false}
-                              {:name :https
-                               :bind ":8443"
-                               :http3? false
-                               :tls {:cert-file "cert.pem"
-                                     :key-file "key.pem"}}]}))))
+               {:tls {:certificates {:load [{:type :pem
+                                             :cert-file "cert.pem"
+                                             :key-file "key.pem"}]}}
+                :entrypoints {:http {:bind ":8080" :tls false}}}))))
 
-  (testing "extracts managed domains and clave config from tls"
-    (let [storage (file-storage/file-storage "target/clave-adapter-test")
+  (testing "extracts managed subject names and clave config from top-level tls"
+    (let [storage (file-storage/file-storage {:root "target/clave-adapter-test"})
           config-fn (fn [_] nil)
           plan (adapter/build-managed-plan
-                {:domains ["example.com" "www.example.com" "example.com"]
-                 :entrypoints [{:name :https
-                                :bind ":443"
-                                :http3? false
-                                :tls {:issuers [{:directory-url "https://acme.example/directory"}]
-                                      :storage storage
-                                      :issuer-selection :shuffle
-                                      :key-type :p384
-                                      :key-reuse true
-                                      :cache-capacity 12
-                                      :solvers {:tls-alpn-01 :existing}
-                                      :ocsp {:enabled false}
-                                      :config-fn config-fn
-                                      :http-client {:connect-timeout 1000}}}]})]
-      (is (= {:domains ["example.com" "www.example.com"]
-              :managed-entrypoints [{:name :https
-                                     :bind ":443"
-                                     :http3? false
-                                     :tls {:issuers [{:directory-url "https://acme.example/directory"}]
-                                           :storage storage
-                                           :issuer-selection :shuffle
-                                           :key-type :p384
-                                           :key-reuse true
-                                           :cache-capacity 12
-                                           :solvers {:tls-alpn-01 :existing}
-                                           :ocsp {:enabled false}
-                                           :config-fn config-fn
-                                           :http-client {:connect-timeout 1000}}}]
-              :clave-config {:issuers [{:directory-url "https://acme.example/directory"}]
-                             :storage storage
+                {:tls {:storage storage
+                       :certificates {:manage ["example.com"
+                                               "www.example.com"
+                                               "example.com"]}
+                       :issuers [{:directory-url
+                                  "https://acme.example/directory"}]
+                       :issuer-selection :shuffle
+                       :key-type :p384
+                       :key-reuse true
+                       :cache-capacity 12
+                       :solvers {:tls-alpn-01 :existing}
+                       :ocsp {:enabled false}
+                       :config-fn config-fn
+                       :http-client {:connect-timeout 1000}}
+                 :entrypoints {:https {:bind ":443"
+                                       :tls {:tls-compatibility-mode
+                                             :modern}}}})]
+      (is (= {:subject-names ["example.com" "www.example.com"]
+              :clave-config {:storage storage
+                             :issuers [{:directory-url
+                                        "https://acme.example/directory"}]
                              :issuer-selection :shuffle
                              :key-type :p384
                              :key-reuse true
@@ -70,7 +55,7 @@
       (is (s/valid? ::specs/managed-plan plan)))))
 
 (deftest start-managed-test
-  (testing "starts clave, manages domains, and waits for initial cert readiness"
+  (testing "starts clave, manages names, and waits for initial cert readiness"
     (let [create-config (atom nil)
           calls (atom [])
           queue (doto (LinkedBlockingQueue.)
@@ -78,11 +63,9 @@
                            :data {:domain "example.com"}}))
           lookup-count (atom 0)
           fake-solver {:registry (atom {})}
-          plan {:domains ["example.com"]
-                :managed-entrypoints [{:name :https
-                                       :bind ":443"
-                                       :tls {:issuers [{:directory-url "https://acme.example/directory"}]}}]
-                :clave-config {:issuers [{:directory-url "https://acme.example/directory"}]
+          plan {:subject-names ["example.com"]
+                :clave-config {:issuers [{:directory-url
+                                          "https://acme.example/directory"}]
                                :solvers {:tls-alpn-01 :existing}}}
           system {:id ::system}]
       (with-redefs [adapter/initial-cert-wait-timeout-ms 500
@@ -110,11 +93,13 @@
                   [:manage system ["example.com"]]]
                  @calls))
           (is (= {:system system
-                  :domains ["example.com"]
+                  :subject-names ["example.com"]
                   :http-solver fake-solver}
-                 (select-keys runtime [:system :domains :http-solver])))
+                 (select-keys runtime
+                              [:system :subject-names :http-solver])))
           (is (ifn? (:lookup-fn runtime)))
-          (is (= {:issuers [{:directory-url "https://acme.example/directory"}]
+          (is (= {:issuers [{:directory-url
+                             "https://acme.example/directory"}]
                   :solvers {:tls-alpn-01 :existing
                             :http-01 fake-solver}}
                  @create-config)
@@ -125,11 +110,9 @@
                   (.offer {:type :certificate-failed
                            :data {:domain "example.com"
                                   :reason :acme-error}}))
-          plan {:domains ["example.com"]
-                :managed-entrypoints [{:name :https
-                                       :bind ":443"
-                                       :tls {:issuers [{:directory-url "https://acme.example/directory"}]}}]
-                :clave-config {:issuers [{:directory-url "https://acme.example/directory"}]}}
+          plan {:subject-names ["example.com"]
+                :clave-config {:issuers [{:directory-url
+                                          "https://acme.example/directory"}]}}
           system {:id ::system}]
       (with-redefs [adapter/initial-cert-wait-timeout-ms 200
                     adapter/event-poll-timeout-ms 10
@@ -149,8 +132,8 @@
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
        #"Invalid managed plan"
-       (adapter/start! {:domains ["example.com"]
-                        :clave-config {:issuers [{:directory-url "https://acme.example/directory"}]}}))))
+       (adapter/start! {:clave-config {:issuers [{:directory-url
+                                                  "https://acme.example/directory"}]}}))))
 
 (deftest wrap-handler-test
   (testing "returns original handler when runtime is nil"
@@ -185,7 +168,8 @@
                                                {:names [hostname]}))]
         (is (= {:names ["hit.example"]}
                (adapter/lookup-certificate runtime "hit.example")))
-        (is (nil? (adapter/lookup-certificate runtime "miss.example")))))))
+        (is (nil? (adapter/lookup-certificate runtime
+                                              "miss.example")))))))
 
 (deftest stop-managed-test
   (testing "delegates stop to clave automation"

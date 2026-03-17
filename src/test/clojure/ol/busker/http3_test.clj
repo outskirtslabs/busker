@@ -11,14 +11,7 @@
    [ol.busker.server :as server]
    [ol.busker.test-utils :as util]))
 
-(def cert-file (.getAbsolutePath (io/file "src/test/fixtures/server.crt")))
-(def key-file (.getAbsolutePath (io/file "src/test/fixtures/server.key")))
 (def tls-sni-host "localhost.examp1e.net")
-
-(defn- fixture-tls-bundle
-  []
-  {:certificate [(slurp cert-file)]
-   :private-key (slurp key-file)})
 
 (defn- udp-port-bound?
   "Check if a UDP socket is bound on the given port.
@@ -31,13 +24,13 @@
 
 (deftest http3-enabled-by-default-test
   (testing "TLS listeners should have HTTP/3 enabled by default"
-    (let [listener {:port 8443 :tls {:cert-file cert-file :key-file key-file}}]
+    (let [listener {:port 8443 :tls {}}]
       (is (true? (server/http3-enabled? listener))
           "http3-enabled? should return true for TLS listener without explicit :http3? flag"))))
 
 (deftest http3-can-be-disabled-test
   (testing "TLS listeners can opt-out of HTTP/3 with :http3? false"
-    (let [listener {:port 8443 :tls {:cert-file cert-file :key-file key-file :http3? false}}]
+    (let [listener {:port 8443 :tls {:http3? false}}]
       (is (false? (server/http3-enabled? listener))
           "http3-enabled? should return false when :http3? is explicitly false"))))
 
@@ -49,7 +42,10 @@
 
 (deftest create-ptls-context-test
   (testing "ptls context creation succeeds with valid cert/key"
-    (let [ctx (h2o/http3-create-ptls-ctx cert-file key-file mem/null mem/null)]
+    (let [ctx (h2o/http3-create-ptls-ctx (util/fixture-cert-path)
+                                         (util/fixture-key-path)
+                                         mem/null
+                                         mem/null)]
       (is (some? ctx) "http3-create-ptls-ctx should return non-nil context")
       (is (not (mem/null? ctx)) "http3-create-ptls-ctx should return non-null pointer")
       (when (and ctx (not (mem/null? ctx)))
@@ -63,7 +59,10 @@
 
 (deftest create-quicly-context-test
   (testing "quicly context creation succeeds with valid ptls context"
-    (let [ptls-ctx (h2o/http3-create-ptls-ctx cert-file key-file mem/null mem/null)]
+    (let [ptls-ctx (h2o/http3-create-ptls-ctx (util/fixture-cert-path)
+                                              (util/fixture-key-path)
+                                              mem/null
+                                              mem/null)]
       (when (and ptls-ctx (not (mem/null? ptls-ctx)))
         (let [globalconf-ptr (mem/alloc (h2o/globalconf-size))
               _ (h2o/create-global-conf globalconf-ptr nil)
@@ -78,12 +77,14 @@
 (deftest server-creates-udp-listener-test
   (testing "Server with TLS listener creates UDP socket on same port"
     (let [port 18443
-          server (server/run-server (fn [_] {:status 200 :body "ok"})
-                                    {:entrypoints [{:name :tls
-                                                    :bind (str "127.0.0.1:" port)
-                                                    :http3? true
-                                                    :tls {:cert-file cert-file
-                                                          :key-file key-file}}]})]
+          server (server/run-server
+                  (util/with-static-tls
+                    (util/with-handler
+                      (fn [_] {:status 200 :body "ok"})
+                      {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                           :http3? true
+                                           :tls {:tls-compatibility-mode
+                                                 :modern}}}})))]
       (try
         (Thread/sleep 100) ; Give server time to bind sockets
         (is (udp-port-bound? port)
@@ -94,12 +95,14 @@
 (deftest server-no-udp-when-http3-disabled-test
   (testing "Server with :http3? false does not create UDP socket"
     (let [port 18444
-          server (server/run-server (fn [_] {:status 200 :body "ok"})
-                                    {:entrypoints [{:name :tls
-                                                    :bind (str "127.0.0.1:" port)
-                                                    :http3? false
-                                                    :tls {:cert-file cert-file
-                                                          :key-file key-file}}]})]
+          server (server/run-server
+                  (util/with-static-tls
+                    (util/with-handler
+                      (fn [_] {:status 200 :body "ok"})
+                      {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                           :http3? false
+                                           :tls {:tls-compatibility-mode
+                                                 :modern}}}})))]
       (try
         (Thread/sleep 100) ; Give server time to bind sockets
         (is (not (udp-port-bound? port))
@@ -110,12 +113,14 @@
 (deftest http3-request-response-test
   (testing "HTTP/3 request receives correct response"
     (let [port 18445
-          server (server/run-server (fn [_] {:status 200 :body "hello http3"})
-                                    {:entrypoints [{:name :tls
-                                                    :bind (str "127.0.0.1:" port)
-                                                    :http3? true
-                                                    :tls {:cert-file cert-file
-                                                          :key-file key-file}}]})]
+          server (server/run-server
+                  (util/with-static-tls
+                    (util/with-handler
+                      (fn [_] {:status 200 :body "hello http3"})
+                      {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                           :http3? true
+                                           :tls {:tls-compatibility-mode
+                                                 :modern}}}})))]
       (try
         (Thread/sleep 200) ; Give server time to bind sockets
         (let [result (util/curl :https :h3 port "/" :max-time 5)]
@@ -126,31 +131,32 @@
         (finally
           (server/stop-server server))))))
 
-(deftest http3-no-sni-default-domain-success-test
-  (testing "HTTP/3 handshake without SNI succeeds when :default-domain is configured"
+(deftest http3-no-sni-managed-fallback-success-test
+  (testing "HTTP/3 handshake without SNI succeeds when a managed fallback subject exists"
     (let [port 18456
           runtime {:system {:id ::runtime}
+                   :subject-names ["fallback.example"]
                    :lookup-fn (fn [hostname]
                                 (when (= hostname "fallback.example")
-                                  (fixture-tls-bundle)))}]
+                                  (util/fixture-tls-bundle)))}]
       (with-redefs [clave-adapter/build-managed-plan
                     (fn [_]
-                      {:domains ["fallback.example"]
-                       :managed-entrypoints [{:name :tls
-                                              :bind (str "127.0.0.1:" port)
-                                              :http3? true
-                                              :tls {:issuers [{:directory-url "https://acme.example/directory"}]}}]
+                      {:subject-names ["fallback.example"]
                        :clave-config {:issuers [{:directory-url "https://acme.example/directory"}]}})
                     clave-adapter/start! (fn [_] runtime)
                     clave-adapter/wrap-handler (fn [handler _] handler)
                     clave-adapter/stop! (fn [_] nil)]
-        (let [server (server/run-server (fn [_] {:status 200 :body "h3-fallback-ok"})
-                                        {:default-domain "fallback.example"
-                                         :domains ["fallback.example"]
-                                         :entrypoints [{:name :tls
-                                                        :bind (str "127.0.0.1:" port)
-                                                        :http3? true
-                                                        :tls {:issuers [{:directory-url "https://acme.example/directory"}]}}]})]
+        (let [server (server/run-server
+                      {:tls {:certificates {:manage ["fallback.example"]}
+                             :issuers [{:directory-url
+                                        "https://acme.example/directory"}]}
+                       :entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                           :http3? true
+                                           :tls {:tls-compatibility-mode
+                                                 :modern}}}
+                       :dispatch [{:handler (fn [_]
+                                              {:status 200
+                                               :body "h3-fallback-ok"})}]})]
           (try
             (Thread/sleep 200)
             (let [result (util/curl :https :h3 port "/" :host "127.0.0.1" :max-time 5)]
@@ -181,15 +187,16 @@
   (testing "HTTP/3 streaming response works correctly"
     (let [port 18446
           server (server/run-server
-                  (fn [_]
-                    {:status 200
-                     :headers {"content-type" "text/plain"}
-                     :body (list "chunk1-" "chunk2-" "chunk3")})
-                  {:entrypoints [{:name :tls
-                                  :bind (str "127.0.0.1:" port)
-                                  :http3? true
-                                  :tls {:cert-file cert-file
-                                        :key-file key-file}}]})]
+                  (util/with-static-tls
+                    (util/with-handler
+                      (fn [_]
+                        {:status 200
+                         :headers {"content-type" "text/plain"}
+                         :body (list "chunk1-" "chunk2-" "chunk3")})
+                      {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                           :http3? true
+                                           :tls {:tls-compatibility-mode
+                                                 :modern}}}})))]
       (try
         (Thread/sleep 200)
         (let [result (util/curl :https :h3 port "/")]
@@ -206,22 +213,23 @@
           first-chunk-sent (promise)
           chunk-delay-ms 100
           server (server/run-server
-                  (fn [{emitter :ol.busker.request/emitter}]
-                    (future
-                      (proto/emit! emitter {:status 200 :headers {"content-type" "text/plain"}})
-                      (doseq [idx (range 5)]
-                        (proto/emit! emitter (str "chunk-" idx "-"))
-                        (proto/flush emitter)
-                        (when (zero? idx)
-                          (deliver first-chunk-sent true))
-                        (Thread/sleep chunk-delay-ms))
-                      (proto/close emitter))
-                    {:body emitter})
-                  {:entrypoints [{:name :tls
-                                  :bind (str "127.0.0.1:" port)
-                                  :http3? true
-                                  :tls {:cert-file cert-file
-                                        :key-file key-file}}]})]
+                  (util/with-static-tls
+                    (util/with-handler
+                      (fn [{emitter :ol.busker.request/emitter}]
+                        (future
+                          (proto/emit! emitter {:status 200 :headers {"content-type" "text/plain"}})
+                          (doseq [idx (range 5)]
+                            (proto/emit! emitter (str "chunk-" idx "-"))
+                            (proto/flush emitter)
+                            (when (zero? idx)
+                              (deliver first-chunk-sent true))
+                            (Thread/sleep chunk-delay-ms))
+                          (proto/close emitter))
+                        {:body emitter})
+                      {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                           :http3? true
+                                           :tls {:tls-compatibility-mode
+                                                 :modern}}}})))]
       (try
         (Thread/sleep 200)
         (let [request-future (future
@@ -262,13 +270,15 @@
                           (Thread/sleep chunk-interval-ms)))
                       (proto/close emitter))
                     {:body emitter})
-          server (server/run-server handler
-                                    {:max-connections 2
-                                     :entrypoints [{:name :tls
-                                                    :bind (str "127.0.0.1:" port)
-                                                    :http3? true
-                                                    :tls {:cert-file cert-file
-                                                          :key-file key-file}}]})]
+          server (server/run-server
+                  (util/with-static-tls
+                    (util/with-handler
+                      handler
+                      {:max-connections 2
+                       :entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                           :http3? true
+                                           :tls {:tls-compatibility-mode
+                                                 :modern}}}})))]
       (try
         (Thread/sleep 200)
         ;; Start 2 long-lived HTTP/3 connections
@@ -317,13 +327,15 @@
                           (Thread/sleep chunk-interval-ms)))
                       (proto/close emitter))
                     {:body emitter})
-          server (server/run-server handler
-                                    {:max-connections 3
-                                     :entrypoints [{:name :tls
-                                                    :bind (str "127.0.0.1:" port)
-                                                    :http3? true
-                                                    :tls {:cert-file cert-file
-                                                          :key-file key-file}}]})]
+          server (server/run-server
+                  (util/with-static-tls
+                    (util/with-handler
+                      handler
+                      {:max-connections 3
+                       :entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                           :http3? true
+                                           :tls {:tls-compatibility-mode
+                                                 :modern}}}})))]
       (try
         (Thread/sleep 200)
         ;; Start 2 HTTP/3 connections and 1 HTTP/2 connection
@@ -371,14 +383,16 @@
                     {:body emitter})
           ;; 2 workers with max 4 connections total
           ;; If it was per-worker, we'd have 8 connections allowed
-          server (server/run-server handler
-                                    {:n-workers 2
-                                     :max-connections 4
-                                     :entrypoints [{:name :tls
-                                                    :bind (str "127.0.0.1:" port)
-                                                    :http3? true
-                                                    :tls {:cert-file cert-file
-                                                          :key-file key-file}}]})]
+          server (server/run-server
+                  (util/with-static-tls
+                    (util/with-handler
+                      handler
+                      {:n-workers 2
+                       :max-connections 4
+                       :entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                           :http3? true
+                                           :tls {:tls-compatibility-mode
+                                                 :modern}}}})))]
       (try
         (Thread/sleep 500)
         ;; Start 4 connections (should reach limit)
@@ -448,12 +462,14 @@
           handler (fn [req]
                     (reset! early-data-value (:ol.busker/early-data? req))
                     {:status 200 :body "ok"})
-          server (server/run-server handler
-                                    {:entrypoints [{:name :tls
-                                                    :bind (str "127.0.0.1:" port)
-                                                    :http3? true
-                                                    :tls {:cert-file cert-file
-                                                          :key-file key-file}}]})]
+          server (server/run-server
+                  (util/with-static-tls
+                    (util/with-handler
+                      handler
+                      {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                           :http3? true
+                                           :tls {:tls-compatibility-mode
+                                                 :modern}}}})))]
       (try
         (Thread/sleep 200)
         (let [result (util/curl :https :h3 port "/")]
@@ -481,12 +497,14 @@
                           :headers {"content-type" "application/edn"}
                           :body    (pr-str {:early-data (boolean (:ol.busker/early-data? req))
                                             :method     (name (:request-method req))})})
-          server       (server/run-server handler
-                                          {:entrypoints [{:name :tls
-                                                          :bind (str "127.0.0.1:" port)
-                                                          :http3? true
-                                                          :tls {:cert-file cert-file
-                                                                :key-file key-file}}]})]
+          server       (server/run-server
+                        (util/with-static-tls
+                          (util/with-handler
+                            handler
+                            {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                                 :http3? true
+                                                 :tls {:tls-compatibility-mode
+                                                       :modern}}}})))]
       (try
         (Thread/sleep 200)
 
@@ -561,12 +579,14 @@
     (let [port         18455
           session-file (str (System/getProperty "java.io.tmpdir") "/busker-test-tls12-sessions-" port ".pem")
           handler      (fn [_] {:status 200 :body "ok"})
-          server       (server/run-server handler
-                                          {:entrypoints [{:name :tls
-                                                          :bind (str "127.0.0.1:" port)
-                                                          :http3? true
-                                                          :tls {:cert-file cert-file
-                                                                :key-file key-file}}]})]
+          server       (server/run-server
+                        (util/with-static-tls
+                          (util/with-handler
+                            handler
+                            {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                                 :http3? true
+                                                 :tls {:tls-compatibility-mode
+                                                       :modern}}}})))]
       (try
         (Thread/sleep 200)
         (io/delete-file session-file true)
