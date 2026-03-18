@@ -10,6 +10,7 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <netinet/in.h>
+#include <fcntl.h>
 #include <openssl/err.h>
 #include <openssl/hmac.h>
 #include <openssl/pem.h>
@@ -968,6 +969,10 @@ struct clj_http3_ctx_t {
   int fd;
 };
 
+struct clj_http3_udp_listener_t {
+  int fd;
+};
+
 typedef struct clj_ptls_identity_cache_entry {
   uint8_t *hostname;
   size_t hostname_len;
@@ -1402,21 +1407,20 @@ clj_on_http3_accept(h2o_quic_ctx_t *quic_ctx, quicly_address_t *destaddr,
   return &conn->super;
 }
 
-clj_http3_ctx_t *clj_h2o_http3_create_worker_ctx(h2o_context_t *h2o_ctx,
-                                                 h2o_evloop_t *loop,
-                                                 quicly_context_t *quic_ctx,
-                                                 h2o_hostconf_t **hosts,
-                                                 const char *host,
-                                                 uint16_t port,
-                                                 uint32_t thread_id) {
-  if (!h2o_ctx || !loop || !quic_ctx || !hosts)
-    return NULL;
+static int clj_dup_fd_cloexec(int fd) {
+  int dup_fd = dup(fd);
+  if (dup_fd == -1)
+    return -1;
 
-  clj_http3_ctx_t *ctx = calloc(1, sizeof(clj_http3_ctx_t));
-  if (!ctx)
-    return NULL;
+  if (fcntl(dup_fd, F_SETFD, FD_CLOEXEC) != 0) {
+    close(dup_fd);
+    return -1;
+  }
 
-  /* Create UDP socket */
+  return dup_fd;
+}
+
+static int clj_h2o_http3_open_udp_fd(const char *host, uint16_t port) {
   struct sockaddr_in addr;
   memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
@@ -1433,35 +1437,47 @@ clj_http3_ctx_t *clj_h2o_http3_create_worker_ctx(h2o_context_t *h2o_ctx,
   int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (fd == -1) {
     DEBUG_LOG("failed to create UDP socket: %s", strerror(errno));
-    free(ctx);
-    return NULL;
+    return -1;
   }
 
   int optval = 1;
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) != 0) {
     DEBUG_LOG("setsockopt(SO_REUSEADDR) failed: %s", strerror(errno));
     close(fd);
-    free(ctx);
-    return NULL;
+    return -1;
   }
 
 #ifdef IP_PKTINFO
   if (setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &optval, sizeof(optval)) != 0) {
     DEBUG_LOG("setsockopt(IP_PKTINFO) failed: %s", strerror(errno));
     close(fd);
-    free(ctx);
-    return NULL;
+    return -1;
   }
 #endif
 
   if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
     DEBUG_LOG("bind(UDP) failed: %s", strerror(errno));
     close(fd);
-    free(ctx);
-    return NULL;
+    return -1;
   }
 
   h2o_socket_set_df_bit(fd, addr.sin_family);
+
+  return fd;
+}
+
+static clj_http3_ctx_t *
+clj_h2o_http3_create_worker_ctx_from_fd(h2o_context_t *h2o_ctx,
+                                        h2o_evloop_t *loop,
+                                        quicly_context_t *quic_ctx,
+                                        h2o_hostconf_t **hosts, int fd,
+                                        uint32_t thread_id) {
+  if (!h2o_ctx || !loop || !quic_ctx || !hosts || fd < 0)
+    return NULL;
+
+  clj_http3_ctx_t *ctx = calloc(1, sizeof(clj_http3_ctx_t));
+  if (!ctx)
+    return NULL;
 
   /* QUIC reads datagrams directly; prevent socket layer from consuming them */
   ctx->udp_sock = h2o_evloop_socket_create(loop, fd, H2O_SOCKET_FLAG_DONT_READ);
@@ -1492,6 +1508,67 @@ clj_http3_ctx_t *clj_h2o_http3_create_worker_ctx(h2o_context_t *h2o_ctx,
   return ctx;
 }
 
+clj_http3_udp_listener_t *clj_h2o_http3_open_udp_listener(const char *host,
+                                                          uint16_t port) {
+  clj_http3_udp_listener_t *listener = calloc(1, sizeof(*listener));
+  if (!listener)
+    return NULL;
+
+  listener->fd = clj_h2o_http3_open_udp_fd(host, port);
+  if (listener->fd == -1) {
+    free(listener);
+    return NULL;
+  }
+
+  return listener;
+}
+
+clj_http3_ctx_t *
+clj_h2o_http3_attach_udp_listener(h2o_context_t *h2o_ctx, h2o_evloop_t *loop,
+                                  quicly_context_t *quic_ctx,
+                                  h2o_hostconf_t **hosts,
+                                  clj_http3_udp_listener_t *listener,
+                                  uint32_t thread_id) {
+  if (!listener)
+    return NULL;
+
+  int dup_fd = clj_dup_fd_cloexec(listener->fd);
+  if (dup_fd == -1) {
+    DEBUG_LOG("dup(UDP listener) failed: %s", strerror(errno));
+    return NULL;
+  }
+
+  return clj_h2o_http3_create_worker_ctx_from_fd(h2o_ctx, loop, quic_ctx, hosts,
+                                                 dup_fd, thread_id);
+}
+
+void clj_h2o_http3_release_udp_listener(clj_http3_udp_listener_t *listener) {
+  if (!listener)
+    return;
+
+  if (listener->fd != -1)
+    close(listener->fd);
+  free(listener);
+}
+
+clj_http3_ctx_t *clj_h2o_http3_create_worker_ctx(h2o_context_t *h2o_ctx,
+                                                 h2o_evloop_t *loop,
+                                                 quicly_context_t *quic_ctx,
+                                                 h2o_hostconf_t **hosts,
+                                                 const char *host,
+                                                 uint16_t port,
+                                                 uint32_t thread_id) {
+  clj_http3_udp_listener_t *listener = clj_h2o_http3_open_udp_listener(host, port);
+  if (!listener)
+    return NULL;
+
+  clj_http3_ctx_t *ctx = clj_h2o_http3_attach_udp_listener(h2o_ctx, loop, quic_ctx,
+                                                           hosts, listener,
+                                                           thread_id);
+  clj_h2o_http3_release_udp_listener(listener);
+  return ctx;
+}
+
 void clj_h2o_http3_stop_accepting(clj_http3_ctx_t *ctx) {
   if (!ctx)
     return;
@@ -1517,6 +1594,10 @@ void clj_h2o_http3_dispose_worker_ctx(clj_http3_ctx_t *ctx) {
   h2o_quic_dispose_context(&ctx->h3_ctx.super);
 
   free(ctx);
+}
+
+void clj_h2o_http3_detach_udp_listener(clj_http3_ctx_t *ctx) {
+  clj_h2o_http3_dispose_worker_ctx(ctx);
 }
 
 /* Global connection limit API implementation */

@@ -211,6 +211,16 @@
         (try (close fd) (catch Throwable _))
         (throw t)))))
 
+(defn dup-fd
+  "Duplicate `fd` and set FD_CLOEXEC on the duplicate."
+  [fd]
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (let [d (dup fd)]
+    (when (neg? d)
+      (throw (ex-info-with-errno "dup() failed" {:fd fd})))
+    (set-cloexec! d)
+    d))
+
 (defn dup-for-threads
   "Given a master listener fd and N, returns a vector of N dup'd fds.
    Each dup is set FD_CLOEXEC. Nonblocking inherits from master (per-FD flag)."
@@ -221,12 +231,7 @@
     (throw (ex-info "n must be >= 0" {:n n})))
   (vec
    (for [_ (range n)]
-     #_{:clj-kondo/ignore [:type-mismatch]}
-     (let [d (dup master-fd)]
-       (when (neg? d)
-         (throw (ex-info-with-errno "dup() failed" {:master-fd master-fd})))
-       (set-cloexec! d)
-       d))))
+     (dup-fd master-fd))))
 
 (defn close-fd! [fd]
   (when (pos? fd)

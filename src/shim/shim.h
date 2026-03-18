@@ -323,6 +323,7 @@ void clj_h2o_free_ssl_ctx(SSL_CTX *ssl_ctx);
 typedef struct st_ptls_context_t ptls_context_t;
 typedef struct st_quicly_context_t quicly_context_t;
 typedef struct clj_http3_ctx_t clj_http3_ctx_t;
+typedef struct clj_http3_udp_listener_t clj_http3_udp_listener_t;
 
 /* Session ticket key constants */
 #define CLJ_TICKET_KEY_NAME_LEN 16   /* bytes */
@@ -378,6 +379,32 @@ quicly_context_t *clj_h2o_create_quicly_ctx(ptls_context_t *ptls_ctx,
 
 /* Free quicly context and CID encryptor */
 void clj_h2o_free_quicly_ctx(quicly_context_t *ctx);
+
+/* Open a pooled UDP listener for HTTP/3 and keep ownership outside worker ctxs.
+ * The returned handle owns the bound socket until released.
+ * Worker contexts should attach via clj_h2o_http3_attach_udp_listener.
+ */
+clj_http3_udp_listener_t *clj_h2o_http3_open_udp_listener(const char *host,
+                                                          uint16_t port);
+
+/* Attach an HTTP/3 worker context to a pooled UDP listener.
+ * The worker context receives a dup'd fd so detaching it does not release the
+ * pooled bind owned by clj_http3_udp_listener_t.
+ */
+clj_http3_ctx_t *
+clj_h2o_http3_attach_udp_listener(h2o_context_t *h2o_ctx, h2o_evloop_t *loop,
+                                  quicly_context_t *quic_ctx,
+                                  h2o_hostconf_t **hosts,
+                                  clj_http3_udp_listener_t *listener,
+                                  uint32_t thread_id);
+
+/* Release a worker context that was attached to a pooled UDP listener.
+ * This closes only the worker-owned dup'd fd.
+ */
+void clj_h2o_http3_detach_udp_listener(clj_http3_ctx_t *ctx);
+
+/* Release the pooled UDP listener and close the bound socket it owns. */
+void clj_h2o_http3_release_udp_listener(clj_http3_udp_listener_t *listener);
 
 /* Create HTTP/3 worker context with UDP listener.
  * Creates a UDP socket bound to host:port, configures it for QUIC

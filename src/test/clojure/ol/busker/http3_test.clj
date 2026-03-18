@@ -9,7 +9,10 @@
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as proto]
    [ol.busker.server :as server]
-   [ol.busker.test-utils :as util]))
+   [ol.busker.test-utils :as util])
+  (:import
+   java.net.InetSocketAddress
+   java.nio.channels.DatagramChannel))
 
 (def tls-sni-host "localhost.examp1e.net")
 
@@ -21,6 +24,15 @@
                         "ss" "-uln" (str "sport = :" port))]
     (and (= 0 (:exit result))
          (str/includes? (:out result) (str ":" port)))))
+
+(defn- datagram-bindable?
+  [port]
+  (try
+    (with-open [channel (DatagramChannel/open)]
+      (.bind channel (InetSocketAddress. "127.0.0.1" (int port)))
+      true)
+    (catch java.net.BindException _
+      false)))
 
 (deftest http3-enabled-by-default-test
   (testing "TLS listeners should have HTTP/3 enabled by default"
@@ -109,6 +121,27 @@
             (str "UDP socket should NOT be bound on port " port " when :http3? is false"))
         (finally
           (server/stop-server server))))))
+
+(deftest pooled-http3-udp-bind-retains-port-until-release-test
+  (testing "A pooled HTTP/3 UDP bind keeps the port unavailable until release"
+    (let [port 18459
+          open-listener (requiring-resolve 'ol.busker.native/http3-open-udp-listener)
+          release-listener (requiring-resolve 'ol.busker.native/http3-release-udp-listener)]
+      (is (datagram-bindable? port)
+          "Port should be available before pooled UDP ownership is acquired")
+      (let [listener (open-listener "127.0.0.1" (short port))]
+        (try
+          (is (some? listener)
+              "Opening the pooled UDP listener should return a handle")
+          (is (not (mem/null? listener))
+              "Opening the pooled UDP listener should return a non-null handle")
+          (is (not (datagram-bindable? port))
+              "Port should remain unavailable while pooled UDP ownership is held")
+          (finally
+            (when (and listener (not (mem/null? listener)))
+              (release-listener listener)))))
+      (is (datagram-bindable? port)
+          "Port should become available again after pooled UDP ownership is released"))))
 
 (deftest http3-request-response-test
   (testing "HTTP/3 request receives correct response"

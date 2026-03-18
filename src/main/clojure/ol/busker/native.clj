@@ -888,6 +888,32 @@
   clj_h2o_free_quicly_ctx
   [::mem/pointer] ::mem/void)
 
+(defcfn http3-open-udp-listener
+  "Open a pooled UDP listener for HTTP/3.
+   The returned handle owns the bound socket until
+   [[http3-release-udp-listener]] is called."
+  clj_h2o_http3_open_udp_listener
+  [::mem/c-string ::mem/short] ::mem/pointer)
+
+(defcfn http3-attach-udp-listener
+  "Attach an HTTP/3 worker context to a pooled UDP listener.
+   The worker context receives a dup'd fd, so detaching it does
+   not release the pooled listener's bind."
+  clj_h2o_http3_attach_udp_listener
+  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer
+   ::mem/pointer ::mem/int] ::mem/pointer)
+
+(defcfn http3-detach-udp-listener
+  "Detach an HTTP/3 worker context from a pooled UDP listener.
+   This closes only the worker-owned dup'd fd."
+  clj_h2o_http3_detach_udp_listener
+  [::mem/pointer] ::mem/void)
+
+(defcfn http3-release-udp-listener
+  "Release a pooled UDP listener and close the bound socket it owns."
+  clj_h2o_http3_release_udp_listener
+  [::mem/pointer] ::mem/void)
+
 (defcfn http3-create-worker-ctx
   "Create HTTP/3 worker context with UDP listener.
    Creates a UDP socket bound to host:port, configures it for QUIC
