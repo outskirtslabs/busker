@@ -1,6 +1,7 @@
 (ns ol.busker.config
   "Configuration parsing, defaults, validation, and dispatch compilation for Busker."
   (:require
+   [clojure.walk :as walk]
    [clojure.string :as str]
    [ol.busker.buffer-pool :as bp]
    [ol.busker.specs :as specs]
@@ -8,6 +9,8 @@
   (:import
    [java.io File]
    [java.util.concurrent Executors]))
+
+(declare config->listeners)
 
 (defn port-string?
   [s]
@@ -332,7 +335,7 @@
       entrypoint
       (assoc entrypoint :http3? (map? (:tls entrypoint))))))
 
-(defn apply-config-defaults
+(defn- base-config-with-defaults
   [user-config]
   (let [config (merge specs/default-config (dissoc user-config :tls))
         config (assoc config :tls (deep-merge (:tls specs/default-config)
@@ -345,11 +348,45 @@
                                         [entrypoint-id
                                          (apply-entrypoint-defaults entrypoint)]))
                                  entrypoints))))]
+    config))
+
+(defn apply-config-defaults
+  [user-config]
+  (let [config (base-config-with-defaults user-config)]
     (-> config
         (cond-> (not (contains? user-config :executor))
           (assoc :executor (Executors/newVirtualThreadPerTaskExecutor)))
         (cond-> (not (contains? user-config :buffer-pool))
           (assoc :buffer-pool (bp/make-bytebuffer-pool {}))))))
+
+(def ^:private callable-placeholder
+  ::callable)
+
+(def ^:private storage-placeholder
+  ::storage)
+
+(defn normalized-snapshot
+  "Return the normalized pure-data config snapshot for `user-config`.
+
+  The snapshot applies Busker defaults, expands listeners, and strips
+  runtime-owned objects such as executors, buffer pools, storage instances,
+  and direct callable values."
+  [user-config]
+  (let [config (-> (base-config-with-defaults user-config)
+                   config->listeners
+                   (dissoc :executor :buffer-pool))]
+    (walk/postwalk
+     (fn [value]
+       (cond
+         (callable-value? value)
+         callable-placeholder
+
+         (satisfies? storage/Storage value)
+         storage-placeholder
+
+         :else
+         value))
+     config)))
 
 (defn validate-config
   [{:keys [entrypoints dispatch tls] :as config}]
