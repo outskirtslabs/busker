@@ -110,6 +110,7 @@
         (automation/manage-domains system subject-names)
         (wait-for-initial-certificates! system subject-names)
         (let [runtime {:system system
+                       :managed-plan managed-plan
                        :subject-names subject-names
                        :http-solver http01-solver}]
           (assoc runtime :lookup-fn

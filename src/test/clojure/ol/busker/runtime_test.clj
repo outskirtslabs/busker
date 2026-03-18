@@ -1,6 +1,7 @@
 (ns ol.busker.runtime-test
   (:require
    [clojure.test :refer [deftest is testing]]
+   [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.runtime :as runtime]
    [ol.busker.test-utils :as util]))
 
@@ -57,3 +58,53 @@
         (when (= :running (:phase (runtime/state server)))
           (runtime/stop! server))))
     (is (= :stopped (:phase (runtime/state server))))))
+
+(deftest cert-automation-reuse-and-replacement-test
+  (let [started (atom [])
+        current-runtime {:managed-plan {:subject-names ["a.example"]
+                                        :clave-config {:issuer :acme}}
+                         :system ::current}
+        acquire! #'ol.busker.runtime/acquire-cert-automation!]
+    (with-redefs [clave-adapter/start! (fn [managed-plan]
+                                         (swap! started conj managed-plan)
+                                         {:managed-plan managed-plan
+                                          :system ::started})]
+      (let [reused (acquire! current-runtime
+                             {:subject-names ["a.example"]
+                              :clave-config {:issuer :acme}})
+            replaced (acquire! current-runtime
+                               {:subject-names ["b.example"]
+                                :clave-config {:issuer :acme}})]
+        (is (= current-runtime (:runtime reused)))
+        (is (true? (:reused? reused)))
+        (is (nil? (:superseded reused)))
+        (is (= {:managed-plan {:subject-names ["b.example"]
+                               :clave-config {:issuer :acme}}
+                :system ::started}
+               (:runtime replaced)))
+        (is (false? (:reused? replaced)))
+        (is (= current-runtime (:superseded replaced)))
+        (is (= [{:subject-names ["b.example"]
+                 :clave-config {:issuer :acme}}]
+               @started))))))
+
+(deftest runtime-start-fails-when-automation-startup-fails-test
+  (with-redefs [clave-adapter/build-managed-plan
+                (fn [_]
+                  {:subject-names ["managed.example"]
+                   :clave-config {:issuer :acme}})
+                clave-adapter/start!
+                (fn [_]
+                  (throw (ex-info "automation failed"
+                                  {:stage :automation-startup})))]
+    (let [config {:entrypoints {:http {:bind "127.0.0.1:18575"
+                                       :tls false}}
+                  :dispatch [{:handler (fn [_]
+                                         {:status 200
+                                          :body "unused"})}]}]
+      (try
+        (runtime/start! config)
+        (is false "start! should throw when automation startup fails")
+        (catch clojure.lang.ExceptionInfo e
+          (is (= {:stage :automation-startup}
+                 (ex-data e))))))))
