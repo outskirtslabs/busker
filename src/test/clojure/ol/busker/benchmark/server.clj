@@ -3,8 +3,8 @@
   with our ol.busker server."
   (:require
    [clj-async-profiler.core :as prof]
+   [ol.busker :as busker]
    [ol.busker.benchmark.utils :as u]
-   [ol.busker.server :as h2o-server]
    [org.httpkit.server :as http-kit]
    [ring.adapter.jetty :as jetty]
    [ring.adapter.jetty9 :as sunng-jetty])
@@ -104,7 +104,7 @@
                                (:n-threads worker-opts)
                                u/num-cores) u/num-cores)
             _ (prof/start)
-            server (h2o-server/run-server
+            server (busker/start!
                     {:entrypoints {:bench {:bind (str "127.0.0.1:" port)
                                            :http3? false
                                            :tls false}}
@@ -122,7 +122,7 @@
   (server-stop [_ timeout-msecs]
     (when-let [{:keys [server pool]} @state_]
       (prof/stop)
-      (h2o-server/stop-server server)
+      (busker/stop! server)
       (shutdown-pool pool timeout-msecs)
       (reset! state_ nil)
       true)))

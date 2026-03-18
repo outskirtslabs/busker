@@ -2,7 +2,7 @@
   (:require
    [clojure.string :as str]
    [clojure.java.io :as io]
-   [ol.busker.server :as busker]))
+   [ol.busker :as busker]))
 
 (defn env
   [name default]
@@ -61,10 +61,10 @@
 
 (defn -main
   [& _]
-  (let [server (busker/run-server config)]
+  (let [server (busker/start! config)]
     (.addShutdownHook
      (Runtime/getRuntime)
-     (Thread. #(busker/stop-server server)))
+     (Thread. #(busker/stop! server)))
     (println "HTTP  http://127.0.0.1:8082")
     (println "HTTPS https://localhost.examp1e.net:8443")
     @(promise)))

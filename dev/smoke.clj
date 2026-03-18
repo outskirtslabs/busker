@@ -1,8 +1,8 @@
 (ns smoke
   (:require
    [clojure.string :as str]
+   [ol.busker :as busker]
    [ol.busker.protocols :as h2o]
-   [ol.busker.server :as server]
    [ol.clave.storage.file :as file-storage]))
 
 (def mib (* 1024 1024))
@@ -150,19 +150,19 @@
                               "src/test/fixtures/pebble-truststore.p12")
         acme-trust-store-pass (env "BUSKER_ACME_TRUST_STORE_PASS" "changeit")
         acme-storage-dir (env "BUSKER_ACME_STORAGE_DIR" "target/busker-main-acme")
-        s (server/run-server {:compress-brotli-level 11
-                              :compress-gzip-level 5
-                              :tls {:storage (file-storage/file-storage {:root acme-storage-dir})
-                                    :certificates {:manage [domain]}
-                                    :issuers [{:directory-url acme-directory-url}]
-                                    :http-client {:ssl-context
-                                                  {:trust-store acme-trust-store
-                                                   :trust-store-pass acme-trust-store-pass}}}
-                              :entrypoints {:http {:bind http-bind
-                                                   :tls false}
-                                            :https {:bind https-bind
-                                                    :tls {:tls-compatibility-mode :modern}}}
-                              :dispatch [{:handler router}]})]
+        s (busker/start! {:compress-brotli-level 11
+                          :compress-gzip-level 5
+                          :tls {:storage (file-storage/file-storage {:root acme-storage-dir})
+                                :certificates {:manage [domain]}
+                                :issuers [{:directory-url acme-directory-url}]
+                                :http-client {:ssl-context
+                                              {:trust-store acme-trust-store
+                                               :trust-store-pass acme-trust-store-pass}}}
+                          :entrypoints {:http {:bind http-bind
+                                               :tls false}
+                                        :https {:bind https-bind
+                                                :tls {:tls-compatibility-mode :modern}}}
+                          :dispatch [{:handler router}]})]
     (println "Server started with managed TLS")
     (println "HTTP bind:" http-bind "HTTPS bind:" https-bind)
     (println "Managed domain:" domain)
@@ -181,5 +181,5 @@
     (println "  GET  /status/404    - Custom status codes")
     @(promise)
     (println "Shutting down...")
-    (server/stop-server s)
+    (busker/stop! s)
     (println "Server stopped")))

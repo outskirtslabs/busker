@@ -53,13 +53,13 @@
     nil))
 
 (defn acquire-claim
-  [pool listener]
+  [{:keys [state lock] :as pool} listener]
   (let [key (listener-key listener)
-        entry (locking (:lock pool)
-                (let [state (:state pool)]
+        entry (locking lock
+                (let [state state]
                   (swap! state
                          (fn [current]
-                           (if-let [existing (get current key)]
+                           (if (get current key)
                              (update-in current [key :ref-count] inc)
                              (assoc current key {:resource (open-resource key)
                                                  :ref-count 1}))))
@@ -84,10 +84,11 @@
   [claim]
   (when (compare-and-set! (:released? claim) false true)
     (let [{:keys [pool key]} claim
+          state (:state pool)
+          lock (:lock pool)
           resource-to-close
-          (locking (:lock pool)
-            (let [state (:state pool)
-                  entry (get @state key)]
+          (locking lock
+            (let [entry (get @state key)]
               (when entry
                 (let [next-ref-count (dec (:ref-count entry))]
                   (if (pos? next-ref-count)

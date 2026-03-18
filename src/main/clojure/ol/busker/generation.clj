@@ -353,7 +353,11 @@
 
 (defn- read-certificates
   [cert-file]
-  (with-open [in (io/input-stream cert-file)]
+  ;; Parse from in-memory bytes so certificate loading does not depend on
+  ;; FileInputStream close semantics during startup or reload.
+  (with-open [in (java.io.ByteArrayInputStream.
+                  (java.nio.file.Files/readAllBytes
+                   (.toPath (io/file cert-file))))]
     (vec (.generateCertificates (CertificateFactory/getInstance "X.509") in))))
 
 (defn- certificate-subject-names
@@ -750,7 +754,7 @@
              {:accept-ctx accept-ctx
               :accept-callback accept-callback
               :accept-callback-ptr accept-callback-ptr
-             :socket sock-ptr})))]
+              :socket sock-ptr})))]
     {:listener listener
      :listener-claim listener-claim
      :ssl-ctx-ptr ssl-ctx-ptr
@@ -815,7 +819,7 @@
   ([compiled-config cert-runtime]
    (start! compiled-config cert-runtime {}))
   ([compiled-config cert-runtime {:keys [listener-pool]
-                                 :or {listener-pool (listen/open-pool)}}]
+                                  :or {listener-pool (listen/open-pool)}}]
    (let [compiled-config (config/config->listeners compiled-config)
          listeners (:listeners compiled-config)
          listener-claims (acquire-listener-claims! listener-pool listeners)]
@@ -841,30 +845,29 @@
          (throw t))))))
 
 (defn begin-stop!
-  [generation]
-  (locking (::stop-lock generation)
-    (let [phase-atom (::phase generation)]
-      (when (= :running @phase-atom)
-        (when-let [handler-ptr (some-> generation ::handler ::h2o/handler-ptr)]
-          (h2o/handler-set-shutting-down handler-ptr 1))
-        (when-let [shutting-down? (::shutting-down? generation)]
-          (.set ^AtomicBoolean shutting-down? true))
-        (when-let [key-mgr (::key-manager generation)]
-          (tickets/stop-key-manager! key-mgr))
-        (when (seq (::workers generation))
-          (evloop/broadcast-wake! (::workers generation)))
-        (when-let [^ExecutorService executor (::executor generation)]
-          (.shutdown executor))
-        (reset! phase-atom :stopping))))
+  [{::keys [stop-lock phase] :as generation}]
+  (locking stop-lock
+    (when (= :running @phase)
+      (when-let [handler-ptr (some-> generation ::handler ::h2o/handler-ptr)]
+        (h2o/handler-set-shutting-down handler-ptr 1))
+      (when-let [shutting-down? (::shutting-down? generation)]
+        (.set ^AtomicBoolean shutting-down? true))
+      (when-let [key-mgr (::key-manager generation)]
+        (tickets/stop-key-manager! key-mgr))
+      (when (seq (::workers generation))
+        (evloop/broadcast-wake! (::workers generation)))
+      (when-let [^ExecutorService executor (::executor generation)]
+        (.shutdown executor))
+      (reset! phase :stopping)))
   generation)
 
 (defn stop!
   ([generation]
    (stop! generation 60 TimeUnit/SECONDS))
-  ([{::keys [^ExecutorService executor] :as generation} ^long timeout ^TimeUnit timeunit]
+  ([{::keys [^ExecutorService executor stop-lock] :as generation} ^long timeout ^TimeUnit timeunit]
    (assert generation)
    (begin-stop! generation)
-   (locking (::stop-lock generation)
+   (locking stop-lock
      (let [phase-atom (::phase generation)]
        (when (not= :stopped @phase-atom)
          (when executor

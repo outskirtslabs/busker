@@ -5,10 +5,11 @@
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [coffi.mem :as mem]
+   [ol.busker :as busker]
    [ol.busker.clave-adapter :as clave-adapter]
+   [ol.busker.generation :as generation]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as proto]
-   [ol.busker.server :as server]
    [ol.busker.test-utils :as util])
   (:import
    java.net.InetSocketAddress
@@ -37,19 +38,19 @@
 (deftest http3-enabled-by-default-test
   (testing "TLS listeners should have HTTP/3 enabled by default"
     (let [listener {:port 8443 :tls {}}]
-      (is (true? (server/http3-enabled? listener))
+      (is (true? (generation/http3-enabled? listener))
           "http3-enabled? should return true for TLS listener without explicit :http3? flag"))))
 
 (deftest http3-can-be-disabled-test
   (testing "TLS listeners can opt-out of HTTP/3 with :http3? false"
     (let [listener {:port 8443 :tls {:http3? false}}]
-      (is (false? (server/http3-enabled? listener))
+      (is (false? (generation/http3-enabled? listener))
           "http3-enabled? should return false when :http3? is explicitly false"))))
 
 (deftest non-tls-listener-no-http3-test
   (testing "Non-TLS listeners should not have HTTP/3"
     (let [listener {:port 8080}]
-      (is (false? (server/http3-enabled? listener))
+      (is (false? (generation/http3-enabled? listener))
           "http3-enabled? should return false for non-TLS listener"))))
 
 (deftest create-ptls-context-test
@@ -89,7 +90,7 @@
 (deftest server-creates-udp-listener-test
   (testing "Server with TLS listener creates UDP socket on same port"
     (let [port 18443
-          server (server/run-server
+          server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
                       (fn [_] {:status 200 :body "ok"})
@@ -102,12 +103,12 @@
         (is (udp-port-bound? port)
             (str "UDP socket should be bound on port " port " for HTTP/3"))
         (finally
-          (server/stop-server server))))))
+          (busker/stop! server))))))
 
 (deftest server-no-udp-when-http3-disabled-test
   (testing "Server with :http3? false does not create UDP socket"
     (let [port 18444
-          server (server/run-server
+          server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
                       (fn [_] {:status 200 :body "ok"})
@@ -120,7 +121,7 @@
         (is (not (udp-port-bound? port))
             (str "UDP socket should NOT be bound on port " port " when :http3? is false"))
         (finally
-          (server/stop-server server))))))
+          (busker/stop! server))))))
 
 (deftest pooled-http3-udp-bind-retains-port-until-release-test
   (testing "A pooled HTTP/3 UDP bind keeps the port unavailable until release"
@@ -146,7 +147,7 @@
 (deftest http3-request-response-test
   (testing "HTTP/3 request receives correct response"
     (let [port 18445
-          server (server/run-server
+          server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
                       (fn [_] {:status 200 :body "hello http3"})
@@ -162,7 +163,7 @@
           (is (= "hello http3" (:out result))
               "HTTP/3 response body should match expected"))
         (finally
-          (server/stop-server server))))))
+          (busker/stop! server))))))
 
 (deftest http3-no-sni-managed-fallback-success-test
   (testing "HTTP/3 handshake without SNI succeeds when a managed fallback subject exists"
@@ -179,7 +180,7 @@
                     clave-adapter/start! (fn [_] runtime)
                     clave-adapter/wrap-handler (fn [handler _] handler)
                     clave-adapter/stop! (fn [_] nil)]
-        (let [server (server/run-server
+        (let [server (busker/start!
                       {:tls {:certificates {:manage ["fallback.example"]}
                              :issuers [{:directory-url
                                         "https://acme.example/directory"}]}
@@ -198,7 +199,7 @@
               (when (zero? (:exit result))
                 (is (= "h3-fallback-ok" (:out result)))))
             (finally
-              (server/stop-server server))))))))
+              (busker/stop! server))))))))
 
 (deftest http3-no-sni-default-domain-miss-no-crash-test
   (testing "HTTP/3 no-SNI miss fails closed without crashing the server process"
@@ -219,7 +220,7 @@
 (deftest http3-request-with-streaming-body-test
   (testing "HTTP/3 streaming response works correctly"
     (let [port 18446
-          server (server/run-server
+          server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
                       (fn [_]
@@ -238,14 +239,14 @@
           (is (= "chunk1-chunk2-chunk3" (:out result))
               "Streamed chunks should be concatenated correctly"))
         (finally
-          (server/stop-server server))))))
+          (busker/stop! server))))))
 
 (deftest http3-graceful-shutdown-test
   (testing "Server gracefully shuts down HTTP/3 connections"
     (let [port 18447
           first-chunk-sent (promise)
           chunk-delay-ms 100
-          server (server/run-server
+          server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
                       (fn [{emitter :ol.busker.request/emitter}]
@@ -271,9 +272,9 @@
           (is (deref first-chunk-sent 5000 false)
               "First chunk should be sent before shutdown")
           (let [stop-future (future
-                              (server/stop-server server 5 java.util.concurrent.TimeUnit/SECONDS))]
+                              (busker/stop! server))]
             (is (= ::timeout (deref stop-future 200 ::timeout))
-                "stop-server should block while stream is in progress")
+                "stop! should block while stream is in progress")
             ;; Verify all chunks are received despite shutdown
             (let [result (deref request-future 10000 nil)]
               (is (some? result) "Request should complete during graceful shutdown")
@@ -283,7 +284,7 @@
                 (is (= "chunk-0-chunk-1-chunk-2-chunk-3-chunk-4-" (:out result))
                     "All chunks should be received during graceful shutdown")))
             (is (not= ::timeout (deref stop-future 5000 ::timeout))
-                "stop-server should complete after stream drains")))
+                "stop! should complete after stream drains")))
         (finally
           nil)))))
 
@@ -303,7 +304,7 @@
                           (Thread/sleep chunk-interval-ms)))
                       (proto/close emitter))
                     {:body emitter})
-          server (server/run-server
+          server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
                       handler
@@ -343,7 +344,7 @@
             (is (zero? (:exit conn4))
                 (str "New HTTP/3 connection should succeed after others close. stderr: " (:err conn4)))))
         (finally
-          (server/stop-server server))))))
+          (busker/stop! server))))))
 
 (deftest http3-and-http2-share-limit-test
   (testing "HTTP/3 and HTTP/2 connections share the global limit"
@@ -360,7 +361,7 @@
                           (Thread/sleep chunk-interval-ms)))
                       (proto/close emitter))
                     {:body emitter})
-          server (server/run-server
+          server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
                       handler
@@ -397,7 +398,7 @@
               (is (zero? (:exit result3))
                   (str "HTTP/2 connection should succeed. stderr: " (:err result3))))))
         (finally
-          (server/stop-server server))))))
+          (busker/stop! server))))))
 
 (deftest http3-global-limit-across-workers-test
   (testing "Connection limit is global across workers, not per-worker"
@@ -416,7 +417,7 @@
                     {:body emitter})
           ;; 2 workers with max 4 connections total
           ;; If it was per-worker, we'd have 8 connections allowed
-          server (server/run-server
+          server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
                       handler
@@ -447,7 +448,7 @@
                 (is (zero? (:exit result))
                     (str "Connection " idx " should succeed. stderr: " (:err result)))))))
         (finally
-          (server/stop-server server))))))
+          (busker/stop! server))))))
 
 (defn- curl-ssl-sessions-supported?
   "Check if curl supports --ssl-sessions option."
@@ -495,7 +496,7 @@
           handler (fn [req]
                     (reset! early-data-value (:ol.busker/early-data? req))
                     {:status 200 :body "ok"})
-          server (server/run-server
+          server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
                       handler
@@ -516,7 +517,7 @@
             (is (false? @early-data-value)
                 "First request should NOT be early data")))
         (finally
-          (server/stop-server server))))))
+          (busker/stop! server))))))
 
 (deftest http3-zero-rtt-test
   (testing "HTTP/3 0-RTT early data detection"
@@ -530,7 +531,7 @@
                           :headers {"content-type" "application/edn"}
                           :body    (pr-str {:early-data (boolean (:ol.busker/early-data? req))
                                             :method     (name (:request-method req))})})
-          server       (server/run-server
+          server       (busker/start!
                         (util/with-static-tls
                           (util/with-handler
                             handler
@@ -584,7 +585,7 @@
                      (:tls-earlydata result4)))))
 
         (finally
-          (server/stop-server server)
+          (busker/stop! server)
           (io/delete-file session-file true))))))
 
 (defn- openssl-session-test
@@ -612,7 +613,7 @@
     (let [port         18455
           session-file (str (System/getProperty "java.io.tmpdir") "/busker-test-tls12-sessions-" port ".pem")
           handler      (fn [_] {:status 200 :body "ok"})
-          server       (server/run-server
+          server       (busker/start!
                         (util/with-static-tls
                           (util/with-handler
                             handler
@@ -639,5 +640,5 @@
           (is (:reused? r2) "Second connection should resume session (ticket decryption worked)"))
 
         (finally
-          (server/stop-server server)
+          (busker/stop! server)
           (io/delete-file session-file true))))))

@@ -6,10 +6,11 @@
    [clojure.string :as str]
    [clojure.test :as test :refer [deftest is testing]]
    [coffi.mem :as mem]
+   [ol.busker :as busker]
    [ol.busker.clave-adapter :as clave-adapter]
+   [ol.busker.generation :as generation]
    [ol.busker.native :as native]
    [ol.busker.protocols :as h2o]
-   [ol.busker.server :as server]
    [ol.busker.test-utils :as util]
    [ol.clave.certificate :as clave-certificate])
   (:import
@@ -20,7 +21,7 @@
 (def base (str "http://127.0.0.1:" plain-port))
 
 (defn test-server [handler & {:as opts}]
-  (server/run-server
+  (busker/start!
    (util/with-handler
      handler
      (merge {:entrypoints {:test-plain
@@ -56,7 +57,7 @@
      (try
        ~@body
        (finally
-         (server/stop-server ~server-sym)))))
+         (busker/stop! ~server-sym)))))
 
 (def abcs (cycle "abcdefghijklmnopqrstuvwxyz"))
 (def large-payload-str (str "START" (str/join "" (take 1000000 (cycle "abcdefghijklmnopqrstuvwxyz"))) "END"))
@@ -383,7 +384,7 @@
                           (Thread/sleep chunk-interval-ms)))
                       (h2o/close emitter))
                     {:body emitter})
-          server (server/run-server
+          server (busker/start!
                   (util/with-handler
                     handler
                     {:max-connections 2
@@ -421,7 +422,7 @@
             (is (zero? (:exit conn4))
                 (str "New TCP connection should succeed after others close. stderr: " (:err conn4)))))
         (finally
-          (server/stop-server server))))))
+          (busker/stop! server))))))
 
 (deftest tcp-and-tls-share-limit-test
   (testing "TCP and TLS connections share the global limit"
@@ -439,7 +440,7 @@
                           (Thread/sleep chunk-interval-ms)))
                       (h2o/close emitter))
                     {:body emitter})
-          server (server/run-server
+          server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
                       handler
@@ -479,7 +480,7 @@
               (is (zero? (:exit result3))
                   (str "HTTPS connection should succeed. stderr: " (:err result3))))))
         (finally
-          (server/stop-server server))))))
+          (busker/stop! server))))))
 
 (deftest managed-clave-lifecycle-test
   (testing "server starts/stops managed clave runtime with server lifecycle"
@@ -532,7 +533,7 @@
           lookup-fn (with-redefs [clave-adapter/lookup-certificate (fn [_runtime _hostname]
                                                                      (swap! clave-calls inc)
                                                                      nil)]
-                      (#'server/build-tls-lookup-fn config {:system {:id ::runtime}}))
+                      (#'generation/build-tls-lookup-fn config {:system {:id ::runtime}}))
           result (lookup-fn "localhost.examp1e.net")]
       (is (= 0 @clave-calls) "Static cert should short-circuit clave lookup")
       (is (string? (:cert-chain-pem result)))
@@ -555,7 +556,7 @@
                                     (when (= hostname "hit.example")
                                       {:certificate [cert]
                                        :private-key (.getPrivate keypair)}))]
-                      (#'server/build-tls-lookup-fn config runtime))]
+                      (#'generation/build-tls-lookup-fn config runtime))]
       (is (nil? (lookup-fn "miss.example")))
       (let [result (lookup-fn "hit.example")]
         (is (string? (:cert-chain-pem result)))
@@ -570,7 +571,7 @@
                                         :http3? false
                                         :tls {:tls-compatibility-mode
                                               :modern}}}}
-          lookup-fn (#'server/build-tls-lookup-fn config nil)
+          lookup-fn (#'generation/build-tls-lookup-fn config nil)
           result (lookup-fn nil)]
       (is (= {:cert-chain-pem (util/fixture-cert-pem)
               :private-key-pem (util/fixture-key-pem)}
@@ -585,7 +586,7 @@
                                         :http3? false
                                         :tls {:tls-compatibility-mode
                                               :modern}}}}
-          lookup-fn (#'server/build-tls-lookup-fn
+          lookup-fn (#'generation/build-tls-lookup-fn
                      config
                      {:subject-names ["fallback.example"]
                       :lookup-fn (fn [hostname]
@@ -603,7 +604,7 @@
                                         :http3? false
                                         :tls {:tls-compatibility-mode
                                               :modern}}}}
-          lookup-fn (#'server/build-tls-lookup-fn
+          lookup-fn (#'generation/build-tls-lookup-fn
                      config
                      {:lookup-fn (fn [hostname]
                                    (swap! calls conj hostname)
@@ -651,7 +652,7 @@
                     clave-adapter/start! (fn [_] runtime)
                     clave-adapter/wrap-handler (fn [handler _] handler)
                     clave-adapter/stop! (fn [_] nil)]
-        (with-server [_server (server/run-server
+        (with-server [_server (busker/start!
                                {:tls {:certificates {:manage ["fallback.example"]}
                                       :issuers [{:directory-url
                                                  "https://acme.example/directory"}]}
@@ -688,7 +689,7 @@
                     clave-adapter/start! (fn [_] runtime)
                     clave-adapter/wrap-handler (fn [handler _] handler)
                     clave-adapter/stop! (fn [_] nil)]
-        (with-server [_server (server/run-server
+        (with-server [_server (busker/start!
                                {:tls {:certificates {:manage ["fallback.example"]}
                                       :issuers [{:directory-url
                                                  "https://acme.example/directory"}]}

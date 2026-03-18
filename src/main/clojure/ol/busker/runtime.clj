@@ -212,11 +212,9 @@
   "Compile and activate a new runtime snapshot for `server-handle`."
   ([server-handle user-config]
    (reload! server-handle user-config {}))
-  ([server-handle user-config opts]
-   (locking (:busker/lifecycle-gate server-handle)
-     (let [state-atom (:busker/state server-handle)
-           {:keys [phase active next-generation-id listener-pool draining]}
-           @state-atom]
+  ([{:keys [busker/lifecycle-gate busker/state] :as server-handle} user-config opts]
+   (locking lifecycle-gate
+     (let [{:keys [phase active next-generation-id listener-pool draining]} @state]
        (when (not= :running phase)
          (throw (ex-info "Server is stopping"
                          {:reason :server-stopping})))
@@ -232,7 +230,7 @@
                                                 listener-pool
                                                 active)
                    draining-generation (begin-drain! server-handle active)]
-               (reset! state-atom
+               (reset! state
                        {:phase :running
                         :config (:config candidate)
                         :next-generation-id (inc next-generation-id)
@@ -251,12 +249,10 @@
 (defn stop!
   "Synchronously stop `server-handle`, waiting for active and draining
   generations to quiesce."
-  [server-handle]
+  [{:keys [busker/lifecycle-gate busker/state] :as server-handle}]
   (let [{:keys [config generations-to-stop]}
-        (locking (:busker/lifecycle-gate server-handle)
-          (let [state-atom (:busker/state server-handle)
-                {:keys [phase config active draining next-generation-id listener-pool]}
-                @state-atom]
+        (locking lifecycle-gate
+          (let [{:keys [phase config active draining next-generation-id listener-pool]}  @state]
             (cond
               (= :stopped phase)
               {:config config
@@ -269,7 +265,7 @@
               :else
               (let [draining (cond-> draining
                                active (conj (begin-drain! server-handle active)))]
-                (reset! state-atom
+                (reset! state
                         {:phase :stopping
                          :config config
                          :next-generation-id next-generation-id
@@ -286,10 +282,9 @@
                                 (remove nil?)
                                 distinct)]
         (clave-adapter/stop! cert-runtime))
-      (locking (:busker/lifecycle-gate server-handle)
-        (let [state-atom (:busker/state server-handle)
-              {:keys [next-generation-id listener-pool]} @state-atom]
-          (reset! state-atom
+      (locking lifecycle-gate
+        (let [{:keys [next-generation-id listener-pool]} @state]
+          (reset! state
                   {:phase :stopped
                    :config config
                    :next-generation-id next-generation-id

@@ -1,7 +1,7 @@
 (ns ol.busker.http3-no-sni-miss-repro
   (:require
+   [ol.busker :as busker]
    [ol.busker.clave-adapter :as clave-adapter]
-   [ol.busker.server :as server]
    [ol.busker.test-utils :as util]))
 
 (defn -main
@@ -16,7 +16,7 @@
                   clave-adapter/start! (fn [_] runtime)
                   clave-adapter/wrap-handler (fn [handler _] handler)
                   clave-adapter/stop! (fn [_] nil)]
-      (server/run-server
+      (busker/start!
        {:tls {:certificates {:manage ["fallback.example"]}
               :issuers [{:directory-url "https://acme.example/directory"}]}
         :entrypoints {:tls {:bind (str "127.0.0.1:" port)
