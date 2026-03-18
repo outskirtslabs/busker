@@ -1,0 +1,903 @@
+(ns ol.busker.generation
+  (:require
+   [clojure.java.io :as io]
+   [clojure.string :as str]
+   [coffi.ffi :as ffi]
+   [coffi.mem :as mem]
+   [ol.busker.buffer-pool :as bp]
+   [ol.busker.byte-bounded-queue :as bbq]
+   [ol.busker.clave-adapter :as clave-adapter]
+   [ol.busker.config :as config]
+   [ol.busker.evloop :as evloop]
+   [ol.busker.internal.protocols :as p]
+   [ol.busker.listen :as listen]
+   [ol.busker.native :as h2o]
+   [ol.busker.native.socket :as socket]
+   [ol.busker.request :as request]
+   [ol.busker.response-queue :as response-queue]
+   [ol.busker.tickets :as tickets]
+   [ol.clave.certificate :as clave-certificate]
+   [taoensso.trove :as trove])
+  (:import
+   [java.io File]
+   [java.security.cert CertificateFactory X509Certificate]
+   [java.util Base64]
+   [java.util.concurrent ExecutorService TimeUnit]
+   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
+
+(set! *warn-on-reflection* true)
+
+(declare stop!)
+
+(defn- response-state-pending?
+  [st]
+  (let [scheduled? (.get ^AtomicBoolean (:scheduled?_ st))
+        in-flight? (some? (.get ^AtomicReference (:in-flight_ st)))
+        queued-bytes (bbq/queued-bytes (:bbq st))]
+    (or scheduled?
+        in-flight?
+        (pos? queued-bytes))))
+
+(defn- request-awaiting-final?
+  [req]
+  (when-let [latency (:latency/state req)]
+    (let [^AtomicLong handler-start (:handler-start latency)
+          ^AtomicLong response-final (:response-final latency)]
+      (and handler-start response-final
+           (pos? (.get handler-start))
+           (zero? (.get response-final))))))
+
+(defn- pending-response-work?
+  [worker]
+  (let [^java.util.HashMap requests (:requests worker)]
+    (boolean
+     (some
+      (fn [req]
+        (or (when-let [write-resp (:write-resp req)]
+              (when-let [st (::response-queue/state write-resp)]
+                (response-state-pending? st)))
+            (request-awaiting-final? req)))
+      (.values requests)))))
+
+(defn evloop-msg-processor
+  [op args]
+  (case op
+    :h2o/proceed-request
+    (let [[req-ctx] args]
+      (h2o/proceed-req (:req req-ctx)))
+
+    :h2o/sendvec
+    (let [[send-vecs] args]
+      (send-vecs))
+
+    :h2o/send-informational
+    (let [[send-fn] args]
+      (send-fn))
+
+    :h2o/start-response
+    (let [[start-fn] args]
+      (start-fn))
+    nil))
+
+(defn- create-connection-close-callback
+  []
+  (let [cb (fn [_]
+             (h2o/conn-limit-release))]
+    {::connection-close-cb cb
+     ::connection-close-cb-ptr
+     (mem/serialize cb [::ffi/fn [::mem/pointer] ::mem/void])}))
+
+(defn- create-accept-callback
+  [accept-ctx-ptr on-close-callback]
+  (let [accept-cb (fn [listener-ptr err-ptr]
+                    (when-not (mem/null? err-ptr)
+                      nil)
+                    (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
+                      (when-not (mem/null? sock-ptr)
+                        #_{:clj-kondo/ignore [:type-mismatch]}
+                        (if (pos? (h2o/conn-limit-try-acquire))
+                          (do
+                            (h2o/socket-set-on-close sock-ptr on-close-callback (mem/as-segment 0))
+                            (h2o/h2o-accept accept-ctx-ptr sock-ptr))
+                          (h2o/socket-close sock-ptr)))))]
+    {::accept-cb accept-cb
+     ::accept-cb-ptr
+     (mem/serialize accept-cb
+                    [::ffi/fn [::mem/pointer ::mem/c-string] ::mem/void])}))
+
+(defn- config->flat-globalconf-t
+  [config]
+  (let [has? (fn [k] (if (contains? config k) 1 0))
+        num-val (fn [k] (get config k 0))
+        bool->int (fn [k] (if (get config k) 1 0))]
+    {:has_server_name (has? :server-name)
+     :server_name (get config :server-name "")
+     :has_proxy_status_identity (has? :proxy-status-identity)
+     :proxy_status_identity (get config :proxy-status-identity "")
+     :has_max_request_entity_size (has? :max-request-entity-size)
+     :max_request_entity_size (num-val :max-request-entity-size)
+     :has_max_delegations (has? :max-delegations)
+     :max_delegations (num-val :max-delegations)
+     :has_max_reprocesses (has? :max-reprocesses)
+     :max_reprocesses (num-val :max-reprocesses)
+     :has_handshake_timeout (has? :handshake-timeout)
+     :handshake_timeout (num-val :handshake-timeout)
+     :has_max_spare_pipes (has? :max-spare-pipes)
+     :max_spare_pipes (num-val :max-spare-pipes)
+     :has_http1__req_timeout (has? :http1-req-timeout)
+     :http1__req_timeout (num-val :http1-req-timeout)
+     :has_http1__req_io_timeout (has? :http1-req-io-timeout)
+     :http1__req_io_timeout (num-val :http1-req-io-timeout)
+     :has_http1__upgrade_to_http2 (has? :http1-upgrade?)
+     :http1__upgrade_to_http2 (bool->int :http1-upgrade?)
+     :has_http2__idle_timeout (has? :http2-idle-timeout)
+     :http2__idle_timeout (num-val :http2-idle-timeout)
+     :has_http2__graceful_shutdown_timeout (has? :http2-graceful-shutdown-timeout)
+     :http2__graceful_shutdown_timeout (num-val :http2-graceful-shutdown-timeout)
+     :has_http2__max_streams (has? :http2-max-streams)
+     :http2__max_streams (num-val :http2-max-streams)
+     :has_http2__max_concurrent_requests_per_connection (has? :http2-max-requests)
+     :http2__max_concurrent_requests_per_connection (num-val :http2-max-requests)
+     :has_http2__max_concurrent_streaming_requests_per_connection (has? :http2-max-streaming-requests)
+     :http2__max_concurrent_streaming_requests_per_connection (num-val :http2-max-streaming-requests)
+     :has_http2__max_streams_for_priority (has? :http2-max-priority-streams)
+     :http2__max_streams_for_priority (num-val :http2-max-priority-streams)
+     :has_http2__active_stream_window_size (has? :http2-stream-window-size)
+     :http2__active_stream_window_size (num-val :http2-stream-window-size)
+     :has_http2__dos_delay (has? :http2-dos-delay)
+     :http2__dos_delay (num-val :http2-dos-delay)
+     :has_http3__idle_timeout (has? :http3-idle-timeout)
+     :http3__idle_timeout (num-val :http3-idle-timeout)
+     :has_http3__graceful_shutdown_timeout (has? :http3-graceful-shutdown-timeout)
+     :http3__graceful_shutdown_timeout (num-val :http3-graceful-shutdown-timeout)
+     :has_http3__active_stream_window_size (has? :http3-stream-window-size)
+     :http3__active_stream_window_size (num-val :http3-stream-window-size)
+     :has_http3__ack_frequency (has? :http3-ack-frequency)
+     :http3__ack_frequency (num-val :http3-ack-frequency)
+     :has_compress_args (if (:compress? config false) 1 0)
+     :compress_args_mine_size (num-val :compress-min-size)
+     :compress_args_gzip_quality (num-val :compress-gzip-level)
+     :compress_args_brotli_quality (num-val :compress-brotli-level)
+     :compress_args_zstd_quality (num-val :compress-zstd-level)}))
+
+(defn- create-server-config
+  [arena ring-handler config]
+  (let [config-ptr (mem/alloc (h2o/globalconf-size) arena)
+        flat-config-ptr (mem/serialize (config->flat-globalconf-t config)
+                                       ::h2o/clj-h2o-flat-globalconf-t
+                                       arena)
+        config-ptr (do
+                     (h2o/create-global-conf config-ptr flat-config-ptr)
+                     config-ptr)
+        hostconf-ptr (with-open [arena2 (mem/confined-arena)]
+                       (h2o/config-register-host config-ptr
+                                                 (h2o/str->iovec "default" arena2)
+                                                 65535))
+        on-request-cb (partial request/on-request (:executor config)
+                               config
+                               ring-handler)
+        on-request-cleanup-cb (partial request/on-request-cleanup ring-handler)
+        handler (h2o/create-handler hostconf-ptr
+                                    on-request-cb
+                                    on-request-cleanup-cb
+                                    flat-config-ptr
+                                    arena)]
+    {::config-ptr config-ptr
+     ::hostconf-ptr hostconf-ptr
+     ::on-request-cb on-request-cb
+     ::on-request-cleanup-cb on-request-cleanup-cb
+     ::handler handler}))
+
+(defn- update-listener-state!
+  [listener-socks accept-callbacks max-connections]
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (let [current-conns (h2o/conn-limit-current)
+        should-accept? (or (zero? max-connections)
+                           (< current-conns max-connections))]
+    (doseq [listener-idx (range (count listener-socks))]
+      (let [sock-ptr (nth listener-socks listener-idx)
+            accept-callback (nth accept-callbacks listener-idx)]
+        (when-not (mem/null? sock-ptr)
+          (if should-accept?
+            (when (zero? (h2o/socket-reading? sock-ptr))
+              (h2o/socket-read-start sock-ptr accept-callback))
+            (when-not (zero? (h2o/socket-reading? sock-ptr))
+              (h2o/socket-read-stop sock-ptr))))))))
+
+(defn- initiate-worker-shutdown!
+  [{:keys [listener-socks loop-ptr ctx-ptr http3-ctxs]}]
+  (doseq [listener-idx (range (count listener-socks))]
+    (let [sock-ptr (nth listener-socks listener-idx)]
+      (when (and (not (mem/null? sock-ptr))
+                 #_{:clj-kondo/ignore [:type-mismatch]}
+                 (not (zero? (h2o/socket-reading? sock-ptr))))
+        (h2o/socket-read-stop sock-ptr))))
+  (doseq [http3-ctx http3-ctxs]
+    (when (and http3-ctx (not (mem/null? http3-ctx)))
+      (h2o/http3-stop-accepting http3-ctx)))
+  (h2o/evloop-run loop-ptr 0)
+  (doseq [listener-idx (range (count listener-socks))]
+    (let [sock-ptr (nth listener-socks listener-idx)]
+      (when-not (mem/null? sock-ptr)
+        (h2o/socket-close sock-ptr))))
+  (h2o/context-request-shutdown ctx-ptr))
+
+(defn- has-active-http3-connections?
+  [http3-ctx]
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (and http3-ctx
+       (not (mem/null? http3-ctx))
+       (pos? (h2o/http3-num-connections http3-ctx))))
+
+(defn- all-connections-drained?
+  [ctx-ptr http3-ctxs]
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (and (zero? (h2o/context-get-active-conns ctx-ptr))
+       (zero? (h2o/context-get-shutdown-conns ctx-ptr))
+       (not-any? has-active-http3-connections? http3-ctxs)))
+
+(defn- ready-to-dispose?
+  [{:keys [context-disposed? shutdown-initiated? receiver-destroyed?]}
+   {:keys [ctx-ptr http3-ctxs]}]
+  (and (not context-disposed?)
+       shutdown-initiated?
+       receiver-destroyed?
+       (all-connections-drained? ctx-ptr http3-ctxs)))
+
+(defn- check-and-initiate-shutdown!
+  [loop-state {:keys [shutting-down?] :as state}]
+  (let [should-shutdown? (.get ^AtomicBoolean shutting-down?)
+        already? (true? (:shutdown-initiated? loop-state))]
+    (when (and should-shutdown? (not already?))
+      (initiate-worker-shutdown! (assoc state :shutdown-initiated? true)))
+    (assoc loop-state :shutdown-initiated? (or already? should-shutdown?))))
+
+(defn- update-receiver-destruction
+  [loop-state worker]
+  (cond
+    (:receiver-destroyed? loop-state)
+    loop-state
+
+    (nil? (.get ^AtomicReference (:wakeup-receiver_ worker)))
+    (assoc loop-state :receiver-destroyed? true)
+
+    :else
+    loop-state))
+
+(defn- dispose-context-if-ready
+  [loop-state worker {:keys [ctx-ptr http3-ctxs] :as state}]
+  (if (ready-to-dispose? loop-state state)
+    (do
+      (doseq [http3-ctx http3-ctxs]
+        (when (and http3-ctx (not (mem/null? http3-ctx)))
+          (h2o/http3-free-worker-ctx http3-ctx)))
+      (h2o/context-dispose ctx-ptr)
+      (p/send-msg worker evloop/stop-msg)
+      (assoc loop-state :context-disposed? true))
+    loop-state))
+
+(defn- worker-loop
+  [worker loop-state
+   {:keys [loop-ptr ctx-ptr listener-socks accept-callbacks max-connections] :as state}]
+  (let [loop-state (-> loop-state
+                       (check-and-initiate-shutdown! state)
+                       (update-receiver-destruction worker)
+                       (dispose-context-if-ready worker state))
+        disposed? (true? (:context-disposed? loop-state))
+        shutting? (true? (:shutdown-initiated? loop-state))]
+    (if disposed?
+      (h2o/evloop-run loop-ptr 0)
+      (let [now (h2o/evloop-now loop-ptr)
+            base-wait (h2o/cleanup-thread now ctx-ptr)
+            wait-ms (cond
+                      (pending-response-work? worker) 5
+                      shutting? 10
+                      :else base-wait)]
+        (when-not shutting?
+          (update-listener-state! listener-socks accept-callbacks max-connections))
+        (h2o/evloop-run loop-ptr (if (pos? (p/count-msgs worker)) 0 wait-ms))))
+    loop-state))
+
+(defn http3-enabled?
+  [listener]
+  (boolean
+   (when-let [tls (:tls listener)]
+     (and (map? tls)
+          (not= false (:http3? tls))))))
+
+(defn- x509-certificate->pem
+  [^X509Certificate cert]
+  (let [line-separator (byte-array [(byte 10)])
+        encoder (Base64/getMimeEncoder 64 line-separator)
+        cert-b64 (.encodeToString encoder (.getEncoded cert))]
+    (str "-----BEGIN CERTIFICATE-----\n"
+         cert-b64
+         "\n-----END CERTIFICATE-----\n")))
+
+(defn- certificate->pem
+  [certificate]
+  (cond
+    (string? certificate)
+    certificate
+
+    (instance? X509Certificate certificate)
+    (x509-certificate->pem certificate)
+
+    :else
+    (throw (ex-info "Unsupported certificate value in TLS lookup bundle."
+                    {:certificate-type (some-> certificate class .getName)}))))
+
+(defn- private-key->pem
+  [private-key]
+  (cond
+    (nil? private-key)
+    nil
+
+    (string? private-key)
+    private-key
+
+    :else
+    (clave-certificate/private-key->pem private-key)))
+
+(defn- clave-bundle->tls-material
+  [bundle]
+  (let [certificates (:certificate bundle)
+        cert-chain (cond
+                     (nil? certificates) nil
+                     (sequential? certificates) certificates
+                     :else [certificates])
+        private-key-pem (private-key->pem (:private-key bundle))]
+    (when (and (seq cert-chain) private-key-pem)
+      {:cert-chain-pem (apply str (map certificate->pem cert-chain))
+       :private-key-pem private-key-pem})))
+
+(defn- read-certificates
+  [cert-file]
+  (with-open [in (io/input-stream cert-file)]
+    (vec (.generateCertificates (CertificateFactory/getInstance "X.509") in))))
+
+(defn- certificate-subject-names
+  [^X509Certificate certificate]
+  (let [sans (or (.getSubjectAlternativeNames certificate) [])
+        san-names (->> sans
+                       (keep (fn [entry]
+                               (let [entry-type (.get ^java.util.List entry 0)
+                                     value (.get ^java.util.List entry 1)]
+                                 (when (or (= entry-type 2)
+                                           (= entry-type 7))
+                                   (str value)))))
+                       distinct
+                       vec)]
+    (if (seq san-names)
+      san-names
+      (when-let [[_ cn] (re-find #"CN=([^,]+)"
+                                 (.getName (.getSubjectX500Principal certificate)))]
+        [cn]))))
+
+(defn- wildcard-subject-name?
+  [subject-name]
+  (and (string? subject-name)
+       (str/starts-with? subject-name "*.")))
+
+(defn- subject-name-matches-hostname?
+  [subject-name hostname]
+  (cond
+    (or (nil? subject-name) (nil? hostname))
+    false
+
+    (= subject-name hostname)
+    true
+
+    (wildcard-subject-name? subject-name)
+    (let [suffix (subs subject-name 1)
+          hostname-parts (str/split hostname #"\.")
+          suffix-parts (str/split (subs subject-name 2) #"\.")]
+      (and (str/ends-with? hostname suffix)
+           (= (count hostname-parts)
+              (inc (count suffix-parts)))))
+
+    :else
+    false))
+
+(defn- tls-material-from-files
+  [cert-file key-file]
+  (let [certificates (read-certificates cert-file)]
+    {:names (or (some-> certificates first certificate-subject-names)
+                [])
+     :material {:cert-chain-pem (slurp cert-file)
+                :private-key-pem (slurp key-file)}}))
+
+(defn- directory-pem-pair
+  [^File dir]
+  (let [cert-pem (io/file dir "cert.pem")
+        key-pem (io/file dir "key.pem")
+        fullchain-pem (io/file dir "fullchain.pem")
+        privkey-pem (io/file dir "privkey.pem")]
+    (cond
+      (and (.isFile cert-pem) (.isFile key-pem))
+      {:cert-file (.getPath cert-pem)
+       :key-file (.getPath key-pem)}
+
+      (and (.isFile fullchain-pem) (.isFile privkey-pem))
+      {:cert-file (.getPath fullchain-pem)
+       :key-file (.getPath privkey-pem)}
+
+      :else
+      nil)))
+
+(defn- load-folder-tls-materials
+  [path]
+  (->> (file-seq (io/file path))
+       (filter #(.isDirectory ^File %))
+       (keep directory-pem-pair)
+       (mapv (fn [{:keys [cert-file key-file]}]
+               (tls-material-from-files cert-file key-file)))))
+
+(defn- load-static-tls-materials
+  [config]
+  (->> (get-in config [:tls :certificates :load])
+       (mapcat (fn [{:keys [type path cert-file key-file]}]
+                 (case type
+                   :folder (load-folder-tls-materials path)
+                   :pem [(tls-material-from-files cert-file key-file)]
+                   [])))
+       vec))
+
+(defn- first-static-tls-identity
+  [config]
+  (some (fn [{:keys [type path cert-file key-file]}]
+          (case type
+            :pem
+            (when (and cert-file key-file)
+              {:cert-file cert-file
+               :key-file key-file})
+
+            :folder
+            (some->> (file-seq (io/file path))
+                     (filter #(.isDirectory ^File %))
+                     (keep directory-pem-pair)
+                     first)
+
+            nil))
+        (get-in config [:tls :certificates :load])))
+
+(defn- tls-callback-required?
+  [config]
+  (boolean
+   (some (fn [[_ entrypoint]]
+           (map? (:tls entrypoint)))
+         (:entrypoints config))))
+
+(defn- build-tls-lookup-fn
+  [config cert-runtime]
+  (let [static-materials (load-static-tls-materials config)
+        fallback-material (some-> static-materials first :material)
+        fallback-subject-name (first (:subject-names cert-runtime))
+        cert-lookup-fn
+        (or (:lookup-fn cert-runtime)
+            (let [lookup-certificate clave-adapter/lookup-certificate]
+              (fn [hostname]
+                (lookup-certificate cert-runtime hostname))))]
+    (fn [hostname]
+      (let [sni-hostname (when (and (string? hostname)
+                                    (not (.isEmpty ^String hostname)))
+                           hostname)
+            static-match (when sni-hostname
+                           (some (fn [{:keys [names material]}]
+                                   (when (some #(subject-name-matches-hostname? % sni-hostname)
+                                               names)
+                                     material))
+                                 static-materials))]
+        (cond
+          static-match
+          static-match
+
+          sni-hostname
+          (some-> (cert-lookup-fn sni-hostname)
+                  clave-bundle->tls-material)
+
+          fallback-material
+          fallback-material
+
+          fallback-subject-name
+          (some-> (cert-lookup-fn fallback-subject-name)
+                  clave-bundle->tls-material)
+
+          :else
+          (do
+            (trove/log! {:level :trace
+                         :id ::tls-lookup-no-sni-miss
+                         :data {}})
+            nil))))))
+
+(defn- init-tls-lookup-state
+  [{::keys [config cert-runtime] :as state}]
+  (if (tls-callback-required? config)
+    (let [lookup-fn (build-tls-lookup-fn config cert-runtime)
+          callback-refs (h2o/build-tls-lookup-callback lookup-fn)]
+      (assoc state
+             ::tls-lookup-fn lookup-fn
+             ::tls-lookup-callback callback-refs))
+    state))
+
+(defn- create-ssl-context
+  [listener tls-lookup-callback-ptr]
+  (when-let [tls (:tls listener)]
+    (when (map? tls)
+      (let [ssl-ctx (h2o/create-ssl-ctx nil nil
+                                        1
+                                        (or tls-lookup-callback-ptr mem/null)
+                                        mem/null)]
+        (when (mem/null? ssl-ctx)
+          (throw (ex-info "Failed to create SSL_CTX (check OpenSSL errors in stderr)"
+                          {:listener (dissoc listener :tls)
+                           :listener-tls (:tls listener)})))
+        ssl-ctx))))
+
+(defn- create-http3-contexts
+  [listeners config config-ptr ticket-mgr-ptr ticket-lifetime-seconds tls-lookup-callback-ptr]
+  (let [{:keys [cert-file key-file]} (first-static-tls-identity config)]
+    (into {}
+          (keep-indexed
+           (fn [idx listener]
+             (when (http3-enabled? listener)
+               (let [ptls-ctx (h2o/http3-create-ptls-ctx cert-file
+                                                         key-file
+                                                         (or tls-lookup-callback-ptr mem/null)
+                                                         mem/null)]
+                 (when (or (nil? ptls-ctx) (mem/null? ptls-ctx))
+                   (throw (ex-info "Failed to create ptls context for HTTP/3"
+                                   {:listener-index idx
+                                    :cert-file cert-file
+                                    :key-file key-file})))
+                 (let [encrypt-ticket
+                       (when (and ticket-mgr-ptr (not (mem/null? ticket-mgr-ptr)))
+                         (h2o/ticket-manager-create-encrypt-ticket ticket-mgr-ptr 1))
+                       _ (when encrypt-ticket
+                           (h2o/ptls-ctx-set-tickets ptls-ctx
+                                                     encrypt-ticket
+                                                     ticket-lifetime-seconds
+                                                     8192))
+                       quicly-ctx (h2o/http3-create-quicly-ctx ptls-ctx config-ptr)]
+                   (when (or (nil? quicly-ctx) (mem/null? quicly-ctx))
+                     (h2o/http3-free-ptls-ctx ptls-ctx)
+                     (throw (ex-info "Failed to create quicly context for HTTP/3"
+                                     {:listener-index idx})))
+                   (when (and ticket-mgr-ptr (not (mem/null? ticket-mgr-ptr)))
+                     (h2o/ticket-manager-set-quic-tag ticket-mgr-ptr quicly-ctx))
+                   [idx {:ptls-ctx ptls-ctx
+                         :quicly-ctx quicly-ctx
+                         :encrypt-ticket encrypt-ticket}]))))
+           listeners))))
+
+(defn- create-http3-worker-contexts
+  [n-workers listeners loops contexts config-ptr http3-contexts listener-claims]
+  (let [hosts-ptr (h2o/globalconf-get-hosts config-ptr)]
+    (vec
+     (for [thread-idx (range n-workers)]
+       (vec
+        (for [listener-idx (range (count listeners))]
+          (let [listener (nth listeners listener-idx)]
+            (when (http3-enabled? listener)
+              (let [{:keys [quicly-ctx]} (get http3-contexts listener-idx)
+                    listener-claim (or (get listener-claims
+                                            (listen/listener-key
+                                             (assoc listener :transport :udp)))
+                                       (throw (ex-info "Missing UDP listener claim"
+                                                       {:listener listener})))
+                    loop-ptr (nth loops thread-idx)
+                    ctx-ptr (nth contexts thread-idx)
+                    http3-ctx (h2o/http3-attach-udp-listener
+                               ctx-ptr
+                               loop-ptr
+                               quicly-ctx
+                               hosts-ptr
+                               (listen/resource listener-claim)
+                               (int thread-idx))]
+                (when (or (nil? http3-ctx) (mem/null? http3-ctx))
+                  (throw (ex-info "Failed to create HTTP/3 worker context"
+                                  {:listener-index listener-idx
+                                   :thread-idx thread-idx
+                                   :port (:port listener)})))
+                http3-ctx)))))))))
+
+(defn- free-http3-contexts
+  [http3-contexts]
+  (doseq [[_ {:keys [quicly-ctx ptls-ctx]}] http3-contexts]
+    (when quicly-ctx
+      (h2o/http3-free-quicly-ctx quicly-ctx))
+    (when ptls-ctx
+      (h2o/http3-free-ptls-ctx ptls-ctx))))
+
+(defn- claim-keys
+  [listeners]
+  (->> listeners
+       (mapcat (fn [listener]
+                 (cond-> [(listen/listener-key listener)]
+                   (http3-enabled? listener)
+                   (conj (listen/listener-key
+                          (assoc listener :transport :udp))))))
+       distinct
+       vec))
+
+(defn- release-listener-claims!
+  [claims]
+  (doseq [claim (vals claims)]
+    (listen/release! claim))
+  nil)
+
+(defn- acquire-listener-claims!
+  [pool listeners]
+  (reduce (fn [claims claim-key]
+            (try
+              (assoc claims claim-key
+                     (listen/acquire-claim pool claim-key))
+              (catch Throwable t
+                (release-listener-claims! claims)
+                (throw (ex-info "Failed to acquire listener claims"
+                                {:listener-key claim-key}
+                                t)))))
+          {}
+          (claim-keys listeners)))
+
+(defn- prepare-generation-state
+  [compiled-config cert-runtime listener-pool listener-claims]
+  (let [{:keys [n-workers max-connections executor]} compiled-config
+        ring-handler (-> compiled-config
+                         config/dispatch-handler
+                         (clave-adapter/wrap-handler cert-runtime))]
+    {::ring-handler ring-handler
+     ::config compiled-config
+     ::cert-runtime cert-runtime
+     ::listener-pool listener-pool
+     ::listener-claims listener-claims
+     ::phase (atom :running)
+     ::stop-lock (Object.)
+     ::message-handler evloop-msg-processor
+     ::shutting-down? (AtomicBoolean. false)
+     ::n-workers n-workers
+     ::max-connections max-connections
+     ::executor executor}))
+
+(defn- init-core-state
+  [{::keys [ring-handler config n-workers max-connections] :as state}]
+  (let [arena (mem/shared-arena)
+        _ (h2o/conn-limit-set-max max-connections)
+        server-config (create-server-config arena ring-handler config)
+        config-ptr (::config-ptr server-config)
+        loops (h2o/create-loops n-workers)
+        contexts (h2o/create-contexts arena loops config-ptr)
+        wakeup-receivers (vec (for [ctx-ptr contexts]
+                                (h2o/mt-create-wakeup-receiver ctx-ptr)))
+        on-close-callback (create-connection-close-callback)]
+    (assoc state
+           ::arena arena
+           ::server-config server-config
+           ::config-ptr config-ptr
+           ::handler (::handler server-config)
+           ::loops loops
+           ::contexts contexts
+           ::wakeup-receivers wakeup-receivers
+           ::on-close-callback on-close-callback)))
+
+(defn- init-tls-http3-state
+  [{::keys [listener-runtimes config config-ptr n-workers loops contexts
+            tls-lookup-callback listener-claims]
+    :as state}]
+  (let [listeners (mapv :listener listener-runtimes)
+        ssl-ctx-ptrs (mapv :ssl-ctx-ptr listener-runtimes)
+        has-tls-listeners? (some some? ssl-ctx-ptrs)
+        tls-lookup-callback-ptr (:callback-ptr tls-lookup-callback)
+        session-ticket-lifetime-seconds (get-in config [:tls :session-tickets :lifetime-seconds])
+        ticket-store (tickets/memory-ticket-store)
+        native-ticket-mgr (when has-tls-listeners?
+                            (h2o/ticket-manager-create
+                             session-ticket-lifetime-seconds))
+        key-manager (when native-ticket-mgr
+                      (-> (tickets/create-key-manager ticket-store
+                                                      native-ticket-mgr
+                                                      config)
+                          (tickets/start-key-manager!)))]
+    (when native-ticket-mgr
+      (doseq [ssl-ctx-ptr ssl-ctx-ptrs]
+        (when ssl-ctx-ptr
+          (h2o/ssl-ctx-set-tickets ssl-ctx-ptr native-ticket-mgr 8192))))
+    (let [http3-contexts (create-http3-contexts listeners
+                                                config
+                                                config-ptr
+                                                native-ticket-mgr
+                                                session-ticket-lifetime-seconds
+                                                tls-lookup-callback-ptr)
+          http3-worker-contexts (create-http3-worker-contexts n-workers
+                                                              listeners
+                                                              loops
+                                                              contexts
+                                                              config-ptr
+                                                              http3-contexts
+                                                              listener-claims)]
+      (assoc state
+             ::ticket-store ticket-store
+             ::native-ticket-mgr native-ticket-mgr
+             ::key-manager key-manager
+             ::http3-contexts http3-contexts
+             ::http3-worker-contexts http3-worker-contexts))))
+
+(defn- init-single-listener-state
+  [listener listener-claims n-workers loops contexts arena config-ptr on-close-callback
+   tls-lookup-callback-ptr]
+  (let [ssl-ctx-ptr (create-ssl-context listener tls-lookup-callback-ptr)
+        listener-claim (or (get listener-claims (listen/listener-key listener))
+                           (throw (ex-info "Missing TCP listener claim"
+                                           {:listener listener})))
+        listener-fd (listen/resource listener-claim)
+        dup-fds (socket/dup-for-threads listener-fd n-workers)
+        thread-states
+        (vec
+         (for [thread-idx (range n-workers)]
+           (let [accept-ctx (h2o/create-accept-ctx arena
+                                                   (nth contexts thread-idx)
+                                                   config-ptr
+                                                   ssl-ctx-ptr)
+                 accept-callback (create-accept-callback
+                                  accept-ctx
+                                  (::connection-close-cb-ptr on-close-callback))
+                 accept-callback-ptr (::accept-cb-ptr accept-callback)
+                 sock-ptr (h2o/create-socket-for-loop
+                           (nth loops thread-idx)
+                           (nth dup-fds thread-idx)
+                           h2o/H2O_SOCKET_FLAG_DONT_READ)]
+             (h2o/socket-read-start sock-ptr accept-callback-ptr)
+             {:accept-ctx accept-ctx
+              :accept-callback accept-callback
+              :accept-callback-ptr accept-callback-ptr
+             :socket sock-ptr})))]
+    {:listener listener
+     :listener-claim listener-claim
+     :ssl-ctx-ptr ssl-ctx-ptr
+     :dup-fds dup-fds
+     :thread-states thread-states}))
+
+(defn- init-listener-state
+  [{::keys [n-workers loops contexts arena config-ptr on-close-callback
+            listener-claims
+            tls-lookup-callback]
+    :as state}]
+  (let [tls-lookup-callback-ptr (:callback-ptr tls-lookup-callback)]
+    (-> state
+        ::config
+        :entrypoints
+        (->> (into [] (mapcat config/entrypoint->listeners))
+             (mapv #(init-single-listener-state %
+                                                listener-claims
+                                                n-workers
+                                                loops
+                                                contexts
+                                                arena
+                                                config-ptr
+                                                on-close-callback
+                                                tls-lookup-callback-ptr)))
+        (->> (assoc state ::listener-runtimes)))))
+
+(defn- init-worker-state
+  [{::keys [n-workers loops contexts listener-runtimes http3-worker-contexts
+            max-connections shutting-down? message-handler wakeup-receivers]
+    :as state}]
+  (let [workers
+        (vec
+         (for [thread-idx (range n-workers)]
+           (let [loop-ptr (nth loops thread-idx)
+                 ctx-ptr (nth contexts thread-idx)
+                 thread-listener-states
+                 (mapv #(nth (:thread-states %) thread-idx) listener-runtimes)
+                 listener-socks-for-thread (mapv :socket thread-listener-states)
+                 accept-callbacks-for-thread (mapv :accept-callback-ptr thread-listener-states)
+                 http3-ctxs-for-thread (nth http3-worker-contexts thread-idx)]
+             (evloop/start-worker!
+              (fn [worker loop-state]
+                (worker-loop worker
+                             loop-state
+                             {:listener-socks listener-socks-for-thread
+                              :accept-callbacks accept-callbacks-for-thread
+                              :loop-ptr loop-ptr
+                              :ctx-ptr ctx-ptr
+                              :http3-ctxs http3-ctxs-for-thread
+                              :max-connections max-connections
+                              :shutting-down? shutting-down?}))
+              message-handler
+              (nth wakeup-receivers thread-idx)))))]
+    (assoc state ::workers workers)))
+
+(defn- finalize-generation-state
+  [state]
+  (dissoc state ::message-handler))
+
+(defn start!
+  ([compiled-config cert-runtime]
+   (start! compiled-config cert-runtime {}))
+  ([compiled-config cert-runtime {:keys [listener-pool]
+                                 :or {listener-pool (listen/open-pool)}}]
+   (let [compiled-config (config/config->listeners compiled-config)
+         listeners (:listeners compiled-config)
+         listener-claims (acquire-listener-claims! listener-pool listeners)]
+     (try
+       (-> (prepare-generation-state compiled-config
+                                     cert-runtime
+                                     listener-pool
+                                     listener-claims)
+           init-tls-lookup-state
+           init-core-state
+           init-listener-state
+           init-tls-http3-state
+           init-worker-state
+           finalize-generation-state)
+       (catch Throwable t
+         (try
+           (stop! (prepare-generation-state compiled-config
+                                            cert-runtime
+                                            listener-pool
+                                            listener-claims))
+           (catch Throwable _
+             (release-listener-claims! listener-claims)))
+         (throw t))))))
+
+(defn begin-stop!
+  [generation]
+  (locking (::stop-lock generation)
+    (let [phase-atom (::phase generation)]
+      (when (= :running @phase-atom)
+        (when-let [handler-ptr (some-> generation ::handler ::h2o/handler-ptr)]
+          (h2o/handler-set-shutting-down handler-ptr 1))
+        (when-let [shutting-down? (::shutting-down? generation)]
+          (.set ^AtomicBoolean shutting-down? true))
+        (when-let [key-mgr (::key-manager generation)]
+          (tickets/stop-key-manager! key-mgr))
+        (when (seq (::workers generation))
+          (evloop/broadcast-wake! (::workers generation)))
+        (when-let [^ExecutorService executor (::executor generation)]
+          (.shutdown executor))
+        (reset! phase-atom :stopping))))
+  generation)
+
+(defn stop!
+  ([generation]
+   (stop! generation 60 TimeUnit/SECONDS))
+  ([{::keys [^ExecutorService executor] :as generation} ^long timeout ^TimeUnit timeunit]
+   (assert generation)
+   (begin-stop! generation)
+   (locking (::stop-lock generation)
+     (let [phase-atom (::phase generation)]
+       (when (not= :stopped @phase-atom)
+         (when executor
+           (when-not (.awaitTermination executor timeout timeunit)
+             (.shutdownNow executor)
+             (when-not (.awaitTermination executor timeout timeunit)
+               (println "Virtual thread request executor pool did not shutdown cleanly"))))
+         (when (seq (::workers generation))
+           (evloop/broadcast-wake! (::workers generation)))
+         (doseq [[worker wr] (map vector (::workers generation) (::wakeup-receivers generation))]
+           (when (and wr (not (mem/null? wr)))
+             (h2o/mt-destroy-wakeup-receiver wr))
+           (.set ^AtomicReference (:wakeup-receiver_ worker) nil))
+         (when (seq (::workers generation))
+           (evloop/join-all! (::workers generation)))
+         (when-let [http3-contexts (::http3-contexts generation)]
+           (free-http3-contexts http3-contexts))
+         (when-let [ticket-mgr (::native-ticket-mgr generation)]
+           (h2o/ticket-manager-destroy ticket-mgr))
+         (when (seq (::loops generation))
+           (h2o/destroy-loops (::loops generation)))
+         (doseq [{:keys [dup-fds]} (::listener-runtimes generation)
+                 fd dup-fds]
+           (socket/close-fd! fd))
+         (when-let [config-ptr (::config-ptr generation)]
+           (h2o/config-dispose config-ptr))
+         (doseq [{:keys [ssl-ctx-ptr]} (::listener-runtimes generation)]
+           (when ssl-ctx-ptr
+             (h2o/free-ssl-ctx ssl-ctx-ptr)))
+         (when-let [buffer-pool (-> generation ::config :buffer-pool)]
+           (bp/dispose buffer-pool))
+         (release-listener-claims! (::listener-claims generation))
+         (when-let [arena (::arena generation)]
+           (.close ^java.lang.AutoCloseable arena))
+         (reset! phase-atom :stopped))))
+   nil))

@@ -1,40 +1,12 @@
 (ns ol.busker.runtime
-  "One-generation runtime lifecycle for Busker.
-
-  This namespace owns the stable server handle used by the Phase 3 API.
-  It starts exactly one runtime generation, exposes pure-data state, and
-  synchronizes `stop!` through a lifecycle gate."
+  "Multi-generation runtime lifecycle for Busker."
   (:require
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.config :as config]
-   [ol.busker.listen :as listen]
-   [ol.busker.server :as server]))
+   [ol.busker.generation :as generation]
+   [ol.busker.listen :as listen]))
 
 (set! *warn-on-reflection* true)
-
-(defn- server-step
-  [sym]
-  (or (ns-resolve 'ol.busker.server sym)
-      (throw (ex-info "Missing server startup step"
-                      {:symbol sym}))))
-
-(def ^:private init-tls-lookup-state-var
-  (delay (server-step 'init-tls-lookup-state)))
-
-(def ^:private init-core-state-var
-  (delay (server-step 'init-core-state)))
-
-(def ^:private init-listener-state-var
-  (delay (server-step 'init-listener-state)))
-
-(def ^:private init-tls-http3-state-var
-  (delay (server-step 'init-tls-http3-state)))
-
-(def ^:private init-worker-state-var
-  (delay (server-step 'init-worker-state)))
-
-(def ^:private finalize-server-state-var
-  (delay (server-step 'finalize-server-state)))
 
 (defn- snapshot-listener-keys
   [snapshot]
@@ -121,94 +93,213 @@
      :reused? false
      :superseded current-runtime}))
 
-(defn- prepare-generation-state
-  [compiled-config cert-automation]
-  (let [{:keys [n-workers max-connections executor]} compiled-config
-        ring-handler (-> compiled-config
-                         config/dispatch-handler
-                         (clave-adapter/wrap-handler cert-automation))]
-    {::server/ring-handler ring-handler
-     ::server/config compiled-config
-     ::server/clave-runtime cert-automation
-     ::server/message-handler server/evloop-msg-processor
-     ::server/shutting-down? (java.util.concurrent.atomic.AtomicBoolean. false)
-     ::server/n-workers n-workers
-     ::server/max-connections max-connections
-     ::server/executor executor}))
+(defn- wrap-stage-error
+  [message stage t]
+  (let [data (ex-data t)]
+    (throw (ex-info message
+                    (merge {:stage (or (:stage data) stage)}
+                           data)
+                    t))))
 
-(defn- start-generation!
-  [user-config current-cert-automation]
-  (let [compiled-config (config/load! user-config)
+(defn- build-generation!
+  [user-config generation-id listener-pool current-generation]
+  (let [compiled-config
+        (try
+          (config/load! user-config)
+          (catch Throwable t
+            (wrap-stage-error "Failed to compile generation config"
+                              :validation
+                              t)))
         snapshot (config/normalized-snapshot user-config)
-        managed-plan (clave-adapter/build-managed-plan compiled-config)
-        {:keys [runtime superseded]}
-        (acquire-cert-automation! current-cert-automation managed-plan)
-        init-tls-lookup-state @init-tls-lookup-state-var
-        init-core-state @init-core-state-var
-        init-listener-state @init-listener-state-var
-        init-tls-http3-state @init-tls-http3-state-var
-        init-worker-state @init-worker-state-var
-        finalize-server-state @finalize-server-state-var]
+        managed-plan (clave-adapter/build-managed-plan snapshot)
+        current-cert-runtime (:cert-automation current-generation)
+        {:keys [runtime reused?]}
+        (try
+          (acquire-cert-automation! current-cert-runtime managed-plan)
+          (catch Throwable t
+            (wrap-stage-error "Failed to start certificate automation"
+                              :automation-startup
+                              t)))]
     (try
-      (let [prepared-state (prepare-generation-state compiled-config runtime)
-            server-state (-> prepared-state
-                             init-tls-lookup-state
-                             init-core-state
-                             init-listener-state
-                             init-tls-http3-state
-                             init-worker-state
-                             finalize-server-state)]
-        {:config snapshot
-         :runtime {:generation-id 0
-                   :server (dissoc server-state ::server/clave-runtime)
-                   :cert-automation runtime}
-         :superseded-cert-automation superseded})
+      {:generation-id generation-id
+       :config snapshot
+       :managed-plan managed-plan
+       :cert-automation runtime
+       :instance (generation/start! compiled-config
+                                    runtime
+                                    {:listener-pool listener-pool})}
       (catch Throwable t
-        (when (and runtime
-                   (not= runtime current-cert-automation))
+        (when (and runtime (not reused?))
           (clave-adapter/stop! runtime))
-        (throw t)))))
+        (wrap-stage-error "Failed to start generation"
+                          :activation
+                          t)))))
+
+(defn- current-generations
+  [state]
+  (cond-> []
+    (:active state) (conj (:active state))
+    (seq (:draining state)) (into (:draining state))))
+
+(defn- cert-runtime-in-use?
+  [state cert-runtime]
+  (boolean
+   (some #(identical? cert-runtime (:cert-automation %))
+         (current-generations state))))
+
+(defn- finalize-draining-generation!
+  [server-handle generation]
+  (let [state-atom (:busker/state server-handle)
+        gate (:busker/lifecycle-gate server-handle)
+        cert-runtime (:cert-automation generation)
+        stop-cert-runtime?
+        (locking gate
+          (let [state @state-atom
+                next-draining (->> (:draining state)
+                                   (remove #(= (:generation-id generation)
+                                               (:generation-id %)))
+                                   vec)
+                next-state (assoc state :draining next-draining)]
+            (reset! state-atom next-state)
+            (and (= :running (:phase state))
+                 cert-runtime
+                 (not (cert-runtime-in-use? next-state cert-runtime)))))]
+    (when stop-cert-runtime?
+      (clave-adapter/stop! cert-runtime))
+    nil))
+
+(defn- begin-drain!
+  [server-handle generation]
+  (generation/begin-stop! (:instance generation))
+  (assoc generation
+         :drain-future
+         (future
+           (let [result
+                 (try
+                   (generation/stop! (:instance generation))
+                   :ok
+                   (catch Throwable t
+                     t)
+                   (finally
+                     (finalize-draining-generation! server-handle generation)))]
+             result))))
+
+(defn- await-drain!
+  [generation]
+  (let [result @(or (:drain-future generation)
+                    (future
+                      (generation/stop! (:instance generation))
+                      :ok))]
+    (when (instance? Throwable result)
+      (throw result))
+    nil))
 
 (defn start!
-  "Start one Busker runtime generation from `user-config`.
-
-  Returns a stable opaque server handle with a lifecycle gate and published
-  runtime state."
+  "Start a new Busker server from `user-config`."
   [user-config]
-  (let [{:keys [config runtime superseded-cert-automation]}
-        (start-generation! user-config nil)]
-    (when superseded-cert-automation
-      (clave-adapter/stop! superseded-cert-automation))
+  (let [listener-pool (listen/open-pool)
+        generation (build-generation! user-config 1 listener-pool nil)]
     {:busker/lifecycle-gate (Object.)
      :busker/state
      (atom {:phase :running
-            :config config
-            :runtime runtime})}))
+            :config (:config generation)
+            :next-generation-id 2
+            :listener-pool listener-pool
+            :active generation
+            :draining []})}))
+
+(defn reload!
+  "Compile and activate a new runtime snapshot for `server-handle`."
+  ([server-handle user-config]
+   (reload! server-handle user-config {}))
+  ([server-handle user-config opts]
+   (locking (:busker/lifecycle-gate server-handle)
+     (let [state-atom (:busker/state server-handle)
+           {:keys [phase active next-generation-id listener-pool draining]}
+           @state-atom]
+       (when (not= :running phase)
+         (throw (ex-info "Server is stopping"
+                         {:reason :server-stopping})))
+       (let [plan (candidate-plan (:config active)
+                                  (:managed-plan active)
+                                  user-config
+                                  opts)]
+         (if (= :unchanged (:action plan))
+           :unchanged
+           (try
+             (let [candidate (build-generation! user-config
+                                                next-generation-id
+                                                listener-pool
+                                                active)
+                   draining-generation (begin-drain! server-handle active)]
+               (reset! state-atom
+                       {:phase :running
+                        :config (:config candidate)
+                        :next-generation-id (inc next-generation-id)
+                        :listener-pool listener-pool
+                        :active candidate
+                        :draining (conj draining draining-generation)})
+               :activated)
+             (catch Throwable t
+               (let [data (ex-data t)]
+                 (throw (ex-info "Reload failed"
+                                 (merge {:reason :reload-failed
+                                         :stage (or (:stage data) :activation)}
+                                        data)
+                                 t)))))))))))
 
 (defn stop!
-  "Synchronously stop the runtime represented by `server-handle`.
-
-  This function is idempotent.
-  After it returns, [[state]] reports `:phase :stopped`."
+  "Synchronously stop `server-handle`, waiting for active and draining
+  generations to quiesce."
   [server-handle]
-  (locking (:busker/lifecycle-gate server-handle)
-    (let [state-atom (:busker/state server-handle)
-          {:keys [phase runtime config]} @state-atom]
-      (when (= :running phase)
-        (swap! state-atom assoc :phase :stopping)
-        (server/stop-server (:server runtime))
-        (clave-adapter/stop! (:cert-automation runtime))
-        (reset! state-atom {:phase :stopped
-                            :config config
-                            :runtime nil}))))
+  (let [{:keys [config generations-to-stop]}
+        (locking (:busker/lifecycle-gate server-handle)
+          (let [state-atom (:busker/state server-handle)
+                {:keys [phase config active draining next-generation-id listener-pool]}
+                @state-atom]
+            (cond
+              (= :stopped phase)
+              {:config config
+               :generations-to-stop nil}
+
+              (= :stopping phase)
+              {:config config
+               :generations-to-stop draining}
+
+              :else
+              (let [draining (cond-> draining
+                               active (conj (begin-drain! server-handle active)))]
+                (reset! state-atom
+                        {:phase :stopping
+                         :config config
+                         :next-generation-id next-generation-id
+                         :listener-pool listener-pool
+                         :active nil
+                         :draining draining})
+                {:config config
+                 :generations-to-stop draining}))))]
+    (when generations-to-stop
+      (doseq [generation generations-to-stop]
+        (await-drain! generation))
+      (doseq [cert-runtime (->> generations-to-stop
+                                (map :cert-automation)
+                                (remove nil?)
+                                distinct)]
+        (clave-adapter/stop! cert-runtime))
+      (locking (:busker/lifecycle-gate server-handle)
+        (let [state-atom (:busker/state server-handle)
+              {:keys [next-generation-id listener-pool]} @state-atom]
+          (reset! state-atom
+                  {:phase :stopped
+                   :config config
+                   :next-generation-id next-generation-id
+                   :listener-pool listener-pool
+                   :active nil
+                   :draining []})))))
   nil)
 
 (defn state
-  "Return pure data describing the current runtime state.
-
-  The returned map is safe for callers to retain.
-  It contains the current lifecycle `:phase` and the normalized config snapshot
-  under `:config`."
+  "Return pure data describing the current runtime state."
   [server-handle]
   (let [{:keys [phase config]} @(:busker/state server-handle)]
     {:phase phase
