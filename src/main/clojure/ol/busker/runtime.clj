@@ -7,6 +7,7 @@
   (:require
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.config :as config]
+   [ol.busker.listen :as listen]
    [ol.busker.server :as server]))
 
 (set! *warn-on-reflection* true)
@@ -34,6 +35,73 @@
 
 (def ^:private finalize-server-state-var
   (delay (server-step 'finalize-server-state)))
+
+(defn- snapshot-listener-keys
+  [snapshot]
+  (->> (:listeners snapshot)
+       (mapcat (fn [listener]
+                 (cond-> [(listen/listener-key listener)]
+                   (get-in listener [:tls :http3?])
+                   (conj (listen/listener-key
+                          (assoc listener :transport :udp))))))
+       distinct
+       (sort-by pr-str)
+       vec))
+
+(defn- listener-reuse-plan
+  [current-snapshot next-snapshot]
+  (let [current-listeners (set (snapshot-listener-keys current-snapshot))
+        next-listeners (set (snapshot-listener-keys next-snapshot))]
+    {:reuse (->> current-listeners
+                 (filter next-listeners)
+                 (sort-by pr-str)
+                 vec)
+     :acquire (->> next-listeners
+                   (remove current-listeners)
+                   (sort-by pr-str)
+                   vec)
+     :release (->> current-listeners
+                   (remove next-listeners)
+                   (sort-by pr-str)
+                   vec)}))
+
+(defn- automation-reuse-plan
+  [current-managed-plan next-managed-plan]
+  (cond
+    (and (nil? current-managed-plan) (nil? next-managed-plan))
+    {:action :none}
+
+    (nil? current-managed-plan)
+    {:action :start
+     :managed-plan next-managed-plan}
+
+    (nil? next-managed-plan)
+    {:action :stop}
+
+    (= current-managed-plan next-managed-plan)
+    {:action :reuse
+     :managed-plan next-managed-plan}
+
+    :else
+    {:action :replace
+     :managed-plan next-managed-plan}))
+
+(defn- candidate-plan
+  [current-snapshot current-managed-plan user-config opts]
+  (let [next-snapshot (config/normalized-snapshot user-config)
+        next-managed-plan (clave-adapter/build-managed-plan next-snapshot)
+        force? (true? (:force? opts))]
+    (if (and (not force?)
+             (= current-snapshot next-snapshot))
+      {:action :unchanged
+       :snapshot current-snapshot}
+      {:action :activate
+       :current-snapshot current-snapshot
+       :next-snapshot next-snapshot
+       :listener-plan (listener-reuse-plan current-snapshot next-snapshot)
+       :automation-plan (automation-reuse-plan current-managed-plan
+                                               next-managed-plan)
+       :force? force?})))
 
 (defn- acquire-cert-automation!
   [current-runtime managed-plan]

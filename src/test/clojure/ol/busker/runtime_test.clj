@@ -2,6 +2,7 @@
   (:require
    [clojure.test :refer [deftest is testing]]
    [ol.busker.clave-adapter :as clave-adapter]
+   [ol.busker.config :as config]
    [ol.busker.runtime :as runtime]
    [ol.busker.test-utils :as util]))
 
@@ -108,3 +109,62 @@
         (catch clojure.lang.ExceptionInfo e
           (is (= {:stage :automation-startup}
                  (ex-data e))))))))
+
+(deftest candidate-plan-skips-unchanged-snapshots-unless-forced-test
+  (let [user-config {:entrypoints {:http {:bind "127.0.0.1:18576"
+                                          :tls false}}
+                     :dispatch [{:handler (fn [_]
+                                            {:status 200
+                                             :body "unchanged"})}]}
+        snapshot (config/normalized-snapshot user-config)
+        plan! #'ol.busker.runtime/candidate-plan]
+    (is (= {:action :unchanged
+            :snapshot snapshot}
+           (plan! snapshot nil user-config {})))
+    (is (= :activate
+           (:action (plan! snapshot nil user-config {:force? true}))))
+    (is (true? (:force? (plan! snapshot nil user-config {:force? true}))))))
+
+(deftest candidate-plan-computes-listener-and-automation-deltas-test
+  (let [current-config {:tls {:certificates {:manage ["a.example"]}
+                              :issuers [{:directory-url
+                                         "https://acme.example/directory"}]}
+                        :entrypoints {:https {:bind "127.0.0.1:18577"
+                                              :tls {:tls-compatibility-mode
+                                                    :modern}}}
+                        :dispatch [{:handler (fn [_]
+                                               {:status 200
+                                                :body "current"})}]}
+        next-config {:tls {:certificates {:manage ["b.example"]}
+                           :issuers [{:directory-url
+                                      "https://acme.example/directory"}]}
+                     :entrypoints {:https {:bind "127.0.0.1:18578"
+                                           :tls {:tls-compatibility-mode
+                                                 :modern}}}
+                     :dispatch [{:handler (fn [_]
+                                            {:status 200
+                                             :body "next"})}]}
+        current-snapshot (config/normalized-snapshot current-config)
+        current-managed-plan (clave-adapter/build-managed-plan current-snapshot)
+        plan! #'ol.busker.runtime/candidate-plan
+        plan (plan! current-snapshot current-managed-plan next-config {})]
+    (is (= :activate (:action plan)))
+    (is (= {:action :replace
+            :managed-plan {:subject-names ["b.example"]
+                           :clave-config {:issuers [{:directory-url
+                                                     "https://acme.example/directory"}]}}}
+           (:automation-plan plan)))
+    (is (= {:reuse []
+            :acquire [{:transport :tcp
+                       :host "127.0.0.1"
+                       :port 18578}
+                      {:transport :udp
+                       :host "127.0.0.1"
+                       :port 18578}]
+            :release [{:transport :tcp
+                       :host "127.0.0.1"
+                       :port 18577}
+                      {:transport :udp
+                       :host "127.0.0.1"
+                       :port 18577}]}
+           (:listener-plan plan)))))
