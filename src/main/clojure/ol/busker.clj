@@ -11,6 +11,13 @@
   [config]
   (runtime/start! config))
 
+(defn reload!
+  "Compile and activate a new runtime snapshot for `server`."
+  ([server config]
+   (runtime/reload! server config))
+  ([server config opts]
+   (runtime/reload! server config opts)))
+
 (defn stop!
   "Synchronously stop `server`."
   [server]
