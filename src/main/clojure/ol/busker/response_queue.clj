@@ -119,8 +119,7 @@
   "Evloop worker thread: drain chunks and send to native when ready."
   [st]
   (when-not (.get ^AtomicBoolean (:stopped?_ st))
-    ;; TODO: what should else branch here be?
-    (if (nil? (.get ^AtomicReference (:in-flight_ st)))
+    (when (nil? (.get ^AtomicReference (:in-flight_ st)))
       (let [arena (Arena/ofAuto)
             result (drain-chunks (:req st) (:bbq st) (get-in st [:config :preferred-chunk-size] Long/MAX_VALUE)
                                  arena)]
@@ -132,17 +131,16 @@
           (.set ^AtomicBoolean (:scheduled?_ st) false))))))
 
 (defn schedule-drain!
-  "Try to schedule a drain task on the event loop.
-   Uses CAS on scheduled?_ to ensure only one drain is posted at a time.
-   Returns true if a new drain was scheduled, false if one was already pending."
+  "Try to schedule a drain task on the event loop."
   [st]
-  (let [trig (if (.compareAndSet ^AtomicBoolean (:scheduled?_ st) false true)
-               (do
-                 (pi/send-msg (:worker (:req st)) [:h2o/sendvec (fn [] (send-vecs st))])
-                 :sent-msg)
-               (do
-                 (pi/wake (:worker (:req st)))
-                 :woke))]))
+  (let [worker (-> st :req :worker)]
+    (if (.compareAndSet ^AtomicBoolean (:scheduled?_ st) false true)
+      (do
+        (pi/send-msg worker [:h2o/sendvec (fn [] (send-vecs st))])
+        :sent-msg)
+      (do
+        (pi/wake worker)
+        :woke))))
 
 (defn report-error [e]
   (trove/log! {:level :error :id :h2o/error :ex e}))
