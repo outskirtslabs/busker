@@ -1,9 +1,9 @@
 {
-  "h2o-0.0.1-7Fp7SixcAADLqEPBMz-e1GJKqHwXTLuWV4ezfzc8ppo9": {
-    "name": "h2o",
-    "url": "git+https://github.com/outskirtslabs/h2o-zig.git?ref=main#c76294cd9faf227a80f1f81710f2d84206cbe938",
-    "hash": "sha256-kz/1MvmMVYN2LBsM63VGIglkJsLDrF4poLkU3WFqB0I=",
-    "rev": "c76294cd9faf227a80f1f81710f2d84206cbe938"
+  "h2o-0.0.1-7Fp7StleAAAR_roWJiFQugGBLn8C-KL6pNM8EJuKbXVN": {
+    "name": "h2o-zig",
+    "url": "git+https://github.com/outskirtslabs/h2o-zig.git#6f1be4d7e96eb242f77f04d6cb863a04bfa9f9df",
+    "hash": "sha256-A6ejLWqSubB1ld2agZ7sk5gBeYqfIp50BUwo1uD8Ais=",
+    "rev": "6f1be4d7e96eb242f77f04d6cb863a04bfa9f9df"
   },
   "N-V-__8AACN7KgQpxLwB65aNI8-tyPk2QtPClwkIXvnoMqFQ": {
     "name": "h2o",

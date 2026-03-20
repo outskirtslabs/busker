@@ -12,7 +12,7 @@
 }:
 let
   system = stdenv.hostPlatform.system;
-  root = toString ../shim;
+  root = toString ../.;
   zig = zig2nix.packages.${system}."zig-0_15_2";
   zig2nixEnv = zig2nix.outputs.zig-env.${system} { inherit zig; };
   deps-cache = mk-deps-cache {
@@ -42,15 +42,23 @@ let
   );
   jarChecks = lib.concatStringsSep "\n" (
     map (target: ''
-      test -e "$out/jars/${target.dir}-$(sed -n 's/.*:version[[:space:]]*"\([^"]*\)".*/\1/p' "$src/${target.dir}/deps.edn" | head -n1).jar"
+      test -e "$out/jars/${target.dir}-$(sed -n 's/.*:version[[:space:]]*"\([^"]*\)".*/\1/p' "$src/shim/${target.dir}/deps.edn" | head -n1).jar"
     '') shimTargets
   );
-in
-zig2nixEnv.package {
-  pname = "busker-shim";
-  version = "0.0.2";
-  src = lib.cleanSourceWith {
-    src = ../shim;
+  excludedShimPrefixes =
+    [
+      "shim/.zig-cache/"
+      "shim/.zig-cache-global/"
+      "shim/zig-cache/"
+      "shim/zig-out/"
+    ]
+    ++ lib.concatMap (target: [
+      "shim/${target.dir}/.cpcache/"
+      "shim/${target.dir}/resources/"
+      "shim/${target.dir}/target/"
+    ]) shimTargets;
+  filteredSrc = lib.cleanSourceWith {
+    src = ../.;
     filter =
       path: _type:
       let
@@ -59,24 +67,26 @@ zig2nixEnv.package {
       in
       !(
         base == ".git"
-        || lib.hasPrefix ".zig-cache/" rel
-        || lib.hasPrefix ".zig-cache-global/" rel
-        || lib.hasPrefix "zig-cache/" rel
-        || lib.hasPrefix "zig-out/" rel
-        || lib.hasPrefix "linux-x86-64/.cpcache/" rel
-        || lib.hasPrefix "linux-x86-64/resources/" rel
-        || lib.hasPrefix "linux-x86-64/target/" rel
-        || lib.hasPrefix "linux-aarch64/.cpcache/" rel
-        || lib.hasPrefix "linux-aarch64/resources/" rel
-        || lib.hasPrefix "linux-aarch64/target/" rel
-        || lib.hasPrefix "macos-x86-64/.cpcache/" rel
-        || lib.hasPrefix "macos-x86-64/resources/" rel
-        || lib.hasPrefix "macos-x86-64/target/" rel
-        || lib.hasPrefix "macos-aarch64/.cpcache/" rel
-        || lib.hasPrefix "macos-aarch64/resources/" rel
-        || lib.hasPrefix "macos-aarch64/target/" rel
+        || !(
+          rel == "deps.edn"
+          || rel == "shim"
+          || rel == "src"
+          || rel == "src/shim"
+          || lib.hasPrefix "src/shim/" rel
+          || (
+            lib.hasPrefix "shim/" rel
+            && !(lib.any (prefix: lib.hasPrefix prefix rel) excludedShimPrefixes)
+          )
+        )
       );
   };
+in
+zig2nixEnv.package {
+  pname = "busker-shim";
+  version = "0.0.2";
+  src = filteredSrc;
+  sourceRoot = "source/shim";
+  zigBuildZon = "${filteredSrc}/shim/build.zig.zon";
   nativeBuildInputs = [
     clojure
     git
@@ -101,7 +111,9 @@ zig2nixEnv.package {
     export JAVA_HOME="${jdk25.home}"
     export PATH="$JAVA_HOME/bin:$PATH"
     export GIT_REV="${gitRev}"
-    cp ${../deps.edn} ../deps.edn
+    if [ ! -f ../deps.edn ]; then
+      cp ${../deps.edn} ../deps.edn
+    fi
     mkdir -p "$out/jars"
     for dir in ${targetNames}; do
       case "$dir" in

@@ -115,7 +115,7 @@ fn buildShimForTarget(b: *std.Build, target_config: TargetConfig, optimize: std.
     const is_macos = target.result.os.tag == .macos;
     const needs_pic = true;
 
-    const h2o_dep = b.dependency("h2o", .{
+    const h2o_dep = b.dependency("h2o-zig", .{
         .target = target,
         .optimize = optimize,
         .@"use-boringssl" = use_boringssl,

@@ -4,9 +4,9 @@
     {
       "lib": "io.github.outskirtslabs/clave",
       "url": "https://github.com/outskirtslabs/clave.git",
-      "rev": "c47cededac7d920e9056d8a1b4c2e3d54885af22",
+      "rev": "2b7fa1d12cb05a23806bdcf249b76027951adbf3",
       "git-dir": "https/github.com/outskirtslabs/clave",
-      "hash": "sha256-pjDLN9uR7jEFlXWKjLtRuthHZ4g2xQ6wni17QYLP0j0="
+      "hash": "sha256-eAtjHKDp1ksf92IeHQpE/5nU8lE64ZQucHu0xHJnB/Y="
     }
   ],
   "mvn-deps": [

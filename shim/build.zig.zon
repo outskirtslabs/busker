@@ -4,8 +4,8 @@
     .fingerprint = 0xaabaf927ba0e83fa,
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
-        .h2o = .{
-            .url = "git+https://github.com/outskirtslabs/h2o-zig.git?ref=main#6f1be4d7e96eb242f77f04d6cb863a04bfa9f9df",
+        .@"h2o-zig" = .{
+            .url = "git+https://github.com/outskirtslabs/h2o-zig.git#6f1be4d7e96eb242f77f04d6cb863a04bfa9f9df",
             .hash = "h2o-0.0.1-7Fp7StleAAAR_roWJiFQugGBLn8C-KL6pNM8EJuKbXVN",
         },
         .boringssl = .{
