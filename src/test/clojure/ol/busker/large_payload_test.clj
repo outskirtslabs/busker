@@ -51,8 +51,23 @@
 
 (def payload-size (* 1024 mib))
 (def value (byte \b))
-(def sha (first (with-open [is (repeat-input-stream payload-size value)] (sha256-hex is))))
-(println "Large test with payload size " payload-size "has sha" sha)
+
+(defonce payload-info_
+  (atom nil))
+
+(defn- with-payload-info
+  [f]
+  (or @payload-info_
+      (let [info (with-open [is (repeat-input-stream payload-size value)]
+                   (let [[sha _total] (sha256-hex is)]
+                     {:sha sha}))]
+        (or (when (compare-and-set! payload-info_ nil info)
+              (println "Large test with payload size" payload-size "has sha" (:sha info))
+              info)
+            @payload-info_)))
+  (f))
+
+(test/use-fixtures :once with-payload-info)
 
 (deftest request-body
   (st/with-server [_server
@@ -65,7 +80,7 @@
                         "/source" {:status  200
                                    :headers {"content-type" "application/octet-stream"
                                              "x-len"        (str payload-size)
-                                             "x-sha256"     sha}
+                                             "x-sha256"     (:sha @payload-info_)}
                                    :body    (repeat-input-stream payload-size value)}
                         {:status 404}))
                     :max-request-entity-size (* 5 gib))]
@@ -87,7 +102,7 @@
                         "/source" {:status  200
                                    :headers {"content-type" "application/octet-stream"
                                              "x-len"        (str payload-size)
-                                             "x-sha256"     sha}
+                                             "x-sha256"     (:sha @payload-info_)}
                                    :body    (repeat-input-stream payload-size value)}
                         {:status 404}))
                     :max-request-entity-size (* 5 gib))]

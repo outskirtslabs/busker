@@ -89,7 +89,7 @@
 
 (deftest server-creates-udp-listener-test
   (testing "Server with TLS listener creates UDP socket on same port"
-    (let [port 18443
+    (let [port (util/free-port)
           server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
@@ -107,7 +107,7 @@
 
 (deftest server-no-udp-when-http3-disabled-test
   (testing "Server with :http3? false does not create UDP socket"
-    (let [port 18444
+    (let [port (util/free-port)
           server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
@@ -125,7 +125,7 @@
 
 (deftest pooled-http3-udp-bind-retains-port-until-release-test
   (testing "A pooled HTTP/3 UDP bind keeps the port unavailable until release"
-    (let [port 18459
+    (let [port (util/free-port)
           open-listener (requiring-resolve 'ol.busker.native/http3-open-udp-listener)
           release-listener (requiring-resolve 'ol.busker.native/http3-release-udp-listener)]
       (is (datagram-bindable? port)
@@ -146,7 +146,7 @@
 
 (deftest http3-request-response-test
   (testing "HTTP/3 request receives correct response"
-    (let [port 18445
+    (let [port (util/free-port)
           server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
@@ -167,7 +167,7 @@
 
 (deftest http3-no-sni-managed-fallback-success-test
   (testing "HTTP/3 handshake without SNI succeeds when a managed fallback subject exists"
-    (let [port 18456
+    (let [port (util/free-port)
           runtime {:system {:id ::runtime}
                    :subject-names ["fallback.example"]
                    :lookup-fn (fn [hostname]
@@ -192,8 +192,9 @@
                                               {:status 200
                                                :body "h3-fallback-ok"})}]})]
           (try
-            (Thread/sleep 200)
-            (let [result (util/curl :https :h3 port "/" :host "127.0.0.1" :max-time 5)]
+            (let [result (util/wait-for-curl-ready! :https :h3 port "/"
+                                                    :host "127.0.0.1"
+                                                    :max-time 5)]
               (is (= 0 (:exit result))
                   (str "HTTP/3 no-SNI request should succeed. stderr: " (:err result)))
               (when (zero? (:exit result))
@@ -219,7 +220,7 @@
 
 (deftest http3-request-with-streaming-body-test
   (testing "HTTP/3 streaming response works correctly"
-    (let [port 18446
+    (let [port (util/free-port)
           server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
@@ -243,7 +244,7 @@
 
 (deftest http3-graceful-shutdown-test
   (testing "Server gracefully shuts down HTTP/3 connections"
-    (let [port 18447
+    (let [port (util/free-port)
           first-chunk-sent (promise)
           chunk-delay-ms 100
           server (busker/start!
@@ -290,7 +291,7 @@
 
 (deftest http3-connection-limit-test
   (testing "HTTP/3 connections respect global max-connections limit"
-    (let [port 18450
+    (let [port (util/free-port)
           stream-duration-ms 3000
           chunk-interval-ms 200
           ;; Create a streaming handler that keeps connections open
@@ -348,19 +349,23 @@
 
 (deftest http3-and-http2-share-limit-test
   (testing "HTTP/3 and HTTP/2 connections share the global limit"
-    (let [port 18451
+    (let [port (util/free-port)
           stream-duration-ms 3000
           chunk-interval-ms 200
-          handler (fn [{emitter :ol.busker.request/emitter}]
-                    (future
-                      (proto/emit! emitter {:status 200 :headers {"content-type" "text/plain"}})
-                      (let [num-chunks (/ stream-duration-ms chunk-interval-ms)]
-                        (doseq [idx (range num-chunks)]
-                          (proto/emit! emitter (str "chunk-" idx "-"))
-                          (proto/flush emitter)
-                          (Thread/sleep chunk-interval-ms)))
-                      (proto/close emitter))
-                    {:body emitter})
+          handler (fn [{:keys [uri]
+                        emitter :ol.busker.request/emitter}]
+                    (if (= "/ready" uri)
+                      {:status 200 :body "ready"}
+                      (do
+                        (future
+                          (proto/emit! emitter {:status 200 :headers {"content-type" "text/plain"}})
+                          (let [num-chunks (/ stream-duration-ms chunk-interval-ms)]
+                            (doseq [idx (range num-chunks)]
+                              (proto/emit! emitter (str "chunk-" idx "-"))
+                              (proto/flush emitter)
+                              (Thread/sleep chunk-interval-ms)))
+                          (proto/close emitter))
+                        {:body emitter})))
           server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
@@ -402,7 +407,7 @@
 
 (deftest http3-global-limit-across-workers-test
   (testing "Connection limit is global across workers, not per-worker"
-    (let [port 18452
+    (let [port (util/free-port)
           stream-duration-ms 3000
           chunk-interval-ms 200
           handler (fn [{emitter :ol.busker.request/emitter}]
@@ -417,7 +422,7 @@
                     {:body emitter})
           ;; 2 workers with max 4 connections total
           ;; If it was per-worker, we'd have 8 connections allowed
-          server (busker/start!
+      server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
                       handler
@@ -428,10 +433,16 @@
                                            :tls {:tls-compatibility-mode
                                                  :modern}}}})))]
       (try
-        (Thread/sleep 500)
+        (let [ready (util/wait-for-curl-ready! :https :h2 port "/ready"
+                                               :max-time 5)]
+          (is (= 0 (:exit ready))
+              (str "HTTP/3 readiness check should succeed. stderr: "
+                   (:err ready))))
         ;; Start 4 connections (should reach limit)
         (let [conns (vec (for [_ (range 4)]
-                           (future (util/curl :https :h3 port "/" :max-time 20))))]
+                           (do
+                             (Thread/sleep 100)
+                             (future (util/curl :https :h3 port "/" :max-time 20)))))]
           ;; Wait a bit for connections to establish
           (Thread/sleep 1000)
 
@@ -491,7 +502,7 @@
 
 (deftest http3-early-data-key-present-test
   (testing "HTTP/3 requests include :ol.busker/early-data? key"
-    (let [port 18453
+    (let [port (util/free-port)
           early-data-value (atom nil)
           handler (fn [req]
                     (reset! early-data-value (:ol.busker/early-data? req))
@@ -523,7 +534,7 @@
   (testing "HTTP/3 0-RTT early data detection"
     (when-not (curl-ssl-sessions-supported?)
       (throw (Exception. "your curl was not compiled with --enable-ssls-export and thus does not support --ssl-sessions")))
-    (let [port         18454
+    (let [port         (util/free-port)
           session-file (str (System/getProperty "java.io.tmpdir") "/busker-test-sessions-" port ".txt")
           ;; Handler returns EDN with early-data? flag
           handler      (fn [req]
@@ -610,7 +621,7 @@
     ;; This validates the ticket encryption/decryption implementation.
     ;; Note: TLS 1.3 TCP session resumption requires BoringSSL's SSL_CTX_set_ticket_aead_method
     ;; which is not yet implemented. HTTP/3 uses picotls which has separate ticket handling.
-    (let [port         18455
+    (let [port         (util/free-port)
           session-file (str (System/getProperty "java.io.tmpdir") "/busker-test-tls12-sessions-" port ".pem")
           handler      (fn [_] {:status 200 :body "ok"})
           server       (busker/start!

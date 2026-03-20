@@ -57,42 +57,52 @@
        {:subject-names subject-names
         :clave-config (select-keys tls-config clave-config-keys)}))))
 
-(defn- pending-subject-names
-  [system subject-names]
-  (reduce (fn [pending subject-name]
-            (if (automation/lookup-cert system subject-name)
-              pending
-              (conj pending subject-name)))
-          #{}
-          subject-names))
-
 (defn- certificate-failed-event?
   [event pending]
   (and (= :certificate-failed (:type event))
        (contains? pending (get-in event [:data :domain]))))
 
-(defn- wait-for-initial-certificates!
+(defn- start-event-watcher!
   [system subject-names]
   (when (seq subject-names)
-    (let [queue (automation/get-event-queue system)
-          deadline-ms (+ (System/currentTimeMillis) initial-cert-wait-timeout-ms)]
-      (loop [pending (pending-subject-names system subject-names)]
-        (when (seq pending)
-          (let [now-ms (System/currentTimeMillis)
-                remaining-ms (- deadline-ms now-ms)]
-            (when (<= remaining-ms 0)
-              (throw
-               (ex-info "Timed out waiting for initial certificates"
-                        {:pending-subject-names (vec (sort pending))
-                         :timeout-ms initial-cert-wait-timeout-ms})))
-            (let [poll-ms (long (max 1 (min event-poll-timeout-ms remaining-ms)))
-                  event (.poll queue poll-ms TimeUnit/MILLISECONDS)]
-              (when (certificate-failed-event? event pending)
-                (throw
-                 (ex-info "Initial certificate obtain failed"
-                          {:event event
-                           :pending-subject-names (vec (sort pending))}))))
-            (recur (pending-subject-names system pending))))))))
+    (let [pending (set subject-names)]
+      (try
+        (let [queue (automation/get-event-queue system)
+              running? (atom true)
+              worker
+              (future
+                (try
+                  (loop []
+                    (when @running?
+                      (when-let [event (.poll queue event-poll-timeout-ms
+                                              TimeUnit/MILLISECONDS)]
+                        (when (certificate-failed-event? event pending)
+                          (trove/log! {:level :error
+                                       :id ::certificate-obtain-failed
+                                       :data {:event event
+                                              :subject-name
+                                              (get-in event [:data :domain])}})))
+                      (recur)))
+                  (catch InterruptedException _
+                    nil)
+                  (catch Throwable t
+                    (trove/log! {:level :error
+                                 :id ::certificate-event-watcher-failed
+                                 :ex t}))))]
+          {:running? running?
+           :worker worker})
+        (catch Throwable t
+          (trove/log! {:level :error
+                       :id ::certificate-event-watcher-start-failed
+                       :ex t})
+          nil)))))
+
+(defn- stop-event-watcher!
+  [watcher]
+  (when watcher
+    (reset! (:running? watcher) false)
+    (future-cancel (:worker watcher)))
+  nil)
 
 (defn start!
   [managed-plan]
@@ -102,21 +112,23 @@
           http01-solver (http-solver/solver)
           clave-config (update clave-config :solvers
                                (fn [solvers]
-                                 (assoc (or solvers {})
-                                        :http-01 http01-solver)))
+                                (assoc (or solvers {})
+                                       :http-01 http01-solver)))
           system (automation/create clave-config)]
       (try
         (automation/start! system)
         (automation/manage-domains system subject-names)
-        (wait-for-initial-certificates! system subject-names)
         (let [runtime {:system system
                        :managed-plan managed-plan
                        :subject-names subject-names
-                       :http-solver http01-solver}]
+                       :http-solver http01-solver
+                       :event-watcher (start-event-watcher! system
+                                                            subject-names)}]
           (assoc runtime :lookup-fn
                  (fn [hostname]
                    (lookup-certificate runtime hostname))))
         (catch Throwable t
+          (stop-event-watcher! nil)
           (automation/stop system)
           (throw t))))))
 
@@ -138,6 +150,7 @@
 
 (defn stop!
   [runtime]
+  (stop-event-watcher! (:event-watcher runtime))
   (when-let [system (:system runtime)]
     (automation/stop system))
   nil)

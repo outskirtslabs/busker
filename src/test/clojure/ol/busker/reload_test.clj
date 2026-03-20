@@ -1,9 +1,17 @@
 (ns ol.busker.reload-test
   (:require
    [clojure.test :refer [deftest is]]
+   [coffi.mem :as mem]
+   [ol.busker.clave-adapter :as clave-adapter]
+   [ol.busker.native :as native]
    [ol.busker.config :as config]
+   [ol.busker.listen :as listen]
    [ol.busker.runtime :as runtime]
-   [ol.busker.test-utils :as util]))
+   [ol.busker.test-utils :as util]
+   [ol.clave.acme.solver.http :as http-solver]
+   [ol.clave.automation :as automation])
+  (:import
+   [java.util.concurrent LinkedBlockingQueue]))
 
 (defn- response-config
   [port handler]
@@ -11,8 +19,137 @@
                         :tls false}}
    :dispatch [{:handler handler}]})
 
+(defn- tls-response-config
+  [port handler]
+  (util/with-static-tls
+    {:entrypoints {:https {:bind (str "127.0.0.1:" port)
+                           :tls {:tls-compatibility-mode :modern}}}
+     :dispatch [{:handler handler}]}))
+
+(defn- managed-http-config
+  [port handler]
+  {:tls {:certificates {:manage ["managed.example"]}
+         :issuers [{:directory-url "https://acme.example/directory"}]}
+   :entrypoints {:http {:bind (str "127.0.0.1:" port)
+                        :tls false}}
+   :dispatch [{:handler handler}]})
+
+(defn- eventually-curl
+  [scheme proto port path & {:keys [max-time]
+                             :or {max-time 10}}]
+  (loop [attempt 0]
+    (let [result (try
+                   (util/curl scheme proto port path :max-time max-time)
+                   (catch Throwable t
+                     t))
+          connect-failed?
+          (and (map? result)
+               (not= 0 (:exit result))
+               (re-find #"Failed to connect|Could not connect|Connection refused"
+                        (str (:err result))))]
+      (if (and (or connect-failed?
+                   (instance? Throwable result))
+               (< attempt 5))
+        (do
+          (Thread/sleep 100)
+          (recur (inc attempt)))
+        (if (instance? Throwable result)
+          (throw result)
+          result)))))
+
+(deftest reload-publishes-candidate-before-old-generation-begins-drain-test
+  (let [old-generation {:generation-id 1
+                        :config {:version :old}
+                        :managed-plan nil
+                        :instance ::old-instance}
+        candidate {:generation-id 2
+                   :config {:version :new}
+                   :managed-plan nil
+                   :instance ::new-instance}
+        state-atom (atom {:phase :running
+                          :config (:config old-generation)
+                          :next-generation-id 2
+                          :listener-pool ::listener-pool
+                          :active old-generation
+                          :draining []})
+        server {:busker/lifecycle-gate (Object.)
+                :busker/state state-atom}
+        events (atom [])]
+    (with-redefs-fn {#'ol.busker.runtime/candidate-plan
+                     (fn [_ _ _ _]
+                       {:action :activate})
+                     #'ol.busker.runtime/build-generation!
+                     (fn [_ generation-id listener-pool active]
+                       (swap! events conj :candidate-built)
+                       (is (= 2 generation-id))
+                       (is (= ::listener-pool listener-pool))
+                       (is (= old-generation active))
+                       candidate)
+                     #'ol.busker.runtime/begin-drain!
+                     (fn [server-handle generation]
+                       (swap! events conj :begin-drain)
+                       (is (= candidate (:active @(:busker/state server-handle))))
+                       (is (= (:config candidate) (:config @(:busker/state server-handle))))
+                       (is (= old-generation generation))
+                       (assoc generation
+                              :drain-future
+                              (future :ok)))}
+      (fn []
+        (is (= :activated
+               (runtime/reload! server ::next-config {:force? true})))
+        (is (= [:candidate-built :begin-drain] @events))
+        (is (= candidate (:active @state-atom)))
+        (is (= [1] (mapv :generation-id (:draining @state-atom))))))))
+
+(deftest begin-drain-waits-for-stop-accepting-before-background-stop-test
+  (let [events (atom [])
+        stop-accepting-release (promise)
+        server {:busker/lifecycle-gate (Object.)
+                :busker/state (atom {:phase :running
+                                     :draining []})}
+        generation {:generation-id 1
+                    :cert-automation nil
+                    :instance ::old-instance}]
+    (with-redefs-fn {#'ol.busker.generation/begin-stop!
+                     (fn [instance]
+                       (is (= ::old-instance instance))
+                       (swap! events conj :begin-stop)
+                       instance)
+                     #'ol.busker.generation/await-stop-accepting!
+                     (fn [instance]
+                       (is (= ::old-instance instance))
+                       (swap! events conj :await-stop-accepting)
+                       (deref stop-accepting-release 5000 true)
+                       (swap! events conj :stopped-accepting)
+                       nil)
+                     #'ol.busker.generation/stop!
+                     (fn [instance]
+                       (is (= ::old-instance instance))
+                       (swap! events conj :stop)
+                       nil)
+                     #'ol.busker.runtime/finalize-draining-generation!
+                     (fn [_ _]
+                       (swap! events conj :finalize)
+                       nil)}
+      (fn []
+        (let [drain-fut (future (#'runtime/begin-drain! server generation))]
+          (is (= ::timeout (deref drain-fut 200 ::timeout)))
+          (is (= [:begin-stop :await-stop-accepting]
+                 @events))
+          (deliver stop-accepting-release true)
+          (let [draining-generation (deref drain-fut 1000 ::timeout)]
+            (is (map? draining-generation))
+            (is (contains? draining-generation :drain-future))
+            @(:drain-future draining-generation)
+            (is (= [:begin-stop
+                    :await-stop-accepting
+                    :stopped-accepting
+                    :stop
+                    :finalize]
+                   @events))))))))
+
 (deftest reload-activates-new-generation-and-drains-old-test
-  (let [port 18580
+  (let [port (util/free-port)
         old-entered (promise)
         old-release (promise)
         server (runtime/start!
@@ -24,7 +161,7 @@
                                     :body "old-generation"})))]
     (try
       (let [old-request (future
-                          (util/curl :http nil port "/" :max-time 10))]
+                          (eventually-curl :http nil port "/" :max-time 10))]
         (is (deref old-entered 5000 false))
         (is (= :activated
                (runtime/reload! server
@@ -46,7 +183,7 @@
         (runtime/stop! server)))))
 
 (deftest reload-failure-keeps-current-generation-active-test
-  (let [port 18581
+  (let [port (util/free-port)
         good-config (response-config port
                                      (fn [_]
                                        {:status 200
@@ -71,14 +208,114 @@
             (is (= {:reason :reload-failed
                     :stage :validation}
                    (select-keys (ex-data e) [:reason :stage]))))))
-      (let [result (util/curl :http nil port "/" :max-time 5)]
+      (let [result (eventually-curl :http nil port "/" :max-time 5)]
         (is (= 0 (:exit result)))
         (is (= "still-active" (:out result))))
       (finally
         (runtime/stop! server)))))
 
+(deftest reload-reports-listener-acquisition-failure-stage-test
+  (let [port (util/free-port)
+        server (runtime/start!
+                (response-config port
+                                 (fn [_]
+                                   {:status 200
+                                    :body "still-listening"})))]
+    (try
+      (with-redefs [listen/acquire-claim
+                    (fn [_ listener]
+                      (throw (ex-info "claim failed"
+                                      {:listener-key (listen/listener-key listener)})))]
+        (try
+          (runtime/reload! server
+                           (response-config port
+                                            (fn [_]
+                                              {:status 200
+                                               :body "never-starts"}))
+                           {:force? true})
+          (is false)
+          (catch clojure.lang.ExceptionInfo e
+            (is (= {:reason :reload-failed
+                    :stage :listener-acquisition
+                    :listener-key {:transport :tcp
+                                   :host "127.0.0.1"
+                                   :port port}}
+                   (select-keys (ex-data e)
+                                [:reason :stage :listener-key]))))))
+      (let [result (util/curl :http nil port "/" :max-time 5)]
+        (is (= 0 (:exit result)))
+        (is (= "still-listening" (:out result))))
+      (finally
+        (runtime/stop! server)))))
+
+(deftest reload-reports-tls-startup-failure-stage-test
+  (let [port (util/free-port)
+        server (runtime/start!
+                (response-config port
+                                 (fn [_]
+                                   {:status 200
+                                    :body "tls-old"})))]
+    (try
+      (with-redefs-fn {#'ol.busker.native/create-ssl-ctx
+                       (fn [& _]
+                         mem/null)}
+        (fn []
+          (try
+            (runtime/reload! server
+                             (tls-response-config port
+                                                  (fn [_]
+                                                    {:status 200
+                                                     :body "tls-new"}))
+                             {:force? true})
+            (is false)
+            (catch clojure.lang.ExceptionInfo e
+              (is (= {:reason :reload-failed
+                      :stage :tls-startup
+                      :listener {:entrypoint :https
+                                 :host "127.0.0.1"
+                                 :port port}}
+                     (select-keys (ex-data e)
+                                  [:reason :stage :listener])))))))
+      (let [result (util/curl :http nil port "/" :max-time 5)]
+        (is (= 0 (:exit result)))
+        (is (= "tls-old" (:out result))))
+      (finally
+        (runtime/stop! server)))))
+
+(deftest reload-activates-while-managed-certificates-converge-test
+  (let [port (util/free-port)
+        queue (LinkedBlockingQueue.)
+        server (runtime/start!
+                (response-config port
+                                 (fn [_]
+                                   {:status 200
+                                    :body "before-managed"})))]
+    (try
+      (with-redefs [clave-adapter/initial-cert-wait-timeout-ms 50
+                    clave-adapter/event-poll-timeout-ms 10
+                    http-solver/solver (fn [] {:registry (atom {})})
+                    automation/create (fn [_] {:id ::system})
+                    automation/start! identity
+                    automation/manage-domains (fn [_ _] nil)
+                    automation/get-event-queue (fn [_] queue)
+                    automation/lookup-cert (fn [_ _] nil)
+                    automation/stop (fn [_] nil)]
+        (is (= :activated
+               (runtime/reload! server
+                                (managed-http-config port
+                                                     (fn [_]
+                                                       {:status 200
+                                                        :body "managed-active"}))
+                                {:force? true})))
+        (let [result (eventually-curl :http nil port "/" :max-time 5)]
+          (is (= 0 (:exit result)))
+          (is (= "managed-active" (:out result)))))
+      (finally
+        (with-redefs [automation/stop (fn [_] nil)]
+          (runtime/stop! server))))))
+
 (deftest reload-calls-serialize-through-lifecycle-gate-test
-  (let [port 18582
+  (let [port (util/free-port)
         server (runtime/start!
                 (response-config port
                                  (fn [_]
@@ -129,7 +366,7 @@
         (runtime/stop! server)))))
 
 (deftest stop-waits-for-active-and-draining-generations-test
-  (let [port 18583
+  (let [port (util/free-port)
         old-entered (promise)
         old-completed (promise)
         old-release (promise)
@@ -147,7 +384,7 @@
     (try
       (let [old-request (future
                           (try
-                            (util/curl :http nil port "/" :max-time 10)
+                            (eventually-curl :http nil port "/" :max-time 10)
                             (catch Throwable t
                               t)))]
         (is (deref old-entered 5000 false))
@@ -163,7 +400,7 @@
                                 {:force? true})))
         (let [new-request (future
                             (try
-                              (util/curl :http nil port "/" :max-time 10)
+                              (eventually-curl :http nil port "/" :max-time 10)
                               (catch Throwable t
                                 t)))
               _ (is (deref new-entered 5000 false))
@@ -181,3 +418,54 @@
         (when (not= :stopped (:phase (runtime/state server)))
           (runtime/stop! server))))
     (is (= :stopped (:phase (runtime/state server))))))
+
+(deftest repeated-reloads-retain-multiple-draining-generations-test
+  (let [port (util/free-port)
+        old-entered (promise)
+        old-release (promise)
+        mid-entered (promise)
+        mid-release (promise)
+        server (runtime/start!
+                (response-config port
+                                 (fn [_]
+                                   (deliver old-entered true)
+                                   (deref old-release 5000 true)
+                                   {:status 200
+                                    :body "old"})))]
+    (try
+      (let [old-request (future
+                          (eventually-curl :http nil port "/" :max-time 10))]
+        (is (deref old-entered 5000 false))
+        (is (= :activated
+               (runtime/reload! server
+                                (response-config port
+                                                 (fn [_]
+                                                   (deliver mid-entered true)
+                                                   (deref mid-release 5000 true)
+                                                   {:status 200
+                                                    :body "mid"}))
+                                {:force? true})))
+        (let [mid-request (future
+                            (eventually-curl :http nil port "/" :max-time 10))]
+          (is (deref mid-entered 10000 false))
+          (is (= :activated
+                 (runtime/reload! server
+                                  (response-config port
+                                                   (fn [_]
+                                                     {:status 200
+                                                      :body "new"}))
+                                  {:force? true})))
+          (is (= 2 (count (:draining @(:busker/state server)))))
+          (let [new-request (eventually-curl :http nil port "/" :max-time 5)]
+            (is (= 0 (:exit new-request)))
+            (is (= "new" (:out new-request))))
+          (deliver old-release true)
+          (deliver mid-release true)
+          (let [old-result (deref old-request 10000 nil)
+                mid-result (deref mid-request 10000 nil)]
+            (is (= 0 (:exit old-result)))
+            (is (= 0 (:exit mid-result)))
+            (is (= "old" (:out old-result)))
+            (is (= "mid" (:out mid-result))))))
+      (finally
+        (runtime/stop! server)))))

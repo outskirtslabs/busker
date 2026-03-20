@@ -2,8 +2,13 @@
   (:require
    [clojure.test :refer [deftest is testing]]
    [ol.busker :as busker]
+   [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.config :as config]
-   [ol.busker.test-utils :as util]))
+   [ol.busker.test-utils :as util]
+   [ol.clave.acme.solver.http :as http-solver]
+   [ol.clave.automation :as automation])
+  (:import
+   [java.util.concurrent LinkedBlockingQueue]))
 
 (defn- callable-value?
   [v]
@@ -21,17 +26,33 @@
     (let [result (try
                    (util/curl scheme proto port path :max-time 5)
                    (catch Throwable t
-                     t))]
-      (if (or (map? result)
-              (>= attempt 4))
-        result
+                     t))
+          retryable?
+          (or (instance? Throwable result)
+              (and (map? result)
+                   (not= 0 (:exit result))
+                   (re-find #"Failed to connect|Could not connect|Connection refused|timed out|Timeout"
+                            (str (:err result)))))]
+      (if (and retryable?
+               (< attempt 4))
         (do
           (Thread/sleep 100)
-          (recur (inc attempt)))))))
+          (recur (inc attempt)))
+        result))))
+
+(defn- managed-http-config
+  [port body]
+  {:tls {:certificates {:manage ["managed.example"]}
+         :issuers [{:directory-url "https://acme.example/directory"}]}
+   :entrypoints {:http {:bind (str "127.0.0.1:" port)
+                        :tls false}}
+   :dispatch [{:handler (fn [_]
+                          {:status 200
+                           :body body})}]})
 
 (deftest public-api-start-stop-and-state-test
   (testing "The public API starts the server and exposes pure state data"
-    (let [port 18573
+    (let [port (util/free-port)
           server (busker/start!
                   {:entrypoints {:http {:bind (str "127.0.0.1:" port)
                                         :tls false}}
@@ -59,7 +80,7 @@
       (is (= :stopped (:phase (busker/state server)))))))
 
 (deftest public-api-reload-test
-  (let [port 18587
+  (let [port (util/free-port)
         server (busker/start!
                 {:entrypoints {:http {:bind (str "127.0.0.1:" port)
                                       :tls false}}
@@ -81,8 +102,69 @@
       (finally
         (busker/stop! server)))))
 
+(deftest public-api-managed-reload-stays-healthy-after-delayed-certificate-failure-test
+  (let [port (util/free-port)
+        queue (LinkedBlockingQueue.)
+        failed-event {:type :certificate-failed
+                      :data {:domain "managed.example"
+                             :reason :acme-error}}
+        queued (promise)
+        server (busker/start!
+                {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                      :tls false}}
+                 :dispatch [{:handler (fn [_]
+                                        {:status 200
+                                         :body "before-managed"})}]})]
+    (try
+      (with-redefs [clave-adapter/initial-cert-wait-timeout-ms 200
+                    clave-adapter/event-poll-timeout-ms 10
+                    http-solver/solver (fn [] {:registry (atom {})})
+                    automation/create (fn [_] {:id ::system})
+                    automation/start! identity
+                    automation/manage-domains (fn [_ _] nil)
+                    automation/get-event-queue (fn [_] queue)
+                    automation/lookup-cert (fn [_ _] nil)
+                    automation/stop (fn [_] nil)]
+        (future
+          (Thread/sleep 25)
+          (.offer queue failed-event)
+          (deliver queued true))
+        (is (= :activated
+               (busker/reload! server
+                               (managed-http-config port "managed-active")
+                               {:force? true})))
+        (is (deref queued 1000 false))
+        (is (true?
+             (loop [attempt 0]
+               (cond
+                 (zero? (.size queue))
+                 true
+
+                 (>= attempt 20)
+                 false
+
+                 :else
+                 (do
+                   (Thread/sleep 25)
+                   (recur (inc attempt))))))
+            "The delayed failure event should be consumed after activation")
+        (is (= :activated
+               (busker/reload! server
+                               {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                                     :tls false}}
+                                :dispatch [{:handler (fn [_]
+                                                       {:status 200
+                                                        :body "after-failure"})}]}
+                               {:force? true})))
+        (let [result (eventually-curl :http nil port "/")]
+          (is (= 0 (:exit result)))
+          (is (= "after-failure" (:out result)))))
+      (finally
+        (with-redefs [automation/stop (fn [_] nil)]
+          (busker/stop! server))))))
+
 (deftest public-api-unchanged-and-failed-reload-test
-  (let [port 18588
+  (let [port (util/free-port)
         config {:entrypoints {:http {:bind (str "127.0.0.1:" port)
                                      :tls false}}
                 :dispatch [{:handler (fn [_]
@@ -111,7 +193,7 @@
             (is (= {:reason :reload-failed
                     :stage :validation}
                    (select-keys (ex-data e) [:reason :stage]))))))
-      (let [result (util/curl :http nil port "/" :max-time 5)]
+      (let [result (eventually-curl :http nil port "/")]
         (is (= 0 (:exit result)))
         (is (= "steady" (:out result))))
       (finally

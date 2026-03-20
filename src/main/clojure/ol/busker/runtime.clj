@@ -171,6 +171,7 @@
 (defn- begin-drain!
   [server-handle generation]
   (generation/begin-stop! (:instance generation))
+  (generation/await-stop-accepting! (:instance generation))
   (assoc generation
          :drain-future
          (future
@@ -229,14 +230,15 @@
                                                 next-generation-id
                                                 listener-pool
                                                 active)
+                   _ (reset! state
+                             {:phase :running
+                              :config (:config candidate)
+                              :next-generation-id (inc next-generation-id)
+                              :listener-pool listener-pool
+                              :active candidate
+                              :draining draining})
                    draining-generation (begin-drain! server-handle active)]
-               (reset! state
-                       {:phase :running
-                        :config (:config candidate)
-                        :next-generation-id (inc next-generation-id)
-                        :listener-pool listener-pool
-                        :active candidate
-                        :draining (conj draining draining-generation)})
+               (swap! state update :draining conj draining-generation)
                :activated)
              (catch Throwable t
                (let [data (ex-data t)]

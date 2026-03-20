@@ -6,7 +6,7 @@
 
 (defn -main
   [& _args]
-  (let [port 18462
+  (let [port (util/free-port)
         runtime {:system {:id ::runtime}
                  :lookup-fn (fn [_hostname] nil)}]
     (with-redefs [clave-adapter/build-managed-plan

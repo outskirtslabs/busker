@@ -18,6 +18,15 @@
      :host (or (:host listener) "0.0.0.0")
      :port (:port listener)}))
 
+(defn- wrap-stage-error
+  [message stage data t]
+  (let [error-data (ex-data t)]
+    (throw (ex-info message
+                    (merge {:stage (or (:stage error-data) stage)}
+                           data
+                           error-data)
+                    t))))
+
 (defn open-pool
   []
   {:lock (Object.)
@@ -25,20 +34,26 @@
 
 (defn- open-resource
   [{:keys [transport host port] :as key}]
-  (case transport
-    :tcp
-    (socket/open-master-listener {:host host
-                                  :port port})
+  (try
+    (case transport
+      :tcp
+      (socket/open-master-listener {:host host
+                                    :port port})
 
-    :udp
-    (let [listener (h2o/http3-open-udp-listener host (short port))]
-      (when (or (nil? listener) (mem/null? listener))
-        (throw (ex-info "Failed to open pooled HTTP/3 UDP listener"
-                        {:listener-key key})))
-      listener)
+      :udp
+      (let [listener (h2o/http3-open-udp-listener host (short port))]
+        (when (or (nil? listener) (mem/null? listener))
+          (throw (ex-info "Failed to open pooled HTTP/3 UDP listener"
+                          {:listener-key key})))
+        listener)
 
-    (throw (ex-info "Unsupported listener transport"
-                    {:listener-key key}))))
+      (throw (ex-info "Unsupported listener transport"
+                      {:listener-key key})))
+    (catch Throwable t
+      (wrap-stage-error "Failed to open pooled listener resource"
+                        :listener-acquisition
+                        {:listener-key key}
+                        t))))
 
 (defn- close-resource!
   [{:keys [transport]} resource]
@@ -56,14 +71,14 @@
   [{:keys [state lock] :as pool} listener]
   (let [key (listener-key listener)
         entry (locking lock
-                (let [state state]
-                  (swap! state
-                         (fn [current]
-                           (if (get current key)
-                             (update-in current [key :ref-count] inc)
-                             (assoc current key {:resource (open-resource key)
-                                                 :ref-count 1}))))
-                  (get @state key)))
+                (get
+                 (swap! state
+                        (fn [current]
+                          (if (get current key)
+                            (update-in current [key :ref-count] inc)
+                            (assoc current key {:resource  (open-resource key)
+                                                :ref-count 1}))))
+                 key))
         claim {:pool pool
                :key key
                :resource (:resource entry)

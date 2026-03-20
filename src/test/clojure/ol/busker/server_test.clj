@@ -16,28 +16,69 @@
   (:import
    [java.security.cert CertificateFactory X509Certificate]))
 
-(def plain-port 7890)
+(defn- allocate-server-ports
+  []
+  (let [plain (util/free-port)
+        tls (loop [port (util/free-port)]
+              (if (= port plain)
+                (recur (util/free-port))
+                port))]
+    {:plain plain
+     :tls tls}))
 
-(def base (str "http://127.0.0.1:" plain-port))
+(defonce server-ports_
+  (atom (allocate-server-ports)))
+
+(defn- refresh-server-ports!
+  []
+  (reset! server-ports_ (allocate-server-ports)))
+
+(test/use-fixtures :each
+  (fn [f]
+    (refresh-server-ports!)
+    (f)))
+
+(defn- plain-port
+  []
+  (:plain @server-ports_))
+
+(defn- tls-port
+  []
+  (:tls @server-ports_))
+
+(defn- base
+  []
+  (str "http://127.0.0.1:" (plain-port)))
 
 (defn test-server [handler & {:as opts}]
-  (busker/start!
-   (util/with-handler
-     handler
-     (merge {:entrypoints {:test-plain
-                           {:bind (str "127.0.0.1:" plain-port)
-                            :http3? false
-                            :tls false}}
-             :compress-min-size 10
-             :max-connections 1024}
-            opts))))
+  (let [wrapped-handler (fn [req]
+                          (if (= "/__ready" (:uri req))
+                            {:status 200
+                             :body "ready"}
+                            (handler req)))
+        server (busker/start!
+                (util/with-handler
+                  wrapped-handler
+                  (merge {:entrypoints {:test-plain
+                                        {:bind (str "127.0.0.1:" (plain-port))
+                                         :http3? false
+                                         :tls false}}
+                          :compress-min-size 10
+                          :max-connections 1024}
+                         opts)))]
+    (let [ready (util/wait-for-curl-ready! :http :h1 (plain-port) "/__ready"
+                                           :max-time 2)]
+      (is (= 0 (:exit ready))
+          (str "Plain HTTP listener should become ready before the test proceeds. stderr: "
+               (:err ready))))
+    server))
 
 (defn req [method path & {:as opts}]
   (->
    (http/request (merge {:timeout 5000 :throw false
                          :headers {"Accept-Encoding" []}}
                         opts
-                        {:uri (str base path)
+                        {:uri (str (base) path)
                          :method method}))
    (dissoc :request)))
 
@@ -182,7 +223,7 @@
           (is (= "/test" (:uri req)))
           (is (= "foo=bar" (:query-string req)))
           (is (= "127.0.0.1" (:server-name req)))
-          (is (= plain-port (:server-port req)))
+          (is (= (plain-port) (:server-port req)))
           (is (= :http (:scheme req)))
           (is (string? (:protocol req)))
           (is (map? (:headers req))))))))
@@ -272,10 +313,10 @@
                              {:status  200
                               :headers {"content-type" "text/plain"}
                               :body    (str "Hello via " (name scheme) " at " uri)})
-                           :entrypoints {:plain {:bind (str "127.0.0.1:" plain-port)
+                           :entrypoints {:plain {:bind (str "127.0.0.1:" (plain-port))
                                                  :http3? false
                                                  :tls false}
-                                         :tls {:bind "127.0.0.1:7891"
+                                         :tls {:bind (str "127.0.0.1:" (tls-port))
                                                :http3? false
                                                :tls {:tls-compatibility-mode
                                                      :modern}}}
@@ -286,12 +327,12 @@
           (is (= "Hello via http at /hello" (:body response)))))
 
       (testing "HTTPS endpoint works"
-        (let [result (util/curl :https :h1 7891 "/secure")]
+        (let [result (util/curl :https :h1 (tls-port) "/secure")]
           (is (= 0 (:exit result)) "HTTPS request should succeed")
           (is (re-find #"Hello via https at /secure" (:out result)) "HTTPS should return expected response")))
 
       (testing "HTTPS with HTTP/2 ALPN negotiation"
-        (let [result (util/curl :https :h2 7891 "/h2" :args ["-v"])]
+        (let [result (util/curl :https :h2 (tls-port) "/h2" :args ["-v"])]
           (is (= 0 (:exit result)) "HTTP/2 request should succeed")
           (is (re-find #"Hello via https at /h2" (:out result)) "HTTP/2 should return expected response")
           (is (re-find #"ALPN.*h2" (:err result)) "Should negotiate HTTP/2 via ALPN"))))))
@@ -320,10 +361,10 @@
                                    (future
                                      (h2o/emit! emitter {:status 200 :body "Hello Async"}))
                                    {:body emitter})
-                                 {:entrypoints {:plain {:bind (str "127.0.0.1:" plain-port)
+                                 {:entrypoints {:plain {:bind (str "127.0.0.1:" (plain-port))
                                                         :http3? false
                                                         :tls false}
-                                                :tls {:bind "127.0.0.1:7891"
+                                                :tls {:bind (str "127.0.0.1:" (tls-port))
                                                       :http3? false
                                                       :tls {:tls-compatibility-mode
                                                             :modern}}}
@@ -339,16 +380,16 @@
                                      (h2o/emit! emitter "<!doctype html><h1>Hello world</h1>")
                                      (h2o/close emitter))
                                    {:body emitter})
-                                 :entrypoints {:plain {:bind (str "127.0.0.1:" plain-port)
+                                 :entrypoints {:plain {:bind (str "127.0.0.1:" (plain-port))
                                                        :http3? false
                                                        :tls false}
-                                               :tls {:bind "127.0.0.1:7891"
+                                               :tls {:bind (str "127.0.0.1:" (tls-port))
                                                      :http3? false
                                                      :tls {:tls-compatibility-mode
                                                            :modern}}}
                                  :tls util/static-tls)]
 
-      (let [result (util/curl :https :h2 7891 "/" :args ["-v"])]
+      (let [result (util/curl :https :h2 (tls-port) "/" :args ["-v"])]
         (is (= 0 (:exit result)))
         (is (re-find #"HTTP/2 103" (:err result)))
         (is (re-find #"link: </style.css>; rel=preload; as=style" (:err result)))
@@ -371,19 +412,24 @@
 
 (deftest tcp-connection-limit-test
   (testing "TCP connections respect global max-connections limit"
-    (let [port 17890
+    (let [port (util/free-port)
           stream-duration-ms 3000
           chunk-interval-ms 200
-          handler (fn [{emitter :ol.busker.request/emitter}]
-                    (future
-                      (h2o/emit! emitter {:status 200 :headers {"content-type" "text/plain"}})
-                      (let [num-chunks (/ stream-duration-ms chunk-interval-ms)]
-                        (doseq [idx (range num-chunks)]
-                          (h2o/emit! emitter (str "chunk-" idx "-"))
-                          (h2o/flush emitter)
-                          (Thread/sleep chunk-interval-ms)))
-                      (h2o/close emitter))
-                    {:body emitter})
+          handler (fn [{:keys [uri]
+                        emitter :ol.busker.request/emitter}]
+                    (if (= "/ready" uri)
+                      {:status 200
+                       :body "ready"}
+                      (do
+                        (future
+                          (h2o/emit! emitter {:status 200 :headers {"content-type" "text/plain"}})
+                          (let [num-chunks (/ stream-duration-ms chunk-interval-ms)]
+                            (doseq [idx (range num-chunks)]
+                              (h2o/emit! emitter (str "chunk-" idx "-"))
+                              (h2o/flush emitter)
+                              (Thread/sleep chunk-interval-ms)))
+                          (h2o/close emitter))
+                        {:body emitter})))
           server (busker/start!
                   (util/with-handler
                     handler
@@ -392,7 +438,11 @@
                                           :http3? false
                                           :tls false}}}))]
       (try
-        (Thread/sleep 200)
+        (let [ready (util/wait-for-curl-ready! :http :h1 port "/ready"
+                                               :max-time 2)]
+          (is (= 0 (:exit ready))
+              (str "HTTP/1 readiness check should succeed. stderr: "
+                   (:err ready))))
         ;; Start 2 long-lived HTTP/1.1 connections
         (let [conn1 (future (util/curl :http :h1 port "/" :max-time 10))
               conn2 (future (util/curl :http :h1 port "/" :max-time 10))]
@@ -418,7 +468,8 @@
 
           ;; After connections close, new connection should succeed
           (Thread/sleep 200)
-          (let [conn4 (util/curl :http :h1 port "/" :max-time 5)]
+          (let [conn4 (util/wait-for-curl-ready! :http :h1 port "/"
+                                                 :max-time 5)]
             (is (zero? (:exit conn4))
                 (str "New TCP connection should succeed after others close. stderr: " (:err conn4)))))
         (finally
@@ -426,8 +477,11 @@
 
 (deftest tcp-and-tls-share-limit-test
   (testing "TCP and TLS connections share the global limit"
-    (let [http-port 17891
-          https-port 17892
+    (let [http-port (util/free-port)
+          https-port (loop [port (util/free-port)]
+                       (if (= port http-port)
+                         (recur (util/free-port))
+                         port))
           stream-duration-ms 3000
           chunk-interval-ms 200
           handler (fn [{emitter :ol.busker.request/emitter}]
@@ -509,7 +563,7 @@
                                           nil)]
         (with-server [_server (test-server (fn [_] {:status 200 :body "ok"})
                                            :entrypoints {:test-plain
-                                                         {:bind (str "127.0.0.1:" plain-port)
+                                                         {:bind (str "127.0.0.1:" (plain-port))
                                                           :http3? false
                                                           :tls false}}
                                            :tls {:certificates {:manage ["example.com"]}
@@ -626,10 +680,10 @@
                     clave-adapter/wrap-handler (fn [handler _] handler)
                     clave-adapter/stop! (fn [_] nil)]
         (with-server [_server (test-server (fn [_] {:status 200 :body "ok"})
-                                           :entrypoints {:plain {:bind (str "127.0.0.1:" plain-port)
+                                           :entrypoints {:plain {:bind (str "127.0.0.1:" (plain-port))
                                                                  :http3? false
                                                                  :tls false}
-                                                         :tls {:bind "127.0.0.1:7891"
+                                                         :tls {:bind (str "127.0.0.1:" (tls-port))
                                                                :http3? false
                                                                :tls {:tls-compatibility-mode
                                                                      :modern}}}
@@ -639,7 +693,7 @@
 
 (deftest tcp-tls-no-sni-falls-back-to-managed-subject-test
   (testing "TCP TLS handshake without SNI succeeds using the first managed subject name"
-    (let [port 17991
+    (let [port (util/free-port)
           runtime {:system {:id ::runtime}
                    :subject-names ["fallback.example"]
                    :lookup-fn (fn [hostname]
@@ -678,7 +732,7 @@
 
 (deftest tcp-tls-no-sni-miss-without-fallback-test
   (testing "TCP TLS handshake without SNI fails when no fallback material exists"
-    (let [port 17992
+    (let [port (util/free-port)
           runtime {:system {:id ::runtime}
                    :subject-names ["fallback.example"]
                    :lookup-fn (fn [_hostname] nil)}]

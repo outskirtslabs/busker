@@ -5,7 +5,9 @@
 (ns ol.busker.test-utils
   (:require
    [babashka.process :as p]
-   [clojure.java.io :as io]))
+   [clojure.java.io :as io])
+  (:import
+   [java.net DatagramSocket InetAddress InetSocketAddress ServerSocket Socket]))
 
 (defn fixture-cert-path
   []
@@ -76,6 +78,82 @@
     (apply p/shell {:out :string :err :string :continue true}
            "curl"
            curl-args)))
+
+(defn wait-for-curl-ready!
+  [scheme proto port path & {:keys [host max-time args attempts delay-ms]
+                             :or {attempts 30
+                                  delay-ms 100
+                                  max-time 2}
+                             :as _opts}]
+  (loop [attempt 0]
+    (let [curl-opts (cond-> [:max-time max-time]
+                      host (conj :host host)
+                      args (conj :args args))
+          result (try
+                   (apply curl scheme proto port path curl-opts)
+                   (catch Throwable t
+                     t))]
+      (cond
+        (and (map? result) (zero? (:exit result)))
+        result
+
+        (< attempt (dec attempts))
+        (do
+          (Thread/sleep delay-ms)
+          (recur (inc attempt)))
+
+        (instance? Throwable result)
+        (throw result)
+
+        :else
+        result))))
+
+(defn wait-for-port-open!
+  [host port & {:keys [attempts delay-ms connect-timeout-ms]
+                :or {attempts 30
+                     delay-ms 100
+                     connect-timeout-ms 200}}]
+  (loop [attempt 0]
+    (let [open?
+          (try
+            (with-open [socket (Socket.)]
+              (.connect socket (InetSocketAddress. ^String host (int port))
+                        (int connect-timeout-ms))
+              true)
+            (catch Throwable _
+              false))]
+      (cond
+        open?
+        true
+
+        (< attempt (dec attempts))
+        (do
+          (Thread/sleep delay-ms)
+          (recur (inc attempt)))
+
+        :else
+        false))))
+
+(defn free-port
+  []
+  (let [loopback (InetAddress/getByName "127.0.0.1")]
+    (loop [attempt 0]
+      (when (>= attempt 32)
+        (throw (ex-info "Unable to allocate a free test port"
+                        {:attempts attempt})))
+      (let [candidate (+ 20000 (rand-int (- 32767 20000)))
+            available?
+            (try
+              (with-open [tcp (ServerSocket. candidate 0 loopback)
+                          udp (DatagramSocket. candidate loopback)]
+                (.setReuseAddress tcp true)
+                (.setReuseAddress udp true)
+                true)
+              (catch java.net.BindException _
+                false))]
+        (if available?
+          candidate
+          (recur (inc attempt)))))))
 
 (defn submap?
   "Is m1 a subset of m2?"

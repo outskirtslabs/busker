@@ -55,12 +55,10 @@
       (is (s/valid? ::specs/managed-plan plan)))))
 
 (deftest start-managed-test
-  (testing "starts clave, manages names, and waits for initial cert readiness"
+  (testing "starts clave, manages names, and returns before initial cert readiness"
     (let [create-config (atom nil)
           calls (atom [])
-          queue (doto (LinkedBlockingQueue.)
-                  (.offer {:type :certificate-obtained
-                           :data {:domain "example.com"}}))
+          queue (LinkedBlockingQueue.)
           lookup-count (atom 0)
           fake-solver {:registry (atom {})}
           plan {:subject-names ["example.com"]
@@ -84,9 +82,9 @@
                     automation/get-event-queue (fn [_]
                                                  queue)
                     automation/lookup-cert (fn [_ _]
-                                             (if (> (swap! lookup-count inc) 1)
-                                               {:names ["example.com"]}
-                                               nil))]
+                                             (swap! lookup-count inc)
+                                             nil)
+                    automation/stop (fn [_] nil)]
         (let [runtime (adapter/start! plan)]
           (is (= [:create
                   :start
@@ -98,6 +96,8 @@
                  (select-keys runtime
                               [:system :subject-names :http-solver])))
           (is (ifn? (:lookup-fn runtime)))
+          (is (zero? @lookup-count)
+              "Activation should not wait for certificate convergence")
           (is (= {:issuers [{:directory-url
                              "https://acme.example/directory"}]
                   :solvers {:tls-alpn-01 :existing
@@ -105,11 +105,12 @@
                  @create-config)
               "existing solvers are preserved")))))
 
-  (testing "raises on certificate-failed events while waiting"
-    (let [queue (doto (LinkedBlockingQueue.)
-                  (.offer {:type :certificate-failed
-                           :data {:domain "example.com"
-                                  :reason :acme-error}}))
+  (testing "post-activation certificate-failed events are consumed in the background"
+    (let [queue (LinkedBlockingQueue.)
+          failed-event {:type :certificate-failed
+                        :data {:domain "example.com"
+                               :reason :acme-error}}
+          queued (promise)
           plan {:subject-names ["example.com"]
                 :clave-config {:issuers [{:directory-url
                                           "https://acme.example/directory"}]}}
@@ -123,10 +124,28 @@
                     automation/get-event-queue (fn [_] queue)
                     automation/lookup-cert (fn [_ _] nil)
                     automation/stop (fn [_] nil)]
-        (is (thrown-with-msg?
-             clojure.lang.ExceptionInfo
-             #"failed"
-             (adapter/start! plan)))))))
+        (future
+          (Thread/sleep 25)
+          (.offer queue failed-event)
+          (deliver queued true))
+        (let [runtime (adapter/start! plan)]
+          (is (some? runtime))
+          (is (deref queued 1000 false))
+          (is (true?
+               (loop [attempt 0]
+                 (cond
+                   (zero? (.size queue))
+                   true
+
+                   (>= attempt 20)
+                   false
+
+                   :else
+                   (do
+                     (Thread/sleep 25)
+                     (recur (inc attempt))))))
+              "The background watcher should consume later failure events")
+          (is (nil? (adapter/stop! runtime))))))))
 
 (testing "rejects invalid managed-plan shape"
   (is (thrown-with-msg?
