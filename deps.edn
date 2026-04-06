@@ -10,8 +10,6 @@
            io.github.outskirtslabs/clave             {:git/sha "2b7fa1d12cb05a23806bdcf249b76027951adbf3"}
            ;; busker requires charred because implementing ACME requires speaking JSON, and clave makes it a peer dep
            com.cnuernber/charred                     {:mvn/version "1.037"}
-           ;; busker requires the ring protocols to provide interopability to the ring ecosystem
-           org.ring-clojure/ring-core-protocols      {:mvn/version "1.15.3"}
            org.ring-clojure/ring-websocket-protocols {:mvn/version "1.15.3"}}
  :aliases {:kaocha {:extra-paths []
                     :extra-deps  {lambdaisland/kaocha {:mvn/version "1.91.1392"}}
@@ -37,6 +35,7 @@
                                   org.clojure/clojure                      {:mvn/version "1.12.3"}
                                   io.github.tonsky/clj-reload              {:mvn/version "1.0.0"}
                                   org.clojure/tools.deps                   {:mvn/version "0.26.1553"}
+                                  org.ring-clojure/ring-core-protocols     {:mvn/version "1.15.3"}
                                   com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.6.2"}
                                   com.outskirtslabs.busker/macos-x86-64    {:mvn/version "0.0.1"}
                                   com.outskirtslabs.busker/macos-aarch64   {:mvn/version "0.0.1"}

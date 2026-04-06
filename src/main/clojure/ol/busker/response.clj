@@ -9,8 +9,8 @@
    [ol.busker.protocols :as p]
    [ol.busker.protocols.content-length]
    [ol.busker.response-queue :as response-queue]
-   [ol.busker.util.headers :as hdr.util]
-   [ring.core.protocols :as ring-protocols])
+   [ol.busker.util :refer [compile-if]]
+   [ol.busker.util.headers :as hdr.util])
   (:import
    [java.io InputStream OutputStream]
    [java.lang.foreign MemorySegment]
@@ -167,6 +167,42 @@
 (defn get-compress-hint [resp]
   (get h2o/->compress-hint (:h2o/compress-hint resp) h2o/H2O_COMPRESS_HINT_ENABLE))
 
+(defn- write-fallback-body-to-stream!
+  [chunk _response ^OutputStream out]
+  (cond
+    (nil? chunk)                       nil
+    (instance? byte-array-class chunk) (.write out ^bytes chunk)
+    (number? chunk)                    (.write out (int chunk))
+    (string? chunk)                    (.write out (.getBytes ^String chunk StandardCharsets/UTF_8))
+    (instance? ByteBuffer chunk)       (let [dup   (.duplicate ^ByteBuffer chunk)
+                                             len   (.remaining dup)
+                                             bytes (byte-array len)]
+                                         (.get dup bytes)
+                                         (.write out bytes))
+    (instance? InputStream chunk)      (io/copy chunk out)
+    (sequential? chunk)                (doseq [part chunk]
+                                         (write-fallback-body-to-stream! part nil out))
+    :else                              (throw (ex-info "Unsupported response chunk" {:type (class chunk)}))))
+
+(compile-if
+  (do
+    (require '[ring.core.protocols :as ring-protocols])
+    true)
+  (do
+    (defn- streamable-response-body?
+      [chunk]
+      (satisfies? ring.core.protocols/StreamableResponseBody chunk))
+    (defn- write-body-to-stream!
+      [chunk response ^OutputStream out]
+      (ring.core.protocols/write-body-to-stream chunk response out)))
+  (do
+    (defn- streamable-response-body?
+      [_]
+      false)
+    (defn- write-body-to-stream!
+      [chunk response ^OutputStream out]
+      (write-fallback-body-to-stream! chunk response out))))
+
 (defn- commit-final!
   [^Request req write-resp committed_ {:keys [body status] :as response} final?]
   (when-not (and (some? status) (final-status? status))
@@ -185,7 +221,7 @@
 (defn- write-body-chunk!
   [chunk ^OutputStream out response close-after?]
   (if close-after?
-    (ring-protocols/write-body-to-stream chunk response out)
+    (write-body-to-stream! chunk response out)
     (cond
       (nil? chunk)                       nil
       (instance? byte-array-class chunk) (.write out ^bytes chunk)
@@ -199,10 +235,7 @@
       (instance? InputStream chunk)      (io/copy chunk out)
       (sequential? chunk)                (doseq [part chunk]
                                            (write-body-chunk! part out response false))
-      (satisfies? ring-protocols/StreamableResponseBody chunk)
-      (if close-after?
-        (ring-protocols/write-body-to-stream chunk response out)
-        (throw (ex-info "StreamableResponseBody chunk requires close-after? true" {:type (class chunk)})))
+      (streamable-response-body? chunk)  (throw (ex-info "StreamableResponseBody chunk requires close-after? true" {:type (class chunk)}))
       :else                              (throw (ex-info "Unsupported response chunk" {:type (class chunk)})))))
 
 (deftype H2OResponseEmitter [^Request req
