@@ -608,7 +608,7 @@
                           t)))))
 
 (defn- create-http3-worker-contexts
-  [n-workers listeners loops contexts config-ptr http3-contexts listener-claims]
+  [generation-id n-workers listeners loops contexts config-ptr http3-contexts listener-claims]
   (let [hosts-ptr (h2o/globalconf-get-hosts config-ptr)]
     (vec
      (for [thread-idx (range n-workers)]
@@ -624,12 +624,13 @@
                                                        {:listener listener})))
                     loop-ptr (nth loops thread-idx)
                     ctx-ptr (nth contexts thread-idx)
-                    http3-ctx (h2o/http3-attach-udp-listener
+                    http3-ctx (h2o/http3-attach-udp-transport
                                ctx-ptr
                                loop-ptr
                                quicly-ctx
                                hosts-ptr
                                (listen/resource listener-claim)
+                               generation-id
                                (int thread-idx))]
                 (when (or (nil? http3-ctx) (mem/null? http3-ctx))
                   (throw (ex-info "Failed to create HTTP/3 worker context"
@@ -657,6 +658,15 @@
        distinct
        vec))
 
+(defn- http3-transport-resources
+  [claims]
+  (->> claims
+       (filter (fn [[claim-key _]]
+                 (= :udp (:transport claim-key))))
+       (map (fn [[_ claim]] (listen/resource claim)))
+       distinct
+       vec))
+
 (defn- release-listener-claims!
   [claims]
   (doseq [claim (vals claims)]
@@ -679,12 +689,13 @@
           (claim-keys listeners)))
 
 (defn- prepare-generation-state
-  [compiled-config cert-runtime listener-pool listener-claims]
+  [compiled-config cert-runtime listener-pool listener-claims generation-id]
   (let [{:keys [n-workers max-connections executor]} compiled-config
         ring-handler (-> compiled-config
                          config/dispatch-handler
                          (clave-adapter/wrap-handler cert-runtime))]
     {::ring-handler ring-handler
+     ::generation-id generation-id
      ::config compiled-config
      ::cert-runtime cert-runtime
      ::listener-pool listener-pool
@@ -722,7 +733,7 @@
            ::on-close-callback on-close-callback)))
 
 (defn- init-tls-http3-state
-  [{::keys [listener-runtimes config config-ptr n-workers loops contexts
+  [{::keys [generation-id listener-runtimes config config-ptr n-workers loops contexts
             tls-lookup-callback listener-claims]
     :as state}]
   (let [listeners (mapv :listener listener-runtimes)
@@ -749,7 +760,8 @@
                                                 native-ticket-mgr
                                                 session-ticket-lifetime-seconds
                                                 tls-lookup-callback-ptr)
-          http3-worker-contexts (create-http3-worker-contexts n-workers
+          http3-worker-contexts (create-http3-worker-contexts generation-id
+                                                              n-workers
                                                               listeners
                                                               loops
                                                               contexts
@@ -844,13 +856,13 @@
                              {:listener-socks listener-socks-for-thread
                               :accept-callbacks accept-callbacks-for-thread
                               :loop-ptr loop-ptr
-                             :ctx-ptr ctx-ptr
-                             :http3-ctxs http3-ctxs-for-thread
-                             :max-connections max-connections
-                             :shutting-down? shutting-down?
-                             :active-connection-count_ active-connection-count_
-                             ::stop-accepting-remaining_ stop-accepting-remaining_
-                             ::stopped-accepting_ stopped-accepting_}))
+                              :ctx-ptr ctx-ptr
+                              :http3-ctxs http3-ctxs-for-thread
+                              :max-connections max-connections
+                              :shutting-down? shutting-down?
+                              :active-connection-count_ active-connection-count_
+                              ::stop-accepting-remaining_ stop-accepting-remaining_
+                              ::stopped-accepting_ stopped-accepting_}))
               message-handler
               (nth wakeup-receivers thread-idx)))))]
     (assoc state ::workers workers)))
@@ -859,31 +871,43 @@
   [state]
   (dissoc state ::message-handler))
 
+(defn activate-http3-transports!
+  [{::keys [generation-id listener-claims] :as generation}]
+  (doseq [transport (http3-transport-resources listener-claims)]
+    (when (and transport (not (mem/null? transport)))
+      (h2o/http3-activate-udp-transport-generation transport generation-id)))
+  generation)
+
 (defn start!
   ([compiled-config cert-runtime]
    (start! compiled-config cert-runtime {}))
-  ([compiled-config cert-runtime {:keys [listener-pool]
-                                  :or {listener-pool (listen/open-pool)}}]
+  ([compiled-config cert-runtime {:keys [activate-http3-transports? generation-id listener-pool]
+                                  :or {activate-http3-transports? true
+                                       generation-id 1
+                                       listener-pool (listen/open-pool)}}]
    (let [compiled-config (config/config->listeners compiled-config)
          listeners (:listeners compiled-config)
          listener-claims (acquire-listener-claims! listener-pool listeners)]
      (try
-       (-> (prepare-generation-state compiled-config
-                                     cert-runtime
-                                     listener-pool
-                                     listener-claims)
-           init-tls-lookup-state
-           init-core-state
-           init-listener-state
-           init-tls-http3-state
-           init-worker-state
-           finalize-generation-state)
+       (cond-> (-> (prepare-generation-state compiled-config
+                                             cert-runtime
+                                             listener-pool
+                                             listener-claims
+                                             generation-id)
+                   init-tls-lookup-state
+                   init-core-state
+                   init-listener-state
+                   init-tls-http3-state
+                   init-worker-state
+                   finalize-generation-state)
+         activate-http3-transports? activate-http3-transports!)
        (catch Throwable t
          (try
            (stop! (prepare-generation-state compiled-config
                                             cert-runtime
                                             listener-pool
-                                            listener-claims))
+                                            listener-claims
+                                            generation-id))
            (catch Throwable _
              (release-listener-claims! listener-claims)))
          (throw t))))))

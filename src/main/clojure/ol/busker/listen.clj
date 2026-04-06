@@ -41,11 +41,13 @@
                                     :port port})
 
       :udp
-      (let [listener (h2o/http3-open-udp-listener host (short port))]
-        (when (or (nil? listener) (mem/null? listener))
-          (throw (ex-info "Failed to open pooled HTTP/3 UDP listener"
+      ;; TODO(ipv6): Remove this HTTP/3-only transport open path when H1/H2/H3
+      ;; share one family-aware listener implementation.
+      (let [transport (h2o/http3-open-udp-transport host (short port))]
+        (when (or (nil? transport) (mem/null? transport))
+          (throw (ex-info "Failed to open pooled HTTP/3 UDP transport"
                           {:listener-key key})))
-        listener)
+        transport)
 
       (throw (ex-info "Unsupported listener transport"
                       {:listener-key key})))
@@ -63,7 +65,7 @@
 
     :udp
     (when (and resource (not (mem/null? resource)))
-      (h2o/http3-release-udp-listener resource))
+      (h2o/http3-release-udp-transport resource))
 
     nil))
 

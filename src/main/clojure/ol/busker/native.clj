@@ -888,51 +888,38 @@
   clj_h2o_free_quicly_ctx
   [::mem/pointer] ::mem/void)
 
-(defcfn http3-open-udp-listener
-  "Open a pooled UDP listener for HTTP/3.
-   The returned handle owns the bound socket until
-   [[http3-release-udp-listener]] is called."
-  clj_h2o_http3_open_udp_listener
+(defcfn http3-open-udp-transport
+  "Open a pooled UDP transport reservation for HTTP/3.
+   The returned handle owns the pooled transport metadata and any reservation
+   socket until [[http3-release-udp-transport]] is called."
+  clj_h2o_http3_open_udp_transport
   [::mem/c-string ::mem/short] ::mem/pointer)
 
-(defcfn http3-attach-udp-listener
-  "Attach an HTTP/3 worker context to a pooled UDP listener.
-   The worker context receives a dup'd fd, so detaching it does
-   not release the pooled listener's bind."
-  clj_h2o_http3_attach_udp_listener
+(defcfn http3-attach-udp-transport
+  "Attach an HTTP/3 worker context to a pooled UDP transport.
+   The worker attachment starts non-accepting until the transport activates
+   the generation identified by `node-id`."
+  clj_h2o_http3_attach_udp_transport
   [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer
-   ::mem/pointer ::mem/int] ::mem/pointer)
+   ::mem/pointer ::mem/long ::mem/int] ::mem/pointer)
 
-(defcfn http3-detach-udp-listener
-  "Detach an HTTP/3 worker context from a pooled UDP listener.
+(defcfn http3-activate-udp-transport-generation
+  "Mark `node-id` as the active acceptor on a pooled UDP transport.
+   Existing connections for older generations continue to route by CID,
+   while new Initial packets are forwarded to the active generation."
+  clj_h2o_http3_activate_udp_transport_generation
+  [::mem/pointer ::mem/long] ::mem/void)
+
+(defcfn http3-detach-udp-transport
+  "Detach an HTTP/3 worker context from a pooled UDP transport.
    This closes only the worker-owned dup'd fd."
-  clj_h2o_http3_detach_udp_listener
+  clj_h2o_http3_detach_udp_transport
   [::mem/pointer] ::mem/void)
 
-(defcfn http3-release-udp-listener
-  "Release a pooled UDP listener and close the bound socket it owns."
-  clj_h2o_http3_release_udp_listener
+(defcfn http3-release-udp-transport
+  "Release a pooled UDP transport and close any reservation socket it owns."
+  clj_h2o_http3_release_udp_transport
   [::mem/pointer] ::mem/void)
-
-(defcfn http3-create-worker-ctx
-  "Create HTTP/3 worker context with UDP listener.
-   Creates a UDP socket bound to host:port, configures it for QUIC
-   (IP_PKTINFO, DF bit, H2O_SOCKET_FLAG_DONT_READ), and initializes
-   the h2o_http3_server_ctx_t.
-
-   Parameters:
-   - h2o-ctx: h2o context for this worker
-   - loop: event loop for this worker
-   - quic-ctx: shared quicly context from [[http3-create-quicly-ctx]]
-   - hosts: hosts array from globalconf
-   - host: bind address (e.g., \"0.0.0.0\" or \"127.0.0.1\")
-   - port: UDP port to bind
-   - thread-id: unique worker thread ID for CID routing
-
-   Returns: opaque context pointer on success, NULL on error"
-  clj_h2o_http3_create_worker_ctx
-  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer
-   ::mem/c-string ::mem/short ::mem/int] ::mem/pointer)
 
 (defcfn http3-stop-accepting
   "Stop accepting new HTTP/3 connections by setting acceptor to NULL.

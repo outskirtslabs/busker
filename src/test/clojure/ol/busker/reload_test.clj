@@ -5,7 +5,9 @@
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.native :as native]
    [ol.busker.config :as config]
+   [ol.busker.generation :as generation]
    [ol.busker.listen :as listen]
+   [ol.busker.protocols :as proto]
    [ol.busker.runtime :as runtime]
    [ol.busker.test-utils :as util]
    [ol.clave.acme.solver.http :as http-solver]
@@ -23,6 +25,7 @@
   [port handler]
   (util/with-static-tls
     {:entrypoints {:https {:bind (str "127.0.0.1:" port)
+                           :http3? true
                            :tls {:tls-compatibility-mode :modern}}}
      :dispatch [{:handler handler}]}))
 
@@ -56,6 +59,14 @@
         (if (instance? Throwable result)
           (throw result)
           result)))))
+
+(defn- udp-transport-resource
+  [generation-instance]
+  (->> (::generation/listener-claims generation-instance)
+       (keep (fn [[claim-key claim]]
+               (when (= :udp (:transport claim-key))
+                 (listen/resource claim))))
+       first))
 
 (deftest reload-publishes-candidate-before-old-generation-begins-drain-test
   (let [old-generation {:generation-id 1
@@ -179,6 +190,178 @@
           (when result
             (is (= 0 (:exit result)))
             (is (= "old-generation" (:out result))))))
+      (finally
+        (runtime/stop! server)))))
+
+(deftest http3-reload-activates-new-generation-and-drains-old-connections-test
+  (let [port (util/free-port)
+        old-first-chunk (promise)
+        old-release (promise)
+        old-body "old-generation-stream-complete"
+        server (runtime/start!
+                (assoc
+                 (tls-response-config port
+                                      (fn [{emitter :ol.busker.request/emitter}]
+                                        (future
+                                          (proto/emit! emitter
+                                                       {:status 200
+                                                        :headers {"content-type" "text/plain"}})
+                                          (proto/emit! emitter "old-generation-")
+                                          (proto/flush emitter)
+                                          (deliver old-first-chunk true)
+                                          (deref old-release 5000 true)
+                                          (proto/emit! emitter "stream-complete")
+                                          (proto/close emitter))
+                                        {:body emitter}))
+                 :n-workers 2))]
+    (try
+      (let [old-request (future
+                          (util/curl :https :h3 port "/" :max-time 10))]
+        (is (deref old-first-chunk 5000 false))
+        (is (= :activated
+               (runtime/reload! server
+                                (assoc
+                                 (tls-response-config port
+                                                      (fn [_]
+                                                        {:status 200
+                                                         :body "new-generation"}))
+                                 :n-workers 2)
+                                {:force? true})))
+        (let [new-requests (mapv (fn [_]
+                                   (util/curl :https :h3 port "/" :max-time 5))
+                                 (range 20))]
+          (doseq [[idx new-request] (map-indexed vector new-requests)]
+            (is (= 0 (:exit new-request))
+                (str "HTTP/3 request after reload should succeed for request "
+                     idx ". stderr: " (:err new-request)))
+            (is (= "new-generation" (:out new-request)))))
+        (deliver old-release true)
+        (let [result (deref old-request 10000 nil)]
+          (is (some? result))
+          (when result
+            (is (= 0 (:exit result))
+                (str "Draining HTTP/3 request should succeed. stderr: " (:err result)))
+            (is (= old-body (:out result))))))
+      (finally
+        (runtime/stop! server)))))
+
+(deftest http3-reload-with-worker-topology-change-reuses-transport-and-routes-to-active-generation-test
+  (let [port (util/free-port)
+        old-first-chunk (promise)
+        old-release (promise)
+        old-body "old-generation-stream-complete"
+        server (runtime/start!
+                (assoc
+                 (tls-response-config port
+                                      (fn [{emitter :ol.busker.request/emitter}]
+                                        (future
+                                          (proto/emit! emitter
+                                                       {:status 200
+                                                        :headers {"content-type" "text/plain"}})
+                                          (proto/emit! emitter "old-generation-")
+                                          (proto/flush emitter)
+                                          (deliver old-first-chunk true)
+                                          (deref old-release 5000 true)
+                                          (proto/emit! emitter "stream-complete")
+                                          (proto/close emitter))
+                                        {:body emitter}))
+                 :n-workers 2))]
+    (try
+      (let [old-request (future
+                          (util/curl :https :h3 port "/" :max-time 10))]
+        (is (deref old-first-chunk 5000 false))
+        (is (= :activated
+               (runtime/reload! server
+                                (assoc
+                                 (tls-response-config port
+                                                      (fn [_]
+                                                        {:status 200
+                                                         :body "new-generation"}))
+                                 :n-workers 1)
+                                {:force? true})))
+        (let [state @(:busker/state server)
+              active-transport (udp-transport-resource (:instance (:active state)))
+              draining-transport
+              (udp-transport-resource (:instance (first (:draining state))))]
+          (is (some? active-transport))
+          (is (some? draining-transport))
+          (is (identical? active-transport draining-transport))
+          (is (= 1 (count (:draining state)))))
+        (let [new-requests (mapv (fn [_]
+                                   (util/curl :https :h3 port "/" :max-time 5))
+                                 (range 20))]
+          (doseq [[idx new-request] (map-indexed vector new-requests)]
+            (is (= 0 (:exit new-request))
+                (str "HTTP/3 request after topology-changing reload should succeed for request "
+                     idx ". stderr: " (:err new-request)))
+            (is (= "new-generation" (:out new-request)))))
+        (deliver old-release true)
+        (let [result (deref old-request 10000 nil)]
+          (is (some? result))
+          (when result
+            (is (= 0 (:exit result))
+                (str "Draining HTTP/3 request should succeed. stderr: " (:err result)))
+            (is (= old-body (:out result))))))
+      (finally
+        (runtime/stop! server)))))
+
+(deftest http3-reload-with-worker-topology-increase-reuses-transport-and-routes-to-active-generation-test
+  (let [port (util/free-port)
+        old-first-chunk (promise)
+        old-release (promise)
+        old-body "old-generation-stream-complete"
+        server (runtime/start!
+                (assoc
+                 (tls-response-config port
+                                      (fn [{emitter :ol.busker.request/emitter}]
+                                        (future
+                                          (proto/emit! emitter
+                                                       {:status 200
+                                                        :headers {"content-type" "text/plain"}})
+                                          (proto/emit! emitter "old-generation-")
+                                          (proto/flush emitter)
+                                          (deliver old-first-chunk true)
+                                          (deref old-release 5000 true)
+                                          (proto/emit! emitter "stream-complete")
+                                          (proto/close emitter))
+                                        {:body emitter}))
+                 :n-workers 1))]
+    (try
+      (let [old-request (future
+                          (util/curl :https :h3 port "/" :max-time 10))]
+        (is (deref old-first-chunk 5000 false))
+        (is (= :activated
+               (runtime/reload! server
+                                (assoc
+                                 (tls-response-config port
+                                                      (fn [_]
+                                                        {:status 200
+                                                         :body "new-generation"}))
+                                 :n-workers 2)
+                                {:force? true})))
+        (let [state @(:busker/state server)
+              active-transport (udp-transport-resource (:instance (:active state)))
+              draining-transport
+              (udp-transport-resource (:instance (first (:draining state))))]
+          (is (some? active-transport))
+          (is (some? draining-transport))
+          (is (identical? active-transport draining-transport))
+          (is (= 1 (count (:draining state)))))
+        (let [new-requests (mapv (fn [_]
+                                   (util/curl :https :h3 port "/" :max-time 5))
+                                 (range 20))]
+          (doseq [[idx new-request] (map-indexed vector new-requests)]
+            (is (= 0 (:exit new-request))
+                (str "HTTP/3 request after topology-increasing reload should succeed for request "
+                     idx ". stderr: " (:err new-request)))
+            (is (= "new-generation" (:out new-request)))))
+        (deliver old-release true)
+        (let [result (deref old-request 10000 nil)]
+          (is (some? result))
+          (when result
+            (is (= 0 (:exit result))
+                (str "Draining HTTP/3 request should succeed. stderr: " (:err result)))
+            (is (= old-body (:out result))))))
       (finally
         (runtime/stop! server)))))
 

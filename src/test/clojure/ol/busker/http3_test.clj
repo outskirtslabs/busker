@@ -35,6 +35,59 @@
     (catch java.net.BindException _
       false)))
 
+(defn- wait-for-conn-limit-current!
+  [expected & {:keys [attempts delay-ms]
+               :or {attempts 50
+                    delay-ms 100}}]
+  (loop [attempt 0]
+    (let [current (h2o/conn-limit-current)]
+      (cond
+        (= expected current)
+        current
+
+        (< attempt (dec attempts))
+        (do
+          (Thread/sleep delay-ms)
+          (recur (inc attempt)))
+
+        :else
+        current))))
+
+(defn- http3-worker-connection-counts
+  [server]
+  (let [generation (:instance (:active @(:busker/state server)))
+        http3-worker-contexts (::generation/http3-worker-contexts generation)]
+    (mapv (fn [worker-http3-ctxs]
+            (reduce (fn [total http3-ctx]
+                      (if (or (nil? http3-ctx) (mem/null? http3-ctx))
+                        total
+                        (+ total (h2o/http3-num-connections http3-ctx))))
+                    0
+                    worker-http3-ctxs))
+          http3-worker-contexts)))
+
+(defn- wait-for-http3-worker-counts!
+  [server expected-total & {:keys [expected-active-workers attempts delay-ms]
+                            :or {attempts 50
+                                 delay-ms 100}}]
+  (loop [attempt 0]
+    (let [counts (http3-worker-connection-counts server)
+          total (reduce + counts)
+          active-workers (count (filter pos? counts))]
+      (cond
+        (and (= expected-total total)
+             (or (nil? expected-active-workers)
+                 (= expected-active-workers active-workers)))
+        counts
+
+        (< attempt (dec attempts))
+        (do
+          (Thread/sleep delay-ms)
+          (recur (inc attempt)))
+
+        :else
+        counts))))
+
 (deftest http3-enabled-by-default-test
   (testing "TLS listeners should have HTTP/3 enabled by default"
     (let [listener {:port 8443 :tls {}}]
@@ -126,8 +179,8 @@
 (deftest pooled-http3-udp-bind-retains-port-until-release-test
   (testing "A pooled HTTP/3 UDP bind keeps the port unavailable until release"
     (let [port (util/free-port)
-          open-listener (requiring-resolve 'ol.busker.native/http3-open-udp-listener)
-          release-listener (requiring-resolve 'ol.busker.native/http3-release-udp-listener)]
+          open-listener (requiring-resolve 'ol.busker.native/http3-open-udp-transport)
+          release-listener (requiring-resolve 'ol.busker.native/http3-release-udp-transport)]
       (is (datagram-bindable? port)
           "Port should be available before pooled UDP ownership is acquired")
       (let [listener (open-listener "127.0.0.1" (short port))]
@@ -143,6 +196,18 @@
               (release-listener listener)))))
       (is (datagram-bindable? port)
           "Port should become available again after pooled UDP ownership is released"))))
+
+(deftest pooled-http3-udp-bind-rejects-unsupported-ipv6-host-test
+  ;; TODO(ipv6): Remove this rejection test when H1/H2/H3 gain shared
+  ;; family-aware listener support and HTTP/3 can bind IPv6 correctly.
+  (testing "A pooled HTTP/3 UDP bind rejects unsupported IPv6 hosts instead of binding 0.0.0.0"
+    (let [port (util/free-port)
+          open-transport (requiring-resolve 'ol.busker.native/http3-open-udp-transport)
+          transport (open-transport "::1" (short port))]
+      (is (or (nil? transport) (mem/null? transport))
+          "Opening a pooled HTTP/3 transport with an unsupported IPv6 host should fail")
+      (is (datagram-bindable? port)
+          "Rejecting an unsupported IPv6 host must not reserve the UDP port"))))
 
 (deftest http3-request-response-test
   (testing "HTTP/3 request receives correct response"
@@ -408,18 +473,22 @@
 (deftest http3-global-limit-across-workers-test
   (testing "Connection limit is global across workers, not per-worker"
     (let [port (util/free-port)
-          stream-duration-ms 3000
+          stream-duration-ms 10000
           chunk-interval-ms 200
-          handler (fn [{emitter :ol.busker.request/emitter}]
-                    (future
-                      (proto/emit! emitter {:status 200 :headers {"content-type" "text/plain"}})
-                      (let [num-chunks (/ stream-duration-ms chunk-interval-ms)]
-                        (doseq [idx (range num-chunks)]
-                          (proto/emit! emitter (str "chunk-" idx "-"))
-                          (proto/flush emitter)
-                          (Thread/sleep chunk-interval-ms)))
-                      (proto/close emitter))
-                    {:body emitter})
+          handler (fn [{:keys [uri]
+                        emitter :ol.busker.request/emitter}]
+                    (if (= "/ready" uri)
+                      {:status 200 :body "ready"}
+                      (do
+                        (future
+                          (proto/emit! emitter {:status 200 :headers {"content-type" "text/plain"}})
+                          (let [num-chunks (/ stream-duration-ms chunk-interval-ms)]
+                            (doseq [idx (range num-chunks)]
+                              (proto/emit! emitter (str "chunk-" idx "-"))
+                              (proto/flush emitter)
+                              (Thread/sleep chunk-interval-ms)))
+                          (proto/close emitter))
+                        {:body emitter})))
           ;; 2 workers with max 4 connections total
           ;; If it was per-worker, we'd have 8 connections allowed
       server (busker/start!
@@ -438,13 +507,16 @@
           (is (= 0 (:exit ready))
               (str "HTTP/3 readiness check should succeed. stderr: "
                    (:err ready))))
+        (is (= 0 (wait-for-conn-limit-current! 0))
+            "Readiness connection should release its global connection slot before the limit test starts")
         ;; Start 4 connections (should reach limit)
-        (let [conns (vec (for [_ (range 4)]
-                           (do
-                             (Thread/sleep 100)
-                             (future (util/curl :https :h3 port "/" :max-time 20)))))]
-          ;; Wait a bit for connections to establish
-          (Thread/sleep 1000)
+        (let [conns (vec (repeatedly 4 #(future (util/curl :https :h3 port "/" :max-time 20))))
+              worker-counts (wait-for-http3-worker-counts! server 4 :attempts 50 :delay-ms 100)]
+          (is (= 4 (reduce + worker-counts))
+              (str "The first four HTTP/3 connections should all be accounted for. counts: "
+                   worker-counts))
+          (is (= 4 (wait-for-conn-limit-current! 4 :attempts 100 :delay-ms 100))
+              "The first four HTTP/3 connections should occupy the full global limit before the fifth request starts")
 
           ;; Fifth connection should fail because global limit is 4, not 8
           (let [conn5 (util/curl :https :h3 port "/" :max-time 1)]
@@ -457,7 +529,8 @@
               (is (some? result) (str "Connection " idx " should complete"))
               (when result
                 (is (zero? (:exit result))
-                    (str "Connection " idx " should succeed. stderr: " (:err result)))))))
+                    (str "Connection " idx " should succeed. stderr: "
+                         (:err result)))))))
         (finally
           (busker/stop! server))))))
 

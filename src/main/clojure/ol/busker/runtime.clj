@@ -127,7 +127,9 @@
        :cert-automation runtime
        :instance (generation/start! compiled-config
                                     runtime
-                                    {:listener-pool listener-pool})}
+                                    {:activate-http3-transports? (nil? current-generation)
+                                     :generation-id generation-id
+                                     :listener-pool listener-pool})}
       (catch Throwable t
         (when (and runtime (not reused?))
           (clave-adapter/stop! runtime))
@@ -230,6 +232,7 @@
                                                 next-generation-id
                                                 listener-pool
                                                 active)
+                   _ (generation/activate-http3-transports! (:instance candidate))
                    _ (reset! state
                              {:phase :running
                               :config (:config candidate)

@@ -21,6 +21,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -965,12 +966,33 @@ struct clj_http3_ctx_t {
   h2o_http3_server_ctx_t h3_ctx;
   h2o_accept_ctx_t accept_ctx;
   h2o_socket_t *udp_sock;
+  h2o_socket_t *forwarded_sock;
   quicly_cid_plaintext_t next_cid;
+  struct clj_http3_udp_transport_t *transport;
+  uint64_t node_id;
+  uint32_t thread_id;
+  int forward_fd;
   int fd;
 };
 
-struct clj_http3_udp_listener_t {
-  int fd;
+typedef struct {
+  uint64_t node_id;
+  uint32_t thread_id;
+  int forward_fd;
+  struct clj_http3_ctx_t *ctx;
+} clj_http3_transport_attachment_t;
+
+struct clj_http3_udp_transport_t {
+  int reservation_fd;
+  char *host;
+  uint16_t port;
+  pthread_mutex_t mutex;
+  uint8_t cid_key[32];
+  int cid_key_initialized;
+  clj_http3_transport_attachment_t *attachments;
+  size_t num_attachments;
+  size_t attachments_capacity;
+  uint64_t active_node_id;
 };
 
 typedef struct clj_ptls_identity_cache_entry {
@@ -1303,6 +1325,28 @@ typedef struct {
   quicly_cid_encryptor_t *cid_encryptor;
 } clj_quicly_wrapper_t;
 
+static int clj_quicly_wrapper_set_cid_key(quicly_context_t *ctx,
+                                          const uint8_t *cid_key,
+                                          size_t cid_key_len) {
+  clj_quicly_wrapper_t *wrapper =
+      H2O_STRUCT_FROM_MEMBER(clj_quicly_wrapper_t, ctx, ctx);
+  quicly_cid_encryptor_t *cid_encryptor =
+      quicly_new_default_cid_encryptor(&ptls_openssl_aes128ecb,
+                                       &ptls_openssl_aes128ecb,
+                                       &ptls_openssl_sha256,
+                                       ptls_iovec_init((void *)cid_key,
+                                                       cid_key_len));
+  if (cid_encryptor == NULL)
+    return 0;
+
+  if (wrapper->cid_encryptor != NULL)
+    free(wrapper->cid_encryptor);
+
+  wrapper->cid_encryptor = cid_encryptor;
+  wrapper->ctx.cid_encryptor = cid_encryptor;
+  return 1;
+}
+
 quicly_context_t *clj_h2o_create_quicly_ctx(ptls_context_t *ptls_ctx,
                                             h2o_globalconf_t *globalconf) {
   if (!ptls_ctx || !globalconf)
@@ -1420,14 +1464,339 @@ static int clj_dup_fd_cloexec(int fd) {
   return dup_fd;
 }
 
+static int clj_set_fd_nonblock(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags == -1)
+    return -1;
+
+  return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+#define CLJ_QUIC_FORWARDED_HEADER_MAX_SIZE (1 + 4 + (1 + 16 + 2) * 2 + 1)
+#define CLJ_QUIC_FORWARDED_VERSION 0x91c17000
+
+static uint8_t *clj_encode_quic_address(uint8_t *dst, quicly_address_t *addr) {
+  switch (addr->sa.sa_family) {
+  case AF_INET:
+    *dst++ = 4;
+    memcpy(dst, &addr->sin.sin_addr.s_addr, 4);
+    dst += 4;
+    memcpy(dst, &addr->sin.sin_port, 2);
+    dst += 2;
+    break;
+  case AF_INET6:
+    *dst++ = 6;
+    memcpy(dst, addr->sin6.sin6_addr.s6_addr, 16);
+    dst += 16;
+    memcpy(dst, &addr->sin6.sin6_port, 2);
+    dst += 2;
+    break;
+  case AF_UNSPEC:
+    *dst++ = 0;
+    break;
+  default:
+    return NULL;
+  }
+
+  return dst;
+}
+
+static int clj_decode_quic_address(quicly_address_t *addr, const uint8_t **src,
+                                   const uint8_t *end) {
+  memset(addr, 0, sizeof(*addr));
+
+  if (*src >= end)
+    return 0;
+
+  switch (*(*src)++) {
+  case 4:
+    if (end - *src < 6)
+      return 0;
+    addr->sin.sin_family = AF_INET;
+    memcpy(&addr->sin.sin_addr.s_addr, *src, 4);
+    *src += 4;
+    memcpy(&addr->sin.sin_port, *src, 2);
+    *src += 2;
+    break;
+  case 6:
+    if (end - *src < 18)
+      return 0;
+    addr->sin6.sin6_family = AF_INET6;
+    memcpy(addr->sin6.sin6_addr.s6_addr, *src, 16);
+    *src += 16;
+    memcpy(&addr->sin6.sin6_port, *src, 2);
+    *src += 2;
+    break;
+  case 0:
+    addr->sa.sa_family = AF_UNSPEC;
+    break;
+  default:
+    return 0;
+  }
+
+  return 1;
+}
+
+static size_t clj_encode_quic_forwarded_header(void *buf,
+                                               quicly_address_t *destaddr,
+                                               quicly_address_t *srcaddr,
+                                               uint8_t ttl) {
+  uint8_t *dst = buf;
+
+  *dst++ = 0x80;
+  dst = quicly_encode32(dst, CLJ_QUIC_FORWARDED_VERSION);
+  dst = clj_encode_quic_address(dst, destaddr);
+  if (dst == NULL)
+    return SIZE_MAX;
+  dst = clj_encode_quic_address(dst, srcaddr);
+  if (dst == NULL)
+    return SIZE_MAX;
+  *dst++ = ttl;
+
+  return dst - (uint8_t *)buf;
+}
+
+static size_t clj_decode_quic_forwarded_header(quicly_address_t *destaddr,
+                                               quicly_address_t *srcaddr,
+                                               uint8_t *ttl,
+                                               h2o_iovec_t octets) {
+  const uint8_t *src = (const uint8_t *)octets.base, *end = src + octets.len;
+
+  if (end - src < 6)
+    goto NotForwarded;
+  if (*src++ != 0x80)
+    goto NotForwarded;
+  if (quicly_decode32(&src) != CLJ_QUIC_FORWARDED_VERSION)
+    goto NotForwarded;
+  if (!clj_decode_quic_address(destaddr, &src, end))
+    goto NotForwarded;
+  if (!clj_decode_quic_address(srcaddr, &src, end))
+    goto NotForwarded;
+  if (end - src < 1)
+    goto NotForwarded;
+  *ttl = *src++;
+
+  return src - (const uint8_t *)octets.base;
+
+NotForwarded:
+  return SIZE_MAX;
+}
+
+static int clj_http3_transport_register_attachment(
+    clj_http3_udp_transport_t *transport, uint64_t node_id, uint32_t thread_id,
+    int forward_fd, clj_http3_ctx_t *ctx) {
+  if (pthread_mutex_lock(&transport->mutex) != 0)
+    return 0;
+
+  size_t slot = transport->num_attachments;
+  for (size_t idx = 0; idx < transport->num_attachments; ++idx) {
+    if (transport->attachments[idx].node_id == node_id &&
+        transport->attachments[idx].thread_id == thread_id) {
+      slot = idx;
+      break;
+    }
+  }
+
+  if (slot == transport->num_attachments) {
+    if (transport->num_attachments == transport->attachments_capacity) {
+      size_t new_capacity =
+          transport->attachments_capacity == 0 ? 8 : transport->attachments_capacity * 2;
+      clj_http3_transport_attachment_t *new_attachments =
+          realloc(transport->attachments,
+                  new_capacity * sizeof(*new_attachments));
+      if (new_attachments == NULL) {
+        pthread_mutex_unlock(&transport->mutex);
+        return 0;
+      }
+      transport->attachments = new_attachments;
+      transport->attachments_capacity = new_capacity;
+    }
+    transport->num_attachments++;
+  }
+
+  transport->attachments[slot] = (clj_http3_transport_attachment_t){
+      .node_id = node_id,
+      .thread_id = thread_id,
+      .forward_fd = forward_fd,
+      .ctx = ctx,
+  };
+  pthread_mutex_unlock(&transport->mutex);
+  return 1;
+}
+
+static int clj_http3_transport_get_forward_fd(
+    clj_http3_udp_transport_t *transport, uint64_t node_id, uint32_t thread_id,
+    int allow_thread_fallback) {
+  int fd = -1;
+  int fallback_fd = -1;
+
+  if (pthread_mutex_lock(&transport->mutex) != 0)
+    return -1;
+  for (size_t idx = 0; idx < transport->num_attachments; ++idx) {
+    clj_http3_transport_attachment_t *attachment = transport->attachments + idx;
+    if (attachment->node_id == node_id) {
+      if (allow_thread_fallback && fallback_fd == -1)
+        fallback_fd = attachment->forward_fd;
+      if (attachment->thread_id == thread_id) {
+        fd = attachment->forward_fd;
+        break;
+      }
+    }
+  }
+  pthread_mutex_unlock(&transport->mutex);
+
+  if (fd != -1)
+    return fd;
+  return fallback_fd;
+}
+
+static void clj_http3_transport_unregister_attachment(
+    clj_http3_udp_transport_t *transport, uint64_t node_id, uint32_t thread_id,
+    int forward_fd) {
+  if (pthread_mutex_lock(&transport->mutex) != 0)
+    return;
+
+  for (size_t idx = 0; idx < transport->num_attachments; ++idx) {
+    clj_http3_transport_attachment_t *attachment = transport->attachments + idx;
+    if (attachment->node_id == node_id && attachment->thread_id == thread_id &&
+        attachment->forward_fd == forward_fd) {
+      if (idx + 1 < transport->num_attachments) {
+        memmove(attachment, attachment + 1,
+                (transport->num_attachments - idx - 1) *
+                    sizeof(*attachment));
+      }
+      transport->num_attachments--;
+      break;
+    }
+  }
+
+  pthread_mutex_unlock(&transport->mutex);
+}
+
+static int clj_forward_quic_packets(h2o_quic_ctx_t *h3ctx,
+                                    const uint64_t *node_id,
+                                    uint32_t thread_id,
+                                    quicly_address_t *destaddr,
+                                    quicly_address_t *srcaddr, uint8_t ttl,
+                                    quicly_decoded_packet_t *packets,
+                                    size_t num_packets) {
+  clj_http3_ctx_t *ctx = H2O_STRUCT_FROM_MEMBER(clj_http3_ctx_t, h3_ctx.super,
+                                                h3ctx);
+  uint64_t target_node_id;
+  int allow_thread_fallback = 0;
+  int fd;
+
+  if (node_id != NULL) {
+    target_node_id = *node_id;
+    if (target_node_id == ctx->node_id && thread_id == ctx->thread_id)
+      return 0;
+  } else {
+    if (pthread_mutex_lock(&ctx->transport->mutex) != 0)
+      return 0;
+    target_node_id = ctx->transport->active_node_id;
+    pthread_mutex_unlock(&ctx->transport->mutex);
+    if (target_node_id == 0)
+      return 0;
+    if (target_node_id == ctx->node_id && thread_id == ctx->thread_id)
+      return 0;
+    if (h3ctx->acceptor != NULL)
+      return 0;
+    /* Unknown Initials can target any active worker; exact thread match matters
+       only after CID routing pins the connection to a specific worker. */
+    allow_thread_fallback = 1;
+  }
+
+  fd = clj_http3_transport_get_forward_fd(ctx->transport, target_node_id,
+                                          thread_id,
+                                          allow_thread_fallback);
+  if (fd == -1)
+    return 0;
+
+  char header_buf[CLJ_QUIC_FORWARDED_HEADER_MAX_SIZE];
+  size_t header_len =
+      clj_encode_quic_forwarded_header(header_buf, destaddr, srcaddr, ttl);
+  if (header_len == SIZE_MAX)
+    return 0;
+
+  for (size_t idx = 0; idx != num_packets; ++idx) {
+    struct iovec vec[2] = {{header_buf, header_len},
+                           {packets[idx].octets.base, packets[idx].octets.len}};
+    if (writev(fd, vec, 2) < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+      return 0;
+  }
+
+  return 1;
+}
+
+static int clj_rewrite_forwarded_quic_datagram(h2o_quic_ctx_t *h3ctx,
+                                               struct msghdr *msg,
+                                               quicly_address_t *destaddr,
+                                               quicly_address_t *srcaddr,
+                                               uint8_t *ttl) {
+  struct {
+    quicly_address_t destaddr, srcaddr;
+    uint8_t ttl;
+    size_t offset;
+  } encapsulated;
+
+  if (msg->msg_iovlen != 1)
+    return 1;
+
+  encapsulated.offset =
+      clj_decode_quic_forwarded_header(&encapsulated.destaddr,
+                                       &encapsulated.srcaddr,
+                                       &encapsulated.ttl,
+                                       h2o_iovec_init(msg->msg_iov[0].iov_base,
+                                                      msg->msg_iov[0].iov_len));
+  if (encapsulated.offset == SIZE_MAX)
+    return 1;
+
+  switch (encapsulated.destaddr.sa.sa_family) {
+  case AF_UNSPEC:
+    break;
+  case AF_INET:
+    if (encapsulated.destaddr.sin.sin_port != *h3ctx->sock.port)
+      return 1;
+    break;
+  case AF_INET6:
+    if (encapsulated.destaddr.sin6.sin6_port != *h3ctx->sock.port)
+      return 1;
+    break;
+  default:
+    return 1;
+  }
+
+  msg->msg_iov[0].iov_base =
+      (char *)msg->msg_iov[0].iov_base + encapsulated.offset;
+  msg->msg_iov[0].iov_len -= encapsulated.offset;
+  *destaddr = encapsulated.destaddr;
+  *srcaddr = encapsulated.srcaddr;
+  *ttl = encapsulated.ttl;
+
+  return 1;
+}
+
+static void clj_forwarded_quic_socket_on_read(h2o_socket_t *sock,
+                                              const char *err) {
+  clj_http3_ctx_t *ctx = sock->data;
+
+  if (err != NULL)
+    return;
+
+  h2o_quic_read_socket(&ctx->h3_ctx.super, sock);
+}
+
 static int clj_h2o_http3_open_udp_fd(const char *host, uint16_t port) {
   struct sockaddr_in addr;
   memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
 
   if (host && host[0] != '\0') {
+    /* TODO(ipv6): Remove this IPv4-only host gate when H1/H2/H3 share one
+       family-aware listener implementation. */
     if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
-      addr.sin_addr.s_addr = htonl(INADDR_ANY);
+      DEBUG_LOG("unsupported HTTP/3 UDP bind host (IPv4 only): %s", host);
+      return -1;
     }
   } else {
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -1446,6 +1815,13 @@ static int clj_h2o_http3_open_udp_fd(const char *host, uint16_t port) {
     close(fd);
     return -1;
   }
+#ifdef SO_REUSEPORT
+  if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval)) != 0) {
+    DEBUG_LOG("setsockopt(SO_REUSEPORT) failed: %s", strerror(errno));
+    close(fd);
+    return -1;
+  }
+#endif
 
 #ifdef IP_PKTINFO
   if (setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &optval, sizeof(optval)) != 0) {
@@ -1471,6 +1847,7 @@ clj_h2o_http3_create_worker_ctx_from_fd(h2o_context_t *h2o_ctx,
                                         h2o_evloop_t *loop,
                                         quicly_context_t *quic_ctx,
                                         h2o_hostconf_t **hosts, int fd,
+                                        uint64_t node_id,
                                         uint32_t thread_id) {
   if (!h2o_ctx || !loop || !quic_ctx || !hosts || fd < 0)
     return NULL;
@@ -1478,6 +1855,8 @@ clj_h2o_http3_create_worker_ctx_from_fd(h2o_context_t *h2o_ctx,
   clj_http3_ctx_t *ctx = calloc(1, sizeof(clj_http3_ctx_t));
   if (!ctx)
     return NULL;
+
+  ctx->forward_fd = -1;
 
   /* QUIC reads datagrams directly; prevent socket layer from consuming them */
   ctx->udp_sock = h2o_evloop_socket_create(loop, fd, H2O_SOCKET_FLAG_DONT_READ);
@@ -1493,14 +1872,15 @@ clj_h2o_http3_create_worker_ctx_from_fd(h2o_context_t *h2o_ctx,
   ctx->next_cid = (quicly_cid_plaintext_t){
       .master_id = 0,
       .thread_id = thread_id,
-      .node_id = 0,
+      .node_id = node_id,
   };
+  ctx->node_id = node_id;
 
   ctx->accept_ctx.ctx = h2o_ctx;
   ctx->accept_ctx.hosts = hosts;
 
   h2o_http3_server_init_context(h2o_ctx, &ctx->h3_ctx.super, loop, ctx->udp_sock,
-                                quic_ctx, &ctx->next_cid, clj_on_http3_accept,
+                                quic_ctx, &ctx->next_cid, NULL,
                                 NULL, 0);
 
   ctx->h3_ctx.accept_ctx = &ctx->accept_ctx;
@@ -1508,65 +1888,154 @@ clj_h2o_http3_create_worker_ctx_from_fd(h2o_context_t *h2o_ctx,
   return ctx;
 }
 
-clj_http3_udp_listener_t *clj_h2o_http3_open_udp_listener(const char *host,
-                                                          uint16_t port) {
-  clj_http3_udp_listener_t *listener = calloc(1, sizeof(*listener));
-  if (!listener)
+clj_http3_udp_transport_t *clj_h2o_http3_open_udp_transport(const char *host,
+                                                            uint16_t port) {
+  clj_http3_udp_transport_t *transport = calloc(1, sizeof(*transport));
+  if (!transport)
     return NULL;
 
-  listener->fd = clj_h2o_http3_open_udp_fd(host, port);
-  if (listener->fd == -1) {
-    free(listener);
+  transport->reservation_fd = -1;
+  if (pthread_mutex_init(&transport->mutex, NULL) != 0) {
+    free(transport);
+    return NULL;
+  }
+  if (host != NULL && host[0] != '\0') {
+    transport->host = strdup(host);
+    if (transport->host == NULL) {
+      pthread_mutex_destroy(&transport->mutex);
+      free(transport);
+      return NULL;
+    }
+  }
+  transport->port = port;
+  transport->reservation_fd = clj_h2o_http3_open_udp_fd(host, port);
+  if (transport->reservation_fd == -1) {
+    free(transport->host);
+    pthread_mutex_destroy(&transport->mutex);
+    free(transport);
     return NULL;
   }
 
-  return listener;
+  return transport;
 }
 
 clj_http3_ctx_t *
-clj_h2o_http3_attach_udp_listener(h2o_context_t *h2o_ctx, h2o_evloop_t *loop,
-                                  quicly_context_t *quic_ctx,
-                                  h2o_hostconf_t **hosts,
-                                  clj_http3_udp_listener_t *listener,
-                                  uint32_t thread_id) {
-  if (!listener)
+clj_h2o_http3_attach_udp_transport(h2o_context_t *h2o_ctx, h2o_evloop_t *loop,
+                                   quicly_context_t *quic_ctx,
+                                   h2o_hostconf_t **hosts,
+                                   clj_http3_udp_transport_t *transport,
+                                   uint64_t node_id, uint32_t thread_id) {
+  clj_http3_ctx_t *ctx;
+  int fds[2];
+
+  if (!transport)
     return NULL;
 
-  int dup_fd = clj_dup_fd_cloexec(listener->fd);
-  if (dup_fd == -1) {
-    DEBUG_LOG("dup(UDP listener) failed: %s", strerror(errno));
+  int lock_rc = pthread_mutex_lock(&transport->mutex);
+  if (lock_rc != 0) {
+    DEBUG_LOG("pthread_mutex_lock(transport) failed: %d", lock_rc);
     return NULL;
   }
 
-  return clj_h2o_http3_create_worker_ctx_from_fd(h2o_ctx, loop, quic_ctx, hosts,
-                                                 dup_fd, thread_id);
-}
+  if (!transport->cid_key_initialized) {
+    ptls_openssl_random_bytes(transport->cid_key, sizeof(transport->cid_key));
+    transport->cid_key_initialized = 1;
+  }
+  if (transport->reservation_fd != -1) {
+    close(transport->reservation_fd);
+    transport->reservation_fd = -1;
+  }
+  pthread_mutex_unlock(&transport->mutex);
 
-void clj_h2o_http3_release_udp_listener(clj_http3_udp_listener_t *listener) {
-  if (!listener)
-    return;
+  if (!clj_quicly_wrapper_set_cid_key(quic_ctx, transport->cid_key,
+                                      sizeof(transport->cid_key))) {
+    DEBUG_LOG("failed to set shared CID key on QUIC context");
+    return NULL;
+  }
 
-  if (listener->fd != -1)
-    close(listener->fd);
-  free(listener);
-}
+  int worker_fd = clj_h2o_http3_open_udp_fd(transport->host, transport->port);
+  if (worker_fd == -1) {
+    DEBUG_LOG("open(worker UDP listener) failed: %s", strerror(errno));
+    return NULL;
+  }
 
-clj_http3_ctx_t *clj_h2o_http3_create_worker_ctx(h2o_context_t *h2o_ctx,
-                                                 h2o_evloop_t *loop,
-                                                 quicly_context_t *quic_ctx,
-                                                 h2o_hostconf_t **hosts,
-                                                 const char *host,
-                                                 uint16_t port,
-                                                 uint32_t thread_id) {
-  clj_http3_udp_listener_t *listener = clj_h2o_http3_open_udp_listener(host, port);
-  if (!listener)
+  ctx = clj_h2o_http3_create_worker_ctx_from_fd(h2o_ctx, loop, quic_ctx, hosts,
+                                                worker_fd, node_id, thread_id);
+  if (ctx == NULL)
     return NULL;
 
-  clj_http3_ctx_t *ctx = clj_h2o_http3_attach_udp_listener(h2o_ctx, loop, quic_ctx,
-                                                           hosts, listener,
-                                                           thread_id);
-  clj_h2o_http3_release_udp_listener(listener);
+  if (socketpair(AF_UNIX, SOCK_DGRAM, 0, fds) != 0) {
+    h2o_quic_dispose_context(&ctx->h3_ctx.super);
+    free(ctx);
+    return NULL;
+  }
+  if (fcntl(fds[0], F_SETFD, FD_CLOEXEC) != 0 ||
+      fcntl(fds[1], F_SETFD, FD_CLOEXEC) != 0 ||
+      clj_set_fd_nonblock(fds[1]) != 0) {
+    close(fds[0]);
+    close(fds[1]);
+    h2o_quic_dispose_context(&ctx->h3_ctx.super);
+    free(ctx);
+    return NULL;
+  }
+
+  ctx->transport = transport;
+  ctx->thread_id = thread_id;
+  ctx->forward_fd = fds[1];
+  ctx->forwarded_sock =
+      h2o_evloop_socket_create(loop, fds[0], H2O_SOCKET_FLAG_DONT_READ);
+  if (ctx->forwarded_sock == NULL ||
+      !clj_http3_transport_register_attachment(transport, node_id, thread_id,
+                                               ctx->forward_fd, ctx)) {
+    if (ctx->forwarded_sock == NULL)
+      close(fds[0]);
+    if (ctx->forwarded_sock != NULL)
+      h2o_socket_close(ctx->forwarded_sock);
+    close(ctx->forward_fd);
+    h2o_quic_dispose_context(&ctx->h3_ctx.super);
+    free(ctx);
+    return NULL;
+  }
+
+  ctx->forwarded_sock->data = ctx;
+  h2o_socket_read_start(ctx->forwarded_sock, clj_forwarded_quic_socket_on_read);
+  h2o_quic_set_forwarding_context(&ctx->h3_ctx.super, 0, 4,
+                                  clj_forward_quic_packets,
+                                  clj_rewrite_forwarded_quic_datagram);
+
   return ctx;
+}
+
+void clj_h2o_http3_activate_udp_transport_generation(
+    clj_http3_udp_transport_t *transport, uint64_t node_id) {
+  if (transport == NULL)
+    return;
+
+  if (pthread_mutex_lock(&transport->mutex) != 0)
+    return;
+
+  transport->active_node_id = node_id;
+  for (size_t idx = 0; idx < transport->num_attachments; ++idx) {
+    clj_http3_transport_attachment_t *attachment = transport->attachments + idx;
+    if (attachment->ctx != NULL) {
+      attachment->ctx->h3_ctx.super.acceptor =
+          attachment->node_id == node_id ? clj_on_http3_accept : NULL;
+    }
+  }
+
+  pthread_mutex_unlock(&transport->mutex);
+}
+
+void clj_h2o_http3_release_udp_transport(clj_http3_udp_transport_t *transport) {
+  if (!transport)
+    return;
+
+  if (transport->reservation_fd != -1)
+    close(transport->reservation_fd);
+  free(transport->host);
+  free(transport->attachments);
+  pthread_mutex_destroy(&transport->mutex);
+  free(transport);
 }
 
 void clj_h2o_http3_stop_accepting(clj_http3_ctx_t *ctx) {
@@ -1590,13 +2059,21 @@ void clj_h2o_http3_dispose_worker_ctx(clj_http3_ctx_t *ctx) {
   if (!ctx)
     return;
 
+  if (ctx->transport != NULL && ctx->forward_fd != -1)
+    clj_http3_transport_unregister_attachment(ctx->transport, ctx->node_id,
+                                              ctx->thread_id, ctx->forward_fd);
+  if (ctx->forwarded_sock != NULL)
+    h2o_socket_close(ctx->forwarded_sock);
+  if (ctx->forward_fd != -1)
+    close(ctx->forward_fd);
+
   /* h2o_quic_dispose_context closes the socket internally */
   h2o_quic_dispose_context(&ctx->h3_ctx.super);
 
   free(ctx);
 }
 
-void clj_h2o_http3_detach_udp_listener(clj_http3_ctx_t *ctx) {
+void clj_h2o_http3_detach_udp_transport(clj_http3_ctx_t *ctx) {
   clj_h2o_http3_dispose_worker_ctx(ctx);
 }
 
