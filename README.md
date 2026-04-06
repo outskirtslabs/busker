@@ -26,6 +26,8 @@ The actual state of affairs is:
 - [x] HTTP/2
 - [x] 103 early hints
 - [x] HTTP/3
+- [ ] IPv4
+- [ ] unix domain sockets
 - [ ] 0-RTT TLS
 - [ ] Automatic HTTPS
 - [ ] TLS STEK, pluggable ticket store
@@ -46,7 +48,7 @@ com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
                           :git/sha "cf53e8e003f66b32d3fc3b0b456f764cc665b308"}
 ```
 
-When using busker as a git dep always run `clj -Xdeps prep` after bumping the git sha.
+When using busker as a git dep always run `clj -X:deps prep` after bumping the git sha.
 
 ...and you need (at least) one of the native dependencies below.
 

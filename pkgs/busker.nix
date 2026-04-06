@@ -1,5 +1,7 @@
 {
   pkgs,
+  stdenv,
+  clojureLib,
   gitRev,
   shim,
 }:
@@ -46,51 +48,63 @@ let
       "--enable-ssls-export"
     ];
   });
+  jdk = pkgs.jdk25;
+  clojure = pkgs.clojure.override { inherit jdk; };
+  clojureLocker = clojureLib.mkLockfile {
+    inherit pkgs jdk;
+    src = projectSrc;
+    lockfile = "./deps-lock.json";
+  };
 in
-pkgs.mkCljLib {
-  inherit projectSrc;
-  name = "com.outskirtslabs/busker";
+stdenv.mkDerivation {
+  pname = "busker";
   version = "0.0.2";
+  src = projectSrc;
   nativeBuildInputs = [
+    clojure
+    jdk
     pkgs.coreutils
     curlWithSsls
+    pkgs.findutils
     pkgs.git
     pkgs.iproute2
     pkgs.openssl
     pkgs.perl
   ];
   GIT_REV = gitRev;
-  JAVA_HOME = pkgs.jdk25.home;
-  buildCommand = ''
-    original_java_tool_options="$JAVA_TOOL_OPTIONS"
-    clj_cache_home="$(printf '%s\n' "$original_java_tool_options" | tr ' ' '\n' | sed -n 's/^-Duser.home=//p' | head -n1)"
+  JAVA_HOME = jdk.home;
+  buildPhase = ''
+    runHook preBuild
 
-    export JAVA_HOME="${pkgs.jdk25.home}"
-    export JAVA_CMD="${pkgs.jdk25}/bin/java"
+    source ${clojureLocker.shellEnv}
+    export JAVA_HOME="${jdk.home}"
+    export JAVA_CMD="${jdk}/bin/java"
     export GIT_REV="${gitRev}"
-    export HOME="$TMPDIR/clj-home"
-    mkdir -p "$HOME"
-    if [ -n "$clj_cache_home" ] && [ -d "$clj_cache_home" ]; then
-      cp -R "$clj_cache_home/.m2" "$HOME/.m2"
-      cp -R "$clj_cache_home/.gitlibs" "$HOME/.gitlibs"
-      cp -R -L "$clj_cache_home/.clojure" "$HOME/.clojure"
-      chmod -R u+w "$HOME"
-    fi
-    export JAVA_TOOL_OPTIONS="$(printf '%s\n' "$original_java_tool_options" | tr ' ' '\n' | grep -v '^-Duser.home=' | tr '\n' ' ') -Duser.home=$HOME"
 
-    mkdir -p "shim/linux-x86-64/resources/linux-x86-64"
-    mkdir -p "shim/linux-aarch64/resources/linux-aarch64"
-    mkdir -p "shim/macos-x86-64/resources/macos-x86-64"
-    mkdir -p "shim/macos-aarch64/resources/macos-aarch64"
+    for dir in linux-x86-64 linux-aarch64 macos-x86-64 macos-aarch64; do
+      case "$dir" in
+        linux-*) lib_name="libh2oclj.so" ;;
+        macos-*) lib_name="libh2oclj.dylib" ;;
+        *) echo "Unknown shim target: $dir" >&2; exit 1 ;;
+      esac
 
-    cp "${shim}/linux-x86-64/libh2oclj.so" "shim/linux-x86-64/resources/linux-x86-64/"
-    cp "${shim}/linux-aarch64/libh2oclj.so" "shim/linux-aarch64/resources/linux-aarch64/"
-    cp "${shim}/macos-x86-64/libh2oclj.dylib" "shim/macos-x86-64/resources/macos-x86-64/"
-    cp "${shim}/macos-aarch64/libh2oclj.dylib" "shim/macos-aarch64/resources/macos-aarch64/"
+      mkdir -p "shim/$dir/resources/$dir"
+      cp "${shim}/$dir/$lib_name" "shim/$dir/resources/$dir/"
+    done
 
-    clojure -Xdeps prep :aliases '[:build :dev :test]'
-    clojure -M:dev:test:kaocha
-    clojure -J-Xmx2g -J-Xms2g -M:dev:test:kaocha --no-capture-output --focus ol.busker.large-payload-test
-    clojure -T:build jar
+    clojure -Srepro -X:deps prep :aliases '[:build :dev :test]'
+    clojure -Srepro -M:dev:test:kaocha
+    clojure -Srepro -J-Xmx2g -J-Xms2g -M:dev:test:kaocha --no-capture-output --focus ol.busker.large-payload-test
+    clojure -Srepro -T:build jar
+
+    runHook postBuild
+  '';
+  installPhase = ''
+    runHook preInstall
+
+    mkdir -p "$out"
+    cp "$(find target -type f -name '*.jar' -print | head -n 1)" "$out/"
+
+    runHook postInstall
   '';
 }

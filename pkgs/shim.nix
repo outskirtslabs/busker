@@ -1,9 +1,9 @@
 {
+  pkgs,
   lib,
-  clojure,
+  clojureLib,
   git,
   jdk25,
-  mk-deps-cache,
   perl,
   stdenv,
   zig2nix,
@@ -13,11 +13,9 @@
 let
   system = stdenv.hostPlatform.system;
   root = toString ../.;
+  clojure = pkgs.clojure.override { jdk = jdk25; };
   zig = zig2nix.packages.${system}."zig-0_15_2";
   zig2nixEnv = zig2nix.outputs.zig-env.${system} { inherit zig; };
-  deps-cache = mk-deps-cache {
-    lockfile = ../deps-lock.json;
-  };
   shimTargets = [
     {
       dir = "linux-x86-64";
@@ -68,7 +66,8 @@ let
       !(
         base == ".git"
         || !(
-          rel == "deps.edn"
+          rel == "deps-lock.json"
+          || rel == "deps.edn"
           || rel == "shim"
           || rel == "src"
           || rel == "src/shim"
@@ -79,6 +78,12 @@ let
           )
         )
       );
+  };
+  clojureLocker = clojureLib.mkLockfile {
+    inherit pkgs;
+    jdk = jdk25;
+    src = filteredSrc;
+    lockfile = "./deps-lock.json";
   };
 in
 zig2nixEnv.package {
@@ -106,9 +111,9 @@ zig2nixEnv.package {
     "-Doptimize=Debug"
   ];
   postInstall = ''
-    export HOME="${deps-cache}"
-    export JAVA_TOOL_OPTIONS="-Duser.home=${deps-cache}"
+    source ${clojureLocker.shellEnv}
     export JAVA_HOME="${jdk25.home}"
+    export JAVA_CMD="${jdk25}/bin/java"
     export PATH="$JAVA_HOME/bin:$PATH"
     export GIT_REV="${gitRev}"
     if [ ! -f ../deps.edn ]; then
@@ -125,7 +130,7 @@ zig2nixEnv.package {
       cp "$out/$dir/$lib_name" "$dir/resources/$dir/"
       (
         cd "$dir"
-        clj -T:build jar
+        clojure -Srepro -T:build jar
       )
       cp "$dir/target/"*.jar "$out/jars/"
     done

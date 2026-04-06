@@ -7,8 +7,6 @@
     devshell.inputs.nixpkgs.follows = "nixpkgs";
     devenv.url = "https://flakehub.com/f/ramblurr/nix-devenv/*";
     devenv.inputs.nixpkgs.follows = "nixpkgs";
-    clj-nix.url = "github:jlesquembre/clj-nix";
-    clj-nix.inputs.nixpkgs.follows = "nixpkgs";
     zig2nix.url = "github:Cloudef/zig2nix";
     zig2nix.inputs.nixpkgs.follows = "nixpkgs";
     h2o-zig.url = "github:outskirtslabs/h2o-zig";
@@ -19,7 +17,6 @@
   outputs =
     inputs@{
       self,
-      clj-nix,
       devenv,
       devshell,
       h2o-zig,
@@ -38,11 +35,11 @@
       withOverlays = [
         devshell.overlays.default
         devenv.overlays.default
-        clj-nix.overlays.default
       ];
 
       packages =
         let
+          clojureLib = devenv.outputs.clojure;
           gitRev =
             if self ? rev then
               self.rev
@@ -53,15 +50,18 @@
         in
         rec {
           apple-sdk = pkgs: pkgs.callPackage ./pkgs/apple-sdk.nix { };
+          locker = pkgs: pkgs.callPackage ./pkgs/locker.nix { inherit clojureLib; };
           shim =
             pkgs:
             pkgs.callPackage ./pkgs/shim.nix {
+              inherit clojureLib;
               inherit gitRev zig2nix;
               apple-sdk = self.packages.${pkgs.system}.apple-sdk;
             };
           busker =
             pkgs:
             pkgs.callPackage ./pkgs/busker.nix {
+              inherit clojureLib;
               inherit gitRev;
               shim = self.packages.${pkgs.system}.shim;
             };
@@ -84,7 +84,7 @@
             pkgs.cfssl
             clojure
             jdk
-            pkgs.deps-lock
+            self.packages.${pkgs.system}.locker
             (pkgs.curlFull.overrideAttrs (prev: {
               pname = prev.pname + "-ssls";
               configureFlags = prev.configureFlags or [ ] ++ [

@@ -1,5 +1,5 @@
 {:paths ["."]
- :deps {org.clojure/clojure {:mvn/version "1.12.3"}
+ :deps {org.clojure/clojure {:mvn/version "1.12.4"}
         com.outskirtslabs/busker {:local/root "../../"}
         com.outskirtslabs.busker/linux-x86-64 {:local/root "../../shim/linux-x86-64"}
         com.outskirtslabs.busker/linux-aarch64 {:local/root "../../shim/linux-aarch64"}

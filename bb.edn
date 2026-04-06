@@ -19,7 +19,7 @@
 
                   prep
                   {:doc  "Prepare the clojure deps"
-                   :task (clojure "-Xdeps prep :aliases '[:dev :test]'")}
+                   :task (clojure "-X:deps prep :aliases '[:dev :test]'")}
 
                   jar:native
                   {:depends [clean prep build:shim]
