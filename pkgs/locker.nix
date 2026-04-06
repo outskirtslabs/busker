@@ -45,4 +45,4 @@ let
     '';
   };
 in
-clojureLocker.locker;
+clojureLocker.locker

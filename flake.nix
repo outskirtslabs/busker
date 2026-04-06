@@ -69,22 +69,28 @@
         };
 
       devShell =
+
         pkgs:
+
         let
           zig = zig2nix.packages.${pkgs.system}."zig-0_15_2";
           zig2nixEnv = zig2nix.outputs.zig-env.${pkgs.system} { inherit zig; };
           apple-sdk = self.packages.${pkgs.system}.apple-sdk;
           javaVersion = "25";
-          jdk = pkgs."jdk${javaVersion}";
-          clojure = pkgs.clojure.override { inherit jdk; };
         in
-        {
+        pkgs.devshell.mkShell {
+          imports = [
+            devenv.capsules.base
+            devenv.capsules.clojure
+          ];
+          commands = [
+            {
+              package = self.packages.${pkgs.system}.locker;
+            }
+          ];
           packages = [
             pkgs.pebble
             pkgs.cfssl
-            clojure
-            jdk
-            self.packages.${pkgs.system}.locker
             (pkgs.curlFull.overrideAttrs (prev: {
               pname = prev.pname + "-ssls";
               configureFlags = prev.configureFlags or [ ] ++ [
@@ -114,21 +120,22 @@
             pkgs.clang-tools
             pkgs.clj-kondo
             pkgs.cljfmt
-            pkgs.babashka
             pkgs.bbin
             pkgs.git
             apple-sdk
             pkgs.wrk
             pkgs.nghttp2
           ];
-          env.APPLE_SDK_PATH = "${apple-sdk}";
-          env.ZIG_GLOBAL_CACHE_DIR = ".zig-cache-global";
-          shellHook = ''
-            mkdir -p extra/
-            pushd extra/
-            test -f seed.bb && bb ./seed.bb
-            popd
-          '';
+          env = [
+            {
+              name = "APPLE_SDK_PATH";
+              value = "${apple-sdk}";
+            }
+            {
+              name = "ZIG_GLOBAL_CACHE_DIR";
+              value = ".zig-cache-global";
+            }
+          ];
         };
     };
 }
