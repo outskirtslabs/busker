@@ -9,8 +9,7 @@
            ;; busker requires clave, an ACME client, to power its auto https features
            io.github.outskirtslabs/clave             {:git/sha "2b7fa1d12cb05a23806bdcf249b76027951adbf3"}
            ;; busker requires charred because implementing ACME requires speaking JSON, and clave makes it a peer dep
-           com.cnuernber/charred                     {:mvn/version "1.037"}
-           org.ring-clojure/ring-websocket-protocols {:mvn/version "1.15.3"}}
+           com.cnuernber/charred                     {:mvn/version "1.037"}}
  :aliases {:kaocha {:extra-paths []
                     :extra-deps  {lambdaisland/kaocha {:mvn/version "1.91.1392"}}
                     :main-opts   ["-m" "kaocha.runner"]}
