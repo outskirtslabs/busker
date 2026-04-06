@@ -28,7 +28,7 @@
 (ns ol.busker.protocols.content-length
   (:require
    [ol.busker.protocols :as p]
-   [ol.busker.util :as util]))
+   [ol.busker.util.headers :as hdr.util]))
 
 ;; Extending primitive arrays prior to Clojure 1.12 requires using the low-level
 ;; extend function.
@@ -40,7 +40,7 @@
 (extend-protocol p/SizableResponseBody
   String
   (body-size-in-bytes [s response]
-    (alength (.getBytes s (or (util/get-charset response) "utf-8"))))
+    (alength (.getBytes s (or (hdr.util/get-charset response) "utf-8"))))
   java.io.File
   (body-size-in-bytes [f _]
     (.length f))

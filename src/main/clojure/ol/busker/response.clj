@@ -1,15 +1,15 @@
 (ns ol.busker.response
   "Response handling for h2o HTTP server."
   (:require
-   [clojure.string :as str]
    [clojure.java.io :as io]
+   [clojure.string :as str]
    [coffi.mem :as mem]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as p]
    [ol.busker.protocols.content-length]
    [ol.busker.response-queue :as response-queue]
-   [ol.busker.util :as util]
+   [ol.busker.util.headers :as hdr.util]
    [ring.core.protocols :as ring-protocols])
   (:import
    [java.io InputStream OutputStream]
@@ -46,7 +46,7 @@
   headers memorysegment should NOT contain content-length if it was found"
   [resp]
   (let [headers (:headers resp)
-        content-length-val (second (util/find-header resp "content-length"))
+        content-length-val (second (hdr.util/find-header resp "content-length"))
         content-length (if content-length-val
                          (coerce-content-length content-length-val)
                          -1)
@@ -88,7 +88,7 @@
   headers memorysegment should NOT contain content-length if it was found"
   [resp]
   (let [headers (:headers resp)
-        content-length-val (second (util/find-header resp "content-length"))
+        content-length-val (second (hdr.util/find-header resp "content-length"))
         content-length (if content-length-val
                          (coerce-content-length content-length-val)
                          -1)
@@ -121,10 +121,10 @@
         [headers-seg headers-count content-length]))))
 
 (defn with-content-length [response]
-  (if (util/get-header response "content-length")
+  (if (hdr.util/get-header response "content-length")
     response
     (if-let [size (p/body-size-in-bytes (:body response) response)]
-      (util/header response "content-length" (str size))
+      (hdr.util/header response "content-length" (str size))
       response)))
 
 (def ^:private byte-array-class (Class/forName "[B"))
