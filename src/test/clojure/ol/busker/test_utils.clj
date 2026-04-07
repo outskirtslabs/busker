@@ -69,7 +69,7 @@
   [scheme host port path]
   (str (name scheme)
        "://"
-       (format-url-host host)
+       host
        (when (some? port)
          (str ":" port))
        path))
@@ -97,6 +97,7 @@
         host (if (and https? (not explicit-host?) (= "127.0.0.1" host))
                "localhost.examp1e.net"
                host)
+        url-host (format-url-host host)
         sni-resolve-args (if (and https? (not explicit-host?)
                                   (= "localhost.examp1e.net" host)
                                   (some? port)
@@ -109,12 +110,12 @@
                      :h3 ["--http3-only"]
                      [])
         default-args (cond-> ["-k" "-s" "--max-time" (str max-time)]
-                       (str/includes? (format-url-host host) ":")
+                       (str/includes? url-host ":")
                        (conj "-g"))
         unix-socket-args (if unix-socket
                            ["--unix-socket" unix-socket]
                            [])
-        url (curl-url scheme host port path)
+        url (curl-url scheme url-host port path)
         curl-args (concat proto-args
                           default-args
                           unix-socket-args
