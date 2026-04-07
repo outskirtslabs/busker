@@ -28,8 +28,6 @@
    :config-fn
    :http-client])
 
-(declare lookup-certificate)
-
 (defn- distinct-subject-names
   [subject-names]
   (->> subject-names
@@ -104,6 +102,16 @@
     (future-cancel (:worker watcher)))
   nil)
 
+(defn lookup-certificate
+  [runtime hostname]
+  (if-let [system (:system runtime)]
+    (let [bundle (automation/lookup-cert system hostname)]
+      (trove/log! {:level :debug
+                   :id (if bundle ::lookup-hit ::lookup-miss)
+                   :data {:hostname hostname}})
+      bundle)
+    nil))
+
 (defn start!
   [managed-plan]
   (when managed-plan
@@ -137,16 +145,6 @@
   (if-let [solver (:http-solver runtime)]
     (http-solver/wrap-acme-challenge handler solver)
     handler))
-
-(defn lookup-certificate
-  [runtime hostname]
-  (if-let [system (:system runtime)]
-    (let [bundle (automation/lookup-cert system hostname)]
-      (trove/log! {:level :debug
-                   :id (if bundle ::lookup-hit ::lookup-miss)
-                   :data {:hostname hostname}})
-      bundle)
-    nil))
 
 (defn stop!
   [runtime]

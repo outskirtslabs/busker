@@ -10,8 +10,6 @@
    [java.io File]
    [java.util.concurrent Executors]))
 
-(declare config->listeners)
-
 (defn port-string?
   [s]
   (when (string? s)
@@ -371,29 +369,6 @@
 (def ^:private storage-placeholder
   ::storage)
 
-(defn normalized-snapshot
-  "Return the normalized pure-data config snapshot for `user-config`.
-
-  The snapshot applies Busker defaults, expands listeners, and strips
-  runtime-owned objects such as executors, buffer pools, storage instances,
-  and direct callable values."
-  [user-config]
-  (let [config (-> (base-config-with-defaults user-config)
-                   config->listeners
-                   (dissoc :executor :buffer-pool))]
-    (walk/postwalk
-     (fn [value]
-       (cond
-         (callable-value? value)
-         callable-placeholder
-
-         (satisfies? storage/Storage value)
-         storage-placeholder
-
-         :else
-         value))
-     config)))
-
 (defn validate-config
   [{:keys [entrypoints dispatch tls] :as config}]
   (let [missing-entrypoints? (or (nil? entrypoints) (empty? entrypoints))
@@ -599,6 +574,29 @@
          (into []
                (mapcat entrypoint->listeners)
                (:entrypoints config))))
+
+(defn normalized-snapshot
+  "Return the normalized pure-data config snapshot for `user-config`.
+
+  The snapshot applies Busker defaults, expands listeners, and strips
+  runtime-owned objects such as executors, buffer pools, storage instances,
+  and direct callable values."
+  [user-config]
+  (let [config (-> (base-config-with-defaults user-config)
+                   config->listeners
+                   (dissoc :executor :buffer-pool))]
+    (walk/postwalk
+     (fn [value]
+       (cond
+         (callable-value? value)
+         callable-placeholder
+
+         (satisfies? storage/Storage value)
+         storage-placeholder
+
+         :else
+         value))
+     config)))
 
 (defn- entrypoint-scheme
   [[_ entrypoint]]

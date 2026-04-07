@@ -97,36 +97,6 @@
                       {:exit exit :out out :err err})))
     pid))
 
-(declare logs! stop!)
-
-(defn start!
-  []
-  (ensure-pebble-binary!)
-  (if-let [pid (running?)]
-    (println (str "Pebble is already running with PID " pid "."))
-    (do
-      (when-not (fs/exists? (config-file))
-        (throw (ex-info (str "Pebble config file not found: " (config-file)) {})))
-      (when (and (fs/exists? (pid-file))
-                 (nil? (running?)))
-        (fs/delete-if-exists (pid-file)))
-      (fs/create-dirs (state-dir))
-      (let [pid (launch-pebble!)]
-        (spit (pid-file) (str pid))
-        (if (wait-ready? pid)
-          (do
-            (println "Started Pebble.")
-            (println (str "PID: " pid))
-            (println (str "Config: " (config-file)))
-            (println (str "Directory: " (directory-url)))
-            (println (str "Log: " (log-file))))
-          (do
-            (println "Pebble did not become ready.")
-            (logs!)
-            (stop!)
-            (throw (ex-info "Pebble did not become ready." {})))))))
-  nil)
-
 (defn stop!
   []
   (if-let [pid (running?)]
@@ -164,6 +134,34 @@
       (doseq [line (take-last 200 (line-seq rdr))]
         (println line)))
     (println (str "No log file found at " (log-file))))
+  nil)
+
+(defn start!
+  []
+  (ensure-pebble-binary!)
+  (if-let [pid (running?)]
+    (println (str "Pebble is already running with PID " pid "."))
+    (do
+      (when-not (fs/exists? (config-file))
+        (throw (ex-info (str "Pebble config file not found: " (config-file)) {})))
+      (when (and (fs/exists? (pid-file))
+                 (nil? (running?)))
+        (fs/delete-if-exists (pid-file)))
+      (fs/create-dirs (state-dir))
+      (let [pid (launch-pebble!)]
+        (spit (pid-file) (str pid))
+        (if (wait-ready? pid)
+          (do
+            (println "Started Pebble.")
+            (println (str "PID: " pid))
+            (println (str "Config: " (config-file)))
+            (println (str "Directory: " (directory-url)))
+            (println (str "Log: " (log-file))))
+          (do
+            (println "Pebble did not become ready.")
+            (logs!)
+            (stop!)
+            (throw (ex-info "Pebble did not become ready." {})))))))
   nil)
 
 (defn restart!
