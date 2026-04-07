@@ -83,12 +83,6 @@
                          :method method}))
    (dissoc :request)))
 
-(defn- temp-unix-socket-path
-  []
-  (let [file (File/createTempFile "busker-server-test-" ".sock")]
-    (.delete file)
-    (.getAbsolutePath file)))
-
 (defn- openssl-no-sni-request
   [port path & {:keys [timeout-seconds]
                 :or {timeout-seconds 5}}]
@@ -272,7 +266,7 @@
 
 (deftest test-unix-socket-listener
   (testing "Unix socket listeners serve requests and clean up their socket path"
-    (let [path (temp-unix-socket-path)
+    (let [path (util/temp-unix-socket-path)
           server (busker/start!
                   (util/with-handler
                     (fn [{:keys [uri]}]

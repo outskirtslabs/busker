@@ -31,6 +31,12 @@
   []
   (slurp (fixture-key-path)))
 
+(defn temp-unix-socket-path
+  []
+  (let [file (io/file (java.io.File/createTempFile "busker-test-" ".sock"))]
+    (.delete ^java.io.File file)
+    (.getAbsolutePath ^java.io.File file)))
+
 (defn fixture-tls-bundle
   []
   {:certificate [(fixture-cert-pem)]

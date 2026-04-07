@@ -160,12 +160,6 @@
       (is (udp-bindable? (:port spec))
           "UDP port should become available after the final claim is released"))))
 
-(defn- temp-unix-socket-path
-  []
-  (let [file (File/createTempFile "busker-listen-test-" ".sock")]
-    (.delete file)
-    (.getAbsolutePath file)))
-
 (defn- temp-unix-abstract-name
   []
   (str "@busker-listen-test-" (System/nanoTime)))
@@ -176,7 +170,7 @@
           acquire-claim (requiring-resolve 'ol.busker.listen/acquire-claim)
           release! (requiring-resolve 'ol.busker.listen/release!)
           pool (open-pool)
-          path (temp-unix-socket-path)
+          path (util/temp-unix-socket-path)
           spec {:transport :tcp
                 :unix path}]
       (let [claim-a (acquire-claim pool spec)
@@ -225,7 +219,7 @@
           acquire-claim (requiring-resolve 'ol.busker.listen/acquire-claim)
           release! (requiring-resolve 'ol.busker.listen/release!)
           pool (open-pool)
-          path (temp-unix-socket-path)
+          path (util/temp-unix-socket-path)
           spec {:transport :tcp
                 :unix path}
           stale-fd (socket/open-unix-listener {:path path})]
@@ -281,7 +275,7 @@
           acquire-claim (requiring-resolve 'ol.busker.listen/acquire-claim)
           release! (requiring-resolve 'ol.busker.listen/release!)
           pool (open-pool)
-          path (temp-unix-socket-path)
+          path (util/temp-unix-socket-path)
           spec {:transport :tcp
                 :unix path}
           original-unlink! socket/unlink-unix-socket-if-still-socket!
