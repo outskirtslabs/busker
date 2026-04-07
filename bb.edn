@@ -22,7 +22,7 @@
                    :task (clojure "-X:deps prep :aliases '[:dev :test]'")}
 
                   jar:native
-                  {:depends [clean prep build:shim]
+                  {:depends [prep build:shim]
                    :doc     "Build native dep jars"
                    :task    (let [arch-dirs ["shim/linux-x86-64" "shim/macos-x86-64" "shim/macos-aarch64"]]
                               (doseq [dir arch-dirs]
@@ -31,7 +31,7 @@
 
                   build
                   {:doc     "Compile all the things"
-                   :depends [build:shim prep jar:native]}
+                   :depends [clean jar:native]}
 
                   jar:lib
                   {:depends [build]
@@ -48,8 +48,8 @@
                    :task
                    (do
                      (shell {:dir "shim"} "rm -rf zig-out zig-cache")
-                     (shell {:dir "shim"} "rm -rf linux-x86-64/resources macos-x86-64/resources macos-aarch64/resources")
-                     (shell {:dir "shim"} "rm -rf linux-x86-64/target macos-x86-64/target macos-aarch64/target")
+                     (shell {:dir "shim"} "rm -rf linux-x86-64/resources linux-aarch64/resources macos-x86-64/resources macos-aarch64/resources")
+                     (shell {:dir "shim"} "rm -rf linux-x86-64/target linux-aarch64/target macos-x86-64/target macos-aarch64/target")
                      (shell {:dir "."} "clj -T:build clean"))}
 
                   dist-clean
