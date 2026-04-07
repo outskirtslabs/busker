@@ -64,12 +64,6 @@
                         {:listener-key key}
                         t))))
 
-(defn- close-tcp-resource!
-  [resource]
-  (if (map? resource)
-    (socket/close-fd! (:handle resource))
-    (socket/close-fd! resource)))
-
 (defn- close-unix-resource!
   [resource]
   (let [{:keys [handle path abstract?]} resource]
@@ -84,7 +78,7 @@
     (close-unix-resource! resource)
 
     (= :tcp (:transport key))
-    (close-tcp-resource! resource)
+    (socket/close-fd! resource)
 
     (= :udp (:transport key))
     (when (and resource (not (mem/null? resource)))
