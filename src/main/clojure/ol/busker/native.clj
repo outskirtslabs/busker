@@ -5,6 +5,7 @@
    [coffi.layout :as layout]
    [coffi.mem :as mem]
    [ol.busker.native.loader]
+   [ol.busker.util :as util]
    [taoensso.trove :as trove])
   (:import
    [java.io InputStream]
@@ -795,6 +796,12 @@
                     value-str (->string value value_len)]
                 [(str/lower-case name-str) value-str]))))))
 
+(defn- default-server-port
+  [scheme-str]
+  (if (= "https" scheme-str)
+    443
+    80))
+
 (defn build-ring-request
   "Build Ring-compliant request map from h2o request metadata.
 
@@ -818,6 +825,9 @@
         scheme-str (->string scheme scheme_len)
         remote-addr-str (->string remote_addr remote_addr_len)
         headers-map (build-ring-headers-map headers headers_len)
+        default-port (default-server-port scheme-str)
+        {:keys [server-name server-port]}
+        (util/parse-authority authority-str default-port)
         [uri query-string] (if path-str
                              (let [idx (str/index-of path-str "?")]
                                (if idx
@@ -829,16 +839,8 @@
                   0x0200 [2 0]
                   0x0300 [3 0]
                   [1 1])]
-    {:server-port (if authority-str
-                    (if-let [colon-idx (str/last-index-of authority-str ":")]
-                      (Integer/parseInt (subs authority-str (inc colon-idx)))
-                      80)
-                    80)
-     :server-name (if authority-str
-                    (if-let [colon-idx (str/last-index-of authority-str ":")]
-                      (subs authority-str 0 colon-idx)
-                      authority-str)
-                    "localhost")
+    {:server-port server-port
+     :server-name server-name
      :remote-addr (or remote-addr-str "")
      :uri uri
      :query-string query-string

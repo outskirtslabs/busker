@@ -266,6 +266,24 @@ void clj_h2o_mt_destroy_wakeup_receiver(clj_mt_receiver_t *wr);
 /* Send a wakeup message to the loop owning this receiver */
 void clj_h2o_mt_wakeup(clj_mt_receiver_t *wr);
 
+/* Open a nonblocking CLOEXEC TCP listener for IPv4 or IPv6.
+   `host` may be NULL or empty only when the caller intentionally wants the
+   platform default implied by the supplied bind host string. */
+int clj_h2o_open_tcp_listener(const char *host, uint16_t port, int backlog,
+                              int reuseaddr, int reuseport, int nonblock,
+                              int cloexec);
+
+/* Open a nonblocking CLOEXEC Unix domain socket listener.
+   Filesystem paths are passed as-is.
+   Abstract Linux socket names are prefixed with `@`. */
+int clj_h2o_open_unix_listener(const char *path, int backlog, int nonblock,
+                               int cloexec);
+
+/* Unlink `path` only if it currently exists and is still a socket.
+   Returns 1 when a socket path was removed, 0 when cleanup was skipped,
+   and -1 on lstat/unlink errors. */
+int clj_h2o_unlink_unix_socket_if_still_socket(const char *path);
+
 /* Create, initialize, and configure a new h2o_globalconf_t.
  * Allocates memory, calls h2o_config_init, and applies flat config if provided.
  * Returns NULL on allocation failure, otherwise returns configured globalconf

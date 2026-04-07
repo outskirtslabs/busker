@@ -14,6 +14,7 @@
    [ol.busker.test-utils :as util]
    [ol.clave.certificate :as clave-certificate])
   (:import
+   java.io.File
    [java.security.cert CertificateFactory X509Certificate]))
 
 (defn- allocate-server-ports
@@ -81,6 +82,12 @@
                         {:uri (str (base) path)
                          :method method}))
    (dissoc :request)))
+
+(defn- temp-unix-socket-path
+  []
+  (let [file (File/createTempFile "busker-server-test-" ".sock")]
+    (.delete file)
+    (.getAbsolutePath file)))
 
 (defn- openssl-no-sni-request
   [port path & {:keys [timeout-seconds]
@@ -227,6 +234,76 @@
           (is (= :http (:scheme req)))
           (is (string? (:protocol req)))
           (is (map? (:headers req))))))))
+
+(deftest test-ipv6-request-info
+  (testing "IPv6 listeners accept requests and expose correct Ring metadata"
+    (let [port (util/free-port)
+          request-info (atom nil)]
+      (with-server [_server (busker/start!
+                             (util/with-handler
+                               (fn [req]
+                                 (if (= "/__ready" (:uri req))
+                                   {:status 200
+                                    :body "ready"}
+                                   (do
+                                     (reset! request-info req)
+                                     {:status 200
+                                      :body "hello-ipv6"})))
+                               {:entrypoints {:ipv6 {:bind (str "[::1]:" port)
+                                                     :http3? false
+                                                     :tls false}}}))]
+        (let [ready (util/wait-for-curl-ready! :http :h1 port "/__ready"
+                                               :host "::1"
+                                               :max-time 2)]
+          (is (= 0 (:exit ready))
+              (str "IPv6 listener should become ready. stderr: " (:err ready))))
+        (let [response (util/curl :http :h1 port "/ipv6"
+                                  :host "::1"
+                                  :max-time 5)]
+          (is (= 0 (:exit response))
+              (str "IPv6 request should succeed. stderr: " (:err response)))
+          (is (= "hello-ipv6" (:out response))))
+        (Thread/sleep 100)
+        (let [req @request-info]
+          (is (= "/ipv6" (:uri req)))
+          (is (= "::1" (:server-name req)))
+          (is (= port (:server-port req)))
+          (is (contains? #{"::1" "0:0:0:0:0:0:0:1"} (:remote-addr req))))))))
+
+(deftest test-unix-socket-listener
+  (testing "Unix socket listeners serve requests and clean up their socket path"
+    (let [path (temp-unix-socket-path)
+          server (busker/start!
+                  (util/with-handler
+                    (fn [{:keys [uri]}]
+                      (if (= "/__ready" uri)
+                        {:status 200
+                         :body "ready"}
+                        {:status 200
+                         :body "hello-unix"}))
+                    {:entrypoints {:unix {:bind (str "unix:" path)
+                                          :http3? false
+                                          :tls false}}}))]
+      (try
+        (let [ready (util/wait-for-curl-ready! :http :h1 nil "/__ready"
+                                               :unix-socket path
+                                               :host "localhost"
+                                               :max-time 2)]
+          (is (= 0 (:exit ready))
+              (str "Unix socket listener should become ready. stderr: " (:err ready))))
+        (is (.exists (File. path))
+            "Filesystem unix socket should exist while the server is running")
+        (let [response (util/curl :http :h1 nil "/unix"
+                                  :unix-socket path
+                                  :host "localhost"
+                                  :max-time 5)]
+          (is (= 0 (:exit response))
+              (str "Unix socket request should succeed. stderr: " (:err response)))
+          (is (= "hello-unix" (:out response))))
+        (finally
+          (busker/stop! server)))
+      (is (not (.exists (File. path)))
+          "Filesystem unix socket path should be removed after stop"))))
 
 (deftest test-ring-body-types
   (testing "All Ring StreamableResponseBody types work correctly"

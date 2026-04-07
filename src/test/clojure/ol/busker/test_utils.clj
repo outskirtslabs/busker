@@ -5,6 +5,7 @@
 (ns ol.busker.test-utils
   (:require
    [babashka.process :as p]
+   [clojure.string :as str]
    [clojure.java.io :as io])
   (:import
    [java.net DatagramSocket InetAddress InetSocketAddress ServerSocket Socket]))
@@ -49,8 +50,39 @@
   [handler config]
   (assoc config :dispatch [{:handler handler}]))
 
+(defn- format-url-host
+  [host]
+  (if (and (string? host)
+           (str/includes? host ":")
+           (not (str/starts-with? host "["))
+           (not (str/ends-with? host "]")))
+    (str "[" host "]")
+    host))
+
+(defn- curl-url
+  [scheme host port path]
+  (str (name scheme)
+       "://"
+       (format-url-host host)
+       (when (some? port)
+         (str ":" port))
+       path))
+
+(defn- loopback-port-available?
+  [^InetAddress address port]
+  (try
+    (with-open [tcp (ServerSocket.)
+                udp (DatagramSocket. nil)]
+      (.setReuseAddress tcp true)
+      (.setReuseAddress udp true)
+      (.bind tcp (InetSocketAddress. address (int port)))
+      (.bind udp (InetSocketAddress. address (int port)))
+      true)
+    (catch Throwable _
+      false)))
+
 (defn curl
-  [scheme proto port path & {:keys [host max-time args]
+  [scheme proto port path & {:keys [host max-time args unix-socket]
                              :or {host "127.0.0.1" max-time 10}
                              :as opts}]
   (let [scheme (or (:scheme opts) scheme)
@@ -60,7 +92,9 @@
                "localhost.examp1e.net"
                host)
         sni-resolve-args (if (and https? (not explicit-host?)
-                                  (= "localhost.examp1e.net" host))
+                                  (= "localhost.examp1e.net" host)
+                                  (some? port)
+                                  (nil? unix-socket))
                            ["--resolve" (str host ":" port ":127.0.0.1")]
                            [])
         proto-args (case proto
@@ -68,10 +102,16 @@
                      :h2 ["--http2"]
                      :h3 ["--http3-only"]
                      [])
-        default-args ["-k" "-s" "--max-time" (str max-time)]
-        url (str (name scheme) "://" host ":" port path)
+        default-args (cond-> ["-k" "-s" "--max-time" (str max-time)]
+                       (str/includes? (format-url-host host) ":")
+                       (conj "-g"))
+        unix-socket-args (if unix-socket
+                           ["--unix-socket" unix-socket]
+                           [])
+        url (curl-url scheme host port path)
         curl-args (concat proto-args
                           default-args
+                          unix-socket-args
                           sni-resolve-args
                           (or args [])
                           [url])]
@@ -80,7 +120,8 @@
            curl-args)))
 
 (defn wait-for-curl-ready!
-  [scheme proto port path & {:keys [host max-time args attempts delay-ms]
+  [scheme proto port path & {:keys [host max-time args unix-socket
+                                    attempts delay-ms]
                              :or {attempts 30
                                   delay-ms 100
                                   max-time 2}
@@ -88,6 +129,7 @@
   (loop [attempt 0]
     (let [curl-opts (cond-> [:max-time max-time]
                       host (conj :host host)
+                      unix-socket (conj :unix-socket unix-socket)
                       args (conj :args args))
           result (try
                    (apply curl scheme proto port path curl-opts)
@@ -136,21 +178,15 @@
 
 (defn free-port
   []
-  (let [loopback (InetAddress/getByName "127.0.0.1")]
+  (let [ipv4-loopback (InetAddress/getByName "127.0.0.1")
+        ipv6-loopback (InetAddress/getByName "::1")]
     (loop [attempt 0]
       (when (>= attempt 32)
         (throw (ex-info "Unable to allocate a free test port"
                         {:attempts attempt})))
       (let [candidate (+ 20000 (rand-int (- 32767 20000)))
-            available?
-            (try
-              (with-open [tcp (ServerSocket. candidate 0 loopback)
-                          udp (DatagramSocket. candidate loopback)]
-                (.setReuseAddress tcp true)
-                (.setReuseAddress udp true)
-                true)
-              (catch java.net.BindException _
-                false))]
+            available? (and (loopback-port-available? ipv4-loopback candidate)
+                            (loopback-port-available? ipv6-loopback candidate))]
         (if available?
           candidate
           (recur (inc attempt)))))))

@@ -1,69 +1,32 @@
 (ns ol.busker.native.socket
   "low-level socket helpers via coffi/FFM.
 
-   - Build sockaddr_in (IPv4) from host/port
-   - open/bind/listen a nonblocking CLOEXEC master listener
+   - open/bind/listen family-aware TCP listeners
+   - open/bind/listen Unix domain socket listeners
    - duplicate the listener per worker thread (ownership: native side after handoff)
    - small utilities for flags and options "
   (:require
    [coffi.ffi :as ffi :refer [defcfn]]
-   [coffi.layout :as layout]
-   [coffi.mem :as mem]))
+   [coffi.mem :as mem]
+   [ol.busker.native.loader]))
 
 (set! *warn-on-reflection* true)
 
-;; minimal constants (POSIX/Linux values)
-;; TODO: check on macos
-
-(def ^:private AF_INET 2)
-(def ^:private SOCK_STREAM 1)
-(def ^:private SOL_SOCKET 1)
-(def ^:private SO_REUSEADDR 2)
-(def ^:private SO_REUSEPORT 15) ;; may differ on some BSDs; set only if requested
-
-(def ^:private F_GETFL 3)
-(def ^:private F_SETFL 4)
 (def ^:private F_SETFD 2)
-(def ^:private O_NONBLOCK 0x800)
 (def ^:private FD_CLOEXEC 1)
-
-(def ^:private INADDR_ANY 0x00000000)
-
-;; struct in_addr { uint32_t s_addr; };
-(mem/defalias ::in_addr
-  [::mem/struct
-   [[:s_addr ::mem/int]]])
-
-;; struct sockaddr_in {
-;;   uint16_t        sin_family;
-;;   uint16_t        sin_port;
-;;   struct in_addr  sin_addr;
-;;   unsigned char   sin_zero[8];
-;; }
-;;
-;; Use with-c-layout to ensure C padding/packing. :contentReference[oaicite:2]{index=2}
-(mem/defalias ::sockaddr_in
-  (layout/with-c-layout
-    [::mem/struct
-     [[:sin_family ::mem/short]
-      [:sin_port ::mem/short]
-      [:sin_addr ::in_addr]
-      [:sin_zero [::mem/array ::mem/byte 8]]]]))
 
 ;; libc bindings (thin)
 
-(defcfn socket "socket" [::mem/int ::mem/int ::mem/int] ::mem/int)
-(defcfn setsockopt "setsockopt" [::mem/int ::mem/int ::mem/int ::mem/pointer ::mem/int] ::mem/int)
 (defcfn fcntl "fcntl" [::mem/int ::mem/int ::mem/int] ::mem/int)
-(defcfn bind "bind" [::mem/int ::mem/pointer ::mem/int] ::mem/int)
-(defcfn listen "listen" [::mem/int ::mem/int] ::mem/int)
 (defcfn dup "dup" [::mem/int] ::mem/int)
 (defcfn close "close" [::mem/int] ::mem/int)
-(defcfn htons "htons" [::mem/short] ::mem/short) ;; network byte order
-
-;; optional: inet_pton for non-ANY binds; keeping IPv4 only here
-(defcfn inet_pton "inet_pton" [::mem/int ::mem/c-string ::mem/pointer] ::mem/int)
 (defcfn strerror "strerror" [::mem/int] ::mem/c-string)
+(defcfn open-tcp-listener* "clj_h2o_open_tcp_listener"
+  [::mem/c-string ::mem/int ::mem/int ::mem/int ::mem/int ::mem/int ::mem/int] ::mem/int)
+(defcfn open-unix-listener* "clj_h2o_open_unix_listener"
+  [::mem/c-string ::mem/int ::mem/int ::mem/int] ::mem/int)
+(defcfn unlink-unix-socket-if-still-socket* "clj_h2o_unlink_unix_socket_if_still_socket"
+  [::mem/c-string] ::mem/int)
 
 ;; helpers
 
@@ -124,51 +87,9 @@
                      :errno-message errno-message}))))
 
 #_{:clj-kondo/ignore [:type-mismatch]}
-(defn- set-nonblocking! [fd]
-  (let [flags (fcntl fd F_GETFL 0)]
-    (when (neg? flags)
-      (throw (ex-info-with-errno "fcntl(F_GETFL) failed" {:fd fd})))
-    (when (neg? (fcntl fd F_SETFL (bit-or flags O_NONBLOCK)))
-      (throw (ex-info-with-errno "fcntl(F_SETFL,O_NONBLOCK) failed" {:fd fd})))))
-
-#_{:clj-kondo/ignore [:type-mismatch]}
 (defn- set-cloexec! [fd]
   (when (neg? (fcntl fd F_SETFD FD_CLOEXEC))
     (throw (ex-info-with-errno "fcntl(F_SETFD,FD_CLOEXEC) failed" {:fd fd}))))
-
-#_{:clj-kondo/ignore [:type-mismatch]}
-(defn- set-bool-sockopt! [fd level opt on?]
-  (with-open [arena (mem/confined-arena)]
-    (let [v (if on? 1 0)
-          ptr (mem/alloc-instance ::mem/int arena)]
-      (mem/write-int ptr 0 v)
-      (when (neg? (setsockopt fd level opt ptr 4))
-        (throw (ex-info-with-errno "setsockopt failed"
-                                   {:fd fd :level level :opt opt :val v}))))))
-
-(defn- sockaddr-in
-  "Build a sockaddr_in for IPv4.
-   host can be nil/\"0.0.0.0\" for INADDR_ANY."
-  [{:keys [host port] :or {host "0.0.0.0"}} arena]
-  (let [port-val (long port)]
-    (when (or (neg? port-val) (> port-val 0xFFFF))
-      (throw (ex-info "port must be in [0, 65535]" {:port port})))
-    (let [s_addr (if (or (nil? host) (= host "0.0.0.0"))
-                   INADDR_ANY
-                   (with-open [tmp-arena (mem/confined-arena)]
-                     #_{:clj-kondo/ignore [:type-mismatch]}
-                     (let [dst (mem/alloc-instance ::in_addr tmp-arena)
-                           r   (inet_pton AF_INET host dst)]
-                       (when (neg? r)
-                         (throw (ex-info "inet_pton error" {:host host :port port})))
-                       (when (zero? r)
-                         (throw (ex-info "inet_pton: invalid address" {:host host})))
-                       (:s_addr (mem/deserialize dst ::in_addr)))))
-          data   {:sin_family (short AF_INET)
-                  :sin_port   (htons (unchecked-short port-val))
-                  :sin_addr   {:s_addr s_addr}
-                  :sin_zero   [0 0 0 0 0 0 0 0]}]
-      (mem/serialize data ::sockaddr_in arena))))
 
 (defn open-master-listener
   "Create a master TCP socket, set NB/CLOEXEC and options, bind + listen.
@@ -183,33 +104,43 @@
   returns fd (int). Caller owns fd and must close on error."
   [{:keys [host port backlog reuseaddr? reuseport? nonblock? cloexec?]
     :or   {host "0.0.0.0" backlog 65535 reuseaddr? true reuseport? false nonblock? true cloexec? true}}]
-  (when-not (int? port)
+  (when-not (integer? port)
     (throw (ex-info "port must be int" {:port port})))
-  (let [fd (socket AF_INET SOCK_STREAM 0)]
+  (let [fd (open-tcp-listener* host
+                               (int port)
+                               (int backlog)
+                               (if reuseaddr? 1 0)
+                               (if reuseport? 1 0)
+                               (if nonblock? 1 0)
+                               (if cloexec? 1 0))]
     #_{:clj-kondo/ignore [:type-mismatch]}
     (when (neg? fd)
-      (throw (ex-info-with-errno "socket() failed" {})))
-    (try
-      (when cloexec? (set-cloexec! fd))
-      (when nonblock? (set-nonblocking! fd))
-      (when reuseaddr? (set-bool-sockopt! fd SOL_SOCKET SO_REUSEADDR true))
-      (when reuseport? (set-bool-sockopt! fd SOL_SOCKET SO_REUSEPORT true))
-      (with-open [arena (mem/confined-arena)]
-        #_{:clj-kondo/ignore [:type-mismatch]}
-        (let [addr    (sockaddr-in {:host host :port port} arena)
-              addrlen (int (mem/size-of ::sockaddr_in))]
-          (when (neg? (bind fd addr addrlen))
-            (throw (ex-info-with-errno
-                    (str "bind() failed for " host ":" port)
-                    {:host host :port port})))
-          (when (neg? (listen fd (int backlog)))
-            (throw (ex-info-with-errno
-                    (str "listen() failed for " host ":" port)
-                    {:host host :port port :backlog backlog})))))
-      fd
-      (catch Throwable t
-        (try (close fd) (catch Throwable _))
-        (throw t)))))
+      (throw (ex-info-with-errno
+              (str "failed to open TCP listener for " host ":" port)
+              {:host host
+               :port port
+               :backlog backlog})))
+    fd))
+
+(defn open-unix-listener
+  "Create a Unix domain socket listener.
+   `path` may be a filesystem socket path like `/tmp/busker.sock` or an
+   abstract Linux socket name prefixed with `@`."
+  [{:keys [path backlog nonblock? cloexec?]
+    :or {backlog 65535 nonblock? true cloexec? true}}]
+  (when-not (string? path)
+    (throw (ex-info "path must be string" {:path path})))
+  (let [fd (open-unix-listener* path
+                                (int backlog)
+                                (if nonblock? 1 0)
+                                (if cloexec? 1 0))]
+    #_{:clj-kondo/ignore [:type-mismatch]}
+    (when (neg? fd)
+      (throw (ex-info-with-errno
+              (str "failed to open unix listener for " path)
+              {:path path
+               :backlog backlog})))
+    fd))
 
 (defn dup-fd
   "Duplicate `fd` and set FD_CLOEXEC on the duplicate."
@@ -236,6 +167,21 @@
 (defn close-fd! [fd]
   (when (pos? fd)
     (close fd)))
+
+(defn unlink-unix-socket-if-still-socket!
+  "Remove `path` only if it still exists and is still a Unix socket.
+   Returns true when a socket path was removed, false when cleanup was skipped."
+  [path]
+  (when-not (string? path)
+    (throw (ex-info "path must be string" {:path path})))
+  (let [rc (unlink-unix-socket-if-still-socket* path)]
+    #_{:clj-kondo/ignore [:type-mismatch]}
+    (when (neg? rc)
+      (throw (ex-info-with-errno
+              (str "failed to safely unlink unix socket path " path)
+              {:path path})))
+    #_{:clj-kondo/ignore [:type-mismatch]}
+    (pos? rc)))
 
 ;; how this integrates with h2o
 ;; For each worker i:

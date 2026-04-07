@@ -17,6 +17,10 @@
 
 (def tls-sni-host "localhost.examp1e.net")
 
+(defn- ipv6-resolve-args
+  [port]
+  ["--resolve" (str tls-sni-host ":" port ":[::1]")])
+
 (defn- udp-port-bound?
   "Check if a UDP socket is bound on the given port.
    Uses ss command to check for UDP listeners."
@@ -27,13 +31,15 @@
          (str/includes? (:out result) (str ":" port)))))
 
 (defn- datagram-bindable?
-  [port]
+  ([port]
+   (datagram-bindable? "127.0.0.1" port))
+  ([host port]
   (try
     (with-open [channel (DatagramChannel/open)]
-      (.bind channel (InetSocketAddress. "127.0.0.1" (int port)))
+      (.bind channel (InetSocketAddress. ^String host (int port)))
       true)
     (catch java.net.BindException _
-      false)))
+      false))))
 
 (defn- wait-for-conn-limit-current!
   [expected & {:keys [attempts delay-ms]
@@ -58,9 +64,10 @@
   (let [generation (:instance (:active @(:busker/state server)))
         http3-worker-contexts (::generation/http3-worker-contexts generation)]
     (mapv (fn [worker-http3-ctxs]
-            (reduce (fn [total http3-ctx]
+                    (reduce (fn [total http3-ctx]
                       (if (or (nil? http3-ctx) (mem/null? http3-ctx))
                         total
+                        #_{:clj-kondo/ignore [:type-mismatch]}
                         (+ total (h2o/http3-num-connections http3-ctx))))
                     0
                     worker-http3-ctxs))
@@ -197,17 +204,26 @@
       (is (datagram-bindable? port)
           "Port should become available again after pooled UDP ownership is released"))))
 
-(deftest pooled-http3-udp-bind-rejects-unsupported-ipv6-host-test
-  ;; TODO(ipv6): Remove this rejection test when H1/H2/H3 gain shared
-  ;; family-aware listener support and HTTP/3 can bind IPv6 correctly.
-  (testing "A pooled HTTP/3 UDP bind rejects unsupported IPv6 hosts instead of binding 0.0.0.0"
+(deftest pooled-http3-udp-bind-supports-ipv6-host-test
+  (testing "A pooled HTTP/3 UDP bind can reserve an IPv6 host"
     (let [port (util/free-port)
           open-transport (requiring-resolve 'ol.busker.native/http3-open-udp-transport)
-          transport (open-transport "::1" (short port))]
-      (is (or (nil? transport) (mem/null? transport))
-          "Opening a pooled HTTP/3 transport with an unsupported IPv6 host should fail")
-      (is (datagram-bindable? port)
-          "Rejecting an unsupported IPv6 host must not reserve the UDP port"))))
+          release-transport (requiring-resolve 'ol.busker.native/http3-release-udp-transport)]
+      (is (datagram-bindable? "::1" port)
+          "IPv6 UDP port should be available before pooled transport ownership is acquired")
+      (let [transport (open-transport "::1" (short port))]
+        (try
+          (is (some? transport)
+              "Opening a pooled HTTP/3 transport with an IPv6 host should return a handle")
+          (is (not (mem/null? transport))
+              "Opening a pooled HTTP/3 transport with an IPv6 host should return a non-null handle")
+          (is (not (datagram-bindable? "::1" port))
+              "Opening a pooled HTTP/3 transport with an IPv6 host should reserve the IPv6 UDP port")
+          (finally
+            (when (and transport (not (mem/null? transport)))
+              (release-transport transport)))))
+      (is (datagram-bindable? "::1" port)
+          "Releasing a pooled HTTP/3 IPv6 transport should free the IPv6 UDP port"))))
 
 (deftest http3-request-response-test
   (testing "HTTP/3 request receives correct response"
@@ -227,6 +243,58 @@
               (str "HTTP/3 curl request should succeed. stderr: " (:err result)))
           (is (= "hello http3" (:out result))
               "HTTP/3 response body should match expected"))
+        (finally
+          (busker/stop! server))))))
+
+(deftest ipv6-http2-and-http3-request-response-test
+  (testing "A TLS IPv6 entrypoint serves both HTTP/2 and HTTP/3 traffic"
+    (let [port (util/free-port)
+          handler (fn [{:keys [uri protocol]}]
+                    (if (= "/ready" uri)
+                      {:status 200
+                       :body "ready"}
+                      {:status 200
+                       :body protocol}))
+          curl-args (ipv6-resolve-args port)
+          server (busker/start!
+                  (util/with-static-tls
+                    (util/with-handler
+                      handler
+                      {:entrypoints {:tls {:bind (str "[::1]:" port)
+                                           :http3? true
+                                           :tls {:tls-compatibility-mode
+                                                 :modern}}}})))]
+      (try
+        (let [h2-ready (util/wait-for-curl-ready! :https :h2 port "/ready"
+                                                  :host tls-sni-host
+                                                  :args curl-args
+                                                  :max-time 5)
+              h3-ready (util/wait-for-curl-ready! :https :h3 port "/ready"
+                                                  :host tls-sni-host
+                                                  :args curl-args
+                                                  :max-time 5)]
+          (is (= 0 (:exit h2-ready))
+              (str "HTTP/2 IPv6 readiness check should succeed. stderr: "
+                   (:err h2-ready)))
+          (is (= 0 (:exit h3-ready))
+              (str "HTTP/3 IPv6 readiness check should succeed. stderr: "
+                   (:err h3-ready))))
+        (let [h2-result (util/curl :https :h2 port "/"
+                                   :host tls-sni-host
+                                   :args curl-args
+                                   :max-time 5)
+              h3-result (util/curl :https :h3 port "/"
+                                   :host tls-sni-host
+                                   :args curl-args
+                                   :max-time 5)]
+          (is (= 0 (:exit h2-result))
+              (str "HTTP/2 IPv6 request should succeed. stderr: " (:err h2-result)))
+          (is (= "HTTP/2.0" (:out h2-result))
+              "HTTP/2 IPv6 request should be served over HTTP/2")
+          (is (= 0 (:exit h3-result))
+              (str "HTTP/3 IPv6 request should succeed. stderr: " (:err h3-result)))
+          (is (= "HTTP/3.0" (:out h3-result))
+              "HTTP/3 IPv6 request should be served over HTTP/3"))
         (finally
           (busker/stop! server))))))
 

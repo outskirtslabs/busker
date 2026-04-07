@@ -35,12 +35,18 @@
 (defn- open-resource
   [{:keys [transport host port] :as key}]
   (try
-    (case transport
-      :tcp
+    (cond
+      (:unix key)
+      (let [path (:unix key)]
+        {:handle (socket/open-unix-listener {:path path})
+         :path path
+         :abstract? (.startsWith ^String path "@")})
+
+      (= transport :tcp)
       (socket/open-master-listener {:host host
                                     :port port})
 
-      :udp
+      (= transport :udp)
       ;; TODO(ipv6): Remove this HTTP/3-only transport open path when H1/H2/H3
       ;; share one family-aware listener implementation.
       (let [transport (h2o/http3-open-udp-transport host (short port))]
@@ -49,6 +55,7 @@
                           {:listener-key key})))
         transport)
 
+      :else
       (throw (ex-info "Unsupported listener transport"
                       {:listener-key key})))
     (catch Throwable t
@@ -57,16 +64,33 @@
                         {:listener-key key}
                         t))))
 
-(defn- close-resource!
-  [{:keys [transport]} resource]
-  (case transport
-    :tcp
-    (socket/close-fd! resource)
+(defn- close-tcp-resource!
+  [resource]
+  (if (map? resource)
+    (socket/close-fd! (:handle resource))
+    (socket/close-fd! resource)))
 
-    :udp
+(defn- close-unix-resource!
+  [resource]
+  (let [{:keys [handle path abstract?]} resource]
+    (socket/close-fd! handle)
+    (when-not abstract?
+      (socket/unlink-unix-socket-if-still-socket! path))))
+
+(defn- close-resource!
+  [key resource]
+  (cond
+    (:unix key)
+    (close-unix-resource! resource)
+
+    (= :tcp (:transport key))
+    (close-tcp-resource! resource)
+
+    (= :udp (:transport key))
     (when (and resource (not (mem/null? resource)))
       (h2o/http3-release-udp-transport resource))
 
+    :else
     nil))
 
 (defn acquire-claim
@@ -90,7 +114,10 @@
 
 (defn resource
   [claim]
-  (:resource claim))
+  (let [resource (:resource claim)]
+    (if (map? resource)
+      (:handle resource)
+      resource)))
 
 (defn fake-close!
   [claim]

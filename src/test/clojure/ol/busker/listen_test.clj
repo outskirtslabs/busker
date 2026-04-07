@@ -3,21 +3,25 @@
    [clojure.test :refer [deftest is testing]]
    [coffi.mem :as mem]
    [ol.busker.listen :as listen]
+   [ol.busker.native.socket :as socket]
    [ol.busker.test-utils :as util])
   (:import
+   java.io.File
    java.net.BindException
    java.net.InetSocketAddress
    java.nio.channels.DatagramChannel
    java.nio.channels.ServerSocketChannel))
 
 (defn- tcp-bindable?
-  [port]
+  ([port]
+   (tcp-bindable? "127.0.0.1" port))
+  ([host port]
   (try
     (with-open [channel (ServerSocketChannel/open)]
-      (.bind channel (InetSocketAddress. "127.0.0.1" (int port)))
+      (.bind channel (InetSocketAddress. ^String host (int port)))
       true)
     (catch BindException _
-      false)))
+      false))))
 
 (defn- udp-bindable?
   [port]
@@ -71,6 +75,32 @@
             (release! claim-b))))
       (is (tcp-bindable? (:port spec))
           "TCP port should become available after the final claim is released"))))
+
+(deftest pooled-ipv6-tcp-claim-retains-port-until-final-release-test
+  (testing "IPv6 TCP claims keep the bound port unavailable until the final release"
+    (let [open-pool (requiring-resolve 'ol.busker.listen/open-pool)
+          acquire-claim (requiring-resolve 'ol.busker.listen/acquire-claim)
+          fake-close! (requiring-resolve 'ol.busker.listen/fake-close!)
+          release! (requiring-resolve 'ol.busker.listen/release!)
+          pool (open-pool)
+          spec {:transport :tcp
+                :host "::1"
+                :port 18463}]
+      (is (tcp-bindable? "::1" (:port spec))
+          "IPv6 port should be available before the first TCP claim")
+      (let [claim-a (acquire-claim pool spec)
+            claim-b (acquire-claim pool spec)]
+        (try
+          (is (not (tcp-bindable? "::1" (:port spec)))
+              "IPv6 TCP port should stay bound while claims exist")
+          (fake-close! claim-a)
+          (release! claim-a)
+          (is (not (tcp-bindable? "::1" (:port spec)))
+              "IPv6 TCP port should remain bound until the last claim is released")
+          (finally
+            (release! claim-b))))
+      (is (tcp-bindable? "::1" (:port spec))
+          "IPv6 TCP port should become available after the final claim is released"))))
 
 (deftest pooled-claims-expose-live-resources-test
   (testing "Claims return the live pooled resource for reuse"
@@ -135,3 +165,146 @@
             (release! claim-b))))
       (is (udp-bindable? (:port spec))
           "UDP port should become available after the final claim is released"))))
+
+(defn- temp-unix-socket-path
+  []
+  (let [file (File/createTempFile "busker-listen-test-" ".sock")]
+    (.delete file)
+    (.getAbsolutePath file)))
+
+(defn- temp-unix-abstract-name
+  []
+  (str "@busker-listen-test-" (System/nanoTime)))
+
+(deftest pooled-unix-claim-retains-path-until-final-release-test
+  (testing "Unix socket claims keep the socket path alive until the final release"
+    (let [open-pool (requiring-resolve 'ol.busker.listen/open-pool)
+          acquire-claim (requiring-resolve 'ol.busker.listen/acquire-claim)
+          fake-close! (requiring-resolve 'ol.busker.listen/fake-close!)
+          release! (requiring-resolve 'ol.busker.listen/release!)
+          pool (open-pool)
+          path (temp-unix-socket-path)
+          spec {:transport :tcp
+                :unix path}]
+      (let [claim-a (acquire-claim pool spec)
+            claim-b (acquire-claim pool spec)]
+        (try
+          (is (.exists (File. path))
+              "Filesystem unix socket path should exist while the claim is active")
+          (is (= (listen/resource claim-a)
+                 (listen/resource claim-b))
+              "Repeated unix claims should reuse the same pooled listener")
+          (fake-close! claim-a)
+          (release! claim-a)
+          (is (.exists (File. path))
+              "Filesystem unix socket path should remain until the last claim is released")
+          (finally
+            (release! claim-b))))
+      (is (not (.exists (File. path)))
+          "Filesystem unix socket path should be removed after the final release"))))
+
+(deftest pooled-abstract-unix-claim-has-no-filesystem-side-effects-test
+  (testing "Abstract unix socket claims never create filesystem paths"
+    (let [open-pool (requiring-resolve 'ol.busker.listen/open-pool)
+          acquire-claim (requiring-resolve 'ol.busker.listen/acquire-claim)
+          release! (requiring-resolve 'ol.busker.listen/release!)
+          pool (open-pool)
+          path (temp-unix-abstract-name)
+          spec {:transport :tcp
+                :unix path}
+          fs-path (File. path)
+          claim-a (acquire-claim pool spec)
+          claim-b (acquire-claim pool spec)]
+      (try
+        (is (= (listen/resource claim-a)
+               (listen/resource claim-b))
+            "Repeated abstract unix claims should reuse the same pooled listener")
+        (is (not (.exists fs-path))
+            "Abstract unix sockets should not create a filesystem path while active")
+        (finally
+          (release! claim-a)
+          (release! claim-b)))
+      (is (not (.exists fs-path))
+          "Abstract unix sockets should not create a filesystem path after release"))))
+
+(deftest pooled-unix-claim-replaces-stale-socket-file-test
+  (testing "Unix socket claims replace a stale socket file before binding"
+    (let [open-pool (requiring-resolve 'ol.busker.listen/open-pool)
+          acquire-claim (requiring-resolve 'ol.busker.listen/acquire-claim)
+          release! (requiring-resolve 'ol.busker.listen/release!)
+          pool (open-pool)
+          path (temp-unix-socket-path)
+          spec {:transport :tcp
+                :unix path}
+          stale-fd (socket/open-unix-listener {:path path})]
+      (socket/close-fd! stale-fd)
+      (is (.exists (File. path))
+          "Closing the stale unix listener should leave a socket file behind")
+      (let [claim (acquire-claim pool spec)]
+        (try
+          (is (.exists (File. path))
+              "Acquiring a fresh unix claim should recreate the socket file")
+          (is (pos? (listen/resource claim))
+              "Acquiring a fresh unix claim should return a live listener fd")
+          (finally
+            (release! claim))))
+      (is (not (.exists (File. path)))
+          "Releasing the fresh unix claim should clean up the recreated socket path"))))
+
+(deftest pooled-unix-claim-refuses-preexisting-nonsocket-path-test
+  (testing "Unix socket claims refuse to overwrite a pre-existing non-socket path"
+    (let [open-pool (requiring-resolve 'ol.busker.listen/open-pool)
+          acquire-claim (requiring-resolve 'ol.busker.listen/acquire-claim)
+          pool (open-pool)
+          file (File/createTempFile "busker-listen-test-regular-file-" ".sock")
+          path (.getAbsolutePath file)
+          spec {:transport :tcp
+                :unix path}
+          _ (spit file "not-a-socket")]
+      (try
+        (let [error (try
+                      (acquire-claim pool spec)
+                      nil
+                      (catch clojure.lang.ExceptionInfo e
+                        e))]
+          (is (some? error)
+              "Acquiring a unix claim over a non-socket path should fail")
+          (when error
+            (is (= :listener-acquisition (:stage (ex-data error)))
+                "Failure should be reported at the listener acquisition stage")
+            (is (= :eaddrinuse (:errno (ex-data error)))
+                "Failure should preserve the native EADDRINUSE cause")))
+        (is (.exists file)
+            "A non-socket path must not be deleted on listener acquisition failure")
+        (is (= "not-a-socket" (slurp file))
+            "A non-socket path must not be overwritten on listener acquisition failure")
+        (is (= {} @(:state pool))
+            "A failed acquisition must not leave a pooled entry behind")
+        (finally
+          (.delete file))))))
+
+(deftest pooled-unix-final-cleanup-skips-replacement-nonsocket-file-test
+  (testing "Final unix cleanup leaves a replacement non-socket file alone"
+    (let [open-pool (requiring-resolve 'ol.busker.listen/open-pool)
+          acquire-claim (requiring-resolve 'ol.busker.listen/acquire-claim)
+          release! (requiring-resolve 'ol.busker.listen/release!)
+          pool (open-pool)
+          path (temp-unix-socket-path)
+          spec {:transport :tcp
+                :unix path}
+          original-unlink! socket/unlink-unix-socket-if-still-socket!
+          replacement-body "replacement-file"
+          claim (acquire-claim pool spec)]
+      (try
+        (with-redefs [socket/unlink-unix-socket-if-still-socket!
+                      (fn [p]
+                        (original-unlink! p)
+                        (spit p replacement-body)
+                        (original-unlink! p))]
+          (release! claim))
+        (is (.exists (File. path))
+            "A replacement non-socket file should survive final unix cleanup")
+        (is (= replacement-body (slurp path))
+            "Final unix cleanup should not delete or overwrite a replacement file")
+        (finally
+          (.delete (File. path)))))))

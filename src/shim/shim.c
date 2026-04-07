@@ -1,5 +1,9 @@
 // Minimal exported helpers for libh2o interop
 // Intended for FFI use from Clojure (coffi/FFM).
+#ifdef __APPLE__
+#define __APPLE_USE_RFC_3542 /* to use IPV6_RECVPKTINFO / IPV6_PKTINFO */
+#endif
+
 #include "shim.h"
 #include "h2o/multithread.h"
 #include "h2o/http3_server.h"
@@ -7,8 +11,11 @@
 #include "picotls/openssl.h"
 #include "quicly.h"
 #include "quicly/defaults.h"
+#include <arpa/inet.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <fcntl.h>
 #include <openssl/err.h>
@@ -20,7 +27,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
@@ -103,6 +112,200 @@ void send_error(http_status_code_t status_code, const char *body,
                 h2o_req_t *req) {
   h2o_send_error_generic(req, status_code, status_code_to_string(status_code),
                          body, 0);
+}
+
+static int clj_set_fd_cloexec(int fd) {
+  int flags = fcntl(fd, F_GETFD, 0);
+  if (flags == -1)
+    return -1;
+  return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+}
+
+static int clj_set_fd_nonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags == -1)
+    return -1;
+  return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+int clj_h2o_open_tcp_listener(const char *host, uint16_t port, int backlog,
+                              int reuseaddr, int reuseport, int nonblock,
+                              int cloexec) {
+  char servname[6];
+  struct addrinfo hints, *res = NULL, *ai = NULL;
+  const char *lookup_host = host != NULL && host[0] != '\0' ? host : NULL;
+  int gai_err, fd = -1, saved_errno = EADDRNOTAVAIL;
+
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
+  hints.ai_flags = AI_NUMERICSERV | AI_PASSIVE;
+
+  snprintf(servname, sizeof(servname), "%u", (unsigned)port);
+  gai_err = getaddrinfo(lookup_host, servname, &hints, &res);
+  if (gai_err != 0) {
+    if (gai_err != EAI_SYSTEM)
+      errno = EINVAL;
+    return -1;
+  }
+
+  for (ai = res; ai != NULL; ai = ai->ai_next) {
+    fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (fd == -1) {
+      saved_errno = errno;
+      continue;
+    }
+
+    if (cloexec && clj_set_fd_cloexec(fd) != 0)
+      goto Next;
+    if (nonblock && clj_set_fd_nonblocking(fd) != 0)
+      goto Next;
+
+#ifdef IPV6_V6ONLY
+    if (ai->ai_family == AF_INET6) {
+      int flag = 1;
+      if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &flag, sizeof(flag)) != 0)
+        goto Next;
+    }
+#endif
+
+    if (reuseaddr) {
+      int on = 1;
+      if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) != 0)
+        goto Next;
+    }
+
+#ifdef SO_REUSEPORT
+    if (reuseport) {
+      int on = 1;
+      if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on)) != 0)
+        goto Next;
+    }
+#endif
+
+    if (bind(fd, ai->ai_addr, ai->ai_addrlen) != 0)
+      goto Next;
+
+    if (listen(fd, backlog > 0 ? backlog : SOMAXCONN) != 0)
+      goto Next;
+
+    freeaddrinfo(res);
+    return fd;
+
+  Next:
+    saved_errno = errno;
+    close(fd);
+    fd = -1;
+  }
+
+  freeaddrinfo(res);
+  errno = saved_errno;
+  return -1;
+}
+
+int clj_h2o_open_unix_listener(const char *path, int backlog, int nonblock,
+                               int cloexec) {
+  struct sockaddr_un addr;
+  socklen_t addrlen = 0;
+  int fd = -1;
+  int cleanup_path = 0;
+
+  if (path == NULL || path[0] == '\0') {
+    errno = EINVAL;
+    return -1;
+  }
+
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+
+  if (path[0] == '@') {
+#if defined(__linux__)
+    size_t name_len = strlen(path + 1);
+    if (name_len == 0 || name_len > sizeof(addr.sun_path) - 1) {
+      errno = ENAMETOOLONG;
+      return -1;
+    }
+    memcpy(addr.sun_path + 1, path + 1, name_len);
+    addrlen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 +
+                          name_len);
+#else
+    errno = EAFNOSUPPORT;
+    return -1;
+#endif
+  } else {
+    struct stat st;
+    size_t path_len = strlen(path);
+    if (path_len >= sizeof(addr.sun_path)) {
+      errno = ENAMETOOLONG;
+      return -1;
+    }
+
+    if (lstat(path, &st) == 0) {
+      if (S_ISSOCK(st.st_mode)) {
+        unlink(path);
+      } else {
+        errno = EADDRINUSE;
+        return -1;
+      }
+    }
+
+    memcpy(addr.sun_path, path, path_len + 1);
+    addrlen =
+        (socklen_t)(offsetof(struct sockaddr_un, sun_path) + path_len + 1);
+    cleanup_path = 1;
+  }
+
+  fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd == -1)
+    return -1;
+
+  if (cloexec && clj_set_fd_cloexec(fd) != 0)
+    goto Error;
+  if (nonblock && clj_set_fd_nonblocking(fd) != 0)
+    goto Error;
+  if (bind(fd, (struct sockaddr *)&addr, addrlen) != 0)
+    goto Error;
+  if (listen(fd, backlog > 0 ? backlog : SOMAXCONN) != 0)
+    goto Error;
+
+  return fd;
+
+Error:
+  {
+    int saved_errno = errno;
+    close(fd);
+    if (cleanup_path)
+      unlink(path);
+    errno = saved_errno;
+    return -1;
+  }
+}
+
+int clj_h2o_unlink_unix_socket_if_still_socket(const char *path) {
+  struct stat st;
+
+  if (path == NULL || path[0] == '\0') {
+    errno = EINVAL;
+    return -1;
+  }
+
+  if (path[0] == '@')
+    return 0;
+
+  if (lstat(path, &st) != 0) {
+    if (errno == ENOENT)
+      return 0;
+    return -1;
+  }
+
+  if (!S_ISSOCK(st.st_mode))
+    return 0;
+
+  if (unlink(path) != 0)
+    return -1;
+
+  return 1;
 }
 
 int clj_h2o_socket_is_reading(h2o_socket_t *sock) {
@@ -319,9 +522,9 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
   /* Extract remote address from connection socket peername */
   if (req->conn && req->conn->callbacks && req->conn->callbacks->get_peername) {
     struct sockaddr_storage sa;
-    socklen_t salen = sizeof(sa);
-    if (req->conn->callbacks->get_peername(req->conn, (struct sockaddr *)&sa) ==
-        0) {
+    socklen_t salen =
+        req->conn->callbacks->get_peername(req->conn, (struct sockaddr *)&sa);
+    if (salen != 0) {
       char addrbuf[NI_MAXHOST];
       if (getnameinfo((struct sockaddr *)&sa, salen, addrbuf, sizeof(addrbuf),
                       NULL, 0, NI_NUMERICHOST) == 0) {
@@ -1787,59 +1990,80 @@ static void clj_forwarded_quic_socket_on_read(h2o_socket_t *sock,
 }
 
 static int clj_h2o_http3_open_udp_fd(const char *host, uint16_t port) {
-  struct sockaddr_in addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-
-  if (host && host[0] != '\0') {
-    /* TODO(ipv6): Remove this IPv4-only host gate when H1/H2/H3 share one
-       family-aware listener implementation. */
-    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
-      DEBUG_LOG("unsupported HTTP/3 UDP bind host (IPv4 only): %s", host);
-      return -1;
-    }
-  } else {
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  }
-  addr.sin_port = htons(port);
-
-  int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  if (fd == -1) {
-    DEBUG_LOG("failed to create UDP socket: %s", strerror(errno));
-    return -1;
-  }
-
+  char servname[6];
+  struct addrinfo hints, *res = NULL, *ai = NULL;
+  const char *lookup_host = host != NULL && host[0] != '\0' ? host : NULL;
+  int gai_err, fd = -1, saved_errno = EADDRNOTAVAIL;
   int optval = 1;
-  if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) != 0) {
-    DEBUG_LOG("setsockopt(SO_REUSEADDR) failed: %s", strerror(errno));
-    close(fd);
+
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_DGRAM;
+  hints.ai_protocol = IPPROTO_UDP;
+  hints.ai_flags = AI_NUMERICSERV | AI_PASSIVE;
+
+  snprintf(servname, sizeof(servname), "%u", (unsigned)port);
+  gai_err = getaddrinfo(lookup_host, servname, &hints, &res);
+  if (gai_err != 0) {
+    if (gai_err != EAI_SYSTEM)
+      errno = EINVAL;
+    DEBUG_LOG("getaddrinfo(UDP) failed for %s:%u",
+              lookup_host ? lookup_host : "*", (unsigned)port);
     return -1;
   }
+
+  for (ai = res; ai != NULL; ai = ai->ai_next) {
+    fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (fd == -1) {
+      saved_errno = errno;
+      continue;
+    }
+
+#ifdef IPV6_V6ONLY
+    if (ai->ai_family == AF_INET6) {
+      int flag = 1;
+      if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &flag, sizeof(flag)) != 0)
+        goto Next;
+    }
+#endif
+
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) != 0)
+      goto Next;
 #ifdef SO_REUSEPORT
-  if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval)) != 0) {
-    DEBUG_LOG("setsockopt(SO_REUSEPORT) failed: %s", strerror(errno));
-    close(fd);
-    return -1;
-  }
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval)) != 0)
+      goto Next;
 #endif
 
 #ifdef IP_PKTINFO
-  if (setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &optval, sizeof(optval)) != 0) {
-    DEBUG_LOG("setsockopt(IP_PKTINFO) failed: %s", strerror(errno));
-    close(fd);
-    return -1;
-  }
+    if (ai->ai_family == AF_INET &&
+        setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &optval, sizeof(optval)) != 0)
+      goto Next;
+#endif
+#ifdef IPV6_RECVPKTINFO
+    if (ai->ai_family == AF_INET6 &&
+        setsockopt(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &optval,
+                   sizeof(optval)) != 0)
+      goto Next;
 #endif
 
-  if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-    DEBUG_LOG("bind(UDP) failed: %s", strerror(errno));
+    if (bind(fd, ai->ai_addr, ai->ai_addrlen) != 0)
+      goto Next;
+
+    h2o_socket_set_df_bit(fd, ai->ai_family);
+    freeaddrinfo(res);
+    return fd;
+
+  Next:
+    saved_errno = errno;
     close(fd);
-    return -1;
+    fd = -1;
   }
 
-  h2o_socket_set_df_bit(fd, addr.sin_family);
-
-  return fd;
+  freeaddrinfo(res);
+  errno = saved_errno;
+  DEBUG_LOG("failed to open UDP socket for %s:%u: %s",
+            lookup_host ? lookup_host : "*", (unsigned)port, strerror(errno));
+  return -1;
 }
 
 static clj_http3_ctx_t *
