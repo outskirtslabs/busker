@@ -26,12 +26,13 @@ The actual state of affairs is:
 - [x] HTTP/2
 - [x] 103 early hints
 - [x] HTTP/3
-- [ ] IPv4
-- [ ] unix domain sockets
-- [ ] 0-RTT TLS
+- [x] IPv4/6
+- [x] IPv6
+- [x] unix domain sockets
 - [ ] Automatic HTTPS
+- [ ] 0-RTT TLS
 - [ ] TLS STEK, pluggable ticket store
-- [ ] Metrics/signals w/out the abominable otel
+- [ ] Metrics/signals... w/out the abominable otel?
 - [ ] Reverse proxying
 - [ ] Standlone operation mode w/ config file
 - [ ] Zero-downtime deployments w/ systemd
