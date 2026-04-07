@@ -17,10 +17,6 @@
 
 (def tls-sni-host "localhost.examp1e.net")
 
-(defn- ipv6-resolve-args
-  [port]
-  ["--resolve" (str tls-sni-host ":" port ":[::1]")])
-
 (defn- udp-port-bound?
   "Check if a UDP socket is bound on the given port.
    Uses ss command to check for UDP listeners."
@@ -255,7 +251,7 @@
                        :body "ready"}
                       {:status 200
                        :body protocol}))
-          curl-args (ipv6-resolve-args port)
+          curl-args ["--resolve" (str tls-sni-host ":" port ":[::1]")]
           server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
