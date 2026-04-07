@@ -118,6 +118,12 @@
    :error error
    :data data})
 
+(def ^:private supported-session-ticket-keys
+  #{:disabled?
+    :persistence
+    :max-keys
+    :lifetime-seconds})
+
 (defn- entrypoint-error
   [entrypoint-id error msg data]
   {:msg msg
@@ -392,6 +398,17 @@
   [{:keys [entrypoints dispatch tls] :as config}]
   (let [missing-entrypoints? (or (nil? entrypoints) (empty? entrypoints))
         missing-dispatch? (or (nil? dispatch) (empty? dispatch))
+        session-ticket-config (:session-tickets tls)
+        session-ticket-keys (if (map? session-ticket-config)
+                              (-> session-ticket-config keys set)
+                              #{})
+        unsupported-session-ticket-keys
+        (->> session-ticket-keys
+             (remove supported-session-ticket-keys)
+             sort
+             vec)
+        session-ticket-persistence (when (map? session-ticket-config)
+                                     (:persistence session-ticket-config))
         spec-errors (when (and (not missing-entrypoints?)
                                (not missing-dispatch?)
                                (not (specs/valid-config? config)))
@@ -414,6 +431,19 @@
                 (or dispatch []))
         tls-errors
         (-> []
+            (maybe-add-error
+             (seq unsupported-session-ticket-keys)
+             #(config-error
+               ::session-ticket-config-invalid
+               "Session ticket config contains unsupported keys."
+               {:keys unsupported-session-ticket-keys}))
+            (maybe-add-error
+             (and (= :storage session-ticket-persistence)
+                  (nil? (:storage tls)))
+             #(config-error
+               ::session-ticket-storage-missing
+               "Session ticket storage persistence requires top-level :tls :storage."
+               {}))
             (into (mapcat (partial validate-tls-load-entry [])
                           (get-in tls [:certificates :load])))
             (maybe-add-error

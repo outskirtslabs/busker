@@ -12,9 +12,12 @@
    [ol.busker.native :as native]
    [ol.busker.protocols :as h2o]
    [ol.busker.test-utils :as util]
-   [ol.clave.certificate :as clave-certificate])
+   [ol.busker.tickets :as tickets]
+   [ol.clave.certificate :as clave-certificate]
+   [ol.clave.storage.file :as file-storage])
   (:import
    java.io.File
+   java.nio.file.Files
    [java.security.cert CertificateFactory X509Certificate]))
 
 (defn- allocate-server-ports
@@ -46,6 +49,19 @@
 (defn- tls-port
   []
   (:tls @server-ports_))
+
+(defn- active-generation-instance
+  [server]
+  (:instance (:active @(:busker/state server))))
+
+(defn- active-generation-keys-edn
+  [server]
+  (some-> server
+          active-generation-instance
+          ::generation/key-manager
+          tickets/current-keys
+          ((fn [keys]
+             (mapv tickets/key->edn keys)))))
 
 (defn- base
   []
@@ -263,6 +279,106 @@
           (is (= "::1" (:server-name req)))
           (is (= port (:server-port req)))
           (is (contains? #{"::1" "0:0:0:0:0:0:0:1"} (:remote-addr req))))))))
+
+(deftest persistent-session-ticket-keys-survive-restart-test
+  (testing "top-level tls storage persists session ticket keys across restart"
+    (let [port (util/free-port)
+          storage-root (str (Files/createTempDirectory "busker-session-storage"
+                                                       (make-array java.nio.file.attribute.FileAttribute 0)))
+          storage (file-storage/file-storage {:root storage-root})
+          config (util/with-handler
+                   (fn [_] {:status 200 :body "ok"})
+                   (util/with-static-tls
+                     {:tls {:storage storage
+                            :session-tickets {:persistence :storage}}
+                      :entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                          :http3? false
+                                          :tls {:tls-compatibility-mode :modern}}}}))
+          server-a (busker/start! config)]
+      (try
+        (let [ready (util/wait-for-curl-ready! :https :h1 port "/"
+                                               :max-time 2)]
+          (is (= 0 (:exit ready))
+              (str "TLS listener should become ready before restart. stderr: "
+                   (:err ready))))
+        (is (.exists (io/file storage-root "busker/session_tickets/keys.edn")))
+        (let [keys-a (active-generation-keys-edn server-a)]
+          (is (seq keys-a))
+          (busker/stop! server-a)
+          (let [server-b (busker/start! config)]
+            (try
+              (let [ready (util/wait-for-curl-ready! :https :h1 port "/"
+                                                     :max-time 2)]
+                (is (= 0 (:exit ready))
+                    (str "TLS listener should become ready after restart. stderr: "
+                         (:err ready))))
+              (is (= keys-a
+                     (active-generation-keys-edn server-b)))
+              (finally
+                (busker/stop! server-b)))))
+        (finally
+          (when (= :running (:phase (busker/state server-a)))
+            (busker/stop! server-a)))))))
+
+(deftest tls-storage-alone-does-not-enable-ticket-persistence-test
+  (testing "top-level tls storage without persistence selector remains memory only"
+    (let [port (util/free-port)
+          storage-root (str (Files/createTempDirectory "busker-session-memory"
+                                                       (make-array java.nio.file.attribute.FileAttribute 0)))
+          storage (file-storage/file-storage {:root storage-root})
+          config (util/with-handler
+                   (fn [_] {:status 200 :body "ok"})
+                   (util/with-static-tls
+                     {:tls {:storage storage}
+                      :entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                          :http3? false
+                                          :tls {:tls-compatibility-mode :modern}}}}))
+          server-a (busker/start! config)]
+      (try
+        (let [ready (util/wait-for-curl-ready! :https :h1 port "/"
+                                               :max-time 2)]
+          (is (= 0 (:exit ready))
+              (str "TLS listener should become ready before restart. stderr: "
+                   (:err ready))))
+        (let [keys-a (active-generation-keys-edn server-a)]
+          (busker/stop! server-a)
+          (let [server-b (busker/start! config)]
+            (try
+              (let [ready (util/wait-for-curl-ready! :https :h1 port "/"
+                                                     :max-time 2)]
+                (is (= 0 (:exit ready))
+                    (str "TLS listener should become ready after restart. stderr: "
+                         (:err ready))))
+              (is (not= keys-a
+                        (active-generation-keys-edn server-b)))
+              (is (not (.exists (io/file storage-root "busker/session_tickets/keys.edn"))))
+              (finally
+                (busker/stop! server-b)))))
+        (finally
+          (when (= :running (:phase (busker/state server-a)))
+            (busker/stop! server-a)))))))
+
+(deftest disabled-session-tickets-skip-native-ticket-manager-test
+  (testing "disabled session tickets do not create ticket manager state"
+    (let [port (util/free-port)
+          server (busker/start!
+                  (util/with-handler
+                    (fn [_] {:status 200 :body "ok"})
+                    (util/with-static-tls
+                      {:tls {:session-tickets {:disabled? true}}
+                       :entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                           :http3? false
+                                           :tls {:tls-compatibility-mode :modern}}}})))]
+      (try
+        (let [ready (util/wait-for-curl-ready! :https :h1 port "/"
+                                               :max-time 2)]
+          (is (= 0 (:exit ready))
+              (str "TLS listener should become ready. stderr: " (:err ready))))
+        (let [generation (active-generation-instance server)]
+          (is (nil? (::generation/key-manager generation)))
+          (is (nil? (::generation/native-ticket-mgr generation))))
+        (finally
+          (busker/stop! server))))))
 
 (deftest test-unix-socket-listener
   (testing "Unix socket listeners serve requests and clean up their socket path"

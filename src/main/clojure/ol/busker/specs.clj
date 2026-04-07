@@ -8,7 +8,6 @@
    [ol.clave.specs :as clave]
    [ol.clave.storage :as storage])
   (:import
-   [java.time Duration]
    [java.util.concurrent ExecutorService]))
 
 (defn- non-blank-string?
@@ -27,35 +26,17 @@
   (or (fn? v)
       (qualified-symbol-ref? v)))
 
-(def key-source
-  {:key ::key-source
-   :doc "Component that generates or obtains session ticket encryption keys."
-   :default nil})
-(s/def ::key-source any?)
-
-(def rotation-interval
-  {:key ::rotation-interval
-   :doc "Interval between automatic STEK rotations."
-   :default (Duration/ofHours 12)})
-(s/def ::rotation-interval #(instance? Duration %))
-
-(def max-keys
-  {:key ::max-keys
-   :doc "Maximum STEKs retained in active rotation."
-   :default 4})
-(s/def ::max-keys pos-int?)
-
-(def rotation-disabled?
-  {:key ::rotation-disabled?
-   :doc "When true, prevents automatic STEK rotation."
-   :default false})
-(s/def ::rotation-disabled? boolean?)
-
 (def disabled?
   {:key ::disabled?
    :doc "When true, disables session ticket resumption."
    :default false})
 (s/def ::disabled? boolean?)
+
+(def persistence
+  {:key ::persistence
+   :doc "Session ticket persistence mode."
+   :default :memory})
+(s/def ::persistence #{:memory :storage})
 
 (def lifetime-seconds
   {:key ::lifetime-seconds
@@ -63,16 +44,23 @@
    :default 86400})
 (s/def ::lifetime-seconds pos-int?)
 
+(def max-keys
+  {:key ::max-keys
+   :doc "Maximum number of session ticket keys retained in rotation."
+   :default 4})
+(s/def ::max-keys pos-int?)
+
 (def session-tickets
   {:key ::session-tickets
    :doc "TLS session ticket configuration for resumption and 0-RTT."
-   :default {:lifetime-seconds (:default lifetime-seconds)}})
+   :default {:disabled? (:default disabled?)
+             :persistence (:default persistence)
+             :max-keys (:default max-keys)
+             :lifetime-seconds (:default lifetime-seconds)}})
 (s/def ::session-tickets
-  (s/keys :opt-un [::key-source
-                   ::rotation-interval
+  (s/keys :opt-un [::disabled?
+                   ::persistence
                    ::max-keys
-                   ::rotation-disabled?
-                   ::disabled?
                    ::lifetime-seconds]))
 
 (def key-type
@@ -659,11 +647,9 @@
                    ::buffer-pool]))
 
 (def all-descriptors
-  [key-source
-   rotation-interval
+  [disabled?
+   persistence
    max-keys
-   rotation-disabled?
-   disabled?
    lifetime-seconds
    session-tickets
    key-type

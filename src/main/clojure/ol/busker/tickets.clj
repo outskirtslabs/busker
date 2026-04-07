@@ -1,78 +1,50 @@
 (ns ol.busker.tickets
-  "Session ticket key management for TLS 1.3 resumption and 0-RTT.
-
-  Provides key storage backends and rotation logic for session tickets.
-  Keys are used by the native layer for ticket encryption/decryption.
-
-  Configuration layers:
-  1. Zero config (default) - in-memory keys, lost on restart
-  2. File persistence - EDN file storage, survives restart
-  3. Custom store - implement [[TicketKeyStore]] protocol"
+  "Session ticket key management for TLS 1.3 resumption and 0-RTT."
   (:require
    [clojure.edn :as edn]
-   [clojure.java.io :as io]
    [coffi.mem :as mem]
-   [ol.busker.native :as h2o])
+   [ol.busker.native :as h2o]
+   [ol.clave.storage :as storage])
   (:import
-   [java.io File]
-   [java.nio.file Files]
-   [java.nio.file.attribute PosixFilePermission]
-   [java.security SecureRandom]
-   [java.util HashSet]))
+   java.nio.file.NoSuchFileException
+   [java.security SecureRandom]))
 
 (set! *warn-on-reflection* true)
 
-(def ^:const default-ticket-lifetime-seconds 86400)  ; 24 hours
-(def ^:const rotation-check-interval-ms 120000)      ; 120 seconds
-(def ^:const max-rotation-jitter-ms 6000)            ; 6 seconds jitter
-(def ^:const file-poll-interval-ms 10000)            ; 10 seconds
+(def ^:const default-ticket-lifetime-seconds
+  86400)
+
+(def ^:const default-max-ticket-keys
+  4)
+
+(def ^:const rotation-check-interval-ms
+  120000)
+
+(def ^:const ticket-storage-key
+  (storage/storage-key "busker" "session_tickets" "keys.edn"))
+
+(def ^:const ticket-rotation-lock-name
+  "busker-session-ticket-rotation")
 
 (def ^:dynamic *ticket-rotation-jitter-seconds*
-  "Jitter seconds for rotation checks. Bind to 0 in tests to disable."
+  "Jitter seconds for rotation checks.
+   Bind to 0 in tests to disable."
   6)
 
 (defprotocol TicketKeyStore
-  "Backend for session ticket key persistence.
-
-  Busker runs rotation checks every 120 seconds with jitter.
-  A new key is created when the newest key is older than ticket-lifetime/4.
-  This protocol handles storage only.
-
-  Keys are maps with:
-
-  | key           | type   | description                           |
-  |---------------|--------|---------------------------------------|
-  | `:name`       | bytes  | 16-byte unique key identifier         |
-  | `:aes-key`    | bytes  | 32-byte AES-256 encryption key        |
-  | `:hmac-key`   | bytes  | 64-byte HMAC-SHA256 key               |
-  | `:not-before` | long   | activation time (epoch milliseconds)  |
-  | `:not-after`  | long   | expiration time (epoch milliseconds)  |
-
-  Thread Safety: Implementations must be thread-safe. store-keys! may be
-  called while load-keys is in progress on another thread."
+  "Backend for session ticket key persistence."
 
   (load-keys [store]
     "Load all keys from the backing store.
 
-    Returns: seq of key maps (newest first), or nil if no keys stored.
-
-    Called at server startup and after rotation to verify persistence.
-
-    On error: Throw exception. Server logs error and uses in-memory
-    fallback (losing persistence until next successful store).")
+    Returns a seq of key maps ordered newest-first, or nil if no keys are
+    stored.")
 
   (store-keys! [store keys]
-    "Atomically persist the complete set of keys.
+    "Atomically persist the complete set of keys.")
 
-    keys: seq of key maps, ordered newest-first
-
-    Atomicity: Readers must see either old or new state, never partial.
-    File stores: use write-to-temp + rename pattern.
-
-    Called after each key rotation cycle.
-
-    On error: Throw exception. Server logs and retries next cycle.
-    In-memory keys remain valid even if persistence fails."))
+  (with-store-lock [store f]
+    "Run `f` while holding any store-specific coordination lock."))
 
 (defn hex->bytes
   "Convert hex string to byte array."
@@ -110,7 +82,7 @@
    :not-after (+ not-before-ms lifetime-ms -1)})
 
 (defn key->edn
-  "Convert a key map to EDN-safe format (hex-encoded bytes)."
+  "Convert a key map to EDN-safe format."
   [{:keys [name aes-key hmac-key not-before not-after]}]
   {:name (bytes->hex name)
    :aes-key (bytes->hex aes-key)
@@ -119,7 +91,7 @@
    :not-after not-after})
 
 (defn edn->key
-  "Convert EDN format back to key map with byte arrays."
+  "Convert EDN format back to a key map with byte arrays."
   [{:keys [name aes-key hmac-key not-before not-after]}]
   {:name (hex->bytes name)
    :aes-key (hex->bytes aes-key)
@@ -127,7 +99,56 @@
    :not-before not-before
    :not-after not-after})
 
-;; In-memory store (Layer 1)
+(defn- key-set->edn
+  [keys]
+  (mapv key->edn (or keys [])))
+
+(defn- same-key-set?
+  [a b]
+  (= (key-set->edn a)
+     (key-set->edn b)))
+
+(defn- parse-stored-keys
+  [content]
+  (->> content
+       edn/read-string
+       (mapv edn->key)))
+
+(defn- corrupt-storage-error
+  [cause]
+  (ex-info "Stored session ticket data is corrupt."
+           {::load-status :corrupt}
+           cause))
+
+(defn- storage-load-error
+  [cause]
+  (ex-info "Failed to load stored session ticket data."
+           {::load-status :storage-error}
+           cause))
+
+(defn- load-storage-keys
+  [storage-impl]
+  (try
+    (let [content (storage/load-string storage-impl
+                                       nil
+                                       ticket-storage-key)]
+      (try
+        (parse-stored-keys content)
+        (catch Exception e
+          (throw (corrupt-storage-error e)))))
+    (catch NoSuchFileException _
+      nil)
+    (catch clojure.lang.ExceptionInfo e
+      (throw e))
+    (catch Exception e
+      (throw (storage-load-error e)))))
+
+(defn- store-storage-keys!
+  [storage-impl keys]
+  (storage/store-string! storage-impl
+                         nil
+                         ticket-storage-key
+                         (pr-str (key-set->edn keys))))
 
 (deftype MemoryTicketStore [keys-atom]
   TicketKeyStore
@@ -135,98 +156,59 @@
     @keys-atom)
   (store-keys! [_ keys]
     (reset! keys-atom (vec keys))
-    nil))
+    nil)
+  (with-store-lock [_ f]
+    (f)))
 
 (defn memory-ticket-store
-  "Create an in-memory ticket key store.
-   Keys are lost on restart."
+  "Create an in-memory ticket key store."
   []
   (->MemoryTicketStore (atom nil)))
 
-;; File-backed store (Layer 2)
-
-(defn- set-file-permissions-0600
-  "Set file permissions to owner read/write only (0600)."
-  [^File file]
-  (let [perms (HashSet.)]
-    (.add perms PosixFilePermission/OWNER_READ)
-    (.add perms PosixFilePermission/OWNER_WRITE)
-    (Files/setPosixFilePermissions (.toPath file) perms)))
-
-(deftype FileTicketStore [^String path cache-atom last-mtime-atom]
+(deftype StorageTicketStore [storage-impl]
   TicketKeyStore
   (load-keys [_]
-    (let [file (io/file path)]
-      (when (.exists file)
-        (let [mtime (.lastModified file)]
-          (if (= mtime @last-mtime-atom)
-            @cache-atom
-            (let [content (slurp file)
-                  keys (mapv edn->key (edn/read-string content))]
-              (reset! cache-atom keys)
-              (reset! last-mtime-atom mtime)
-              keys))))))
-
+    (load-storage-keys storage-impl))
   (store-keys! [_ keys]
-    (let [file (io/file path)
-          parent (.getParentFile file)]
-      (when (and parent (not (.exists parent)))
-        (throw (ex-info "Parent directory does not exist" {:path path})))
-      (let [temp-file (File/createTempFile "tickets" ".edn.tmp" parent)
-            edn-keys (mapv key->edn keys)
-            content (pr-str edn-keys)]
-        (try
-          (spit temp-file content)
-          (set-file-permissions-0600 temp-file)
-          (Files/move (.toPath temp-file) (.toPath file)
-                      (into-array java.nio.file.CopyOption
-                                  [java.nio.file.StandardCopyOption/REPLACE_EXISTING
-                                   java.nio.file.StandardCopyOption/ATOMIC_MOVE]))
-          (reset! cache-atom (vec keys))
-          (reset! last-mtime-atom (.lastModified file))
-          nil
-          (catch Exception e
-            (when (.exists temp-file)
-              (.delete temp-file))
-            (throw e)))))))
+    (store-storage-keys! storage-impl keys))
+  (with-store-lock [_ f]
+    (storage/with-lock storage-impl
+                       nil
+                       ticket-rotation-lock-name
+                       f)))
 
-(defn file-ticket-store
-  "Create a file-backed ticket key store.
+(defn storage-ticket-store
+  "Create a Clave-backed ticket key store."
+  [storage-impl]
+  (->StorageTicketStore storage-impl))
 
-  path: File path for EDN key storage
-
-  Atomic writes via temp file + rename.
-  File permissions set to 0600 (owner read/write only).
-  Parent directory must exist.
-  Polls the file every 10 seconds for external changes.
-
-  Thread safe for concurrent load-keys/store-keys! calls."
-  [path]
-  (->FileTicketStore path (atom nil) (atom 0)))
-
-;; Key rotation logic
+(defn- load-keys-result
+  [store]
+  (try
+    (let [keys (some-> (load-keys store) vec)]
+      (if keys
+        {:status :ok
+         :keys keys}
+        {:status :missing}))
+    (catch clojure.lang.ExceptionInfo e
+      {:status (or (::load-status (ex-data e))
+                   :storage-error)
+       :exception e})
+    (catch Exception e
+      {:status :storage-error
+       :exception e})))
 
 (defn- prune-expired-keys
-  "Remove keys where not-after < now."
   [keys now-ms]
   (filterv #(>= (:not-after %) now-ms) keys))
 
-(defn- unique-1byte-ids
-  "Ensure keys have unique 1-byte identifiers (first byte of name).
-   Returns keys with unique IDs, preferring newer keys."
-  [keys]
-  (let [seen (volatile! #{})]
-    (filterv (fn [k]
-               (let [id (aget ^bytes (:name k) 0)]
-                 (if (contains? @seen id)
-                   false
-                   (do (vswap! seen conj id)
-                       true))))
-             keys)))
+(defn- retain-max-keys
+  [keys max-keys]
+  (->> keys
+       (take max-keys)
+       vec))
 
 (defn- needs-new-key?
-  "Check if a new key should be generated.
-   Returns true if no valid keys or newest key is past 1/4 of its lifetime."
   [keys now-ms lifetime-ms]
   (if (empty? keys)
     true
@@ -238,109 +220,129 @@
 (defn rotate-keys
   "Perform key rotation if needed.
 
-  Returns updated keys seq (newest first).
-
-  Algorithm:
-  1. Prune expired keys
-  2. Remove entries with colliding 1-byte identifiers
-  3. Generate new key if needed (no valid key or newest past 1/4 lifetime)
-  4. Abort if would need 256+ unique identifiers"
-  [keys now-ms lifetime-ms]
+  Returns updated keys ordered newest-first."
+  [keys now-ms lifetime-ms max-keys]
+  ;; Rotation keeps all non-expired keys and prepends one fresh key when the
+  ;; newest active key reaches 1/4 of its lifetime. The retained set is capped
+  ;; at `max-keys`. New keys become active immediately so encryption always has
+  ;; a currently valid key even when operators configure `:max-keys 1`.
   (let [valid-keys (-> keys
                        (prune-expired-keys now-ms)
-                       unique-1byte-ids)]
-    (when (>= (count valid-keys) 256)
-      (throw (ex-info "Too many ticket keys - would require 256+ unique identifiers"
-                      {:key-count (count valid-keys)})))
+                       (retain-max-keys max-keys))]
     (if (needs-new-key? valid-keys now-ms lifetime-ms)
-      (let [not-before (if (empty? valid-keys)
-                         now-ms
-                         (+ now-ms 60000))  ; 60s grace period for clock skew
-            new-key (generate-key not-before lifetime-ms)]
-        (into [new-key] valid-keys))
+      (let [new-key (generate-key now-ms lifetime-ms)
+            next-keys (into [new-key] valid-keys)]
+        (retain-max-keys next-keys max-keys))
       valid-keys)))
 
-;; Native key synchronization
-
-(defn keys->native-array
-  "Convert seq of Clojure key maps to native clj_session_ticket_t array."
-  [keys arena]
-  (let [struct-size h2o/size-of-session-ticket-t
-        n (count keys)
-        segment (mem/alloc (* n struct-size) arena)]
-    (doseq [[i k] (map-indexed vector keys)]
-      (let [offset (* i struct-size)
-            name-bytes ^bytes (:name k)
-            aes-bytes ^bytes (:aes-key k)
-            hmac-bytes ^bytes (:hmac-key k)]
-        ;; Copy byte arrays into native memory
-        (doseq [j (range 16)]
-          (mem/write-byte segment (+ offset j) (aget name-bytes j)))
-        (doseq [j (range 32)]
-          (mem/write-byte segment (+ offset 16 j) (aget aes-bytes j)))
-        (doseq [j (range 64)]
-          (mem/write-byte segment (+ offset 48 j) (aget hmac-bytes j)))
-        ;; Write timestamps
-        (mem/write-long segment (+ offset 112) (:not-before k))
-        (mem/write-long segment (+ offset 120) (:not-after k))))
-    segment))
+(defn- rotation-needed?
+  [keys now-ms lifetime-ms max-keys]
+  (not (same-key-set? keys
+                      (rotate-keys keys now-ms lifetime-ms max-keys))))
 
 (defn sync-keys-to-native!
-  "Push current keys to native ticket manager."
+  "Push current keys to the native ticket manager."
   [native-mgr keys]
   (if (empty? keys)
     (h2o/ticket-manager-set-keys native-mgr mem/null 0)
     (with-open [arena (mem/confined-arena)]
-      (let [arr (keys->native-array keys arena)]
+      (let [arr (h2o/session-ticket-keys->native-array keys arena)]
         (h2o/ticket-manager-set-keys native-mgr arr (count keys))))))
 
-;; Key manager (combines store + rotation + native sync)
+(defn- replace-current-keys!
+  [{:keys [native-mgr keys-atom]} keys]
+  (reset! keys-atom (vec keys))
+  (sync-keys-to-native! native-mgr keys))
 
-(defrecord KeyManager [store native-mgr lifetime-ms keys-atom running?-atom rotation-thread])
+(defn- initialize-keys
+  [store lifetime-ms max-keys]
+  (let [now-ms (System/currentTimeMillis)]
+    (with-store-lock
+      store
+      (fn []
+        (let [{:keys [status keys]} (load-keys-result store)
+              base-keys (if (= status :ok) keys nil)
+              winner (rotate-keys base-keys now-ms lifetime-ms max-keys)]
+          (store-keys! store winner)
+          winner)))))
+
+(defn- refresh-keys!
+  [store current-keys lifetime-ms max-keys]
+  (let [now-ms (System/currentTimeMillis)
+        load-result (load-keys-result store)]
+    (cond
+      (= :storage-error (:status load-result))
+      current-keys
+
+      (and (= :ok (:status load-result))
+           (not (rotation-needed? (:keys load-result)
+                                  now-ms
+                                  lifetime-ms
+                                  max-keys)))
+      (:keys load-result)
+
+      :else
+      (try
+        (with-store-lock
+          store
+          (fn []
+            (let [{:keys [status keys]} (load-keys-result store)
+                  base-keys (case status
+                              :ok keys
+                              :missing nil
+                              :corrupt nil
+                              :storage-error current-keys)
+                  next-keys (rotate-keys base-keys now-ms lifetime-ms max-keys)]
+              (when (or (not= status :ok)
+                        (not (same-key-set? base-keys next-keys)))
+                (store-keys! store next-keys))
+              next-keys)))
+        (catch Exception _
+          current-keys)))))
 
 (defn- rotation-check-jitter-ms
-  "Return random jitter in milliseconds for rotation checks."
   []
   (if (zero? *ticket-rotation-jitter-seconds*)
     0
-    (* (rand-int (* *ticket-rotation-jitter-seconds* 1000)) 1)))
+    (rand-int (* *ticket-rotation-jitter-seconds* 1000))))
 
 (defn- run-rotation-loop
-  "Background rotation loop. Checks every 120s + jitter."
-  [{:keys [store native-mgr lifetime-ms keys-atom running?-atom] :as _mgr}]
+  [{:keys [store lifetime-ms max-keys keys-atom running?-atom] :as mgr}]
   (while @running?-atom
     (try
-      (Thread/sleep (long (+ rotation-check-interval-ms (rotation-check-jitter-ms))))
+      (Thread/sleep (long (+ rotation-check-interval-ms
+                             (rotation-check-jitter-ms))))
       (when @running?-atom
-        (let [now-ms (System/currentTimeMillis)
-              current-keys @keys-atom
-              rotated-keys (rotate-keys current-keys now-ms lifetime-ms)]
-          (when (not= (count rotated-keys) (count current-keys))
-            (reset! keys-atom rotated-keys)
-            (sync-keys-to-native! native-mgr rotated-keys)
-            (try
-              (store-keys! store rotated-keys)
-              (catch Exception _e
-                nil)))))  ; Log and continue on store failure
+        (let [current-keys @keys-atom
+              next-keys (refresh-keys! store
+                                       current-keys
+                                       lifetime-ms
+                                       max-keys)]
+          (when-not (same-key-set? next-keys current-keys)
+            (replace-current-keys! mgr next-keys))))
       (catch InterruptedException _
-        nil)  ; Expected during shutdown
-      (catch Exception _e
-        nil))))  ; Log and continue
+        nil)
+      (catch Exception _
+        nil))))
 
 (defn create-key-manager
-  "Create a key manager with store, rotation, and native sync.
-
-  Options:
-  - :session-ticket-lifetime-seconds - key lifetime (default 24h)
-
-  Returns a KeyManager record. Call start-key-manager! to begin rotation."
-  [store native-mgr opts]
-  (let [lifetime-s (get opts :session-ticket-lifetime-seconds default-ticket-lifetime-seconds)
+  "Create a key manager map with store, rotation, and native sync."
+  [store native-mgr session-ticket-config]
+  (let [lifetime-s (get session-ticket-config
+                        :lifetime-seconds
+                        default-ticket-lifetime-seconds)
+        max-keys (get session-ticket-config
+                      :max-keys
+                      default-max-ticket-keys)
         lifetime-ms (* lifetime-s 1000)
-        initial-keys (or (try (load-keys store) (catch Exception _ nil))
-                         (let [now (System/currentTimeMillis)]
-                           [(generate-key now lifetime-ms)]))]
-    (->KeyManager store native-mgr lifetime-ms (atom initial-keys) (atom false) (atom nil))))
+        initial-keys (initialize-keys store lifetime-ms max-keys)]
+    {:store store
+     :native-mgr native-mgr
+     :lifetime-ms lifetime-ms
+     :max-keys max-keys
+     :keys-atom (atom initial-keys)
+     :running?-atom (atom false)
+     :rotation-thread (atom nil)}))
 
 (defn start-key-manager!
   "Start the background rotation thread for a key manager.

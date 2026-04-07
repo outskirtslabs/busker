@@ -740,15 +740,23 @@
         ssl-ctx-ptrs (mapv :ssl-ctx-ptr listener-runtimes)
         has-tls-listeners? (some some? ssl-ctx-ptrs)
         tls-lookup-callback-ptr (:callback-ptr tls-lookup-callback)
-        session-ticket-lifetime-seconds (get-in config [:tls :session-tickets :lifetime-seconds])
-        ticket-store (tickets/memory-ticket-store)
-        native-ticket-mgr (when has-tls-listeners?
+        session-ticket-config (get-in config [:tls :session-tickets])
+        session-ticket-lifetime-seconds (:lifetime-seconds session-ticket-config)
+        session-tickets-disabled? (:disabled? session-ticket-config)
+        session-ticket-persistence (:persistence session-ticket-config)
+        ticket-store (when (and has-tls-listeners?
+                                (not session-tickets-disabled?))
+                       (if (= :storage session-ticket-persistence)
+                         (tickets/storage-ticket-store (get-in config [:tls :storage]))
+                         (tickets/memory-ticket-store)))
+        native-ticket-mgr (when (and has-tls-listeners?
+                                     (not session-tickets-disabled?))
                             (h2o/ticket-manager-create
                              session-ticket-lifetime-seconds))
         key-manager (when native-ticket-mgr
                       (-> (tickets/create-key-manager ticket-store
                                                       native-ticket-mgr
-                                                      config)
+                                                      session-ticket-config)
                           (tickets/start-key-manager!)))]
     (when native-ticket-mgr
       (doseq [ssl-ctx-ptr ssl-ctx-ptrs]

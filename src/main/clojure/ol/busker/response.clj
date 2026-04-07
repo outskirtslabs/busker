@@ -184,24 +184,25 @@
                                          (write-fallback-body-to-stream! part nil out))
     :else                              (throw (ex-info "Unsupported response chunk" {:type (class chunk)}))))
 
+#_{:clj-kondo/ignore [:unresolved-namespace]}
 (compile-if
-  (do
-    (require '[ring.core.protocols :as ring-protocols])
-    true)
-  (do
-    (defn- streamable-response-body?
-      [chunk]
-      (satisfies? ring.core.protocols/StreamableResponseBody chunk))
-    (defn- write-body-to-stream!
-      [chunk response ^OutputStream out]
-      (ring.core.protocols/write-body-to-stream chunk response out)))
-  (do
-    (defn- streamable-response-body?
-      [_]
-      false)
-    (defn- write-body-to-stream!
-      [chunk response ^OutputStream out]
-      (write-fallback-body-to-stream! chunk response out))))
+ (do
+   (require '[ring.core.protocols :as ring-protocols])
+   true)
+ (do
+   (defn- streamable-response-body?
+     [chunk]
+     (satisfies? ring.core.protocols/StreamableResponseBody chunk))
+   (defn- write-body-to-stream!
+     [chunk response ^OutputStream out]
+     (ring.core.protocols/write-body-to-stream chunk response out)))
+ (do
+   (defn- streamable-response-body?
+     [_]
+     false)
+   (defn- write-body-to-stream!
+     [chunk response ^OutputStream out]
+     (write-fallback-body-to-stream! chunk response out))))
 
 (defn- commit-final!
   [^Request req write-resp committed_ {:keys [body status] :as response} final?]

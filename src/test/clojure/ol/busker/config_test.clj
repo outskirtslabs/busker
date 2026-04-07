@@ -92,9 +92,51 @@
   (testing "exposes config defaults used by the loader"
     (is (= 1 (:n-workers specs/default-config)))
     (is (= 1024 (:max-connections specs/default-config)))
+    (is (= 4
+           (get-in specs/default-config
+                   [:tls :session-tickets :max-keys])))
     (is (= 86400
            (get-in specs/default-config
                    [:tls :session-tickets :lifetime-seconds])))))
+
+(deftest session-ticket-config-contract-test
+  (testing "accepts the minimal active session ticket config"
+    (let [config (cfg/load!
+                  {:tls {:session-tickets {:disabled? true
+                                           :persistence :memory
+                                           :max-keys 7
+                                           :lifetime-seconds 42}}
+                   :entrypoints {:http {:bind ":8080"
+                                        :tls false}}
+                   :dispatch [{}]})]
+      (is (= true (get-in config [:tls :session-tickets :disabled?])))
+      (is (= :memory (get-in config [:tls :session-tickets :persistence])))
+      (is (= 7 (get-in config [:tls :session-tickets :max-keys])))
+      (is (= 42 (get-in config [:tls :session-tickets :lifetime-seconds])))))
+
+  (testing "rejects storage persistence without top-level tls storage"
+    (let [errors (load-errors
+                  {:tls {:session-tickets {:persistence :storage}}
+                   :entrypoints {:https {:bind ":8443"
+                                         :tls {:tls-compatibility-mode :modern}}}
+                   :dispatch [{}]})]
+      (is (some #(= ::cfg/session-ticket-storage-missing (:error %)) errors))))
+
+  (testing "rejects unknown session ticket knobs"
+    (let [errors (load-errors
+                  {:tls {:session-tickets {:bogus true}}
+                   :entrypoints {:http {:bind ":8080"
+                                        :tls false}}
+                   :dispatch [{}]})]
+      (is (some #(= ::cfg/session-ticket-config-invalid (:error %)) errors))))
+
+  (testing "malformed session ticket values stay on the normal spec validation path"
+    (let [errors (load-errors
+                  {:tls {:session-tickets true}
+                   :entrypoints {:http {:bind ":8080"
+                                        :tls false}}
+                   :dispatch [{}]})]
+      (is (some #(= ::cfg/config-spec-invalid (:error %)) errors)))))
 
 (deftest validate-entrypoint-selection-test
   (testing "rejects dispatch references to unknown entrypoints"

@@ -975,6 +975,34 @@
 
 (def size-of-session-ticket-t (mem/size-of ::clj-session-ticket-t))
 
+(defn session-ticket-keys->native-array
+  "Allocate and populate a contiguous native array of `::clj-session-ticket-t`.
+
+  Input is a seq of maps ordered newest-first, where each map contains:
+  `:name` as a 16-byte array, `:aes-key` as a 32-byte array, `:hmac-key` as a
+  64-byte array, and `:not-before` / `:not-after` as epoch-millisecond longs.
+
+  Returns a native memory segment allocated in `arena` containing one
+  `::clj-session-ticket-t` struct per input key in the same order."
+  [keys arena]
+  (let [struct-size size-of-session-ticket-t
+        n (count keys)
+        segment (mem/alloc (* n struct-size) arena)]
+    (doseq [[i k] (map-indexed vector keys)]
+      (let [offset (* i struct-size)
+            name-bytes ^bytes (:name k)
+            aes-bytes ^bytes (:aes-key k)
+            hmac-bytes ^bytes (:hmac-key k)]
+        (doseq [j (range 16)]
+          (mem/write-byte segment (+ offset j) (aget name-bytes j)))
+        (doseq [j (range 32)]
+          (mem/write-byte segment (+ offset 16 j) (aget aes-bytes j)))
+        (doseq [j (range 64)]
+          (mem/write-byte segment (+ offset 48 j) (aget hmac-bytes j)))
+        (mem/write-long segment (+ offset 112) (:not-before k))
+        (mem/write-long segment (+ offset 120) (:not-after k))))
+    segment))
+
 (defcfn ticket-manager-create
   "Create a new ticket manager with specified ticket lifetime.
    Returns pointer to clj_ticket_manager_t, or NULL on failure."
