@@ -54,7 +54,6 @@
   (testing "TCP claims keep the bound port unavailable until the final release"
     (let [open-pool (requiring-resolve 'ol.busker.listen/open-pool)
           acquire-claim (requiring-resolve 'ol.busker.listen/acquire-claim)
-          fake-close! (requiring-resolve 'ol.busker.listen/fake-close!)
           release! (requiring-resolve 'ol.busker.listen/release!)
           pool (open-pool)
           spec {:transport :tcp
@@ -67,7 +66,6 @@
         (try
           (is (not (tcp-bindable? (:port spec)))
               "TCP port should stay bound while claims exist")
-          (fake-close! claim-a)
           (release! claim-a)
           (is (not (tcp-bindable? (:port spec)))
               "TCP port should remain bound until the last claim is released")
@@ -80,7 +78,6 @@
   (testing "IPv6 TCP claims keep the bound port unavailable until the final release"
     (let [open-pool (requiring-resolve 'ol.busker.listen/open-pool)
           acquire-claim (requiring-resolve 'ol.busker.listen/acquire-claim)
-          fake-close! (requiring-resolve 'ol.busker.listen/fake-close!)
           release! (requiring-resolve 'ol.busker.listen/release!)
           pool (open-pool)
           spec {:transport :tcp
@@ -93,7 +90,6 @@
         (try
           (is (not (tcp-bindable? "::1" (:port spec)))
               "IPv6 TCP port should stay bound while claims exist")
-          (fake-close! claim-a)
           (release! claim-a)
           (is (not (tcp-bindable? "::1" (:port spec)))
               "IPv6 TCP port should remain bound until the last claim is released")
@@ -144,7 +140,6 @@
   (testing "UDP claims keep the bound port unavailable until the final release"
     (let [open-pool (requiring-resolve 'ol.busker.listen/open-pool)
           acquire-claim (requiring-resolve 'ol.busker.listen/acquire-claim)
-          fake-close! (requiring-resolve 'ol.busker.listen/fake-close!)
           release! (requiring-resolve 'ol.busker.listen/release!)
           pool (open-pool)
           spec {:transport :udp
@@ -157,7 +152,6 @@
         (try
           (is (not (udp-bindable? (:port spec)))
               "UDP port should stay bound while claims exist")
-          (fake-close! claim-a)
           (release! claim-a)
           (is (not (udp-bindable? (:port spec)))
               "UDP port should remain bound until the last claim is released")
@@ -180,7 +174,6 @@
   (testing "Unix socket claims keep the socket path alive until the final release"
     (let [open-pool (requiring-resolve 'ol.busker.listen/open-pool)
           acquire-claim (requiring-resolve 'ol.busker.listen/acquire-claim)
-          fake-close! (requiring-resolve 'ol.busker.listen/fake-close!)
           release! (requiring-resolve 'ol.busker.listen/release!)
           pool (open-pool)
           path (temp-unix-socket-path)
@@ -194,7 +187,6 @@
           (is (= (listen/resource claim-a)
                  (listen/resource claim-b))
               "Repeated unix claims should reuse the same pooled listener")
-          (fake-close! claim-a)
           (release! claim-a)
           (is (.exists (File. path))
               "Filesystem unix socket path should remain until the last claim is released")

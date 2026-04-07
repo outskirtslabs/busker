@@ -108,8 +108,7 @@
         claim {:pool pool
                :key key
                :resource (:resource entry)
-               :released? (atom false)
-               :fake-closed? (atom false)}]
+               :released? (atom false)}]
     claim))
 
 (defn resource
@@ -118,11 +117,6 @@
     (if (map? resource)
       (:handle resource)
       resource)))
-
-(defn fake-close!
-  [claim]
-  (reset! (:fake-closed? claim) true)
-  nil)
 
 (defn release!
   [claim]
