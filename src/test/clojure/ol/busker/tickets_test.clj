@@ -85,10 +85,12 @@
       (try
         (is (= "busker-session-ticket-rotation" @lock-name_))
         (is (.exists (io/file root "busker/session_tickets/keys.edn")))
-        (is (= (key-set->edn (tickets/current-keys manager))
-               (-> impl
-                   (storage/load-string nil "busker/session_tickets/keys.edn")
-                   edn/read-string)))
+        (let [snapshot (-> impl
+                           (storage/load-string nil "busker/session_tickets/keys.edn")
+                           edn/read-string)]
+          (is (map? snapshot))
+          (is (= (key-set->edn (tickets/current-keys manager))
+                 (:keys snapshot))))
         (finally
           (tickets/stop-key-manager! manager))))))
 
@@ -104,16 +106,47 @@
                                                  ::native
                                                  {:lifetime-seconds 86400})))))))
 
+(deftest storage-ticket-store-startup-fails-on-corrupt-persisted-data-test
+  (testing "storage-backed startup fails when persisted ticket data is corrupt"
+    (let [root (temp-storage-root)
+          impl (file-storage/file-storage {:root root})
+          _ (storage/store-string! impl
+                                   nil
+                                   "busker/session_tickets/keys.edn"
+                                   "{this-is-not-edn")
+          store (tickets/storage-ticket-store impl)]
+      (with-redefs [tickets/sync-keys-to-native! (fn [_ _] nil)]
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (tickets/create-key-manager store
+                                                 ::native
+                                                 {:lifetime-seconds 86400})))))))
+
+(deftest storage-ticket-store-startup-fails-on-storage-read-error-test
+  (testing "storage-backed startup fails when persisted ticket data cannot be read"
+    (let [root (temp-storage-root)
+          impl (file-storage/file-storage {:root root})
+          store (tickets/storage-ticket-store impl)]
+      (with-redefs [tickets/sync-keys-to-native! (fn [_ _] nil)
+                    storage/load-string (fn [& _]
+                                          (throw (ex-info "read failed" {})))]
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (tickets/create-key-manager store
+                                                 ::native
+                                                 {:lifetime-seconds 86400})))))))
+
 (deftest storage-ticket-store-startup-reuses-existing-keys-test
   (testing "storage-backed startup reloads the stored snapshot instead of generating a new one"
     (let [root (temp-storage-root)
           impl (file-storage/file-storage {:root root})
+          now-ms (System/currentTimeMillis)
           existing-keys [(tickets/generate-key (System/currentTimeMillis)
                                                (* 86400 1000))]
           _ (storage/store-string! impl
                                    nil
                                    "busker/session_tickets/keys.edn"
-                                   (pr-str (key-set->edn existing-keys)))
+                                   (pr-str {:keys (key-set->edn existing-keys)
+                                            :last-rotation-ms now-ms
+                                            :next-rotation-ms (+ now-ms 3600000)}))
           store (tickets/storage-ticket-store impl)
           manager (with-redefs [tickets/sync-keys-to-native! (fn [_ _] nil)]
                     (-> (tickets/create-key-manager store
@@ -122,6 +155,57 @@
                         (tickets/start-key-manager!)))]
       (try
         (is (= (key-set->edn existing-keys)
+               (key-set->edn (tickets/current-keys manager))))
+        (finally
+          (tickets/stop-key-manager! manager))))))
+
+(deftest storage-ticket-store-persists-rotation-schedule-metadata-test
+  (testing "storage-backed snapshots persist explicit rotation schedule metadata"
+    (let [root (temp-storage-root)
+          impl (file-storage/file-storage {:root root})
+          store (tickets/storage-ticket-store impl)
+          manager (with-redefs [tickets/sync-keys-to-native! (fn [_ _] nil)]
+                    (-> (tickets/create-key-manager store
+                                                    ::native
+                                                    {:lifetime-seconds 86400})
+                        (tickets/start-key-manager!)))]
+      (try
+        (let [snapshot (-> impl
+                           (storage/load-string nil "busker/session_tickets/keys.edn")
+                           edn/read-string)]
+          (is (map? snapshot))
+          (is (= (key-set->edn (tickets/current-keys manager))
+                 (:keys snapshot)))
+          (is (integer? (:last-rotation-ms snapshot)))
+          (is (integer? (:next-rotation-ms snapshot)))
+          (when (and (integer? (:last-rotation-ms snapshot))
+                     (integer? (:next-rotation-ms snapshot)))
+            (is (< (:last-rotation-ms snapshot)
+                   (:next-rotation-ms snapshot)))))
+        (finally
+          (tickets/stop-key-manager! manager))))))
+
+(deftest storage-ticket-store-startup-honors-stored-next-rotation-ms-test
+  (testing "storage-backed startup trusts persisted next-rotation timing instead of deriving it from key age"
+    (let [root (temp-storage-root)
+          impl (file-storage/file-storage {:root root})
+          now-ms (System/currentTimeMillis)
+          old-key (tickets/generate-key (- now-ms (* 12 60 60 1000))
+                                        (* 24 60 60 1000))
+          _ (storage/store-string! impl
+                                   nil
+                                   "busker/session_tickets/keys.edn"
+                                   (pr-str {:keys (key-set->edn [old-key])
+                                            :last-rotation-ms (- now-ms 1000)
+                                            :next-rotation-ms (+ now-ms 3600000)}))
+          store (tickets/storage-ticket-store impl)
+          manager (with-redefs [tickets/sync-keys-to-native! (fn [_ _] nil)]
+                    (-> (tickets/create-key-manager store
+                                                    ::native
+                                                    {:lifetime-seconds 86400})
+                        (tickets/start-key-manager!)))]
+      (try
+        (is (= (key-set->edn [old-key])
                (key-set->edn (tickets/current-keys manager))))
         (finally
           (tickets/stop-key-manager! manager))))))

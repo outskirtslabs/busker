@@ -15,7 +15,7 @@
    java.net.InetSocketAddress
    java.nio.channels.DatagramChannel))
 
-(def tls-sni-host "localhost.examp1e.net")
+(def tls-sni-host util/tls-sni-host)
 
 (defn- udp-port-bound?
   "Check if a UDP socket is bound on the given port.
@@ -736,28 +736,8 @@
           (busker/stop! server)
           (io/delete-file session-file true))))))
 
-(defn- openssl-session-test
-  "Test TLS session resumption using openssl s_client.
-   More reliable than curl for testing ticket mechanisms.
-   Returns {:new? true/false :reused? true/false} based on handshake output."
-  [port tls-version session-file save?]
-  (let [tls-arg (case tls-version :tls1.2 "-tls1_2" :tls1.3 "")
-        sess-arg (if save? "-sess_out" "-sess_in")
-        cmd (str "(sleep 1; echo Q) | timeout 5 openssl s_client -connect 127.0.0.1:" port
-                 " -servername " tls-sni-host
-                 " " tls-arg " " sess-arg " " session-file " 2>&1")
-        result (p/shell {:out :string :err :string :continue true} "bash" "-c" cmd)
-        out (:out result)]
-    {:exit (:exit result)
-     :new? (str/includes? out "New,")
-     :reused? (str/includes? out "Reused,")}))
-
 (deftest tcp-tls-session-resumption-test
   (testing "TCP TLS 1.2 session resumption via tickets"
-    ;; TLS 1.2 session resumption works with our SSL_CTX_set_tlsext_ticket_key_cb callback.
-    ;; This validates the ticket encryption/decryption implementation.
-    ;; Note: TLS 1.3 TCP session resumption requires BoringSSL's SSL_CTX_set_ticket_aead_method
-    ;; which is not yet implemented. HTTP/3 uses picotls which has separate ticket handling.
     (let [port         (util/free-port)
           session-file (str (System/getProperty "java.io.tmpdir") "/busker-test-tls12-sessions-" port ".pem")
           handler      (fn [_] {:status 200 :body "ok"})
@@ -774,7 +754,7 @@
         (io/delete-file session-file true)
 
         ;; First connection - establish session with TLS 1.2
-        (let [r1 (openssl-session-test port :tls1.2 session-file true)]
+        (let [r1 (util/openssl-session-handshake port :tls1.2 session-file true)]
           (is (= 0 (:exit r1)) "First TLS 1.2 connection should succeed")
           (is (:new? r1) "First connection should be new (not resumed)"))
 
@@ -783,9 +763,44 @@
             "TLS 1.2 session ticket file should be created")
 
         ;; Second connection - resume session with TLS 1.2
-        (let [r2 (openssl-session-test port :tls1.2 session-file false)]
+        (let [r2 (util/openssl-session-handshake port :tls1.2 session-file false)]
           (is (= 0 (:exit r2)) "Second TLS 1.2 connection should succeed")
           (is (:reused? r2) "Second connection should resume session (ticket decryption worked)"))
+
+        (finally
+          (busker/stop! server)
+          (io/delete-file session-file true))))))
+
+(deftest tcp-tls13-session-resumption-test
+  (testing "TCP TLS 1.3 session resumption via tickets"
+    (let [port         (util/free-port)
+          session-file (str (System/getProperty "java.io.tmpdir") "/busker-test-tls13-sessions-" port ".pem")
+          handler      (fn [_] {:status 200 :body "ok"})
+          server       (busker/start!
+                        (util/with-static-tls
+                          (util/with-handler
+                            handler
+                            {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                                 :http3? true
+                                                 :tls {:tls-compatibility-mode
+                                                       :modern}}}})))]
+      (try
+        (Thread/sleep 200)
+        (io/delete-file session-file true)
+
+        (let [r1 (util/openssl-session-handshake port :tls1.3 session-file true)]
+          (is (= 0 (:exit r1))
+              (str "First TLS 1.3 connection should succeed. output: " (:out r1)))
+          (is (:new? r1) "First TLS 1.3 connection should be new"))
+
+        (is (.exists (io/file session-file))
+            "TLS 1.3 session ticket file should be created")
+
+        (let [r2 (util/openssl-session-handshake port :tls1.3 session-file false)]
+          (is (= 0 (:exit r2))
+              (str "Second TLS 1.3 connection should succeed. output: " (:out r2)))
+          (is (:reused? r2)
+              (str "Second TLS 1.3 connection should resume. output: " (:out r2))))
 
         (finally
           (busker/stop! server)

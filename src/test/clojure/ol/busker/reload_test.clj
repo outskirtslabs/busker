@@ -10,6 +10,7 @@
    [ol.busker.protocols :as proto]
    [ol.busker.runtime :as runtime]
    [ol.busker.test-utils :as util]
+   [ol.busker.tickets :as tickets]
    [ol.clave.acme.solver.http :as http-solver]
    [ol.clave.automation :as automation])
   (:import
@@ -68,6 +69,32 @@
                  (listen/resource claim))))
        first))
 
+(defn- active-generation-instance
+  [server]
+  (:instance (:active @(:busker/state server))))
+
+(defn- active-generation-keys-edn
+  [server]
+  (some-> server
+          active-generation-instance
+          ::generation/key-manager
+          :service
+          :snapshot-atom
+          deref
+          :keys
+          (->> (mapv tickets/key->edn))))
+
+(defn- generation-shared-ticket-service
+  [generation-state]
+  (some-> generation-state
+          :instance
+          ::generation/key-manager
+          :service))
+
+(defn- shared-ticket-manager-count
+  [service]
+  (count @(:native-mgrs-atom service)))
+
 (deftest reload-publishes-candidate-before-old-generation-begins-drain-test
   (let [old-generation {:generation-id 1
                         :config {:version :old}
@@ -90,11 +117,12 @@
                      (fn [_ _ _ _]
                        {:action :activate})
                      #'ol.busker.runtime/build-generation!
-                     (fn [_ generation-id listener-pool active]
+                     (fn [_ generation-id listener-pool active memory-ticket-service]
                        (swap! events conj :candidate-built)
                        (is (= 2 generation-id))
                        (is (= ::listener-pool listener-pool))
                        (is (= old-generation active))
+                       (is (nil? memory-ticket-service))
                        candidate)
                      #'ol.busker.runtime/begin-drain!
                      (fn [server-handle generation]
@@ -190,6 +218,276 @@
           (when result
             (is (= 0 (:exit result)))
             (is (= "old-generation" (:out result))))))
+      (finally
+        (runtime/stop! server)))))
+
+(deftest memory-session-tickets-survive-reload-test
+  (let [port (util/free-port)
+        config-a (util/with-static-tls
+                   (assoc (response-config port
+                                           (fn [_]
+                                             {:status 200
+                                              :body "generation-a"}))
+                          :tls {:session-tickets {:persistence :memory}}
+                          :entrypoints {:https {:bind (str "127.0.0.1:" port)
+                                                :http3? false
+                                                :tls {:tls-compatibility-mode
+                                                      :modern}}}))
+        config-b (util/with-static-tls
+                   (assoc (response-config port
+                                           (fn [_]
+                                             {:status 200
+                                              :body "generation-b"}))
+                          :tls {:session-tickets {:persistence :memory}}
+                          :entrypoints {:https {:bind (str "127.0.0.1:" port)
+                                                :http3? false
+                                                :tls {:tls-compatibility-mode
+                                                      :modern}}}))
+        server (runtime/start! config-a)]
+    (try
+      (let [ready (util/wait-for-curl-ready! :https :h1 port "/" :max-time 2)]
+        (is (= 0 (:exit ready))))
+      (let [keys-a (active-generation-keys-edn server)]
+        (is (seq keys-a))
+        (is (= :activated
+               (runtime/reload! server config-b {:force? true})))
+        (let [ready (util/wait-for-curl-ready! :https :h1 port "/" :max-time 2)]
+          (is (= 0 (:exit ready))))
+        (is (= keys-a
+               (active-generation-keys-edn server))))
+      (finally
+        (runtime/stop! server)))))
+
+(deftest memory-session-tickets-not-reused-after-disabled-reload-test
+  (let [port (util/free-port)
+        memory-config (util/with-static-tls
+                        (assoc (response-config port
+                                                (fn [_]
+                                                  {:status 200
+                                                   :body "memory"}))
+                               :tls {:session-tickets {:persistence :memory}}
+                               :entrypoints {:https {:bind (str "127.0.0.1:" port)
+                                                     :http3? false
+                                                     :tls {:tls-compatibility-mode
+                                                           :modern}}}))
+        disabled-config (util/with-static-tls
+                          (assoc (response-config port
+                                                  (fn [_]
+                                                    {:status 200
+                                                     :body "disabled"}))
+                                 :tls {:session-tickets {:disabled? true}}
+                                 :entrypoints {:https {:bind (str "127.0.0.1:" port)
+                                                       :http3? false
+                                                       :tls {:tls-compatibility-mode
+                                                             :modern}}}))
+        server (runtime/start! memory-config)]
+    (try
+      (let [ready (util/wait-for-curl-ready! :https :h1 port "/" :max-time 2)]
+        (is (= 0 (:exit ready))))
+      (is (seq (active-generation-keys-edn server)))
+      (is (= :activated
+             (runtime/reload! server disabled-config {:force? true})))
+      (let [ready (util/wait-for-curl-ready! :https :h1 port "/" :max-time 2)]
+        (is (= 0 (:exit ready))))
+      (is (nil? (::generation/key-manager (active-generation-instance server))))
+      (finally
+        (runtime/stop! server)))))
+
+(deftest memory-session-ticket-service-is-shared-during-reload-overlap-test
+  (let [port (util/free-port)
+        old-entered (promise)
+        old-release (promise)
+        config-a (util/with-static-tls
+                   {:tls {:session-tickets {:persistence :memory}}
+                    :entrypoints {:https {:bind (str "127.0.0.1:" port)
+                                          :http3? false
+                                          :tls {:tls-compatibility-mode :modern}}}
+                    :dispatch [{:handler (fn [_]
+                                           (deliver old-entered true)
+                                           (deref old-release 5000 true)
+                                           {:status 200
+                                            :body "old"})}]})
+        config-b (util/with-static-tls
+                   {:tls {:session-tickets {:persistence :memory}}
+                    :entrypoints {:https {:bind (str "127.0.0.1:" port)
+                                          :http3? false
+                                          :tls {:tls-compatibility-mode :modern}}}
+                    :dispatch [{:handler (fn [_]
+                                           {:status 200
+                                            :body "new"})}]})
+        server (runtime/start! config-a)]
+    (try
+      (let [old-request (future
+                          (util/curl :https :h1 port "/" :max-time 10))]
+        (is (deref old-entered 5000 false))
+        (is (= :activated
+               (runtime/reload! server config-b {:force? true})))
+        (let [state @(:busker/state server)
+              active-service (generation-shared-ticket-service (:active state))
+              draining-service (generation-shared-ticket-service
+                                (first (:draining state)))]
+          (is (= 1 (count (:draining state))))
+          (is (some? active-service))
+          (is (identical? active-service draining-service)))
+        (deliver old-release true)
+        (let [result (deref old-request 10000 nil)]
+          (is (some? result))))
+      (finally
+        (runtime/stop! server)))))
+
+(deftest memory-session-ticket-policy-change-replaces-service-but-preserves-keys-test
+  (let [port (util/free-port)
+        config-a (util/with-static-tls
+                   (assoc (response-config port
+                                           (fn [_]
+                                             {:status 200
+                                              :body "generation-a"}))
+                          :tls {:session-tickets {:persistence :memory
+                                                  :lifetime-seconds 86400
+                                                  :max-keys 4}}
+                          :entrypoints {:https {:bind (str "127.0.0.1:" port)
+                                                :http3? false
+                                                :tls {:tls-compatibility-mode
+                                                      :modern}}}))
+        config-b (util/with-static-tls
+                   (assoc (response-config port
+                                           (fn [_]
+                                             {:status 200
+                                              :body "generation-b"}))
+                          :tls {:session-tickets {:persistence :memory
+                                                  :lifetime-seconds 120
+                                                  :max-keys 2}}
+                          :entrypoints {:https {:bind (str "127.0.0.1:" port)
+                                                :http3? false
+                                                :tls {:tls-compatibility-mode
+                                                      :modern}}}))
+        server (runtime/start! config-a)]
+    (try
+      (let [ready (util/wait-for-curl-ready! :https :h1 port "/" :max-time 2)]
+        (is (= 0 (:exit ready))))
+      (let [service-a (generation-shared-ticket-service (:active @(:busker/state server)))
+            keys-a (active-generation-keys-edn server)]
+        (is (some? service-a))
+        (is (= 86400000 (:lifetime-ms service-a)))
+        (is (= 4 (:max-keys service-a)))
+        (is (seq keys-a))
+        (is (= :activated
+               (runtime/reload! server config-b {:force? true})))
+        (let [ready (util/wait-for-curl-ready! :https :h1 port "/" :max-time 2)
+              service-b (generation-shared-ticket-service (:active @(:busker/state server)))
+              snapshot-b @(:snapshot-atom service-b)]
+          (is (= 0 (:exit ready)))
+          (is (some? service-b))
+          (is (not (identical? service-a service-b)))
+          (is (= keys-a
+                 (active-generation-keys-edn server)))
+          (is (= 120000 (:lifetime-ms service-b)))
+          (is (= 2 (:max-keys service-b)))
+          (is (= (+ (:last-rotation-ms snapshot-b)
+                    (quot 120000 4))
+                 (:next-rotation-ms snapshot-b)))))
+      (finally
+        (runtime/stop! server)))))
+
+(deftest failed-reload-does-not-leak-shared-ticket-native-manager-test
+  (let [port (util/free-port)
+        config-a (util/with-static-tls
+                   (assoc (response-config port
+                                           (fn [_]
+                                             {:status 200
+                                              :body "generation-a"}))
+                          :tls {:session-tickets {:persistence :memory}}
+                          :entrypoints {:https {:bind (str "127.0.0.1:" port)
+                                                :http3? false
+                                                :tls {:tls-compatibility-mode
+                                                      :modern}}}))
+        config-b (util/with-static-tls
+                   (assoc (response-config port
+                                           (fn [_]
+                                             {:status 200
+                                              :body "generation-b"}))
+                          :tls {:session-tickets {:persistence :memory}}
+                          :entrypoints {:https {:bind (str "127.0.0.1:" port)
+                                                :http3? false
+                                                :tls {:tls-compatibility-mode
+                                                      :modern}}}))
+        server (runtime/start! config-a)]
+    (try
+      (let [ready (util/wait-for-curl-ready! :https :h1 port "/" :max-time 2)]
+        (is (= 0 (:exit ready))))
+      (let [service (generation-shared-ticket-service (:active @(:busker/state server)))]
+        (is (some? service))
+        (is (= 1 (shared-ticket-manager-count service)))
+        (with-redefs [ol.busker.generation/init-worker-state
+                      (fn [_]
+                        (throw (ex-info "simulated worker init failure" {})))]
+          (try
+            (runtime/reload! server config-b {:force? true})
+            (is false "Reload should fail")
+            (catch clojure.lang.ExceptionInfo e
+              (is (= :reload-failed (:reason (ex-data e)))))))
+        (is (identical? service
+                        (generation-shared-ticket-service
+                         (:active @(:busker/state server)))))
+        (is (= 1 (shared-ticket-manager-count service)))
+        (let [request (util/curl :https :h1 port "/" :max-time 5)]
+          (is (= 0 (:exit request)))
+          (is (= "generation-a" (:out request)))))
+      (finally
+        (runtime/stop! server)))))
+
+(deftest memory-service-is-not-reused-after-mode-change-during-overlap-test
+  (let [port (util/free-port)
+        old-entered (promise)
+        old-release (promise)
+        config-a (util/with-static-tls
+                   {:tls {:session-tickets {:persistence :memory}}
+                    :entrypoints {:https {:bind (str "127.0.0.1:" port)
+                                          :http3? false
+                                          :tls {:tls-compatibility-mode :modern}}}
+                    :dispatch [{:handler (fn [_]
+                                           (deliver old-entered true)
+                                           (deref old-release 5000 true)
+                                           {:status 200
+                                            :body "memory-a"})}]})
+        config-b (util/with-static-tls
+                   {:tls {:session-tickets {:disabled? true}}
+                    :entrypoints {:https {:bind (str "127.0.0.1:" port)
+                                          :http3? false
+                                          :tls {:tls-compatibility-mode :modern}}}
+                    :dispatch [{:handler (fn [_]
+                                           {:status 200
+                                            :body "disabled"})}]})
+        config-c (util/with-static-tls
+                   {:tls {:session-tickets {:persistence :memory}}
+                    :entrypoints {:https {:bind (str "127.0.0.1:" port)
+                                          :http3? false
+                                          :tls {:tls-compatibility-mode :modern}}}
+                    :dispatch [{:handler (fn [_]
+                                           {:status 200
+                                            :body "memory-c"})}]})
+        server (runtime/start! config-a)]
+    (try
+      (let [old-request (future
+                          (util/curl :https :h1 port "/" :max-time 10))]
+        (is (deref old-entered 5000 false))
+        (let [original-service (generation-shared-ticket-service
+                                (:active @(:busker/state server)))]
+          (is (some? original-service))
+          (is (= :activated
+                 (runtime/reload! server config-b {:force? true})))
+          (is (= :activated
+                 (runtime/reload! server config-c {:force? true})))
+          (let [state @(:busker/state server)
+                active-service (generation-shared-ticket-service (:active state))]
+            (is (some? active-service))
+            (is (not (identical? original-service active-service)))))
+        (deliver old-release true)
+        (let [result (deref old-request 10000 nil)]
+          (is (some? result))
+          (when result
+            (is (= 0 (:exit result)))
+            (is (= "memory-a" (:out result))))))
       (finally
         (runtime/stop! server)))))
 

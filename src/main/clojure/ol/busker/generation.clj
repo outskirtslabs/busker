@@ -27,8 +27,6 @@
 
 (set! *warn-on-reflection* true)
 
-(declare stop!)
-
 (defn- wrap-stage-error
   [message stage data t]
   (let [error-data (ex-data t)]
@@ -689,7 +687,8 @@
           (claim-keys listeners)))
 
 (defn- prepare-generation-state
-  [compiled-config cert-runtime listener-pool listener-claims generation-id]
+  [compiled-config cert-runtime listener-pool listener-claims generation-id
+   memory-ticket-service]
   (let [{:keys [n-workers max-connections executor]} compiled-config
         ring-handler (-> compiled-config
                          config/dispatch-handler
@@ -698,6 +697,7 @@
      ::generation-id generation-id
      ::config compiled-config
      ::cert-runtime cert-runtime
+     ::memory-ticket-service memory-ticket-service
      ::listener-pool listener-pool
      ::listener-claims listener-claims
      ::phase (atom :running)
@@ -734,7 +734,7 @@
 
 (defn- init-tls-http3-state
   [{::keys [generation-id listener-runtimes config config-ptr n-workers loops contexts
-            tls-lookup-callback listener-claims]
+            tls-lookup-callback listener-claims memory-ticket-service]
     :as state}]
   (let [listeners (mapv :listener listener-runtimes)
         ssl-ctx-ptrs (mapv :ssl-ctx-ptr listener-runtimes)
@@ -744,20 +744,33 @@
         session-ticket-lifetime-seconds (:lifetime-seconds session-ticket-config)
         session-tickets-disabled? (:disabled? session-ticket-config)
         session-ticket-persistence (:persistence session-ticket-config)
-        ticket-store (when (and has-tls-listeners?
-                                (not session-tickets-disabled?))
-                       (if (= :storage session-ticket-persistence)
-                         (tickets/storage-ticket-store (get-in config [:tls :storage]))
-                         (tickets/memory-ticket-store)))
+        standalone-ticket-store
+        (when (and has-tls-listeners?
+                   (not session-tickets-disabled?)
+                   (= :storage session-ticket-persistence))
+          (tickets/storage-ticket-store (get-in config [:tls :storage])))
         native-ticket-mgr (when (and has-tls-listeners?
                                      (not session-tickets-disabled?))
                             (h2o/ticket-manager-create
                              session-ticket-lifetime-seconds))
-        key-manager (when native-ticket-mgr
-                      (-> (tickets/create-key-manager ticket-store
-                                                      native-ticket-mgr
-                                                      session-ticket-config)
-                          (tickets/start-key-manager!)))]
+        key-manager
+        (when native-ticket-mgr
+          (cond
+            (= :storage session-ticket-persistence)
+            (-> (tickets/create-key-manager standalone-ticket-store
+                                            native-ticket-mgr
+                                            session-ticket-config)
+                (tickets/start-key-manager!))
+
+            memory-ticket-service
+            (tickets/attach-key-manager memory-ticket-service
+                                        native-ticket-mgr)
+
+            :else
+            (-> (tickets/create-key-manager (tickets/memory-ticket-store)
+                                            native-ticket-mgr
+                                            session-ticket-config)
+                (tickets/start-key-manager!))))]
     (when native-ticket-mgr
       (doseq [ssl-ctx-ptr ssl-ctx-ptrs]
         (when ssl-ctx-ptr
@@ -777,7 +790,7 @@
                                                               http3-contexts
                                                               listener-claims)]
       (assoc state
-             ::ticket-store ticket-store
+             ::ticket-store standalone-ticket-store
              ::native-ticket-mgr native-ticket-mgr
              ::key-manager key-manager
              ::http3-contexts http3-contexts
@@ -886,39 +899,11 @@
       (h2o/http3-activate-udp-transport-generation transport generation-id)))
   generation)
 
-(defn start!
-  ([compiled-config cert-runtime]
-   (start! compiled-config cert-runtime {}))
-  ([compiled-config cert-runtime {:keys [activate-http3-transports? generation-id listener-pool]
-                                  :or {activate-http3-transports? true
-                                       generation-id 1
-                                       listener-pool (listen/open-pool)}}]
-   (let [compiled-config (config/config->listeners compiled-config)
-         listeners (:listeners compiled-config)
-         listener-claims (acquire-listener-claims! listener-pool listeners)]
-     (try
-       (cond-> (-> (prepare-generation-state compiled-config
-                                             cert-runtime
-                                             listener-pool
-                                             listener-claims
-                                             generation-id)
-                   init-tls-lookup-state
-                   init-core-state
-                   init-listener-state
-                   init-tls-http3-state
-                   init-worker-state
-                   finalize-generation-state)
-         activate-http3-transports? activate-http3-transports!)
-       (catch Throwable t
-         (try
-           (stop! (prepare-generation-state compiled-config
-                                            cert-runtime
-                                            listener-pool
-                                            listener-claims
-                                            generation-id))
-           (catch Throwable _
-             (release-listener-claims! listener-claims)))
-         (throw t))))))
+(defn register-shared-ticket-manager!
+  [{::keys [memory-ticket-service key-manager] :as generation}]
+  (when (and memory-ticket-service key-manager)
+    (tickets/start-key-manager! key-manager))
+  generation)
 
 (defn begin-stop!
   [{::keys [stop-lock phase] :as generation}]
@@ -982,3 +967,40 @@
            (.close ^java.lang.AutoCloseable arena))
          (reset! phase-atom :stopped))))
    nil))
+
+(defn start!
+  ([compiled-config cert-runtime]
+   (start! compiled-config cert-runtime {}))
+  ([compiled-config cert-runtime {:keys [activate-http3-transports? generation-id listener-pool
+                                         memory-ticket-service]
+                                  :or {activate-http3-transports? true
+                                       generation-id 1
+                                       listener-pool (listen/open-pool)}}]
+   (let [compiled-config (config/config->listeners compiled-config)
+         listeners (:listeners compiled-config)
+         listener-claims (acquire-listener-claims! listener-pool listeners)]
+     (try
+       (cond-> (-> (prepare-generation-state compiled-config
+                                             cert-runtime
+                                             listener-pool
+                                             listener-claims
+                                             generation-id
+                                             memory-ticket-service)
+                   init-tls-lookup-state
+                   init-core-state
+                   init-listener-state
+                   init-tls-http3-state
+                   init-worker-state
+                   finalize-generation-state)
+         activate-http3-transports? activate-http3-transports!)
+       (catch Throwable t
+         (try
+           (stop! (prepare-generation-state compiled-config
+                                            cert-runtime
+                                            listener-pool
+                                            listener-claims
+                                            generation-id
+                                            memory-ticket-service))
+           (catch Throwable _
+             (release-listener-claims! listener-claims)))
+         (throw t))))))

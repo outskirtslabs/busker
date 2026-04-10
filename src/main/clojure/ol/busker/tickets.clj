@@ -34,14 +34,13 @@
 (defprotocol TicketKeyStore
   "Backend for session ticket key persistence."
 
-  (load-keys [store]
-    "Load all keys from the backing store.
+  (load-snapshot [store]
+    "Load the current ticket snapshot from the backing store.
 
-    Returns a seq of key maps ordered newest-first, or nil if no keys are
-    stored.")
+    Returns a snapshot map or nil if no snapshot is stored.")
 
-  (store-keys! [store keys]
-    "Atomically persist the complete set of keys.")
+  (store-snapshot! [store snapshot]
+    "Atomically persist the complete ticket snapshot.")
 
   (with-store-lock [store f]
     "Run `f` while holding any store-specific coordination lock."))
@@ -103,16 +102,40 @@
   [keys]
   (mapv key->edn (or keys [])))
 
+(defn- snapshot->edn
+  [snapshot]
+  (when snapshot
+    {:keys (key-set->edn (:keys snapshot))
+     :last-rotation-ms (:last-rotation-ms snapshot)
+     :next-rotation-ms (:next-rotation-ms snapshot)}))
+
 (defn- same-key-set?
   [a b]
   (= (key-set->edn a)
      (key-set->edn b)))
 
-(defn- parse-stored-keys
+(defn- same-snapshot?
+  [a b]
+  (= (snapshot->edn a)
+     (snapshot->edn b)))
+
+(defn- parse-stored-snapshot
   [content]
-  (->> content
-       edn/read-string
-       (mapv edn->key)))
+  (let [data (edn/read-string content)]
+    (when-not (map? data)
+      (throw (ex-info "Stored session ticket snapshot must be a map." {})))
+    (let [keys (:keys data)
+          last-rotation-ms (:last-rotation-ms data)
+          next-rotation-ms (:next-rotation-ms data)]
+      (when-not (vector? keys)
+        (throw (ex-info "Stored session ticket snapshot must contain :keys." {})))
+      (when-not (or (nil? last-rotation-ms) (integer? last-rotation-ms))
+        (throw (ex-info "Stored session ticket snapshot has invalid :last-rotation-ms." {})))
+      (when-not (or (nil? next-rotation-ms) (integer? next-rotation-ms))
+        (throw (ex-info "Stored session ticket snapshot has invalid :next-rotation-ms." {})))
+      {:keys (mapv edn->key keys)
+       :last-rotation-ms last-rotation-ms
+       :next-rotation-ms next-rotation-ms})))
 
 (defn- corrupt-storage-error
   [cause]
@@ -126,14 +149,14 @@
            {::load-status :storage-error}
            cause))
 
-(defn- load-storage-keys
+(defn- load-storage-snapshot
   [storage-impl]
   (try
     (let [content (storage/load-string storage-impl
                                        nil
                                        ticket-storage-key)]
       (try
-        (parse-stored-keys content)
+        (parse-stored-snapshot content)
         (catch Exception e
           (throw (corrupt-storage-error e)))))
     (catch NoSuchFileException _
@@ -143,39 +166,40 @@
     (catch Exception e
       (throw (storage-load-error e)))))
 
-(defn- store-storage-keys!
-  [storage-impl keys]
+(defn- store-storage-snapshot!
+  [storage-impl snapshot]
   (storage/store-string! storage-impl
                          nil
                          ticket-storage-key
-                         (pr-str (key-set->edn keys))))
+                         (pr-str (snapshot->edn snapshot))))
 
-(deftype MemoryTicketStore [keys-atom]
+(deftype MemoryTicketStore [snapshot-atom]
   TicketKeyStore
-  (load-keys [_]
-    @keys-atom)
-  (store-keys! [_ keys]
-    (reset! keys-atom (vec keys))
+  (load-snapshot [_]
+    @snapshot-atom)
+  (store-snapshot! [_ snapshot]
+    (reset! snapshot-atom snapshot)
     nil)
   (with-store-lock [_ f]
     (f)))
 
 (defn memory-ticket-store
   "Create an in-memory ticket key store."
-  []
-  (->MemoryTicketStore (atom nil)))
+  ([] (memory-ticket-store nil))
+  ([snapshot]
+   (->MemoryTicketStore (atom snapshot))))
 
 (deftype StorageTicketStore [storage-impl]
   TicketKeyStore
-  (load-keys [_]
-    (load-storage-keys storage-impl))
-  (store-keys! [_ keys]
-    (store-storage-keys! storage-impl keys))
+  (load-snapshot [_]
+    (load-storage-snapshot storage-impl))
+  (store-snapshot! [_ snapshot]
+    (store-storage-snapshot! storage-impl snapshot))
   (with-store-lock [_ f]
     (storage/with-lock storage-impl
-                       nil
-                       ticket-rotation-lock-name
-                       f)))
+      nil
+      ticket-rotation-lock-name
+      f)))
 
 (defn storage-ticket-store
   "Create a Clave-backed ticket key store."
@@ -185,10 +209,11 @@
 (defn- load-keys-result
   [store]
   (try
-    (let [keys (some-> (load-keys store) vec)]
-      (if keys
+    (let [snapshot (load-snapshot store)]
+      (if snapshot
         {:status :ok
-         :keys keys}
+         :snapshot snapshot
+         :keys (:keys snapshot)}
         {:status :missing}))
     (catch clojure.lang.ExceptionInfo e
       {:status (or (::load-status (ex-data e))
@@ -208,6 +233,19 @@
        (take max-keys)
        vec))
 
+(defn- current-time-ms
+  []
+  (System/currentTimeMillis))
+
+(defn- rotation-interval-ms
+  [lifetime-ms]
+  (max 1 (quot lifetime-ms 4)))
+
+(defn- active-key?
+  [key now-ms]
+  (and (<= (:not-before key) now-ms)
+       (< now-ms (:not-after key))))
+
 (defn- needs-new-key?
   [keys now-ms lifetime-ms]
   (if (empty? keys)
@@ -216,6 +254,20 @@
           rotation-threshold (/ lifetime-ms 4)
           age (- now-ms (:not-before newest))]
       (>= age rotation-threshold))))
+
+(defn- snapshot-needs-rotation?
+  [snapshot now-ms lifetime-ms]
+  (let [keys (-> snapshot :keys (or []) vec)
+        valid-keys (prune-expired-keys keys now-ms)]
+    (cond
+      (not-any? #(active-key? % now-ms) valid-keys)
+      true
+
+      (integer? (:next-rotation-ms snapshot))
+      (>= now-ms (:next-rotation-ms snapshot))
+
+      :else
+      (needs-new-key? valid-keys now-ms lifetime-ms))))
 
 (defn rotate-keys
   "Perform key rotation if needed.
@@ -235,10 +287,19 @@
         (retain-max-keys next-keys max-keys))
       valid-keys)))
 
-(defn- rotation-needed?
-  [keys now-ms lifetime-ms max-keys]
-  (not (same-key-set? keys
-                      (rotate-keys keys now-ms lifetime-ms max-keys))))
+(defn- snapshot-with-keys
+  [keys now-ms lifetime-ms]
+  {:keys (vec keys)
+   :last-rotation-ms now-ms
+   :next-rotation-ms (+ now-ms (rotation-interval-ms lifetime-ms))})
+
+(defn- rotate-snapshot
+  [snapshot now-ms lifetime-ms max-keys]
+  (let [keys (rotate-keys (:keys snapshot) now-ms lifetime-ms max-keys)]
+    (if (and snapshot
+             (same-key-set? (:keys snapshot) keys))
+      snapshot
+      (snapshot-with-keys keys now-ms lifetime-ms))))
 
 (defn sync-keys-to-native!
   "Push current keys to the native ticket manager."
@@ -249,56 +310,83 @@
       (let [arr (h2o/session-ticket-keys->native-array keys arena)]
         (h2o/ticket-manager-set-keys native-mgr arr (count keys))))))
 
-(defn- replace-current-keys!
-  [{:keys [native-mgr keys-atom]} keys]
-  (reset! keys-atom (vec keys))
-  (sync-keys-to-native! native-mgr keys))
+(defn- sync-service-to-native!
+  [{:keys [native-mgrs-atom snapshot-atom]}]
+  (let [keys (:keys @snapshot-atom)]
+    (doseq [native-mgr @native-mgrs-atom]
+      (sync-keys-to-native! native-mgr keys))))
 
-(defn- initialize-keys
+(defn- replace-current-snapshot!
+  [{:keys [snapshot-atom] :as service} snapshot]
+  (reset! snapshot-atom snapshot)
+  (sync-service-to-native! service))
+
+(defn- initialize-snapshot
   [store lifetime-ms max-keys]
-  (let [now-ms (System/currentTimeMillis)]
+  (let [now-ms (current-time-ms)]
     (with-store-lock
       store
       (fn []
-        (let [{:keys [status keys]} (load-keys-result store)
-              base-keys (if (= status :ok) keys nil)
-              winner (rotate-keys base-keys now-ms lifetime-ms max-keys)]
-          (store-keys! store winner)
-          winner)))))
+        (let [{:keys [status snapshot exception]} (load-keys-result store)]
+          (case status
+            :ok
+            (let [winner (if (snapshot-needs-rotation? snapshot now-ms lifetime-ms)
+                           (rotate-snapshot snapshot now-ms lifetime-ms max-keys)
+                           snapshot)]
+              (when-not (same-snapshot? snapshot winner)
+                (store-snapshot! store winner))
+              winner)
 
-(defn- refresh-keys!
-  [store current-keys lifetime-ms max-keys]
-  (let [now-ms (System/currentTimeMillis)
+            :missing
+            (let [winner (rotate-snapshot nil now-ms lifetime-ms max-keys)]
+              (store-snapshot! store winner)
+              winner)
+
+            (throw exception)))))))
+
+(defn- refresh-snapshot!
+  [store current-snapshot lifetime-ms max-keys]
+  (let [now-ms (current-time-ms)
         load-result (load-keys-result store)]
     (cond
       (= :storage-error (:status load-result))
-      current-keys
+      current-snapshot
 
       (and (= :ok (:status load-result))
-           (not (rotation-needed? (:keys load-result)
-                                  now-ms
-                                  lifetime-ms
-                                  max-keys)))
-      (:keys load-result)
+           (not (snapshot-needs-rotation? (:snapshot load-result)
+                                          now-ms
+                                          lifetime-ms)))
+      (:snapshot load-result)
 
       :else
       (try
         (with-store-lock
           store
           (fn []
-            (let [{:keys [status keys]} (load-keys-result store)
-                  base-keys (case status
-                              :ok keys
-                              :missing nil
-                              :corrupt nil
-                              :storage-error current-keys)
-                  next-keys (rotate-keys base-keys now-ms lifetime-ms max-keys)]
+            (let [{:keys [status snapshot]} (load-keys-result store)
+                  base-snapshot (case status
+                                  :ok snapshot
+                                  :missing current-snapshot
+                                  :corrupt current-snapshot
+                                  :storage-error current-snapshot)
+                  winner (if (snapshot-needs-rotation? base-snapshot
+                                                       now-ms
+                                                       lifetime-ms)
+                           (rotate-snapshot base-snapshot
+                                            now-ms
+                                            lifetime-ms
+                                            max-keys)
+                           (or base-snapshot
+                               (rotate-snapshot nil
+                                                now-ms
+                                                lifetime-ms
+                                                max-keys)))]
               (when (or (not= status :ok)
-                        (not (same-key-set? base-keys next-keys)))
-                (store-keys! store next-keys))
-              next-keys)))
+                        (not (same-snapshot? base-snapshot winner)))
+                (store-snapshot! store winner))
+              winner)))
         (catch Exception _
-          current-keys)))))
+          current-snapshot)))))
 
 (defn- rotation-check-jitter-ms
   []
@@ -307,64 +395,153 @@
     (rand-int (* *ticket-rotation-jitter-seconds* 1000))))
 
 (defn- run-rotation-loop
-  [{:keys [store lifetime-ms max-keys keys-atom running?-atom] :as mgr}]
+  [{:keys [store lifetime-ms max-keys snapshot-atom running?-atom] :as service}]
   (while @running?-atom
     (try
       (Thread/sleep (long (+ rotation-check-interval-ms
                              (rotation-check-jitter-ms))))
       (when @running?-atom
-        (let [current-keys @keys-atom
-              next-keys (refresh-keys! store
-                                       current-keys
-                                       lifetime-ms
-                                       max-keys)]
-          (when-not (same-key-set? next-keys current-keys)
-            (replace-current-keys! mgr next-keys))))
+        (let [current-snapshot @snapshot-atom
+              next-snapshot (refresh-snapshot! store
+                                               current-snapshot
+                                               lifetime-ms
+                                               max-keys)]
+          (when-not (same-snapshot? next-snapshot current-snapshot)
+            (replace-current-snapshot! service next-snapshot))))
       (catch InterruptedException _
         nil)
       (catch Exception _
         nil))))
 
+(defn create-key-service
+  "Create a key service map with store, rotation, and native sync."
+  ([store session-ticket-config]
+   (create-key-service store session-ticket-config {}))
+  ([store session-ticket-config {:keys [shared?]
+                                 :or {shared? false}}]
+   (let [lifetime-s (get session-ticket-config
+                         :lifetime-seconds
+                         default-ticket-lifetime-seconds)
+         max-keys (get session-ticket-config
+                       :max-keys
+                       default-max-ticket-keys)
+         lifetime-ms (* lifetime-s 1000)
+         initial-snapshot (initialize-snapshot store lifetime-ms max-keys)]
+     {:shared? shared?
+      :store store
+      :lifetime-ms lifetime-ms
+      :max-keys max-keys
+      :snapshot-atom (atom initial-snapshot)
+      :native-mgrs-atom (atom [])
+      :running?-atom (atom false)
+      :rotation-thread (atom nil)})))
+
+(defn- reseed-memory-snapshot
+  [snapshot lifetime-ms]
+  (when snapshot
+    (let [now-ms (current-time-ms)
+          last-rotation-ms (or (:last-rotation-ms snapshot) now-ms)]
+      {:keys (vec (or (:keys snapshot) []))
+       :last-rotation-ms last-rotation-ms
+       :next-rotation-ms (+ last-rotation-ms
+                            (rotation-interval-ms lifetime-ms))})))
+
+(defn create-memory-ticket-service
+  ([session-ticket-config]
+   (create-memory-ticket-service session-ticket-config nil))
+  ([session-ticket-config snapshot]
+   (let [lifetime-s (get session-ticket-config
+                         :lifetime-seconds
+                         default-ticket-lifetime-seconds)
+         lifetime-ms (* lifetime-s 1000)]
+     (create-key-service (memory-ticket-store
+                          (reseed-memory-snapshot snapshot lifetime-ms))
+                         session-ticket-config
+                         {:shared? true}))))
+
+(defn recreate-memory-ticket-service
+  "Create a new shared in-memory key service from `service`'s current snapshot,
+  adopting `session-ticket-config` for future rotation."
+  [service session-ticket-config]
+  (create-memory-ticket-service session-ticket-config
+                                @(:snapshot-atom service)))
+
 (defn create-key-manager
-  "Create a key manager map with store, rotation, and native sync."
+  "Create a key manager wrapper that owns its own key service."
   [store native-mgr session-ticket-config]
-  (let [lifetime-s (get session-ticket-config
-                        :lifetime-seconds
-                        default-ticket-lifetime-seconds)
-        max-keys (get session-ticket-config
-                      :max-keys
-                      default-max-ticket-keys)
-        lifetime-ms (* lifetime-s 1000)
-        initial-keys (initialize-keys store lifetime-ms max-keys)]
-    {:store store
-     :native-mgr native-mgr
-     :lifetime-ms lifetime-ms
-     :max-keys max-keys
-     :keys-atom (atom initial-keys)
-     :running?-atom (atom false)
-     :rotation-thread (atom nil)}))
+  {:service (create-key-service store session-ticket-config)
+   :native-mgr native-mgr
+   :owns-service? true})
 
-(defn start-key-manager!
-  "Start the background rotation thread for a key manager.
-   Returns the key manager."
-  [{:keys [native-mgr keys-atom running?-atom rotation-thread] :as mgr}]
-  (reset! running?-atom true)
-  (sync-keys-to-native! native-mgr @keys-atom)
-  (let [t (Thread. #(run-rotation-loop mgr) "busker-ticket-rotation")]
-    (.setDaemon t true)
-    (reset! rotation-thread t)
-    (.start t))
-  mgr)
+(defn attach-key-manager
+  "Attach `native-mgr` to an already-running shared key service."
+  [service native-mgr]
+  {:service service
+   :native-mgr native-mgr
+   :owns-service? false})
 
-(defn stop-key-manager!
-  "Stop the background rotation thread."
+(defn start-key-service!
+  [{:keys [running?-atom rotation-thread] :as service}]
+  (when (compare-and-set! running?-atom false true)
+    (let [t (Thread. #(run-rotation-loop service) "busker-ticket-rotation")]
+      (.setDaemon t true)
+      (reset! rotation-thread t)
+      (.start t)))
+  service)
+
+(defn stop-key-service!
   [{:keys [running?-atom rotation-thread]}]
   (reset! running?-atom false)
   (when-let [t @rotation-thread]
     (.interrupt ^Thread t)
     (.join ^Thread t 5000)))
 
+(defn- attach-native-manager!
+  [{:keys [native-mgrs-atom snapshot-atom]} native-mgr]
+  (swap! native-mgrs-atom
+         (fn [native-mgrs]
+           (if (some #(identical? native-mgr %) native-mgrs)
+             native-mgrs
+             (conj native-mgrs native-mgr))))
+  (sync-keys-to-native! native-mgr (:keys @snapshot-atom)))
+
+(defn- detach-native-manager!
+  [{:keys [native-mgrs-atom]} native-mgr]
+  (swap! native-mgrs-atom
+         (fn [native-mgrs]
+           (->> native-mgrs
+                (remove #(identical? native-mgr %))
+                vec))))
+
+(defn shared-service?
+  [service]
+  (true? (:shared? service)))
+
+(defn- service-of
+  [manager-or-service]
+  (or (:service manager-or-service)
+      manager-or-service))
+
+(defn start-key-manager!
+  "Start the backing key service and attach the native ticket manager."
+  [{:keys [service native-mgr] :as mgr}]
+  (start-key-service! service)
+  (attach-native-manager! service native-mgr)
+  mgr)
+
+(defn stop-key-manager!
+  "Detach the native ticket manager and stop any service it owns."
+  [{:keys [service native-mgr owns-service?]}]
+  (when (and service native-mgr)
+    (detach-native-manager! service native-mgr))
+  (when owns-service?
+    (stop-key-service! service)))
+
 (defn current-keys
-  "Get the current keys from the key manager."
-  [{:keys [keys-atom]}]
-  @keys-atom)
+  "Get the current keys from the key service."
+  [manager-or-service]
+  (-> manager-or-service
+      service-of
+      :snapshot-atom
+      deref
+      :keys))

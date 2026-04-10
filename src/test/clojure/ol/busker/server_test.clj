@@ -320,6 +320,113 @@
           (when (= :running (:phase (busker/state server-a)))
             (busker/stop! server-a)))))))
 
+(deftest corrupt-persistent-session-ticket-file-fails-startup-test
+  (testing "storage-backed startup fails against a corrupt persisted session ticket file"
+    (let [port (util/free-port)
+          storage-root (str (Files/createTempDirectory "busker-session-corrupt"
+                                                       (make-array java.nio.file.attribute.FileAttribute 0)))
+          storage (file-storage/file-storage {:root storage-root})
+          ticket-path (io/file storage-root "busker/session_tickets/keys.edn")
+          _ (.mkdirs (.getParentFile ticket-path))
+          _ (spit ticket-path "{corrupt")
+          config (util/with-handler
+                   (fn [_] {:status 200 :body "ok"})
+                   (util/with-static-tls
+                     {:tls {:storage storage
+                            :session-tickets {:persistence :storage}}
+                      :entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                          :http3? false
+                                          :tls {:tls-compatibility-mode :modern}}}}))]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (busker/start! config))))))
+
+(deftest persistent-session-ticket-resumption-survives-restart-test
+  (testing "a saved TLS session resumes after restart when storage-backed tickets are enabled"
+    (let [port (util/free-port)
+          session-file (str (System/getProperty "java.io.tmpdir")
+                            "/busker-restart-session-" port ".pem")
+          storage-root (str (Files/createTempDirectory "busker-session-handshake-restart"
+                                                       (make-array java.nio.file.attribute.FileAttribute 0)))
+          storage (file-storage/file-storage {:root storage-root})
+          config (util/with-handler
+                   (fn [_] {:status 200 :body "ok"})
+                   (util/with-static-tls
+                     {:tls {:storage storage
+                            :session-tickets {:persistence :storage}}
+                      :entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                          :http3? false
+                                          :tls {:tls-compatibility-mode :modern}}}}))
+          server-a (busker/start! config)]
+      (io/delete-file session-file true)
+      (try
+        (let [ready (util/wait-for-curl-ready! :https :h1 port "/" :max-time 2)]
+          (is (= 0 (:exit ready))))
+        (let [r1 (util/openssl-session-handshake port :tls1.2 session-file true)]
+          (is (= 0 (:exit r1)))
+          (is (:new? r1)))
+        (is (.exists (io/file session-file)))
+        (busker/stop! server-a)
+        (let [server-b (busker/start! config)]
+          (try
+            (let [ready (util/wait-for-curl-ready! :https :h1 port "/" :max-time 2)]
+              (is (= 0 (:exit ready))))
+            (let [r2 (util/openssl-session-handshake port :tls1.2 session-file false)]
+              (is (= 0 (:exit r2))
+                  (str "TLS 1.2 restart resume should succeed. output: " (:out r2)))
+              (is (:reused? r2)
+                  (str "TLS 1.2 restart resume should reuse the session. output: "
+                       (:out r2))))
+            (finally
+              (busker/stop! server-b))))
+        (finally
+          (when (= :running (:phase (busker/state server-a)))
+            (busker/stop! server-a))
+          (io/delete-file session-file true))))))
+
+(deftest persistent-session-ticket-resumption-works-across-peer-processes-test
+  (testing "a saved TLS session resumes against a peer Busker process sharing the same storage root"
+    (let [port-a (util/free-port)
+          port-b (loop [candidate (util/free-port)]
+                   (if (= candidate port-a)
+                     (recur (util/free-port))
+                     candidate))
+          session-file (str (System/getProperty "java.io.tmpdir")
+                            "/busker-peer-session-" port-a "-" port-b ".pem")
+          storage-root (str (Files/createTempDirectory "busker-session-handshake-peer"
+                                                       (make-array java.nio.file.attribute.FileAttribute 0)))
+          storage (file-storage/file-storage {:root storage-root})
+          make-config (fn [port body]
+                        (util/with-handler
+                          (fn [_] {:status 200 :body body})
+                          (util/with-static-tls
+                            {:tls {:storage storage
+                                   :session-tickets {:persistence :storage}}
+                             :entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                                 :http3? false
+                                                 :tls {:tls-compatibility-mode :modern}}}})))
+          server-a (busker/start! (make-config port-a "a"))
+          server-b (busker/start! (make-config port-b "b"))]
+      (io/delete-file session-file true)
+      (try
+        (let [ready-a (util/wait-for-curl-ready! :https :h1 port-a "/" :max-time 2)
+              ready-b (util/wait-for-curl-ready! :https :h1 port-b "/" :max-time 2)]
+          (is (= 0 (:exit ready-a)))
+          (is (= 0 (:exit ready-b))))
+        (let [r1 (util/openssl-session-handshake port-a :tls1.2 session-file true)]
+          (is (= 0 (:exit r1)))
+          (is (:new? r1)))
+        (is (.exists (io/file session-file)))
+        (let [r2 (util/openssl-session-handshake port-b :tls1.2 session-file false)]
+          (is (= 0 (:exit r2))
+              (str "Peer TLS 1.2 resume should succeed. output: " (:out r2)))
+          (is (:reused? r2)
+              (str "Peer TLS 1.2 resume should reuse the session. output: "
+                   (:out r2))))
+        (finally
+          (busker/stop! server-a)
+          (busker/stop! server-b)
+          (io/delete-file session-file true))))))
+
 (deftest tls-storage-alone-does-not-enable-ticket-persistence-test
   (testing "top-level tls storage without persistence selector remains memory only"
     (let [port (util/free-port)

@@ -23,6 +23,9 @@
                           :cert-file (fixture-cert-path)
                           :key-file (fixture-key-path)}]}})
 
+(def tls-sni-host
+  "localhost.examp1e.net")
+
 (defn fixture-cert-pem
   []
   (slurp (fixture-cert-path)))
@@ -51,6 +54,32 @@
 (defn with-static-tls
   [config]
   (update config :tls #(deep-merge static-tls (or % {}))))
+
+(defn openssl-session-handshake
+  [port tls-version session-file save?]
+  (let [tls-arg (case tls-version
+                  :tls1.2 "-tls1_2"
+                  :tls1.3 "-tls1_3"
+                  "")
+        linger-seconds (if (= :tls1.3 tls-version) 2 1)
+        sess-arg (if save? "-sess_out" "-sess_in")
+        cmd (str "(printf 'GET / HTTP/1.1\\r\\nHost: " tls-sni-host
+                 "\\r\\nConnection: close\\r\\n\\r\\n'; sleep "
+                 linger-seconds
+                 ") | timeout 8 openssl s_client"
+                 " -connect 127.0.0.1:" port
+                 " -servername " tls-sni-host
+                 " " tls-arg
+                 " " sess-arg
+                 " " session-file
+                 " 2>&1")
+        result (p/shell {:out :string :err :string :continue true}
+                        "bash" "-lc" cmd)
+        out (str (:out result) (:err result))]
+    {:exit (:exit result)
+     :out out
+     :new? (str/includes? out "New,")
+     :reused? (str/includes? out "Reused,")}))
 
 (defn with-handler
   [handler config]
