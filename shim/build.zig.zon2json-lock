@@ -1,126 +1,112 @@
 {
-  "h2o-0.0.1-7Fp7StleAAAR_roWJiFQugGBLn8C-KL6pNM8EJuKbXVN": {
+  "h2o-0.0.1-7Fp7StleAAD_KKrrZE-12zvTyKY6v6RIV2fpmdwiqIDv": {
     "name": "h2o-zig",
-    "url": "git+https://github.com/outskirtslabs/h2o-zig.git#6f1be4d7e96eb242f77f04d6cb863a04bfa9f9df",
-    "hash": "sha256-A6ejLWqSubB1ld2agZ7sk5gBeYqfIp50BUwo1uD8Ais=",
-    "rev": "6f1be4d7e96eb242f77f04d6cb863a04bfa9f9df"
+    "url": "git+https://github.com/outskirtslabs/h2o-zig.git#97925511c72e6e35f2aaf7daf9cef749fef1aba7",
+    "hash": "sha256-suVam7O2Pn8N5k9NAwc1jLi/5IFOepZ2mt02EN4E3Do="
   },
-  "N-V-__8AACN7KgQpxLwB65aNI8-tyPk2QtPClwkIXvnoMqFQ": {
+  "N-V-__8AACQ9LAQXcPEiLd_mcWtIxo1byemaSQy4unWdmIiz": {
     "name": "h2o",
-    "url": "git+https://github.com/ramblurr/h2o.git?ref=h2o-zig#7c1e7f54faa8b008a503c13e87b254005866b956",
-    "hash": "sha256-KWMK8DzogcXucb1Nfcrq4ZoD/THBiMtiPGnY2lX7YRk=",
-    "rev": "7c1e7f54faa8b008a503c13e87b254005866b956"
+    "url": "git+https://github.com/ramblurr/h2o.git?ref=h2o-zig#df9a4db619d7706e62a92dd1a5539fdc3690d989",
+    "hash": "sha256-ujcCGCPW1eP51PTZLCLv+H2QIC0Am/lyl9S5ONiJob8="
   },
   "N-V-__8AADdLBADNETOk9pvYZ-k7F8a08-U43YCrYSlxu621": {
     "name": "wslay",
     "url": "https://github.com/tatsuhiro-t/wslay/archive/refs/tags/release-1.1.1.tar.gz",
-    "hash": "sha256-e59LnfCa2qbgfsMJtoqzdsDbLP2RZhMCO1Kket/aIko="
+    "hash": "sha256-xKQGZO5hNzMg+JYKeqOBsu73YO+ucBEOcNhG8iSNYvA="
   },
   "openssl-3.6.0-YymhPrUoAQCKRYLwvQUcGnmdVPu-fBBsq37GSaIx0ZMy": {
     "name": "openssl",
     "url": "git+https://github.com/dzfrias/openssl-zig.git#8f9dd2791a5ec743c85e57fb1ef9c59e99c5d222",
-    "hash": "sha256-CmY0q3EbBXPFYAyZ2WP0C5U1QnvHISDKyEtxsleh0oI=",
-    "rev": "8f9dd2791a5ec743c85e57fb1ef9c59e99c5d222"
+    "hash": "sha256-PmZlZcKRclHddWCR8HVAsrtbv02iFu6e2BVGpjqVffM="
   },
   "N-V-__8AAL0vEgg_3y6FkdXUTcg3WnimiykPSElV4Z2A3uhh": {
     "name": "openssl",
     "url": "https://github.com/openssl/openssl/releases/download/openssl-3.6.0/openssl-3.6.0.tar.gz",
-    "hash": "sha256-tqX0S362nj+jXb8VUkQFtEg3pIHUPYHa3d4/8h/LuOk="
+    "hash": "sha256-jTVmd4MWMFeI9GNb+/vsDg1A3RiirdeDsYlg1VJFNns="
   },
   "zlib-1.3.1-ZZQ7lc8NAABUbHzDe_cSWboCqMbrLkVwvFkKnojgeiT2": {
     "name": "zlib",
     "url": "git+https://github.com/allyourcodebase/zlib.git#3599c16d41dbe749ae51b0ff7ab864c61adc779a",
-    "hash": "sha256-gLOlrqnQjPKlwN0sddGABlaFbZrHaBZIWQmVgwya0So=",
-    "rev": "3599c16d41dbe749ae51b0ff7ab864c61adc779a"
+    "hash": "sha256-tqDZ2tr8FWAA6YoNXB9JTdc3/ltNEDcgWVN8FEgq/ao="
   },
   "N-V-__8AAB0eQwD-0MdOEBmz7intriBReIsIDNlukNVoNu6o": {
     "name": "zlib",
     "url": "https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz",
-    "hash": "sha256-F+iIY/NgBnKrSRgvIXKBtvxNPHYr3jYZNeQ2qVIU0Fw="
+    "hash": "sha256-AyjahTVYbfeLwnQCzdaBg76EHKk5FB5zBO7GTk0LSoE="
   },
   "zstd-1.5.7-KEItkJ8vAAC5_rRlKmLflYQ-eKXbAIQBWZNmmJtS18q0": {
     "name": "zstd",
     "url": "git+https://github.com/allyourcodebase/zstd.git#01327d49cbc56dc24c20a167bb0055d7fc23de84",
-    "hash": "sha256-1w+hR2U9t6R4sNvUMynDsYO0sNAan2svjxjUvxT+x6A=",
-    "rev": "01327d49cbc56dc24c20a167bb0055d7fc23de84"
+    "hash": "sha256-H6x4WtIJRGg16YBPDdkGPPdlbuYoN+Zg/sBvJptAt3Q="
   },
   "N-V-__8AAGxifwAAGwXwvsnl_aOXFGLZTeYCu0WBhuEXr96u": {
     "name": "zstd",
     "url": "git+https://github.com/facebook/zstd.git?ref=v1.5.7#f8745da6ff1ad1e7bab384bd1f9d742439278e99",
-    "hash": "sha256-tNFWIT9ydfozB8dWcmTMuZLCQmQudTFJIkSr0aG7S44=",
-    "rev": "f8745da6ff1ad1e7bab384bd1f9d742439278e99"
+    "hash": "sha256-536AnhlrKrrrtbqd6AmlXIKrvgxCEaUxN8LtC1Y2j2w="
   },
   "boringssl-0.20260211.0-EhtkNSX1AgAVn19O7psBVh_y_ugXBQjPoaRowjbYCHfs": {
     "name": "boringssl",
     "url": "git+https://github.com/Ramblurr/boringssl.git?ref=update/boringssl-0.20260211.0#e07b2a9bbf7dc0e93f122f61b579f648e066b3a1",
-    "hash": "sha256-VrGgf9jdUmjU/ubvlciU00lA0/Gko5Cs1grYc5kbPaI=",
-    "rev": "e07b2a9bbf7dc0e93f122f61b579f648e066b3a1"
+    "hash": "sha256-buWc5mY8haDrSzsFHgXk5VTE7RCfEBmhod/Sxl0rYWM="
   },
   "N-V-__8AAPhCtgx0Mmk2dHLULFtWaEwMViuz4WudJWk5Vw8P": {
     "name": "boringssl",
     "url": "https://github.com/google/boringssl/archive/617634bc015344093f5ea0b0a5b653c924cfa20d.tar.gz",
-    "hash": "sha256-n9Qli2xTAFnBuFGSyUDzrl9fnwy0ITznf4kvPu9iQ3w="
+    "hash": "sha256-LTSrA0miECxwZmPtHLd/bc7W86ZH20Q5zycAqbNblR0="
   },
   "nasm-2.16.3-B_NnpU5KAADHG19LPMfgWVyyYyQLDt8S2x3UFOLQfjiN": {
     "name": "nasm",
     "url": "git+https://github.com/sno2/nasm.git#31622af89d7e90af49d2e610d7dcdf36f8e23c7a",
-    "hash": "sha256-wP2F460kJMX4I05dBSJ16RCyRmo97uOINg3MSbEWky8=",
-    "rev": "31622af89d7e90af49d2e610d7dcdf36f8e23c7a"
+    "hash": "sha256-mNlCVLj6P71R3IFiubfU8YafsVGmpi90mBQctF5stqk="
   },
   "N-V-__8AAOdiwQAcuTPO3dqgQrt8BtvnkUYJ1Z5tP5qQOphI": {
     "name": "nasm",
     "url": "https://nasm.us/pub/nasm/releasebuilds/2.16.03/nasm-2.16.03.tar.gz",
-    "hash": "sha256-W8lA3YpCRWhpdqj36WupNAoJFfLVuINWh0iQ4ge9tYE="
+    "hash": "sha256-v6L6BA5w8lY9Svlc4R+AdbvVmoXrKFQkSwXG6hwlgNQ="
   },
   "patch-2.6.1-po1jORRvAAD4_gRpqMKvC00UPblvIpkxvnJdDpG4-DMY": {
     "name": "patch",
     "url": "git+https://github.com/akunaakwei/zig-patch.git#799ade2cd8954a38aba3d730de1a69891aa68234",
-    "hash": "sha256-POOKYbp4rkDWXLAcjGAMBJWWX4y/HR7TweiVJ0CMYWg=",
-    "rev": "799ade2cd8954a38aba3d730de1a69891aa68234"
+    "hash": "sha256-Zee18Vl/k1lthZ0sxjyj1VML2kqvE2426eEdBfW6ALk="
   },
   "N-V-__8AAJPSEgDcozcxiSvegfkjtNmn6GcEB8wT_c3xq86P": {
     "name": "patch",
     "url": "https://ftpmirror.gnu.org/patch/patch-2.6.1.tar.gz",
-    "hash": "sha256-0VY3MenP/tEcxfARsrjgdMMl6Go4OpGIm1xbgLCXgbk="
+    "hash": "sha256-RaFPZH4gj/W2DvR9eSonMcyOMUUbh9AY0XnICOne7J8="
   },
   "googletest-1.15.2-vLU55gAVAAC86GD--lNpG3oVHLsJhdB0lFCOCsBEbiAE": {
     "name": "googletest",
     "url": "git+https://github.com/allyourcodebase/googletest.git?ref=main#e2affdd13730f800aa63772039f2adfa971461b6",
-    "hash": "sha256-BLAA422mZZvEWm9Z56S8UTYo919ZV/Vhun8OF6IXOBg=",
-    "rev": "e2affdd13730f800aa63772039f2adfa971461b6"
+    "hash": "sha256-tHagB9RwtR8kQYIgO8eHZJPv6a+Up2NPrNqLxsZe/xY="
   },
   "N-V-__8AAEV8PgDOBc81AuVJQ9XhGo46f-4dlQ7sXar_M0_i": {
     "name": "googletest",
     "url": "https://github.com/google/googletest/archive/refs/tags/v1.17.0.tar.gz",
-    "hash": "sha256-Zfq3AdmCnTjLd8FKzcQx0hCL/b+JeeQOuK5Wft8Qsnw="
+    "hash": "sha256-nFDyiWhN2oADzm3XpQOgDVInhZh8pCOevhiuSq/InPA="
   },
   "N-V-__8AAAzZEACOMvQYxlYs314zKF5QRYuHDO1DIIM41YBT": {
     "name": "benchmark",
     "url": "https://github.com/google/benchmark/archive/192ef10025eb2c4cdd392bc502f0c852196baa48.tar.gz",
-    "hash": "sha256-+CcFonJtj2zc2idLhB9jFNv8b3Mc3aBslG8xDsHMOtk="
+    "hash": "sha256-Mm4pG7zMB00iof32CxreoNBFnduPZTMp3reHMCIAFPQ="
   },
   "brotli_build-0.0.0-KJ9D2_sUAABKsFh3cVnQac7MbuJvgmYoq7PxcRa3lY1x": {
     "name": "brotli_build",
     "url": "git+https://github.com/ramblurr/brotli.zig?ref=feat/pic#c473c6f511da732b7359d6b523067de09ec7d06e",
-    "hash": "sha256-2UarnkaP4AWbf1+++dHWn3J2AHKasTBkEBRGl/S984A=",
-    "rev": "c473c6f511da732b7359d6b523067de09ec7d06e"
+    "hash": "sha256-xETpWNI4GKJ9X/z/YXWPgtmRWKvWlfrIvzDOBtJyS48="
   },
   "N-V-__8AAI2b6QPVus14oqoaXFGvvUMDwBA0vE-y0XaApMDn": {
     "name": "brotli",
     "url": "git+https://github.com/google/brotli?ref=master#440e03642b891968a76b6d088d70f01f06e0c349",
-    "hash": "sha256-v8weDhIjp0qvq/FhJWwNKxz8wR6lVoqntExD9ILqGls=",
-    "rev": "440e03642b891968a76b6d088d70f01f06e0c349"
+    "hash": "sha256-Rwy/NgVzDImTLewWygD+YSrVxWQOPo3gQjy/pci6F7I="
   },
   "aegis-0.4.5-wT2IxX5xCAASZ_JMAHMcDVupuxhsoIbY2cqKKSKFcyCe": {
     "name": "libaegis",
     "url": "git+https://github.com/aegis-aead/libaegis.git?ref=0.4.5#4a234009c94454fe818ed1b19091c0c41a1c63d7",
-    "hash": "sha256-c0gp4zYzzsxQQafL993H5pTATusSKAdKFD7ezihFufQ=",
-    "rev": "4a234009c94454fe818ed1b19091c0c41a1c63d7"
+    "hash": "sha256-dCh6MT8za/9E+TtnMIZONyiwN71gFFXSshKdhEL9OqQ="
   },
   "openssl-3.6.0-YymhPg0kAQD_p6kpTbrodJ3ENoPoLzjiJlx-IqDQPoUo": {
     "name": "openssl",
     "url": "git+https://github.com/ramblurr/openssl-zig.git?ref=update/openssl-3.6.0#b89f39f1bb8f230b448eaa5e692b5da9005ad9c7",
-    "hash": "sha256-8PtUX3LyYtFR5cG3zr6eXSnyd+0h7CLfzIdtCKQpntg=",
-    "rev": "b89f39f1bb8f230b448eaa5e692b5da9005ad9c7"
+    "hash": "sha256-vPbf0nyTH/mhWEeTv/Eh6xAqNsqVkLlNxGYtJuTj3S8="
   }
 }

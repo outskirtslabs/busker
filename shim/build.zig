@@ -96,6 +96,8 @@ pub fn build(b: *std.Build) void {
         \\echo '-std=c17' >> ../src/shim/compile_flags.txt && \
         \\echo '-Wall' >> ../src/shim/compile_flags.txt && \
         \\echo '-Wextra' >> ../src/shim/compile_flags.txt && \
+        \\echo '-Wno-null-pointer-subtraction' >> ../src/shim/compile_flags.txt && \
+        \\echo '-Wno-missing-field-initializers' >> ../src/shim/compile_flags.txt && \
         \\echo '-D_POSIX_C_SOURCE=200809L' >> ../src/shim/compile_flags.txt && \
         \\echo '-DH2O_USE_LIBUV=0' >> ../src/shim/compile_flags.txt && \
         \\echo '{s}' >> ../src/shim/compile_flags.txt && \
@@ -161,6 +163,8 @@ fn buildShimForTarget(b: *std.Build, target_config: TargetConfig, optimize: std.
         flags.append(b.allocator, "-std=c17") catch unreachable;
         flags.append(b.allocator, "-Wall") catch unreachable;
         flags.append(b.allocator, "-Wextra") catch unreachable;
+        flags.append(b.allocator, "-Wno-null-pointer-subtraction") catch unreachable;
+        flags.append(b.allocator, "-Wno-missing-field-initializers") catch unreachable;
         flags.append(b.allocator, "-D_POSIX_C_SOURCE=200809L") catch unreachable;
         flags.append(b.allocator, "-DH2O_USE_LIBUV=0") catch unreachable;
 
