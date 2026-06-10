@@ -73,7 +73,7 @@
         pkgs:
 
         let
-          zig = zig2nix.packages.${pkgs.system}."zig-0_15_2";
+          zig = zig2nix.packages.${pkgs.system}."zig-0_16_0";
           zig2nixEnv = zig2nix.outputs.zig-env.${pkgs.system} { inherit zig; };
           apple-sdk = self.packages.${pkgs.system}.apple-sdk;
           javaVersion = "25";

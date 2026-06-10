@@ -14,7 +14,7 @@ let
   system = stdenv.hostPlatform.system;
   root = toString ../.;
   clojure = pkgs.clojure.override { jdk = jdk25; };
-  zig = zig2nix.packages.${system}."zig-0_15_2";
+  zig = zig2nix.packages.${system}."zig-0_16_0";
   zig2nixEnv = zig2nix.outputs.zig-env.${system} { inherit zig; };
   shimTargets = [
     {

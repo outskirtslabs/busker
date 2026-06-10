@@ -2,20 +2,20 @@
     .name = .http_clj,
     .version = "0.0.1",
     .fingerprint = 0xaabaf927ba0e83fa,
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .@"h2o-zig" = .{
-            .url = "git+https://github.com/outskirtslabs/h2o-zig.git#97925511c72e6e35f2aaf7daf9cef749fef1aba7",
-            .hash = "h2o-0.0.1-7Fp7StleAAD_KKrrZE-12zvTyKY6v6RIV2fpmdwiqIDv",
+            .url = "git+https://github.com/outskirtslabs/h2o-zig.git#f91016e8accc06eb1e4691463a5650914611b251",
+            .hash = "h2o-0.0.1-7Fp7SvdhAADLdeg5l07sj5L7bK8QyJ92ul--h7J7dtFL",
         },
         .boringssl = .{
-            .url = "git+https://github.com/Ramblurr/boringssl.git?ref=update/boringssl-0.20260211.0#e07b2a9bbf7dc0e93f122f61b579f648e066b3a1",
-            .hash = "boringssl-0.20260211.0-EhtkNSX1AgAVn19O7psBVh_y_ugXBQjPoaRowjbYCHfs",
+            .url = "git+https://github.com/Ramblurr/boringssl.git?ref=h2o-zig/boringssl-0.20260526.0-pic#56d7f0ece36a500037ab519c0f035fba715ae07d",
+            .hash = "boringssl-0.20260526.0-EhtkNa_1AgAQhAiZ-Q1ik0_32P63WPPBmyoynfjTqH88",
             .lazy = true,
         },
         .openssl = .{
-            .url = "git+https://github.com/ramblurr/openssl-zig.git?ref=update/openssl-3.6.0#b89f39f1bb8f230b448eaa5e692b5da9005ad9c7",
-            .hash = "openssl-3.6.0-YymhPg0kAQD_p6kpTbrodJ3ENoPoLzjiJlx-IqDQPoUo",
+            .url = "git+https://github.com/dzfrias/openssl-zig.git?ref=main#303ff47bad5d3b4d55d5a85a7ca5053abba3e307",
+            .hash = "openssl-3.6.0-YymhPkUpAQBvGMYJLeoNCns4esnK4ysEzokvFoypRQv1",
             .lazy = true,
         },
         .zlib = .{
@@ -23,12 +23,12 @@
             .hash = "zlib-1.3.1-ZZQ7lc8NAABUbHzDe_cSWboCqMbrLkVwvFkKnojgeiT2",
         },
         .zstd = .{
-            .url = "git+https://github.com/allyourcodebase/zstd.git#01327d49cbc56dc24c20a167bb0055d7fc23de84",
-            .hash = "zstd-1.5.7-KEItkJ8vAAC5_rRlKmLflYQ-eKXbAIQBWZNmmJtS18q0",
+            .url = "git+https://github.com/allyourcodebase/zstd.git?ref=1.5.7-2#4ccb01e6fceae86fb9fe36c60b8a103cdc058155",
+            .hash = "zstd-1.5.7-2-KEItkAMwAADNhCbGaImKrjXjnSA51jcqEbGCA3RasVZ9",
         },
         .brotli_build = .{
-            .url = "git+https://github.com/ramblurr/brotli.zig?ref=feat/pic#c473c6f511da732b7359d6b523067de09ec7d06e",
-            .hash = "brotli_build-0.0.0-KJ9D2_sUAABKsFh3cVnQac7MbuJvgmYoq7PxcRa3lY1x",
+            .url = "git+https://github.com/Ramblurr/brotli.zig?ref=feat/pic#fe5cb9ad7bb22d13a1b9190e71966e6901885590",
+            .hash = "brotli_build-0.0.0-KJ9D22EVAADK5nnTfd8XM8Yn8tO9sGtUbfaBwl3lTM-3",
         },
     },
     .paths = .{
