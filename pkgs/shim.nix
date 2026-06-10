@@ -130,7 +130,7 @@ zig2nixEnv.package {
       cp "$out/$dir/$lib_name" "$dir/resources/$dir/"
       (
         cd "$dir"
-        clojure -Srepro -T:build jar
+        clojure -Srepro -Sthreads 1 -T:build jar
       )
       cp "$dir/target/"*.jar "$out/jars/"
     done
