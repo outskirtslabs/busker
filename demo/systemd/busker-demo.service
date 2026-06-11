@@ -1,0 +1,29 @@
+[Unit]
+Description=Busker demo
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=busker
+Group=busker
+WorkingDirectory=/var/lib/busker
+Environment=HOME=/var/lib/busker
+Environment=JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64
+ExecStart=/usr/local/bin/clojure -M:run
+Restart=on-failure
+RestartSec=5
+SuccessExitStatus=143
+StateDirectory=busker
+CacheDirectory=busker
+UMask=0077
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/busker /var/cache/busker
+
+[Install]
+WantedBy=multi-user.target
