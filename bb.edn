@@ -24,10 +24,9 @@
                   jar:native
                   {:depends [prep build:shim]
                    :doc     "Build native dep jars"
-                   :task    (let [arch-dirs ["shim/linux-x86-64" "shim/macos-x86-64" "shim/macos-aarch64"]]
-                              (doseq [dir arch-dirs]
-                                (println (str "Building jar for " dir))
-                                (shell {:dir dir} "clj -T:build jar")))}
+                   :task    (doseq [dir build/lib-dirs]
+                              (println (str "Building jar for " dir))
+                              (shell {:dir dir} "clj -T:build jar"))}
 
                   build
                   {:doc     "Compile all the things"
@@ -75,10 +74,9 @@
                              (build/lib-bump! dir component)))}
 
                   publish:native
-                  {:doc     "Publish the clojure libs to clojars"
-                   :depends [jar:all]
-                   :task    (doseq [dir build/lib-dirs]
-                              (build/lib-publish! dir))}
+                  {:doc     "Publish native jars to clojars"
+                   :depends [prep build:shim]
+                   :task    (build/publish-libs! build/lib-dirs)}
                   publish:all
                   {:doc     "Publish the clojure libs to clojars"
                    :depends [jar:all]
