@@ -53,7 +53,7 @@
         in
         rec {
           apple-sdk = pkgs: pkgs.callPackage ./pkgs/apple-sdk.nix { };
-          locker = pkgs: pkgs.callPackage ./pkgs/locker.nix { inherit clojureLib; };
+          locker = pkgs: (busker pkgs).locker;
           shim =
             pkgs:
             pkgs.callPackage ./pkgs/shim.nix {
