@@ -51,7 +51,7 @@
                             :platforms   [:clj :linux :macos]
                             :created     "2026-02-16"
                             :status      :experimental
-                            :version     "0.0.2"
+                            :version     "0.0.3"
                             :url         "https://github.com/outskirtslabs/busker"
                             :scm         [:scm
                                           [:url "https://github.com/outskirtslabs/busker"]

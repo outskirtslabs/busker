@@ -5,16 +5,17 @@
 (not in order)
 
 - [x] Dynamic runtime configuration
-- [ ] Metrics/signals w/out the abominable otel (or with?)
+- [x] Dynamic TLS certificate selection based on SNI for multi-domain hosting on a single port
 - [x] TLS STEK and pluggable ticket store
-- [ ] Cross-process TLS ticket resumption test
+- [x] 0-RTT TLS
+- [ ] Metrics/signals w/out the abominable otel (or with?)
+- [ ] test: Cross-process TLS ticket resumption
 - [ ] Reverse proxying
 - [ ] Standalone operation mode w/ config file
 - [ ] Zero-downtime deployments w/ systemd
 - [ ] GraalVM native-image
 - [ ] Configurable congestion control -allow selection of congestion control algorithm (Reno, Cubic, BBR) instead of using quicly defaults
 - [ ] Connection keep-alive config - add explicit keep-alive interval and timeout configuration instead of relying on implicit ACK frequency
-- [x] Dynamic TLS certificate selection based on SNI for multi-domain hosting on a single port
 - [ ] User-supplied TLS certificate callback API
 - [ ] QUIC datagram support  implement RFC 9221 unreliable datagram frames for use cases like WebRTC over HTTP/3 or gaming protocols
 - [ ] Support .ts.net  out of the box

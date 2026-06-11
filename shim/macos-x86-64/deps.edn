@@ -4,4 +4,4 @@
                    :ns-default build}
            :neil {:project {:name com.outskirtslabs.busker/macos-x86-64
                             :description "Native dependency for com.outskirtslabs/busker"
-                            :version "0.0.1"}}}}
+                            :version "0.0.3"}}}}

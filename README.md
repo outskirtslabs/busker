@@ -29,9 +29,9 @@ The actual state of affairs is:
 - [x] IPv4/6
 - [x] IPv6
 - [x] unix domain sockets
-- [ ] Automatic HTTPS
-- [ ] 0-RTT TLS
-- [ ] TLS STEK, pluggable ticket store
+- [x] Automatic HTTPS
+- [x] 0-RTT TLS
+- [x] TLS STEK, pluggable ticket store
 - [ ] Metrics/signals... w/out the abominable otel?
 - [ ] Reverse proxying
 - [ ] Standlone operation mode w/ config file
@@ -58,12 +58,12 @@ If multiple native deps are included, the right one will automatically be chosen
 
 ``` clojure
 # Linux
-com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.1"}
-com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.1"}
+com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.3"}
+com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.3"}
 
 # MacOS
-com.outskirtslabs.busker/macos-x86-64 {:mvn/version "0.0.1"}
-com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.1"}
+com.outskirtslabs.busker/macos-x86-64 {:mvn/version "0.0.3"}
+com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.3"}
 ```
 
 
