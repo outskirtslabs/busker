@@ -7,6 +7,8 @@
     devshell.inputs.nixpkgs.follows = "nixpkgs";
     devenv.url = "github:ramblurr/nix-devenv";
     devenv.inputs.nixpkgs.follows = "nixpkgs";
+    clj-helpers.url = "github:outskirtslabs/clojure-nix-locker-helpers";
+    clj-helpers.inputs.nixpkgs.follows = "nixpkgs";
     zig2nix.url = "github:Cloudef/zig2nix";
     zig2nix.inputs.nixpkgs.follows = "nixpkgs";
     h2o-zig.url = "github:outskirtslabs/h2o-zig";
@@ -19,6 +21,7 @@
       self,
       devenv,
       devshell,
+      clj-helpers,
       h2o-zig,
       zig2nix,
       ...
@@ -39,7 +42,7 @@
 
       packages =
         let
-          clojureLib = devenv.outputs.clojure;
+          clojureLib = clj-helpers.lib;
           gitRev =
             if self ? rev then
               self.rev
