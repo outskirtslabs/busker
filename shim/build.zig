@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) void {
 
             if (is_native) {
                 const native_config = TargetConfig{
-                    .query = .{},
+                    .query = .{ .cpu_model = .baseline },
                     .dir_name = target_config.dir_name,
                     .lib_name = target_config.lib_name,
                 };
@@ -64,7 +64,7 @@ pub fn build(b: *std.Build) void {
         for (all_target_configs) |target_config| {
             if (target_config.query.cpu_arch == native_arch and target_config.query.os_tag == native_os) {
                 matched_config = TargetConfig{
-                    .query = .{},
+                    .query = .{ .cpu_model = .baseline },
                     .dir_name = target_config.dir_name,
                     .lib_name = target_config.lib_name,
                 };

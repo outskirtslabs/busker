@@ -483,6 +483,15 @@ size_t clj_h2o_start_response(
   return req->preferred_chunk_size;
 }
 
+static int clj_h2o_req_has_body(h2o_req_t *req) {
+  if (!req)
+    return 0;
+
+  /* H2O exposes request body state through proceed_req for streaming bodies
+     and entity.base for complete buffered bodies, including zero-length bodies. */
+  return (req->proceed_req != NULL || req->entity.base != NULL) ? 1 : 0;
+}
+
 static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
   meta->method = (const uint8_t *)req->method.base;
   meta->method_len = req->method.len;
@@ -508,7 +517,7 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
     meta->headers_len = 0;
   }
 
-  meta->has_body = (req->entity.base != NULL && req->entity.len > 0) ? 1 : 0;
+  meta->has_body = clj_h2o_req_has_body(req);
   meta->is_early_data = h2o_conn_is_early_data(req->conn) ? 1 : 0;
 
   if (req->scheme) {

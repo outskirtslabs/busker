@@ -175,6 +175,24 @@
                                    "content-type"   "text/plain"}}
                         (req :get "/simple" {:headers {"Accept-Encoding" ["gzip"]}}))))))
 
+(deftest test-host-header-without-request-body
+  (testing "domain Host headers do not make empty requests enter body streaming"
+    (let [seen-body (promise)]
+      (with-server [_server (test-server (fn [{:keys [body]}]
+                                           (deliver seen-body body)
+                                           {:status 200
+                                            :headers {"content-type" "text/plain"}
+                                            :body "ok"}))]
+        (let [result (util/curl :http :h1 (plain-port) "/"
+                                :max-time 3
+                                :args ["-H" "Host: busker.outskirtslabs.com"])
+              body-value (deref seen-body 1000 ::missing)]
+          (is (= 0 (:exit result))
+              (str "HTTP request with Host header should succeed. stderr: " (:err result)))
+          (is (= "ok" (:out result)))
+          (is (not= ::missing body-value))
+          (is (nil? body-value)))))))
+
 (deftest test-content-length
   (testing "content-length with get and head"
     (with-server [_server (test-server (fn [{:keys [request-method]}]

@@ -19,7 +19,7 @@
   "Creates a ReadableByteChannel + RequestBody for streaming request body.
    proceed-callback is called after each chunk is fully consumed."
   [proceed-callback]
-  (let [queue (LinkedBlockingQueue. 1)
+  (let [queue (LinkedBlockingQueue. 2)
         eof-marker ::eof
         closed? (volatile! false)
         current-buf (volatile! nil)
@@ -70,7 +70,7 @@
     {:channel body-channel
      :write-chunk (fn [chunk is-last]
                     (when-not @closed?
-                      (when chunk
+                      (when (and chunk (pos? (alength ^bytes chunk)))
                         (.put queue chunk))
                       (when is-last
                         (.put queue eof-marker))))
