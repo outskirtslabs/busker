@@ -34,7 +34,7 @@
                         :http3? false
                         :tls false}
                  :https {:bind ":443"
-                         :http3? false
+                         :http3? true
                          :tls {}}}
    :dispatch [{:handler handler}]})
 
