@@ -34,6 +34,7 @@ The actual state of affairs is:
 - [x] Automatic HTTPS
 - [x] 0-RTT TLS
 - [x] TLS STEK, pluggable ticket store
+- [ ] Native file handler w/ compression (bypass jvm for files on disk)
 - [ ] Metrics/signals... w/out the abominable otel?
 - [ ] Reverse proxying
 - [ ] Standlone operation mode w/ config file

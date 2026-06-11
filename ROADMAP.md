@@ -8,6 +8,7 @@
 - [x] Dynamic TLS certificate selection based on SNI for multi-domain hosting on a single port
 - [x] TLS STEK and pluggable ticket store
 - [x] 0-RTT TLS
+- [ ] Native file handler w/ compression (bypass jvm for files on disk)
 - [ ] Metrics/signals w/out the abominable otel (or with?)
 - [ ] test: Cross-process TLS ticket resumption
 - [ ] Reverse proxying
