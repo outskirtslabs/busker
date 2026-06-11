@@ -46,7 +46,7 @@
       :else
       {:service (-> (if current-service
                       (tickets/recreate-memory-ticket-service current-service
-                                                             session-ticket-config)
+                                                              session-ticket-config)
                       (tickets/create-memory-ticket-service session-ticket-config))
                     (tickets/start-key-service!))
        :reused? false})))
@@ -352,8 +352,8 @@
                    :activated)
                  (catch Throwable t
                    (cleanup-unpublished-generation! candidate
-                                                   (:cert-automation active)
-                                                   memory-ticket-service)
+                                                    (:cert-automation active)
+                                                    memory-ticket-service)
                    (throw t))))
              (catch Throwable t
                (let [data (ex-data t)]

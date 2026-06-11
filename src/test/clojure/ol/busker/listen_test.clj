@@ -16,12 +16,12 @@
   ([port]
    (tcp-bindable? "127.0.0.1" port))
   ([host port]
-  (try
-    (with-open [channel (ServerSocketChannel/open)]
-      (.bind channel (InetSocketAddress. ^String host (int port)))
-      true)
-    (catch BindException _
-      false))))
+   (try
+     (with-open [channel (ServerSocketChannel/open)]
+       (.bind channel (InetSocketAddress. ^String host (int port)))
+       true)
+     (catch BindException _
+       false))))
 
 (defn- udp-bindable?
   [port]

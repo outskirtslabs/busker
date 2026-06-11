@@ -120,8 +120,8 @@
           http01-solver (http-solver/solver)
           clave-config (update clave-config :solvers
                                (fn [solvers]
-                                (assoc (or solvers {})
-                                       :http-01 http01-solver)))
+                                 (assoc (or solvers {})
+                                        :http-01 http01-solver)))
           system (automation/create clave-config)]
       (try
         (automation/start! system)

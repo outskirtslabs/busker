@@ -30,12 +30,12 @@
   ([port]
    (datagram-bindable? "127.0.0.1" port))
   ([host port]
-  (try
-    (with-open [channel (DatagramChannel/open)]
-      (.bind channel (InetSocketAddress. ^String host (int port)))
-      true)
-    (catch java.net.BindException _
-      false))))
+   (try
+     (with-open [channel (DatagramChannel/open)]
+       (.bind channel (InetSocketAddress. ^String host (int port)))
+       true)
+     (catch java.net.BindException _
+       false))))
 
 (defn- wait-for-conn-limit-current!
   [expected & {:keys [attempts delay-ms]
@@ -60,7 +60,7 @@
   (let [generation (:instance (:active @(:busker/state server)))
         http3-worker-contexts (::generation/http3-worker-contexts generation)]
     (mapv (fn [worker-http3-ctxs]
-                    (reduce (fn [total http3-ctx]
+            (reduce (fn [total http3-ctx]
                       (if (or (nil? http3-ctx) (mem/null? http3-ctx))
                         total
                         #_{:clj-kondo/ignore [:type-mismatch]}
@@ -555,7 +555,7 @@
                         {:body emitter})))
           ;; 2 workers with max 4 connections total
           ;; If it was per-worker, we'd have 8 connections allowed
-      server (busker/start!
+          server (busker/start!
                   (util/with-static-tls
                     (util/with-handler
                       handler
