@@ -5,7 +5,7 @@
     nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1";
     devshell.url = "github:numtide/devshell";
     devshell.inputs.nixpkgs.follows = "nixpkgs";
-    devenv.url = "https://flakehub.com/f/ramblurr/nix-devenv/*";
+    devenv.url = "github:ramblurr/nix-devenv";
     devenv.inputs.nixpkgs.follows = "nixpkgs";
     zig2nix.url = "github:Cloudef/zig2nix";
     zig2nix.inputs.nixpkgs.follows = "nixpkgs";
