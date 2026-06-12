@@ -304,7 +304,8 @@
    :doc "Entrypoint definition including bind, protocol toggles, and entrypoint-local TLS settings."
    :default {:http1? true
              :http2? true
-             :tls false}})
+             :http3? true
+             :tls {:tls-compatibility-mode (:default tls-compatibility-mode)}}})
 (s/def ::entrypoint
   (s/keys :req-un [::bind]
           :opt-un [::http1? ::http2? ::http3? ::tls]))

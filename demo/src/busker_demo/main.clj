@@ -27,11 +27,8 @@
   []
   {:tls {:certificates {:manage [domain]}}
    :entrypoints {:http {:bind ":80"
-                        :http3? false
                         :tls false}
-                 :https {:bind ":443"
-                         :http3? true
-                         :tls {}}}
+                 :https {:bind ":443"}}
    :dispatch [{:handler handler}]})
 
 (defonce server_

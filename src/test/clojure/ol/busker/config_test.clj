@@ -101,7 +101,30 @@
                    [:tls :session-tickets :lifetime-seconds])))
     (is (= [{:directory-url
              "https://acme-v02.api.letsencrypt.org/directory"}]
-           (get-in specs/default-config [:tls :issuers])))))
+           (get-in specs/default-config [:tls :issuers])))
+    (is (= true
+           (:http3? (:default specs/entrypoint))))))
+
+(deftest entrypoint-http3-defaults-test
+  (testing "defaults HTTP/3 from effective entrypoint TLS"
+    (let [snapshot (cfg/normalized-snapshot
+                    {:entrypoints {:clear {:bind ":8080"
+                                           :tls false}
+                                   :secure {:bind ":8443"}
+                                   :secure-http3-disabled {:bind ":9443"
+                                                           :http3? false}}
+                     :dispatch [{}]})]
+      (is (= {:clear {:tls false
+                      :http3? false}
+              :secure {:tls {:tls-compatibility-mode :modern}
+                       :http3? true}
+              :secure-http3-disabled {:tls {:tls-compatibility-mode :modern}
+                                      :http3? false}}
+             (into {}
+                   (map (fn [[entrypoint-id entrypoint]]
+                          [entrypoint-id
+                           (select-keys entrypoint [:tls :http3?])]))
+                   (:entrypoints snapshot)))))))
 
 (deftest session-ticket-config-contract-test
   (testing "accepts the minimal active session ticket config"
@@ -148,6 +171,14 @@
                   {:entrypoints {:http {:bind ":8080" :tls false}}
                    :dispatch [{:entrypoints #{:missing}}]})]
       (is (some #(= ::cfg/dispatch-entrypoint-missing (:error %)) errors))))
+
+  (testing "rejects HTTP/3 on explicit cleartext entrypoints"
+    (let [errors (load-errors
+                  {:entrypoints {:http {:bind ":8080"
+                                        :tls false
+                                        :http3? true}}
+                   :dispatch [{}]})]
+      (is (some #(= ::cfg/entrypoint-http3-requires-tls (:error %)) errors))))
 
   (testing "rejects conflicting bind usage across entrypoints"
     (let [errors (load-errors
