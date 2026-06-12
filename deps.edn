@@ -1,14 +1,14 @@
 {:paths   ["src/main/clojure" "target/classes"]
  :deps    {;; busker tries to minimize dependencies
-           org.suskalo/coffi                         {:git/url    "https://github.com/Ramblurr/coffi.git"
-                                                      :git/branch "feat/update-tools-build"
-                                                      :git/sha    "9b05e268b915b1992bfd4175cb7c8c7c45d8973a"}
+           org.suskalo/coffi             {:git/url    "https://github.com/Ramblurr/coffi.git"
+                                          :git/branch "feat/update-tools-build"
+                                          :git/sha    "9b05e268b915b1992bfd4175cb7c8c7c45d8973a"}
            ;; busker requires trove for its light pluggiable logging facade
-           com.taoensso/trove                        {:mvn/version "1.1.0"}
+           com.taoensso/trove            {:mvn/version "1.1.0"}
            ;; busker requires clave, an ACME client, to power its auto https features
-           io.github.outskirtslabs/clave             {:git/sha "2b7fa1d12cb05a23806bdcf249b76027951adbf3"}
+           io.github.outskirtslabs/clave {:git/sha "486b365e1973df99e1ab12435c46969a7b7d8c34"}
            ;; busker requires charred because implementing ACME requires speaking JSON, and clave makes it a peer dep
-           com.cnuernber/charred                     {:mvn/version "1.037"}}
+           com.cnuernber/charred         {:mvn/version "1.037"}}
  :aliases {:kaocha {:extra-paths []
                     :extra-deps  {lambdaisland/kaocha {:mvn/version "1.91.1392"}}
                     :main-opts   ["-m" "kaocha.runner"]}

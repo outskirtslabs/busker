@@ -5,6 +5,7 @@
    [clojure.spec.alpha :as s]
    [clojure.string :as str]
    [ol.busker.buffer-pool :as bp]
+   [ol.clave.issuers :as issuers]
    [ol.clave.specs :as clave]
    [ol.clave.storage :as storage])
   (:import
@@ -95,10 +96,13 @@
   (s/keys :req-un [::clave/directory-url]
           :opt-un [::email ::eab]))
 
+(def ^:private default-issuers
+  [{:directory-url issuers/lets-encrypt-production-ca}])
+
 (def issuers
   {:key ::issuers
    :doc "ACME certificate authorities to attempt, in priority order."
-   :default nil})
+   :default default-issuers})
 (s/def ::issuers (s/coll-of ::issuer-config :kind vector?))
 
 (def enabled?
@@ -235,7 +239,8 @@
 (def tls
   {:key ::tls
    :doc "Global TLS subsystem configuration, or entrypoint-specific TLS settings when used under an entrypoint."
-   :default {:session-tickets (:default session-tickets)}})
+   :default {:session-tickets (:default session-tickets)
+             :issuers (:default issuers)}})
 (s/def ::tls
   (s/or :global
         (s/keys :opt-un [::storage
@@ -736,7 +741,7 @@
   (into {} (map (juxt :key identity) all-descriptors)))
 
 (def default-config
-  {:tls {:session-tickets (:default session-tickets)}
+  {:tls (:default tls)
    :entrypoints (:default entrypoints)
    :dispatch (:default dispatch)
    :n-workers (:default n-workers)

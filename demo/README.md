@@ -45,10 +45,3 @@ Deploy from this directory.
 
 The script connects to `root@ol-busker-demo`, creates the `busker` system user, installs the application under `/var/lib/busker`, installs `busker-demo.service`, prepares Clojure dependencies as the `busker` user, and restarts the service.
 
-
-Set `ACME_EMAIL` if you want the ACME account to include a contact address.
-
-
-```bash
-ACME_EMAIL=admin@example.com ./deploy.sh
-```

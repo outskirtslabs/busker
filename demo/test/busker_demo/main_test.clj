@@ -23,3 +23,9 @@
             :body "Method not allowed.\n"}
            (main/handler {:request-method :post
                           :uri "/"})))))
+
+(deftest config-test
+  (testing "uses Busker's default ACME issuer"
+    (is (= {:manage ["busker.outskirtslabs.com"]}
+           (get-in (main/config) [:tls :certificates])))
+    (is (not (contains? (:tls (main/config)) :issuers)))))

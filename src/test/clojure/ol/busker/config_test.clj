@@ -68,8 +68,6 @@
     (let [config (cfg/load!
                   {:tls {:storage {:factory 'ol.clave.storage.file/file-storage
                                    :root "target/config-test-storage"}
-                         :issuers [{:directory-url
-                                    "https://acme.example/directory"}]
                          :certificates {:load [{:type :pem
                                                 :cert-file (util/fixture-cert-path)
                                                 :key-file (util/fixture-key-path)}]
@@ -84,6 +82,9 @@
       (is (satisfies? storage/Storage (get-in config [:tls :storage])))
       (is (= ["example.com" "www.example.com"]
              (get-in config [:tls :certificates :manage])))
+      (is (= [{:directory-url
+               "https://acme-v02.api.letsencrypt.org/directory"}]
+             (get-in config [:tls :issuers])))
       (is (= true (get-in config [:entrypoints :http :http1?])))
       (is (= true (get-in config [:entrypoints :https :http2?])))
       (is (= true (get-in config [:entrypoints :https :http3?])))
@@ -97,7 +98,10 @@
                    [:tls :session-tickets :max-keys])))
     (is (= 86400
            (get-in specs/default-config
-                   [:tls :session-tickets :lifetime-seconds])))))
+                   [:tls :session-tickets :lifetime-seconds])))
+    (is (= [{:directory-url
+             "https://acme-v02.api.letsencrypt.org/directory"}]
+           (get-in specs/default-config [:tls :issuers])))))
 
 (deftest session-ticket-config-contract-test
   (testing "accepts the minimal active session ticket config"

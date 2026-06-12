@@ -5,9 +5,6 @@
 (def domain
   "busker.outskirtslabs.com")
 
-(def lets-encrypt-directory
-  "https://acme-v02.api.letsencrypt.org/directory")
-
 (defn text-response
   ([status body]
    (text-response status body {}))
@@ -28,8 +25,7 @@
 
 (defn config
   []
-  {:tls {:certificates {:manage [domain]}
-         :issuers [{:directory-url lets-encrypt-directory}]}
+  {:tls {:certificates {:manage [domain]}}
    :entrypoints {:http {:bind ":80"
                         :http3? false
                         :tls false}
