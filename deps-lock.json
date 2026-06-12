@@ -1,9 +1,9 @@
 {
   "git": {
-    "io.github.outskirtslabs/clave/486b365e1973df99e1ab12435c46969a7b7d8c34": {
+    "io.github.outskirtslabs/clave/fc1180d7c209bdbf6553ead1785df06e1117d4bd": {
       "common_dir": "https/github.com/outskirtslabs/clave",
-      "rev": "486b365e1973df99e1ab12435c46969a7b7d8c34",
-      "sha256": "1097p9dy0ajp1vqbgpyl0iq13s1ywwq8467zg9hcqcsj8ayislxh",
+      "rev": "fc1180d7c209bdbf6553ead1785df06e1117d4bd",
+      "sha256": "0gd7c866r1q3y7p9k6f5nz4v22x3si8i3284w9xp7yb0c3y185mv",
       "url": "https://github.com/outskirtslabs/clave.git"
     },
     "org.suskalo/coffi/9b05e268b915b1992bfd4175cb7c8c7c45d8973a": {
@@ -297,17 +297,11 @@
     "com/nextjournal/beholder/1.0.2/beholder-1.0.2.pom": {
       "sha256": "2d12644867503df2e87868cbc14ddd7852a86ae9b6756fd0278ea508ad1de2ee"
     },
-    "com/outskirtslabs/busker/macos-aarch64/0.0.1/macos-aarch64-0.0.1.jar": {
-      "sha256": "b6f1f80ac8618a319408f35abc6873cb2e4696f1dd15565fc58f9971a5c6729b"
+    "com/outskirtslabs/busker/macos-aarch64/0.0.4/macos-aarch64-0.0.4.jar": {
+      "sha256": "81fe54a7f2d7b18b7f214e3b5a998585fdb4cc7a82d23f34d38245868c44a5e5"
     },
-    "com/outskirtslabs/busker/macos-aarch64/0.0.1/macos-aarch64-0.0.1.pom": {
-      "sha256": "38bb9c29bd954ef0a63544719e1ad5bd37099bf3a52e2c40e256147ea2f169aa"
-    },
-    "com/outskirtslabs/busker/macos-x86-64/0.0.1/macos-x86-64-0.0.1.jar": {
-      "sha256": "e7fffb1caaa25773633168574554fc8cc46f67109d1cbeed49f7da7ecc3045d7"
-    },
-    "com/outskirtslabs/busker/macos-x86-64/0.0.1/macos-x86-64-0.0.1.pom": {
-      "sha256": "96e8700e2ce2a939780c84d713f8030c58ab008a4058c113506cb762e100fc4f"
+    "com/outskirtslabs/busker/macos-aarch64/0.0.4/macos-aarch64-0.0.4.pom": {
+      "sha256": "1e6784074fce2575e3f279f20fe2719ef0f242da6ee417173d47b9e844420601"
     },
     "com/taoensso/trove/1.1.0/trove-1.1.0.jar": {
       "sha256": "749160b5bbc9c9098fd7d4dfb4e06e21aa3c5b95a57b521d4bf03c6af1ffbd92"

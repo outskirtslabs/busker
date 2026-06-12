@@ -6,7 +6,7 @@
            ;; busker requires trove for its light pluggiable logging facade
            com.taoensso/trove            {:mvn/version "1.1.0"}
            ;; busker requires clave, an ACME client, to power its auto https features
-           io.github.outskirtslabs/clave {:git/sha "486b365e1973df99e1ab12435c46969a7b7d8c34"}
+           io.github.outskirtslabs/clave {:git/sha "fc1180d7c209bdbf6553ead1785df06e1117d4bd"}
            ;; busker requires charred because implementing ACME requires speaking JSON, and clave makes it a peer dep
            com.cnuernber/charred         {:mvn/version "1.037"}}
  :aliases {:kaocha {:extra-paths []
@@ -35,8 +35,7 @@
                                   org.clojure/tools.deps                   {:mvn/version "0.26.1553"}
                                   org.ring-clojure/ring-core-protocols     {:mvn/version "1.15.3"}
                                   com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.6.2"}
-                                  com.outskirtslabs.busker/macos-x86-64    {:mvn/version "0.0.1"}
-                                  com.outskirtslabs.busker/macos-aarch64   {:mvn/version "0.0.1"}
+                                  com.outskirtslabs.busker/macos-aarch64   {:mvn/version "0.0.4"}
                                   com.outskirtslabs.busker/linux-x86-64    {:local/root "shim/linux-x86-64"}}}
            :bench  {:extra-paths ["src/test/clojure" "src/test/resources"]
                     :extra-deps  {http-kit/http-kit              {:mvn/version "2.8.1"}
