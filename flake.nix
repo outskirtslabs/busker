@@ -57,24 +57,20 @@
           shim =
             pkgs:
             pkgs.callPackage ./pkgs/shim.nix {
-              inherit clojureLib;
-              inherit gitRev zig2nix;
+              inherit clojureLib gitRev zig2nix;
               apple-sdk = self.packages.${pkgs.system}.apple-sdk;
             };
           busker =
             pkgs:
             pkgs.callPackage ./pkgs/busker.nix {
-              inherit clojureLib;
-              inherit gitRev;
+              inherit clojureLib gitRev;
               shim = self.packages.${pkgs.system}.shim;
             };
           default = busker;
         };
 
       devShell =
-
         pkgs:
-
         let
           zig = zig2nix.packages.${pkgs.system}."zig-0_16_0";
           zig2nixEnv = zig2nix.outputs.zig-env.${pkgs.system} { inherit zig; };

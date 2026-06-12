@@ -67,6 +67,8 @@ clojureLib.mkCljLib {
     "test"
   ];
   checkCommand = ''
+    cljfmt check src test
+    clj-kondo --lint src test
     clojure -Srepro -M:dev:test:kaocha
     clojure -Srepro -J-Xmx2g -J-Xms2g -M:dev:test:kaocha --no-capture-output --focus ol.busker.large-payload-test
   '';
@@ -75,6 +77,8 @@ clojureLib.mkCljLib {
     pkgs.iproute2
     pkgs.openssl
     pkgs.perl
+    pkgs.cljfmt
+    pkgs.clj-kondo
   ];
   preBuild = copyShimLibs;
   lockCommand = ''
