@@ -1,0 +1,1 @@
+{:lint-as {ol.h2o.server-test/with-server clojure.core/with-open}}

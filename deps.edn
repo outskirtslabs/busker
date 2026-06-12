@@ -48,9 +48,9 @@
                             :description "Busker is your Clojure web server that plays live on the open web"
                             :license     {:id "EUPL-1.2"}
                             :platforms   [:clj :linux :macos]
-                            :created     "2026-02-16"
+                            :created     "2025-10-10"
                             :status      :experimental
-                            :version     "0.0.3"
+                            :version     "0.0.4"
                             :url         "https://github.com/outskirtslabs/busker"
                             :scm         [:scm
                                           [:url "https://github.com/outskirtslabs/busker"]

@@ -1,1 +1,4 @@
 */target/
+.zig-cache-global/
+.zig-cache/
+zig-pkg/
