@@ -1,0 +1,179 @@
+= ol.busker.metrics
+
+
+Minimal CLJ metrics facade built on taoensso/trove.
+
+What this is:
+- A tiny, dependency-light API for recording counters, gauges, histograms, meters, and timers.
+- Emits structured "metric events" via `taoensso.trove/log!`, keeping the core free of registry/export deps.
+- Works in Clojure and uses a monotonic clock for timing.
+
+Why:
+- Library authors get a zero-registry metrics API without forcing apps to pull in Micrometer/Prometheus/etc.
+- Applications can plug in their preferred backend by setting `trove/*log-fn*` to an adapter log-fn.
+- Trove's lazy value semantics keep call-site overhead low and allow filtering before doing expensive work.
+
+How it emits:
+- Each metric call logs a structured event with:
+  - `:level`   — typically `:trace` (so you can route/disable separately from normal logs).
+  - `:id`      — shaped as `[:metrics kind metric-id]` for easy filtering and routing.
+  - `:data`    — normalized namespaced fields per kind, e.g. `{::delta ...}` for counters,
+                 `{::value ...}` for gauges/histograms, `{::n ...}` for meters,
+                 `{::duration-ns ...}` for timers, plus optional `{::tags {...}}`.
+
+API surface:
+- `counter!(id delta [tags])`              — increment/decrement a counter.
+- `gauge-set!(id value [tags])`            — set a gauge to an absolute value.
+- `histogram-observe!(id value [tags])`    — observe a sample into a histogram.
+- `meter-mark!(id [n] [tags])`             — mark one or N occurrences on a meter.
+- `time!(id f [tags])`                     — time `f` and emit `::duration-ns`; returns `f`'s result.
+- `now-ns`                                 — cross-platform monotonic timestamp (ns).
+
+Backends (out of scope here):
+- This namespace does NOT implement a registry, percentile/reservoir logic, rate windows, scraping endpoints,
+  or exporters. Those live in a Trove log-fn adapter you provide in your app, e.g. Micrometer, Prometheus, OTel, StatsD.
+- Write an adapter that recognizes `[:metrics kind id]` events and forwards to your registry/exporter.
+
+Caveats and guidance:
+- Keep tag sets small and low-cardinality to avoid backend explosion.
+- Percentiles/histogram behavior depends on your chosen backend/registry; this facade just emits observations.
+- Because events are normal Trove logs, you can filter by namespace, id, level, data, or tags.
+
+Intended use:
+- Libraries depend only on Trove and call this API.
+- Applications choose and configure a metrics backend by installing a Trove log-fn adapter.
+
+[#now-ns]
+== now-ns
+
+
+
+
+[source,clojure]
+----
+(now-ns)
+----
+
+Cross-platform monotonic timestamp in nanoseconds.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/metrics.clj#L46-L49[source,window=_blank]
+
+'''
+
+[#counter-BANG-]
+== counter!
+
+
+
+
+[source,clojure]
+----
+(counter! id delta)
+(counter! id delta tags)
+----
+
+Increment a counter by `delta` (can be negative).
+ - id: keyword or vector (e.g. :auth/logins or [:http :requests])
+ - tags: optional map of low-cardinality labels
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/metrics.clj#L62-L68[source,window=_blank]
+
+'''
+
+[#gauge-set-BANG-]
+== gauge-set!
+
+
+
+
+[source,clojure]
+----
+(gauge-set! id value)
+(gauge-set! id value tags)
+----
+
+Set a gauge to an absolute `value`.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/metrics.clj#L70-L74[source,window=_blank]
+
+'''
+
+[#histogram-observe-BANG-]
+== histogram-observe!
+
+
+
+
+[source,clojure]
+----
+(histogram-observe! id value)
+(histogram-observe! id value tags)
+----
+
+Record a value into a histogram.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/metrics.clj#L76-L80[source,window=_blank]
+
+'''
+
+[#meter-mark-BANG-]
+== meter-mark!
+
+
+
+
+[source,clojure]
+----
+(meter-mark! id)
+(meter-mark! id n)
+(meter-mark! id n tags)
+----
+
+Mark N events on a meter (rate).
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/metrics.clj#L82-L87[source,window=_blank]
+
+'''
+
+[#time-BANG-]
+== time!
+
+
+
+
+[source,clojure]
+----
+(time! id f)
+(time! id f tags)
+----
+
+Time the execution of thunk `f`, emit a timer metric (duration-ns), and return f's result.
+ Usage: (time! :db/query #(run-query q) {:tags {:db :primary}})
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/metrics.clj#L89-L98[source,window=_blank]
+
+'''
+
+[#time-block-BANG-]
+== time-block!
+
+
+
+
+[source,clojure]
+----
+(time-block! id f)
+(time-block! id f tags)
+----
+
+Time an arbitrary block by passing a zero-arg function.
+ This is just a small helper if you don't want an inline #(do ...).
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/metrics.clj#L100-L104[source,window=_blank]

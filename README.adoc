@@ -1,0 +1,106 @@
+= ol.busker
+
+____
+Busker is a Clojure web server that plays live on the open web
+____
+
+image:https://img.shields.io/badge/doc-outskirtslabs-orange.svg[doc,link=https://docs.outskirtslabs.com/ol.busker/next/]
+image:https://img.shields.io/badge/status-experimental-red.svg[status: experimental,link=https://docs.outskirtslabs.com/open-source-vital-signs#experimental]
+image:https://img.shields.io/badge/CI-Logs-brightgreen,link=[built with nixbot,link=https://ci.outskirtslabs.com/repos/github/outskirtslabs/busker]
+
+`ol.busker` is a Clojure HTTP server library built directly on https://github.com/h2o/h2o[libh2o], the web server core that powers Fastly's global CDN.
+It brings HTTP/1.1, HTTP/2, and HTTP/3 support to the JVM through Panama FFI and virtual threads.
+
+Busker aims to:
+
+* Provide modern HTTP support, including HTTP/1.1, HTTP/2, HTTP/3, 103 Early Hints, and HTTP/2 streams
+* Handle automatic HTTPS certificate management and renewal
+* Simplify deployment by letting you deploy an uberjar directly with `systemd`, without nginx, Caddy, or Docker
+* Deliver predictable performance under load with production-ready defaults
+
+== Platform requirements
+
+Busker requires JDK 21 or later.
+GraalVM native-image builds require JDK 25 or later.
+
+Pre-built jars containing native binaries are available for Linux and macOS on aarch64 and x86-64.
+
+Project status: *https://docs.outskirtslabs.com/open-source-vital-signs#experimental[Experimental]*.
+
+== Usage
+
+Add the Busker git dependency to `deps.edn`:
+
+[source,clojure]
+----
+com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
+                          :git/sha "07fb6b7962a8d534bbb11006c78a4c5a99160d97"}
+----
+
+When using Busker as a git dependency, run `clj -X:deps prep` after bumping the git sha.
+
+Add at least one native dependency for your target platform:
+
+[source,clojure]
+----
+;; Choose at least one of the following.
+com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.4"}
+com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.4"}
+com.outskirtslabs.busker/macos-x86-64 {:mvn/version "0.0.4"}
+com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.4"}
+----
+
+If you include multiple native dependencies, Busker chooses the one matching the current platform.
+Including extra native dependencies increases uberjar size.
+
+== Examples
+
+See the example projects in https://github.com/outskirtslabs/busker/tree/main/examples[`examples/`]:
+
+* https://github.com/outskirtslabs/busker/tree/main/examples/quickstart[`quickstart`] shows a small server with HTTP, TLS, hello, echo, and streaming routes
+* https://github.com/outskirtslabs/busker/tree/main/examples/early-hints[`early-hints`] shows how to emit `103 Early Hints` before a final response
+* https://github.com/outskirtslabs/busker/tree/main/examples/sse[`sse`] shows a long-lived Server Sent Events stream with optional Brotli compression
+
+== Documentation
+
+* https://docs.outskirtslabs.com/ol.busker/next/[Docs]
+* https://docs.outskirtslabs.com/ol.busker/next/api[API Reference]
+* https://github.com/outskirtslabs/busker/issues[Support via GitHub Issues]
+
+== Roadmap
+
+The project description above is aspirational.
+Busker is still a work in progress.
+
+ifdef::env-github[]
+See link:./doc/modules/ROOT/pages/roadmap.adoc[Roadmap] for current roadmap ideas.
+endif::[]
+ifndef::env-github[]
+See xref:roadmap.adoc[Roadmap] for current roadmap ideas.
+endif::[]
+
+== Changelog
+
+ifdef::env-github[]
+See link:./CHANGELOG.adoc[CHANGELOG.adoc] for notable changes.
+endif::[]
+ifndef::env-github[]
+See xref:changelog.adoc[Changelog] for notable changes.
+endif::[]
+
+== Security
+
+ifdef::env-github[]
+See link:./SECURITY.adoc[SECURITY.adoc] for security reporting and policy links.
+endif::[]
+ifndef::env-github[]
+See xref:security.adoc[Security] for security reporting and policy links.
+endif::[]
+
+== License
+
+Busker is distributed under the https://spdx.org/licenses/EUPL-1.2.html[EUPL-1.2].
+
+Copyright (C) 2025-2026 Casey Link.
+
+Some files included in this project and in binary distributions, including JAR files on Clojars and GitHub releases, are from third-party sources and retain their original licenses as indicated in https://github.com/outskirtslabs/busker/blob/main/NOTICE[NOTICE].

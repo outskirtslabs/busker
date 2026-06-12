@@ -1,0 +1,32 @@
+= Roadmap
+
+== Backlog
+
+Not in order:
+
+* [x] Dynamic runtime configuration
+* [x] Dynamic TLS certificate selection based on SNI for multi-domain hosting on a single port
+* [x] TLS STEK and pluggable ticket store
+* [x] 0-RTT TLS
+* [ ] Native file handler with compression to bypass the JVM for files on disk
+* [ ] Metrics and signals without OpenTelemetry, or with minimal OpenTelemetry support
+* [ ] Cross-process TLS ticket resumption tests
+* [ ] Reverse proxying
+* [ ] Standalone operation mode with a config file
+* [ ] Zero-downtime deployments with `systemd`
+* [ ] GraalVM native-image support
+* [ ] Configurable congestion control to allow selection of Reno, Cubic, or BBR instead of using quicly defaults
+* [ ] Connection keep-alive configuration with explicit interval and timeout settings instead of implicit ACK frequency
+* [ ] User-supplied TLS certificate callback API
+* [ ] QUIC datagram support for RFC 9221 unreliable datagram frames, useful for WebRTC over HTTP/3 and gaming protocols
+* [ ] Built-in `.ts.net` support
+
+== Small tasks
+
+* [x] Implement request cleanup and reaping when clients disconnect early, including interruption of body and response streams
+* [x] Rewrite response queue from `Channel` to `OutputStream`
+* [x] Rename mutable state-map keywords so they end with `_`
+* [x] Add IPv6 listener support
+* [x] Add Unix domain socket listener support
+* [ ] Double-check all volatile uses for correctness
+* [ ] Decide whether `AtomicBoolean` values should become atoms

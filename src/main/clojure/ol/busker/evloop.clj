@@ -107,7 +107,7 @@
 
 (defn start-worker!
   "Start a worker on a platform thread (daemon).
-   
+
    Parameters:
    - loop-fn: function called for each loop iteration: (worker, state) -> state
    - message-handler
@@ -154,16 +154,16 @@
 
    Parameters:
    - workers: a seq of workers
-   - msg: message to broadcast "
+   - msg: message to broadcast"
   [workers msg]
   (doseq [^Worker w workers]
     (p/send-msg w msg)))
 
 (defn broadcast-wake!
   "Wake all workers.
-   
+
    Parameters:
-   - workers: a seq of workers "
+   - workers: a seq of workers"
   [workers]
   (doseq [^Worker w workers]
     (p/wake w)))

@@ -1,0 +1,7 @@
+---
+name: ol.busker
+title: ol.busker
+version: next
+prerelease: true
+nav:
+  - modules/ROOT/nav.adoc

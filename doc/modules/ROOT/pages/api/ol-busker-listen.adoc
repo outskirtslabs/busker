@@ -1,0 +1,84 @@
+= ol.busker.listen
+
+[#listener-key]
+== listener-key
+
+
+
+
+[source,clojure]
+----
+(listener-key listener)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/listen.clj#L9-L19[source,window=_blank]
+
+'''
+
+[#open-pool]
+== open-pool
+
+
+
+
+[source,clojure]
+----
+(open-pool)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/listen.clj#L30-L33[source,window=_blank]
+
+'''
+
+[#acquire-claim]
+== acquire-claim
+
+
+
+
+[source,clojure]
+----
+(acquire-claim {:keys [state lock] :as pool} listener)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/listen.clj#L90-L106[source,window=_blank]
+
+'''
+
+[#resource]
+== resource
+
+
+
+
+[source,clojure]
+----
+(resource claim)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/listen.clj#L108-L113[source,window=_blank]
+
+'''
+
+[#release-BANG-]
+== release!
+
+
+
+
+[source,clojure]
+----
+(release! claim)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/listen.clj#L115-L135[source,window=_blank]

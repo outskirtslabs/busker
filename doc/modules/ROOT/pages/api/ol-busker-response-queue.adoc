@@ -1,0 +1,373 @@
+= ol.busker.response-queue
+
+[#--GT-Chunk]
+== ->Chunk
+
+
+
+
+[source,clojure]
+----
+(->Chunk bufs bytes final?)
+----
+
+A sealed, immutable outbound unit to send in one h2o_sendvec call.
+ - bufs: IPersistentVector of read-only ByteBuffer slices (position/limit fixed for send).
+ - bytes: total payload bytes across bufs.
+ - final?: true iff this chunk closes the response body (H2O_SEND_STATE_FINAL).
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L18-L26[source,window=_blank]
+
+'''
+
+[#Chunk]
+== Chunk
+
+
+
+
+
+A sealed, immutable outbound unit to send in one h2o_sendvec call.
+ - bufs: IPersistentVector of read-only ByteBuffer slices (position/limit fixed for send).
+ - bytes: total payload bytes across bufs.
+ - final?: true iff this chunk closes the response body (H2O_SEND_STATE_FINAL).
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L18-L26[source,window=_blank]
+
+'''
+
+[#map--GT-Chunk]
+== map->Chunk
+
+
+
+
+[source,clojure]
+----
+(map->Chunk m)
+----
+
+A sealed, immutable outbound unit to send in one h2o_sendvec call.
+ - bufs: IPersistentVector of read-only ByteBuffer slices (position/limit fixed for send).
+ - bytes: total payload bytes across bufs.
+ - final?: true iff this chunk closes the response body (H2O_SEND_STATE_FINAL).
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L18-L26[source,window=_blank]
+
+'''
+
+[#release-chunk]
+== release-chunk
+
+
+
+
+[source,clojure]
+----
+(release-chunk p c)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L32-L34[source,window=_blank]
+
+'''
+
+[#package-chunks]
+== package-chunks
+
+
+
+
+[source,clojure]
+----
+(package-chunks chunks arena)
+----
+
+Build a contiguous array of h2o_sendvec_t descriptors from a vector of Chunks.
+ Copies ByteBuffer data to arena-allocated stable segments for safe native access.
+ Returns map with :seg (sendvec array), :veccnt, :final?, and :stable-segs (to prevent GC).
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L66-L93[source,window=_blank]
+
+'''
+
+[#drain-chunks]
+== drain-chunks
+
+
+
+
+[source,clojure]
+----
+(drain-chunks req bbq preferred-chunk-size arena)
+----
+
+Worker thread. Called after proceed indicates we can send more chunks to native, returns true if final was sent
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L95-L105[source,window=_blank]
+
+'''
+
+[#release-chunks]
+== release-chunks
+
+
+
+
+[source,clojure]
+----
+(release-chunks pool in-flight_)
+----
+
+Worker thread. Release the Chunks that were in-flight back to the pool.
+ Note: Arena/ofAuto arenas are GC-managed and should NOT be manually closed.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L107-L116[source,window=_blank]
+
+'''
+
+[#send-vecs]
+== send-vecs
+
+
+
+
+[source,clojure]
+----
+(send-vecs st)
+----
+
+Evloop worker thread: drain chunks and send to native when ready.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L118-L131[source,window=_blank]
+
+'''
+
+[#schedule-drain-BANG-]
+== schedule-drain!
+
+
+
+
+[source,clojure]
+----
+(schedule-drain! st)
+----
+
+Try to schedule a drain task on the event loop.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L133-L143[source,window=_blank]
+
+'''
+
+[#report-error]
+== report-error
+
+
+
+
+[source,clojure]
+----
+(report-error e)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L145-L146[source,window=_blank]
+
+'''
+
+[#on-proceed]
+== on-proceed
+
+
+
+
+[source,clojure]
+----
+(on-proceed st)
+----
+
+Worker thread. Called by libh2o to progress the response generator
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L148-L156[source,window=_blank]
+
+'''
+
+[#on-stop]
+== on-stop
+
+
+
+
+[source,clojure]
+----
+(on-stop st _reason)
+----
+
+Worker thread. Called by libh2o to cancel the request (because client hung up etc).
+Must not throw.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L158-L168[source,window=_blank]
+
+'''
+
+[#seal-chunk]
+== seal-chunk
+
+
+
+
+[source,clojure]
+----
+(seal-chunk bufs final?)
+----
+
+Build a sealed Chunk from a seq of ByteBuffers and a final? flag.
+ Each buffer should already have position/limit set for reading.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L174-L180[source,window=_blank]
+
+'''
+
+[#--GT-H2OResponseWriter]
+== ->H2OResponseWriter
+
+
+
+
+[source,clojure]
+----
+(->H2OResponseWriter req bbq output-buffer-size scheduled?_ in-flight_ closing?_ stopped?_ final-enqueued?_ current-buffer_ buffer-pool config)
+----
+
+Per-request state for the queue-based sender.
+ Fields:
+ - req: the Request
+ - bbq: SPSC ByteBoundedQueue of Chunk (writer enqueues, worker drains).
+ - output-buffer-size: size of buffers to grab from the pool
+ - scheduled: AtomicBoolean; true iff a drain task is scheduled/on-going on the event loop.
+ - in-flight: AtomicReference<Chunk>; the currently sent chunk awaiting proceed.
+ - closing: AtomicBoolean; producer side. writer set when close() called (no more writes).
+ - stopped: AtomicBoolean; consumer side. libh2o drives this when request is stopped/cancelled or consumer sets it when final chunk sent
+ - final-enqueued: AtomicBoolean; tracks whether a final chunk has been enqueued.
+ - buffer-pool: reference to pooled direct ByteBuffers (opaque here).
+ - current-buffer: AtomicReference<ByteBuffer>; writer-owned aggregation buffer (rotated on seal).
+ - config: IPersistentMap of tuning knobs, e.g.:
+     {:aggregation-size int
+      :large-threshold  int
+      :max-buffered-bytes long
+      :max-vecs-per-send int}
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L248-L277[source,window=_blank]
+
+'''
+
+[#H2OResponseWriter]
+== H2OResponseWriter
+
+
+
+
+
+Per-request state for the queue-based sender.
+ Fields:
+ - req: the Request
+ - bbq: SPSC ByteBoundedQueue of Chunk (writer enqueues, worker drains).
+ - output-buffer-size: size of buffers to grab from the pool
+ - scheduled: AtomicBoolean; true iff a drain task is scheduled/on-going on the event loop.
+ - in-flight: AtomicReference<Chunk>; the currently sent chunk awaiting proceed.
+ - closing: AtomicBoolean; producer side. writer set when close() called (no more writes).
+ - stopped: AtomicBoolean; consumer side. libh2o drives this when request is stopped/cancelled or consumer sets it when final chunk sent
+ - final-enqueued: AtomicBoolean; tracks whether a final chunk has been enqueued.
+ - buffer-pool: reference to pooled direct ByteBuffers (opaque here).
+ - current-buffer: AtomicReference<ByteBuffer>; writer-owned aggregation buffer (rotated on seal).
+ - config: IPersistentMap of tuning knobs, e.g.:
+     {:aggregation-size int
+      :large-threshold  int
+      :max-buffered-bytes long
+      :max-vecs-per-send int}
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L248-L277[source,window=_blank]
+
+'''
+
+[#map--GT-H2OResponseWriter]
+== map->H2OResponseWriter
+
+
+
+
+[source,clojure]
+----
+(map->H2OResponseWriter m)
+----
+
+Per-request state for the queue-based sender.
+ Fields:
+ - req: the Request
+ - bbq: SPSC ByteBoundedQueue of Chunk (writer enqueues, worker drains).
+ - output-buffer-size: size of buffers to grab from the pool
+ - scheduled: AtomicBoolean; true iff a drain task is scheduled/on-going on the event loop.
+ - in-flight: AtomicReference<Chunk>; the currently sent chunk awaiting proceed.
+ - closing: AtomicBoolean; producer side. writer set when close() called (no more writes).
+ - stopped: AtomicBoolean; consumer side. libh2o drives this when request is stopped/cancelled or consumer sets it when final chunk sent
+ - final-enqueued: AtomicBoolean; tracks whether a final chunk has been enqueued.
+ - buffer-pool: reference to pooled direct ByteBuffers (opaque here).
+ - current-buffer: AtomicReference<ByteBuffer>; writer-owned aggregation buffer (rotated on seal).
+ - config: IPersistentMap of tuning knobs, e.g.:
+     {:aggregation-size int
+      :large-threshold  int
+      :max-buffered-bytes long
+      :max-vecs-per-send int}
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L248-L277[source,window=_blank]
+
+'''
+
+[#new-response-state]
+== new-response-state
+
+
+
+
+[source,clojure]
+----
+(new-response-state req)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L279-L293[source,window=_blank]
+
+'''
+
+[#create-response-writer]
+== create-response-writer
+
+
+
+
+[source,clojure]
+----
+(create-response-writer req)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response_queue.clj#L295-L308[source,window=_blank]

@@ -1,0 +1,137 @@
+= ol.busker.generation
+
+[#evloop-msg-processor]
+== evloop-msg-processor
+
+
+
+
+[source,clojure]
+----
+(evloop-msg-processor op args)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L69-L87[source,window=_blank]
+
+'''
+
+[#http3-enabled-QMARK-]
+== http3-enabled?
+
+
+
+
+[source,clojure]
+----
+(http3-enabled? listener)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L314-L319[source,window=_blank]
+
+'''
+
+[#activate-http3-transports-BANG-]
+== activate-http3-transports!
+
+
+
+
+[source,clojure]
+----
+(activate-http3-transports! {::keys [generation-id listener-claims] :as generation})
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L895-L900[source,window=_blank]
+
+'''
+
+[#register-shared-ticket-manager-BANG-]
+== register-shared-ticket-manager!
+
+
+
+
+[source,clojure]
+----
+(register-shared-ticket-manager! {::keys [memory-ticket-service key-manager] :as generation})
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L902-L906[source,window=_blank]
+
+'''
+
+[#begin-stop-BANG-]
+== begin-stop!
+
+
+
+
+[source,clojure]
+----
+(begin-stop! {::keys [stop-lock phase] :as generation})
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L908-L923[source,window=_blank]
+
+'''
+
+[#await-stop-accepting-BANG-]
+== await-stop-accepting!
+
+
+
+
+[source,clojure]
+----
+(await-stop-accepting! {::keys [stopped-accepting_] :as _generation})
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L925-L928[source,window=_blank]
+
+'''
+
+[#stop-BANG-]
+== stop!
+
+
+
+
+[source,clojure]
+----
+(stop! generation)
+(stop! {::keys [executor stop-lock] :as generation} timeout timeunit)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L930-L969[source,window=_blank]
+
+'''
+
+[#start-BANG-]
+== start!
+
+
+
+
+[source,clojure]
+----
+(start! compiled-config cert-runtime)
+(start! compiled-config cert-runtime {:keys [activate-http3-transports? generation-id listener-pool memory-ticket-service] :or {activate-http3-transports? true generation-id 1 listener-pool (listen/open-pool)}})
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L971-L1006[source,window=_blank]

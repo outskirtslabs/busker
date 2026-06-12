@@ -1,0 +1,209 @@
+= ol.busker.buffer-pool
+
+
+ByteBuffer pooling response buffers
+
+This namespace provides a thread-safe pool that reuses ByteBuffer instances
+to minimize garbage collection pressure during high-throughput I/O operations.
+Buffers are organized into size-aligned buckets using a factor-based scheme.
+
+## How It Works
+
+The pool groups buffers into buckets by capacity. When you request a buffer
+of size N bytes, the pool rounds up to the nearest multiple of the `factor`
+(default 2048), then looks in the corresponding bucket. If a matching buffer
+is available, it's returned immediately. Otherwise, a fresh buffer is allocated.
+
+When you return a buffer, it's placed back into its bucket if there's room,
+subject to per-bucket and memory limits. Buffers that don't align with bucket
+sizes (e.g., unusual capacities) are rejected and left for GC.
+
+## Configuration Options
+
+- `:factor` (int, default 2048) - Bucket alignment step. Buffer capacities are
+  rounded to multiples of this value. Larger factors reduce bucket count but
+  may waste space; smaller factors increase bucket count but improve fit.
+
+- `:min-capacity` (int, default 0) - Minimum pooled capacity. Requests below
+  this are rounded up.
+
+- `:max-capacity` (int, default 65536) - Maximum pooled capacity. Buffers
+  larger than this are allocated but never pooled on return.
+
+- `:max-bucket-size` (int, default ~2x CPU cores) - Maximum buffers per bucket.
+  Once a bucket reaches this limit, returned buffers are discarded. Use `-1`
+  or `nil` for unbounded buckets.
+
+- `:max-heap-memory` (long, default unlimited) - Total bytes of heap buffers
+  the pool will retain. Additional returns are rejected.
+
+- `:max-direct-memory` (long, default unlimited) - Total bytes of direct buffers
+  the pool will retain. Additional returns are rejected.
+
+## Example
+
+[source,clojure]
+----
+(require '[ol.busker.buffer-pool :as pool])
+
+(def p (pool/make-bytebuffer-pool {:factor 2048
+                                    :max-capacity 65536
+                                    :max-bucket-size 16}))
+
+;; Borrow a 3000-byte direct buffer (rounds up to 4096).
+(let [buf (pool/borrow p 3000 true)]
+  ;; Use buf...
+  (pool/return p buf)) ;; returns true if pooled
+
+(pool/dispose p)
+----
+
+## Thread Safety
+
+All operations are atomic and safe for concurrent access from multiple threads.
+
+[#BufferPool]
+== BufferPool
+
+Protocol for thread-safe ByteBuffer pooling.
+
+_protocol_
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/buffer_pool.clj#L64-L102[source,window=_blank]
+
+
+[#borrow]
+=== borrow
+
+[source,clojure]
+----
+(borrow pool size direct?)
+----
+
+Acquires a ByteBuffer with capacity at least `size` bytes.
+
+  The actual capacity may be larger due to bucket alignment. If `size` exceeds
+  the pool's `:max-capacity`, a fresh buffer is allocated but won't be pooled
+  on return.
+
+  Arguments:
+  - `size` (long) - Minimum required capacity in bytes
+  - `direct?` (boolean) - `true` for direct (off-heap) buffer, `false` for heap
+
+  Returns:
+  - `java.nio.ByteBuffer` with `capacity >= size` and `position` at 0
+
+'''
+
+[#return]
+=== return
+
+[source,clojure]
+----
+(return pool buffer)
+----
+
+Returns a ByteBuffer to the pool for potential reuse.
+
+  The buffer is only pooled if:
+  - Its capacity aligns with a bucket size (multiple of `:factor`)
+  - The bucket isn't full (under `:max-bucket-size`)
+  - Pool memory limits aren't exceeded (`:max-heap-memory` / `:max-direct-memory`)
+
+  Arguments:
+  - `buffer` (ByteBuffer) - Buffer to return, or `nil` (ignored)
+
+  Returns:
+  - `boolean` - `true` if the buffer was accepted into the pool, `false` if rejected
+
+'''
+
+[#dispose]
+=== dispose
+
+[source,clojure]
+----
+(dispose pool)
+----
+
+Clears all pooled buffers and releases resources.
+
+  After calling `dispose`, `borrow` will still allocate fresh buffers, but
+  `return` will reject all buffers. Call this during application shutdown.
+
+  Returns:
+  - `:disposed` keyword
+
+'''
+
+[#--GT-BufferPoolImpl]
+== ->BufferPoolImpl
+
+
+
+
+[source,clojure]
+----
+(->BufferPoolImpl cfg buckets totals disposed?)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/buffer_pool.clj#L149-L220[source,window=_blank]
+
+'''
+
+[#BufferPoolImpl]
+== BufferPoolImpl
+
+
+
+
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/buffer_pool.clj#L149-L220[source,window=_blank]
+
+'''
+
+[#map--GT-BufferPoolImpl]
+== map->BufferPoolImpl
+
+
+
+
+[source,clojure]
+----
+(map->BufferPoolImpl m)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/buffer_pool.clj#L149-L220[source,window=_blank]
+
+'''
+
+[#make-bytebuffer-pool]
+== make-bytebuffer-pool
+
+
+
+
+[source,clojure]
+----
+(make-bytebuffer-pool opts)
+----
+
+Create a new buffer pool instance.
+ opts may include:
+   :min-capacity      (int)  minimum pooled buffer capacity (default 0)
+   :factor            (int)  capacity step/bucket factor (default 2048)
+   :max-capacity      (int)  maximum pooled capacity (default 65536)
+   :max-bucket-size   (int)  max buffers per bucket (-1 or nil for unbounded; default ~2x CPU)
+   :max-heap-memory   (long) pooled heap-bytes cap (0 or nil for heuristic/unlimited)
+   :max-direct-memory (long) pooled direct-bytes cap (0 or nil for heuristic/unlimited)
+ Returns a value that satisfies BufferPool.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/buffer_pool.clj#L222-L238[source,window=_blank]

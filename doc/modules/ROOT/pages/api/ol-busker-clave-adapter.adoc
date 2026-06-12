@@ -1,0 +1,110 @@
+= ol.busker.clave-adapter
+
+[#initial-cert-wait-timeout-ms]
+== initial-cert-wait-timeout-ms
+
+
+
+
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L13-L14[source,window=_blank]
+
+'''
+
+[#event-poll-timeout-ms]
+== event-poll-timeout-ms
+
+
+
+
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L16-L17[source,window=_blank]
+
+'''
+
+[#build-managed-plan]
+== build-managed-plan
+
+
+
+
+[source,clojure]
+----
+(build-managed-plan config)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L48-L56[source,window=_blank]
+
+'''
+
+[#lookup-certificate]
+== lookup-certificate
+
+
+
+
+[source,clojure]
+----
+(lookup-certificate runtime hostname)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L105-L113[source,window=_blank]
+
+'''
+
+[#start-BANG-]
+== start!
+
+
+
+
+[source,clojure]
+----
+(start! managed-plan)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L115-L141[source,window=_blank]
+
+'''
+
+[#wrap-handler]
+== wrap-handler
+
+
+
+
+[source,clojure]
+----
+(wrap-handler handler runtime)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L143-L147[source,window=_blank]
+
+'''
+
+[#stop-BANG-]
+== stop!
+
+
+
+
+[source,clojure]
+----
+(stop! runtime)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L149-L154[source,window=_blank]

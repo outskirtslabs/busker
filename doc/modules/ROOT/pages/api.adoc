@@ -1,0 +1,87 @@
+= API Reference
+
+This release publishes 26 namespaces.
+
+[cols="1,3",options="header",stripes=hover]
+|===
+| Namespace | Summary
+
+| xref:api/ol-busker.adoc[`ol.busker`]
+| Public lifecycle API for Busker.
+
+| xref:api/ol-busker-buffer-pool.adoc[`ol.busker.buffer-pool`]
+| ByteBuffer pooling response buffers This namespace provides a thread-safe pool that reuses ByteBuffer instances to minimize garbage collection pressure during high-throughput I/O operations.
+
+| xref:api/ol-busker-byte-bounded-queue.adoc[`ol.busker.byte-bounded-queue`]
+| Byte-bounded queue for backpressure-aware streaming.
+
+| xref:api/ol-busker-clave-adapter.adoc[`ol.busker.clave-adapter`]
+| -
+
+| xref:api/ol-busker-config.adoc[`ol.busker.config`]
+| Configuration docs, parsing, defaults, validation, and dispatch compilation.
+
+| xref:api/ol-busker-evloop.adoc[`ol.busker.evloop`]
+| -
+
+| xref:api/ol-busker-generation.adoc[`ol.busker.generation`]
+| -
+
+| xref:api/ol-busker-internal-protocols.adoc[`ol.busker.internal.protocols`]
+| -
+
+| xref:api/ol-busker-listen.adoc[`ol.busker.listen`]
+| -
+
+| xref:api/ol-busker-metrics.adoc[`ol.busker.metrics`]
+| Minimal CLJ metrics facade built on taoensso/trove.
+
+| xref:api/ol-busker-middleware.adoc[`ol.busker.middleware`]
+| Ring middleware for common HTTP handling patterns.
+
+| xref:api/ol-busker-native.adoc[`ol.busker.native`]
+| -
+
+| xref:api/ol-busker-native-loader.adoc[`ol.busker.native.loader`]
+| -
+
+| xref:api/ol-busker-native-socket.adoc[`ol.busker.native.socket`]
+| low-level socket helpers via coffi/FFM.
+
+| xref:api/ol-busker-protocols.adoc[`ol.busker.protocols`]
+| -
+
+| xref:api/ol-busker-protocols-content-length.adoc[`ol.busker.protocols.content-length`]
+| -
+
+| xref:api/ol-busker-request.adoc[`ol.busker.request`]
+| -
+
+| xref:api/ol-busker-response.adoc[`ol.busker.response`]
+| Response handling for h2o HTTP server.
+
+| xref:api/ol-busker-response-channel.adoc[`ol.busker.response-channel`]
+| -
+
+| xref:api/ol-busker-response-queue.adoc[`ol.busker.response-queue`]
+| -
+
+| xref:api/ol-busker-runtime.adoc[`ol.busker.runtime`]
+| Multi-generation runtime lifecycle for Busker.
+
+| xref:api/ol-busker-specs.adoc[`ol.busker.specs`]
+| clojure.
+
+| xref:api/ol-busker-tickets.adoc[`ol.busker.tickets`]
+| Session ticket key management for TLS 1.
+
+| xref:api/ol-busker-util.adoc[`ol.busker.util`]
+| -
+
+| xref:api/ol-busker-util-headers.adoc[`ol.busker.util.headers`]
+| -
+
+| xref:api/ol-busker-util-parsing.adoc[`ol.busker.util.parsing`]
+| -
+
+|===

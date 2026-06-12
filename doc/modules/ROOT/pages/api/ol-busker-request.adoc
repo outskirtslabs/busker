@@ -1,0 +1,109 @@
+= ol.busker.request
+
+[#create-write-req-channel]
+== create-write-req-channel
+
+
+
+
+[source,clojure]
+----
+(create-write-req-channel proceed-callback)
+----
+
+Creates a ReadableByteChannel + RequestBody for streaming request body.
+ proceed-callback is called after each chunk is fully consumed.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/request.clj#L18-L77[source,window=_blank]
+
+'''
+
+[#set-req-body-channel]
+== set-req-body-channel
+
+
+
+
+[source,clojure]
+----
+(set-req-body-channel worker req-ctx-ptr req-ctx)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/request.clj#L79-L92[source,window=_blank]
+
+'''
+
+[#run-handler]
+== run-handler
+
+
+
+
+[source,clojure]
+----
+(run-handler handler ring-req)
+----
+
+Run the handler given the ring request map. Must return a ring response map.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/request.clj#L94-L112[source,window=_blank]
+
+'''
+
+[#close-streams]
+== close-streams
+
+
+
+
+[source,clojure]
+----
+(close-streams req emitter)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/request.clj#L114-L119[source,window=_blank]
+
+'''
+
+[#on-request]
+== on-request
+
+
+
+
+[source,clojure]
+----
+(on-request executor config ring-handler req-ctx-ptr req-ctx)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/request.clj#L121-L155[source,window=_blank]
+
+'''
+
+[#on-request-cleanup]
+== on-request-cleanup
+
+
+
+
+[source,clojure]
+----
+(on-request-cleanup _ring-handler _req-ctx-ptr req-ctx)
+----
+
+Completion cleanup callback - this is called by h2o when our request dies
+ such as when the client disconnects abruptly
+ ref: https://github.com/h2o/h2o/issues/1894#issuecomment-437231273
+
+ Exceptions thrown from this function will crash the jvm.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/request.clj#L157-L169[source,window=_blank]

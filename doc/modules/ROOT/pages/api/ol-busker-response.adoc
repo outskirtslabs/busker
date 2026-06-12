@@ -1,0 +1,152 @@
+= ol.busker.response
+
+
+Response handling for h2o HTTP server.
+
+[#dissoc-header]
+== dissoc-header
+
+
+
+
+[source,clojure]
+----
+(dissoc-header headers header-name)
+----
+
+Remove all case variations of a header by name (case-insensitive).
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response.clj#L24-L31[source,window=_blank]
+
+'''
+
+[#build-headers2]
+== build-headers2
+
+
+
+
+[source,clojure]
+----
+(build-headers2 resp)
+----
+
+Return a tuple [resp headers headers-len content-length]
+- headers is a clj_header_t *headers MemorySegment
+- headers-len is size_t (number of headers, aka length of headers array)
+- content-length is the content length header if any was found or -1 (SIZE_MAX)
+
+headers memorysegment should NOT contain content-length if it was found
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response.clj#L40-L80[source,window=_blank]
+
+'''
+
+[#build-headers]
+== build-headers
+
+
+
+
+[source,clojure]
+----
+(build-headers resp)
+----
+
+Return a tuple [headers headers-len content-length]
+- headers is a clj_header_t *headers MemorySegment
+- headers-len is size_t (number of headers, aka length of headers array)
+- content-length is the content length header if any was found or -1 (SIZE_MAX)
+
+headers memorysegment should NOT contain content-length if it was found
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response.clj#L82-L121[source,window=_blank]
+
+'''
+
+[#with-content-length]
+== with-content-length
+
+
+
+
+[source,clojure]
+----
+(with-content-length response)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response.clj#L123-L128[source,window=_blank]
+
+'''
+
+[#get-compress-hint]
+== get-compress-hint
+
+
+
+
+[source,clojure]
+----
+(get-compress-hint resp)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response.clj#L167-L168[source,window=_blank]
+
+'''
+
+[#new-response-emitter]
+== new-response-emitter
+
+
+
+
+[source,clojure]
+----
+(new-response-emitter req)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response.clj#L299-L304[source,window=_blank]
+
+'''
+
+[#stop-emitter]
+== stop-emitter
+
+
+
+
+[source,clojure]
+----
+(stop-emitter emitter)
+----
+
+Stop right away, the connection is closing/closed.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response.clj#L306-L310[source,window=_blank]
+
+'''
+
+[#send-ring-response-BANG-]
+== send-ring-response!
+
+
+
+
+[source,clojure]
+----
+(send-ring-response! emitter ring-resp)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/response.clj#L312-L322[source,window=_blank]

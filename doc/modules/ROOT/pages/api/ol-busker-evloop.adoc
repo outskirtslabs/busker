@@ -1,0 +1,199 @@
+= ol.busker.evloop
+
+[#--GT-Worker]
+== ->Worker
+
+
+
+
+[source,clojure]
+----
+(->Worker id thread running?_ mailbox evloop loop-fn message-handler wakeup-receiver_ requests args)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/evloop.clj#L16-L42[source,window=_blank]
+
+'''
+
+[#Worker]
+== Worker
+
+
+
+
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/evloop.clj#L16-L42[source,window=_blank]
+
+'''
+
+[#map--GT-Worker]
+== map->Worker
+
+
+
+
+[source,clojure]
+----
+(map->Worker m)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/evloop.clj#L16-L42[source,window=_blank]
+
+'''
+
+[#worker-context]
+== worker-context
+
+
+
+
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/evloop.clj#L47-L47[source,window=_blank]
+
+'''
+
+[#get-current-worker]
+== get-current-worker
+
+
+
+
+[source,clojure]
+----
+(get-current-worker)
+----
+
+Get the Worker record for the current thread.
+ Only valid when called from a worker thread.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/evloop.clj#L49-L53[source,window=_blank]
+
+'''
+
+[#stop-msg]
+== stop-msg
+
+
+
+
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/evloop.clj#L59-L59[source,window=_blank]
+
+'''
+
+[#start-worker-BANG-]
+== start-worker!
+
+
+
+
+[source,clojure]
+----
+(start-worker! loop-fn message-handler wakeup-receiver & {:keys [thread-name-prefix] :or {thread-name-prefix "h2o-evloop"}})
+----
+
+Start a worker on a platform thread (daemon).
+
+ Parameters:
+ - loop-fn: function called for each loop iteration: (worker, state) -> state
+ - message-handler
+ - wakeup-receiver
+
+ Options:
+ - :thread-name-prefix - prefix for thread name (default 'h2o-evloop')
+
+ Returns: worker
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/evloop.clj#L108-L136[source,window=_blank]
+
+'''
+
+[#join-worker-BANG-]
+== join-worker!
+
+
+
+
+[source,clojure]
+----
+(join-worker! worker)
+----
+
+Join a worker thread without sending stop messages. Assumes the worker will
+ exit on its own (e.g. after draining).
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/evloop.clj#L138-L144[source,window=_blank]
+
+'''
+
+[#join-all-BANG-]
+== join-all!
+
+
+
+
+[source,clojure]
+----
+(join-all! workers)
+----
+
+Join all workers without signalling stop.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/evloop.clj#L146-L150[source,window=_blank]
+
+'''
+
+[#broadcast-BANG-]
+== broadcast!
+
+
+
+
+[source,clojure]
+----
+(broadcast! workers msg)
+----
+
+Send a control message to all workers.
+
+ Parameters:
+ - workers: a seq of workers
+ - msg: message to broadcast
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/evloop.clj#L152-L160[source,window=_blank]
+
+'''
+
+[#broadcast-wake-BANG-]
+== broadcast-wake!
+
+
+
+
+[source,clojure]
+----
+(broadcast-wake! workers)
+----
+
+Wake all workers.
+
+ Parameters:
+ - workers: a seq of workers
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/evloop.clj#L162-L169[source,window=_blank]

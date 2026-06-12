@@ -1,0 +1,61 @@
+= ol.busker.util
+
+[#compile-if]
+== compile-if
+
+_macro_
+
+
+
+[source,clojure]
+----
+(compile-if test then else)
+----
+
+Evaluates `test`. If it returns logical true (and doesn't throw), expands
+to `then`, otherwise expands to `else`.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/util.clj#L6-L13[source,window=_blank]
+
+'''
+
+[#parse-port]
+== parse-port
+
+
+
+
+[source,clojure]
+----
+(parse-port port-str)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/util.clj#L21-L26[source,window=_blank]
+
+'''
+
+[#parse-authority]
+== parse-authority
+
+
+
+
+[source,clojure]
+----
+(parse-authority authority-str default-port)
+----
+
+Parse an HTTP authority or Host value into Ring-friendly server metadata.
+
+ Valid authorities follow RFC 9110 `Host = uri-host [":" port ]`.
+ Busker accepts reg-name or IPv4 hosts with an optional numeric port, and
+ bracketed IP literals with an optional numeric port.
+
+ Invalid authorities are treated as opaque host strings and keep the
+ `default-port`.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/util.clj#L45-L80[source,window=_blank]

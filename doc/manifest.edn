@@ -1,0 +1,18 @@
+{:manifest/version 1,
+ :project
+ {:id "ol.busker",
+  :coord "com.outskirtslabs/busker",
+  :description
+  "Busker is your Clojure web server that plays live on the open web",
+  :license "EUPL-1.2",
+  :platforms [:clj :linux :macos],
+  :status :experimental,
+  :created "2026-02-16",
+  :version "0.0.3"},
+ :docs
+ {:component "ol.busker",
+  :title "ol.busker",
+  :version "next",
+  :prerelease true,
+  :start-path "doc"},
+ :repo {:url "https://github.com/outskirtslabs/busker"}}

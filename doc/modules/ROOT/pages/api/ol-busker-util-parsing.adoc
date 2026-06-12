@@ -1,0 +1,73 @@
+= ol.busker.util.parsing
+
+[#re-token]
+== re-token
+
+
+
+
+
+HTTP token: 1*<any CHAR except CTLs or tspecials>. See RFC2068
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/util/parsing.clj#L26-L28[source,window=_blank]
+
+'''
+
+[#re-quoted]
+== re-quoted
+
+
+
+
+
+HTTP quoted-string: <"> *<any TEXT except "> <">. See RFC2068.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/util/parsing.clj#L30-L32[source,window=_blank]
+
+'''
+
+[#re-value]
+== re-value
+
+
+
+
+
+HTTP value: token | quoted-string. See RFC2109
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/util/parsing.clj#L34-L36[source,window=_blank]
+
+'''
+
+[#re-charset]
+== re-charset
+
+
+
+
+
+Pattern for pulling the charset out of the content-type header
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/util/parsing.clj#L38-L40[source,window=_blank]
+
+'''
+
+[#find-content-type-charset]
+== find-content-type-charset
+
+
+
+
+[source,clojure]
+----
+(find-content-type-charset s)
+----
+
+Return the charset of a given a content-type string.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/util/parsing.clj#L42-L46[source,window=_blank]

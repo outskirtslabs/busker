@@ -1,0 +1,6 @@
+* xref:index.adoc[Home]
+* xref:roadmap.adoc[Roadmap]
+* xref:changelog.adoc[Changelog]
+* xref:security.adoc[Security]
+
+include::partial$api-nav.adoc[]

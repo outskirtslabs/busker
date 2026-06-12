@@ -1,0 +1,50 @@
+= ol.busker.native.loader
+
+[#copy-resource]
+== copy-resource
+
+
+
+
+[source,clojure]
+----
+(copy-resource resource-path output-path)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/native/loader.clj#L9-L12[source,window=_blank]
+
+'''
+
+[#get-os-arch]
+== get-os-arch
+
+
+
+
+[source,clojure]
+----
+(get-os-arch)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/native/loader.clj#L14-L24[source,window=_blank]
+
+'''
+
+[#load-bundled-library]
+== load-bundled-library
+
+
+
+
+[source,clojure]
+----
+(load-bundled-library)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/native/loader.clj#L26-L42[source,window=_blank]

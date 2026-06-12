@@ -4,7 +4,7 @@
    - open/bind/listen family-aware TCP listeners
    - open/bind/listen Unix domain socket listeners
    - duplicate the listener per worker thread (ownership: native side after handoff)
-   - small utilities for flags and options "
+   - small utilities for flags and options"
   (:require
    [coffi.ffi :as ffi :refer [defcfn]]
    [coffi.mem :as mem]
