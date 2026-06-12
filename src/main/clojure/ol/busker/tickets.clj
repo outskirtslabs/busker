@@ -168,7 +168,7 @@
 
 (defn- store-storage-snapshot!
   [storage-impl snapshot]
-  (storage/store-string! storage-impl
+  (storage/store-string storage-impl
                          nil
                          ticket-storage-key
                          (pr-str (snapshot->edn snapshot))))

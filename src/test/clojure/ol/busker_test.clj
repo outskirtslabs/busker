@@ -120,7 +120,7 @@
                     clave-adapter/event-poll-timeout-ms 10
                     http-solver/solver (fn [] {:registry (atom {})})
                     automation/create (fn [_] {:id ::system})
-                    automation/start! identity
+                    automation/start identity
                     automation/manage-domains (fn [_ _] nil)
                     automation/get-event-queue (fn [_] queue)
                     automation/lookup-cert (fn [_ _] nil)

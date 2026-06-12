@@ -124,7 +124,7 @@
                                         :http-01 http01-solver)))
           system (automation/create clave-config)]
       (try
-        (automation/start! system)
+        (automation/start system)
         (automation/manage-domains system subject-names)
         (let [runtime {:system system
                        :managed-plan managed-plan

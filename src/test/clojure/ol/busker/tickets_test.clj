@@ -110,7 +110,7 @@
   (testing "storage-backed startup fails when persisted ticket data is corrupt"
     (let [root (temp-storage-root)
           impl (file-storage/file-storage {:root root})
-          _ (storage/store-string! impl
+          _ (storage/store-string impl
                                    nil
                                    "busker/session_tickets/keys.edn"
                                    "{this-is-not-edn")
@@ -141,7 +141,7 @@
           now-ms (System/currentTimeMillis)
           existing-keys [(tickets/generate-key (System/currentTimeMillis)
                                                (* 86400 1000))]
-          _ (storage/store-string! impl
+          _ (storage/store-string impl
                                    nil
                                    "busker/session_tickets/keys.edn"
                                    (pr-str {:keys (key-set->edn existing-keys)
@@ -192,7 +192,7 @@
           now-ms (System/currentTimeMillis)
           old-key (tickets/generate-key (- now-ms (* 12 60 60 1000))
                                         (* 24 60 60 1000))
-          _ (storage/store-string! impl
+          _ (storage/store-string impl
                                    nil
                                    "busker/session_tickets/keys.edn"
                                    (pr-str {:keys (key-set->edn [old-key])
