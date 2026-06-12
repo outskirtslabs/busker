@@ -77,6 +77,7 @@
                   {:doc     "Publish native jars to clojars"
                    :depends [prep build:shim]
                    :task    (build/publish-libs! build/lib-dirs)}
+
                   publish:all
                   {:doc     "Publish the clojure libs to clojars"
                    :depends [jar:all]
@@ -149,10 +150,14 @@
                   {:doc  "Show dependency tree"
                    :task (clojure "-X:deps tree :aliases '[:dev]'")}
 
+                  lockfile
+                  {:doc "Update the clojure nix lockfile"
+                   :task (shell "nix run .#locker")}
+
                   qa
                   {:doc     "Run full quality assurance: format, lint, and test"
                    :depends [build lint test:all test]}
 
                   ci
                   {:doc     "Ran by the CI"
-                   :depends [build test:all fmt:check lint jar:all]}}}
+                   :depends [build test:all fmt:check lint jar:all lockfile]}}}

@@ -12,10 +12,10 @@
  :aliases {:kaocha {:extra-paths []
                     :extra-deps  {lambdaisland/kaocha {:mvn/version "1.91.1392"}}
                     :main-opts   ["-m" "kaocha.runner"]}
-           :build  {:deps       {io.github.clojure/tools.build {:mvn/version "0.10.13"}
+           :build  {:deps       {io.github.clojure/tools.build {:mvn/version "0.10.14"}
                                  org.clojure/tools.deps.cli    {:mvn/version "0.15.131"}}
                     :ns-default build}
-           :deploy {:extra-deps {slipset/deps-deploy {:mvn/version "0.2.2"}}}
+           :deploy {:extra-deps {slipset/deps-deploy {:mvn/version "0.2.5"}}}
            :test   {:extra-paths ["src/test/clojure"]
                     :extra-deps  {}}
            :dev    {:extra-paths ["dev"]
