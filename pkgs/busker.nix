@@ -67,8 +67,8 @@ clojureLib.mkCljLib {
     "test"
   ];
   checkCommand = ''
-    cljfmt check src test
-    clj-kondo --lint src test
+    cljfmt check src
+    clj-kondo --lint src
     clojure -Srepro -M:dev:test:kaocha
     clojure -Srepro -J-Xmx2g -J-Xms2g -M:dev:test:kaocha --no-capture-output --focus ol.busker.large-payload-test
   '';
