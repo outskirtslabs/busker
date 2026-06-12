@@ -74,8 +74,8 @@
                                         (swap! calls conj :create)
                                         system)
                     automation/start (fn [s]
-                                        (swap! calls conj :start)
-                                        s)
+                                       (swap! calls conj :start)
+                                       s)
                     automation/manage-domains (fn [s domains]
                                                 (swap! calls conj [:manage s domains])
                                                 nil)

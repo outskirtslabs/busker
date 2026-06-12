@@ -169,9 +169,9 @@
 (defn- store-storage-snapshot!
   [storage-impl snapshot]
   (storage/store-string storage-impl
-                         nil
-                         ticket-storage-key
-                         (pr-str (snapshot->edn snapshot))))
+                        nil
+                        ticket-storage-key
+                        (pr-str (snapshot->edn snapshot))))
 
 (deftype MemoryTicketStore [snapshot-atom]
   TicketKeyStore

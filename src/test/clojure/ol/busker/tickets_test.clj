@@ -111,9 +111,9 @@
     (let [root (temp-storage-root)
           impl (file-storage/file-storage {:root root})
           _ (storage/store-string impl
-                                   nil
-                                   "busker/session_tickets/keys.edn"
-                                   "{this-is-not-edn")
+                                  nil
+                                  "busker/session_tickets/keys.edn"
+                                  "{this-is-not-edn")
           store (tickets/storage-ticket-store impl)]
       (with-redefs [tickets/sync-keys-to-native! (fn [_ _] nil)]
         (is (thrown? clojure.lang.ExceptionInfo
@@ -142,11 +142,11 @@
           existing-keys [(tickets/generate-key (System/currentTimeMillis)
                                                (* 86400 1000))]
           _ (storage/store-string impl
-                                   nil
-                                   "busker/session_tickets/keys.edn"
-                                   (pr-str {:keys (key-set->edn existing-keys)
-                                            :last-rotation-ms now-ms
-                                            :next-rotation-ms (+ now-ms 3600000)}))
+                                  nil
+                                  "busker/session_tickets/keys.edn"
+                                  (pr-str {:keys (key-set->edn existing-keys)
+                                           :last-rotation-ms now-ms
+                                           :next-rotation-ms (+ now-ms 3600000)}))
           store (tickets/storage-ticket-store impl)
           manager (with-redefs [tickets/sync-keys-to-native! (fn [_ _] nil)]
                     (-> (tickets/create-key-manager store
@@ -193,11 +193,11 @@
           old-key (tickets/generate-key (- now-ms (* 12 60 60 1000))
                                         (* 24 60 60 1000))
           _ (storage/store-string impl
-                                   nil
-                                   "busker/session_tickets/keys.edn"
-                                   (pr-str {:keys (key-set->edn [old-key])
-                                            :last-rotation-ms (- now-ms 1000)
-                                            :next-rotation-ms (+ now-ms 3600000)}))
+                                  nil
+                                  "busker/session_tickets/keys.edn"
+                                  (pr-str {:keys (key-set->edn [old-key])
+                                           :last-rotation-ms (- now-ms 1000)
+                                           :next-rotation-ms (+ now-ms 3600000)}))
           store (tickets/storage-ticket-store impl)
           manager (with-redefs [tickets/sync-keys-to-native! (fn [_ _] nil)]
                     (-> (tickets/create-key-manager store
