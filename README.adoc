@@ -4,24 +4,22 @@ ____
 Busker is a Clojure web server that plays live on the open web
 ____
 
-image:https://img.shields.io/badge/doc-outskirtslabs-orange.svg[doc,link=https://docs.outskirtslabs.com/ol.busker/next/]
+image:https://img.shields.io/badge/ol-docs-orange.svg[busker docs,link=https://docs.outskirtslabs.com/ol.busker/next/]
 image:https://img.shields.io/badge/status-experimental-red.svg[status: experimental,link=https://docs.outskirtslabs.com/open-source-vital-signs#experimental]
-image:https://img.shields.io/badge/CI-Logs-brightgreen,link=[built with nixbot,link=https://ci.outskirtslabs.com/repos/github/outskirtslabs/busker]
+image:https://img.shields.io/badge/CI-builds-brightgreen,link=[built with nixbot,link=https://ci.outskirtslabs.com/repos/github/outskirtslabs/busker]
 
-`ol.busker` is a Clojure HTTP server library built directly on https://github.com/h2o/h2o[libh2o], the web server core that powers Fastly's global CDN.
-It brings HTTP/1.1, HTTP/2, and HTTP/3 support to the JVM through Panama FFI and virtual threads.
+`ol.busker` is a Clojure web server built on https://github.com/h2o/h2o[libh2o] (the web server core that powers Fastly's global CDN).
 
-Busker aims to:
+Busker provides:
 
-* Provide modern HTTP support, including HTTP/1.1, HTTP/2, HTTP/3, 103 Early Hints, and HTTP/2 streams
-* Handle automatic HTTPS certificate management and renewal
-* Simplify deployment by letting you deploy an uberjar directly with `systemd`, without nginx, Caddy, or Docker
-* Deliver predictable performance under load with production-ready defaults
+* modern HTTP support, including HTTP/1.1, HTTP/2, HTTP/3, 103 Early Hints, 0-RTT TLS, etc.
+* automatic HTTPS certificate obtaining and renewal
+* simplified deployment by letting you deploy an uberjar directly with `systemd`, without nginx, Caddy, or Docker
+* predictable performance under load with production-ready defaults
 
 == Platform requirements
 
-Busker requires JDK 21 or later.
-GraalVM native-image builds require JDK 25 or later.
+Busker requires JDK 21 or later (25+ is recommended).
 
 Pre-built jars containing native binaries are available for Linux and macOS on aarch64 and x86-64.
 
