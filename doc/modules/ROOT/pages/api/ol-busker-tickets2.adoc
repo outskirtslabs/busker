@@ -1,0 +1,426 @@
+= ol.busker.tickets2
+
+
+Experimental session ticket design with one store protocol and plain
+ process-local ticket state data.
+
+[#default-ticket-lifetime-seconds]
+== default-ticket-lifetime-seconds
+
+
+
+
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L15-L16[source,window=_blank]
+
+'''
+
+[#default-max-ticket-keys]
+== default-max-ticket-keys
+
+
+
+
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L18-L19[source,window=_blank]
+
+'''
+
+[#rotation-check-interval-ms]
+== rotation-check-interval-ms
+
+
+
+
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L21-L22[source,window=_blank]
+
+'''
+
+[#ticket-storage-key]
+== ticket-storage-key
+
+
+
+
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L24-L25[source,window=_blank]
+
+'''
+
+[#ticket-rotation-lock-name]
+== ticket-rotation-lock-name
+
+
+
+
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L27-L28[source,window=_blank]
+
+'''
+
+[#-STAR-ticket-rotation-jitter-seconds-STAR-]
+== *ticket-rotation-jitter-seconds*
+
+
+
+
+
+Jitter seconds for rotation checks.
+ Bind to 0 in tests to disable.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L30-L33[source,window=_blank]
+
+'''
+
+[#TicketKeyStore]
+== TicketKeyStore
+
+Backend for session ticket key persistence.
+
+_protocol_
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L35-L47[source,window=_blank]
+
+
+[#load-snapshot]
+=== load-snapshot
+
+[source,clojure]
+----
+(load-snapshot store)
+----
+
+Load the current ticket snapshot from the backing store.
+
+  Returns a snapshot map or nil if no snapshot is stored.
+
+'''
+
+[#store-snapshot-BANG-]
+=== store-snapshot!
+
+[source,clojure]
+----
+(store-snapshot! store snapshot)
+----
+
+Atomically persist the complete ticket snapshot.
+
+'''
+
+[#with-store-lock]
+=== with-store-lock
+
+[source,clojure]
+----
+(with-store-lock store f)
+----
+
+Run `f` while holding any store-specific coordination lock.
+
+'''
+
+[#hex--GT-bytes]
+== hex->bytes
+
+
+
+
+[source,clojure]
+----
+(hex->bytes s)
+----
+
+Convert hex string to byte array.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L49-L57[source,window=_blank]
+
+'''
+
+[#bytes--GT-hex]
+== bytes->hex
+
+
+
+
+[source,clojure]
+----
+(bytes->hex arr)
+----
+
+Convert byte array to lowercase hex string.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L59-L65[source,window=_blank]
+
+'''
+
+[#generate-random-bytes]
+== generate-random-bytes
+
+
+
+
+[source,clojure]
+----
+(generate-random-bytes n)
+----
+
+Generate cryptographically secure random bytes.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L67-L73[source,window=_blank]
+
+'''
+
+[#generate-key]
+== generate-key
+
+
+
+
+[source,clojure]
+----
+(generate-key not-before-ms lifetime-ms)
+----
+
+Generate a new session ticket key with specified validity window.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L75-L82[source,window=_blank]
+
+'''
+
+[#key--GT-edn]
+== key->edn
+
+
+
+
+[source,clojure]
+----
+(key->edn {:keys [name aes-key hmac-key not-before not-after]})
+----
+
+Convert a key map to EDN-safe format.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L84-L91[source,window=_blank]
+
+'''
+
+[#edn--GT-key]
+== edn->key
+
+
+
+
+[source,clojure]
+----
+(edn->key {:keys [name aes-key hmac-key not-before not-after]})
+----
+
+Convert EDN format back to a key map with byte arrays.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L93-L100[source,window=_blank]
+
+'''
+
+[#memory-ticket-store]
+== memory-ticket-store
+
+
+
+
+[source,clojure]
+----
+(memory-ticket-store)
+(memory-ticket-store snapshot)
+----
+
+Create an in-memory ticket key store.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L185-L189[source,window=_blank]
+
+'''
+
+[#storage-ticket-store]
+== storage-ticket-store
+
+
+
+
+[source,clojure]
+----
+(storage-ticket-store storage-impl)
+----
+
+Create a Clave-backed ticket key store.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L203-L206[source,window=_blank]
+
+'''
+
+[#rotate-keys]
+== rotate-keys
+
+
+
+
+[source,clojure]
+----
+(rotate-keys keys now-ms lifetime-ms max-keys)
+----
+
+Perform key rotation if needed.
+
+Returns updated keys ordered newest-first.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L271-L283[source,window=_blank]
+
+'''
+
+[#sync-keys-to-native-BANG-]
+== sync-keys-to-native!
+
+
+
+
+[source,clojure]
+----
+(sync-keys-to-native! native-ticket-mgr keys)
+----
+
+Push current keys to the native ticket manager.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L299-L306[source,window=_blank]
+
+'''
+
+[#acquire-ticket-state-BANG-]
+== acquire-ticket-state!
+
+
+
+
+[source,clojure]
+----
+(acquire-ticket-state! current-ticket-state compiled-config config-snapshot)
+----
+
+Return the next process-local ticket state for `compiled-config`.
+
+`current-ticket-state` is the currently reusable ticket state from runtime.
+`config-snapshot` should be the normalized pure-data config snapshot so
+storage-backed reuse decisions can compare sharing boundaries without
+depending on resolved runtime objects.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L521-L544[source,window=_blank]
+
+'''
+
+[#register-native-ticket-mgr-BANG-]
+== register-native-ticket-mgr!
+
+
+
+
+[source,clojure]
+----
+(register-native-ticket-mgr! ticket-state native-ticket-mgr)
+----
+
+Attach `native-ticket-mgr` to `ticket-state` and sync the current keys.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L546-L558[source,window=_blank]
+
+'''
+
+[#unregister-native-ticket-mgr-BANG-]
+== unregister-native-ticket-mgr!
+
+
+
+
+[source,clojure]
+----
+(unregister-native-ticket-mgr! ticket-state native-ticket-mgr)
+----
+
+Detach `native-ticket-mgr` from `ticket-state`.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L560-L569[source,window=_blank]
+
+'''
+
+[#stop-ticket-state-BANG-]
+== stop-ticket-state!
+
+
+
+
+[source,clojure]
+----
+(stop-ticket-state! ticket-state)
+----
+
+Stop the rotation loop and clear tracked native managers.
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L571-L581[source,window=_blank]
+
+'''
+
+[#ticket-lifetime-seconds]
+== ticket-lifetime-seconds
+
+
+
+
+[source,clojure]
+----
+(ticket-lifetime-seconds ticket-state)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L583-L585[source,window=_blank]
+
+'''
+
+[#current-keys]
+== current-keys
+
+
+
+
+[source,clojure]
+----
+(current-keys ticket-state)
+----
+
+
+[.api-source]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/tickets2.clj#L587-L589[source,window=_blank]

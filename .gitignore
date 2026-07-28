@@ -6,13 +6,9 @@
 **/.claude/settings.local.json
 .lsp/
 .nrepl-port
-archive/
 target/
 .clojure-mcp
-extra/
-.direnv
 *.log
-prompts/PROMPTS.md
 result
 .env
 
@@ -29,4 +25,3 @@ zig-out
 .eca/
 .tmuxb_session
 .zig-cache-global/
-prompts/

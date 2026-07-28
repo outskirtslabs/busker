@@ -251,18 +251,18 @@ Example: Bring your own certs
 
 ### Storage factory map (`:tls :storage`)
 
-The `:storage` key may be a `ol.clave.storage/Storage` instance or a factory map.
+The `:storage` key may be a xref:next@ol.clave::api/ol-clave-storage.adoc#Storage[`ol.clave.storage/Storage`] instance or a factory map.
 
-When omitted, managed certificate automation uses `ol.clave.storage.file/file-storage` with its no-arg default root.
+When omitted, managed certificate automation uses xref:next@ol.clave::api/ol-clave-storage-file.adoc#file-storage[`ol.clave.storage.file/file-storage`] with its no-arg default root.
 
 The Clave default is to use `<dir>/ol.clave`, where `<dir>` is `$STATE_DIRECTORY` (for systemd usage) or `$XDG_DATA_HOME`.
 While often not necessary, you can configure this explicitly.
 
 When used as a map `:storage` contains:
 
-- `:factory` - Function or qualified symbol returning a `ol.clave.storage/Storage` implementation (required).
+- `:factory` - Function or qualified symbol returning a xref:next@ol.clave::api/ol-clave-storage.adoc#Storage[`ol.clave.storage/Storage`] implementation (required).
 - factory-specific keys - Options passed to the factory (default: none).
-  For the built-in filesystem storage factory, see `ol.clave.storage.file/file-storage`.
+  For the built-in filesystem storage factory, see xref:next@ol.clave::api/ol-clave-storage-file.adoc#file-storage[`ol.clave.storage.file/file-storage`].
   Its options include `:root`, a root directory string or `java.nio.file.Path`.
 
 ### Issuer maps (`:tls :issuers`)
@@ -309,8 +309,8 @@ challenge type:
   This is required for wildcard names such as `"*.example.com"`.
 - `:tls-alpn-01` - TLS ALPN challenge solver for port 443 validation.
 
-To write a custom solver, see `ol.clave.certificate` and
-`ol.clave.certificate/validate-solvers`.
+To write a custom solver, see xref:next@ol.clave::api/ol-clave-certificate.adoc[`ol.clave.certificate`] and
+xref:next@ol.clave::api/ol-clave-certificate.adoc#validate-solvers[`ol.clave.certificate/validate-solvers`].
 
 Example: this adds `:dns-01`, while Busker still adds its integrated `:http-01`
 solver.

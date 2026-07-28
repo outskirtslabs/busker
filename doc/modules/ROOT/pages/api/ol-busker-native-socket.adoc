@@ -16,7 +16,7 @@ low-level socket helpers via coffi/FFM.
 
 [source,clojure]
 ----
-(fcntl arg11469 arg11470 arg11471)
+(fcntl arg12573 arg12574 arg12575)
 ----
 
 
@@ -33,7 +33,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(dup arg11481)
+(dup arg12585)
 ----
 
 
@@ -50,7 +50,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(close arg11489)
+(close arg12593)
 ----
 
 
@@ -67,7 +67,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(strerror arg11497)
+(strerror arg12601)
 ----
 
 
@@ -84,7 +84,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(open-tcp-listener* arg11505 arg11506 arg11507 arg11508 arg11509 arg11510 arg11511)
+(open-tcp-listener* arg12609 arg12610 arg12611 arg12612 arg12613 arg12614 arg12615)
 ----
 
 
@@ -101,7 +101,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(open-unix-listener* arg11525 arg11526 arg11527 arg11528)
+(open-unix-listener* arg12629 arg12630 arg12631 arg12632)
 ----
 
 
@@ -118,7 +118,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(unlink-unix-socket-if-still-socket* arg11539)
+(unlink-unix-socket-if-still-socket* arg12643)
 ----
 
 
