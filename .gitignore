@@ -25,3 +25,5 @@ zig-out
 .eca/
 .tmuxb_session
 .zig-cache-global/
+.scratch/
+.scratch-org/
