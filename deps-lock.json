@@ -1,9 +1,9 @@
 {
   "git": {
-    "io.github.outskirtslabs/clave/fc1180d7c209bdbf6553ead1785df06e1117d4bd": {
+    "io.github.outskirtslabs/clave/04f7bf854bcbe379df14e3f9d7221af9d0c030d6": {
       "common_dir": "https/github.com/outskirtslabs/clave",
-      "rev": "fc1180d7c209bdbf6553ead1785df06e1117d4bd",
-      "sha256": "0gd7c866r1q3y7p9k6f5nz4v22x3si8i3284w9xp7yb0c3y185mv",
+      "rev": "04f7bf854bcbe379df14e3f9d7221af9d0c030d6",
+      "sha256": "14g41q33ydi61n1clzyqa93g1fk6n0r6xkizjlbq851vyh56zfic",
       "url": "https://github.com/outskirtslabs/clave.git"
     },
     "org.suskalo/coffi/9b05e268b915b1992bfd4175cb7c8c7c45d8973a": {

@@ -79,8 +79,10 @@
                     automation/manage-domains (fn [s domains]
                                                 (swap! calls conj [:manage s domains])
                                                 nil)
-                    automation/get-event-queue (fn [_]
-                                                 queue)
+                    automation/subscribe-events (fn [_]
+                                                  (swap! calls conj :subscribe)
+                                                  queue)
+                    automation/unsubscribe-events (fn [_ _] nil)
                     automation/lookup-cert (fn [_ _]
                                              (swap! lookup-count inc)
                                              nil)
@@ -88,6 +90,7 @@
         (let [runtime (adapter/start! plan)]
           (is (= [:create
                   :start
+                  :subscribe
                   [:manage system ["example.com"]]]
                  @calls))
           (is (= {:system system
@@ -103,10 +106,12 @@
                   :solvers {:tls-alpn-01 :existing
                             :http-01 fake-solver}}
                  @create-config)
-              "existing solvers are preserved")))))
+              "existing solvers are preserved")
+          (adapter/stop! runtime)))))
 
   (testing "post-activation certificate-failed events are consumed in the background"
     (let [queue (LinkedBlockingQueue.)
+          unsubscribed (atom nil)
           failed-event {:type :certificate-failed
                         :data {:domain "example.com"
                                :reason :acme-error}}
@@ -121,7 +126,9 @@
                     automation/create (fn [_] system)
                     automation/start identity
                     automation/manage-domains (fn [_ _] nil)
-                    automation/get-event-queue (fn [_] queue)
+                    automation/subscribe-events (fn [_] queue)
+                    automation/unsubscribe-events (fn [s q]
+                                                    (reset! unsubscribed [s q]))
                     automation/lookup-cert (fn [_ _] nil)
                     automation/stop (fn [_] nil)]
         (future
@@ -145,7 +152,8 @@
                      (Thread/sleep 25)
                      (recur (inc attempt))))))
               "The background watcher should consume later failure events")
-          (is (nil? (adapter/stop! runtime))))))))
+          (is (nil? (adapter/stop! runtime)))
+          (is (= [system queue] @unsubscribed)))))))
 
 (testing "rejects invalid managed-plan shape"
   (is (thrown-with-msg?

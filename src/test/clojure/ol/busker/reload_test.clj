@@ -778,7 +778,8 @@
                     automation/create (fn [_] {:id ::system})
                     automation/start identity
                     automation/manage-domains (fn [_ _] nil)
-                    automation/get-event-queue (fn [_] queue)
+                    automation/subscribe-events (fn [_] queue)
+                    automation/unsubscribe-events (fn [_ _] nil)
                     automation/lookup-cert (fn [_ _] nil)
                     automation/stop (fn [_] nil)]
         (is (= :activated
@@ -792,7 +793,8 @@
           (is (= 0 (:exit result)))
           (is (= "managed-active" (:out result)))))
       (finally
-        (with-redefs [automation/stop (fn [_] nil)]
+        (with-redefs [automation/unsubscribe-events (fn [_ _] nil)
+                      automation/stop (fn [_] nil)]
           (runtime/stop! server))))))
 
 (deftest reload-calls-serialize-through-lifecycle-gate-test

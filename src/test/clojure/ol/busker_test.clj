@@ -122,7 +122,8 @@
                     automation/create (fn [_] {:id ::system})
                     automation/start identity
                     automation/manage-domains (fn [_ _] nil)
-                    automation/get-event-queue (fn [_] queue)
+                    automation/subscribe-events (fn [_] queue)
+                    automation/unsubscribe-events (fn [_ _] nil)
                     automation/lookup-cert (fn [_ _] nil)
                     automation/stop (fn [_] nil)]
         (future

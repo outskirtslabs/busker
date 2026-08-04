@@ -65,30 +65,36 @@
   (when (seq subject-names)
     (let [pending (set subject-names)]
       (try
-        (let [queue (automation/get-event-queue system)
-              running? (atom true)
-              worker
-              (future
-                (try
-                  (loop []
-                    (when @running?
-                      (when-let [event (.poll queue event-poll-timeout-ms
-                                              TimeUnit/MILLISECONDS)]
-                        (when (certificate-failed-event? event pending)
-                          (trove/log! {:level :error
-                                       :id ::certificate-obtain-failed
-                                       :data {:event event
-                                              :subject-name
-                                              (get-in event [:data :domain])}})))
-                      (recur)))
-                  (catch InterruptedException _
-                    nil)
-                  (catch Throwable t
-                    (trove/log! {:level :error
-                                 :id ::certificate-event-watcher-failed
-                                 :ex t}))))]
-          {:running? running?
-           :worker worker})
+        (let [queue (automation/subscribe-events system)]
+          (try
+            (let [running? (atom true)
+                  worker
+                  (future
+                    (try
+                      (loop []
+                        (when @running?
+                          (when-let [event (.poll queue event-poll-timeout-ms
+                                                  TimeUnit/MILLISECONDS)]
+                            (when (certificate-failed-event? event pending)
+                              (trove/log! {:level :error
+                                           :id ::certificate-obtain-failed
+                                           :data {:event event
+                                                  :subject-name
+                                                  (get-in event [:data :domain])}})))
+                          (recur)))
+                      (catch InterruptedException _
+                        nil)
+                      (catch Throwable t
+                        (trove/log! {:level :error
+                                     :id ::certificate-event-watcher-failed
+                                     :ex t}))))]
+              {:system system
+               :queue queue
+               :running? running?
+               :worker worker})
+            (catch Throwable t
+              (automation/unsubscribe-events system queue)
+              (throw t))))
         (catch Throwable t
           (trove/log! {:level :error
                        :id ::certificate-event-watcher-start-failed
@@ -99,7 +105,8 @@
   [watcher]
   (when watcher
     (reset! (:running? watcher) false)
-    (future-cancel (:worker watcher)))
+    (future-cancel (:worker watcher))
+    (automation/unsubscribe-events (:system watcher) (:queue watcher)))
   nil)
 
 (defn lookup-certificate
@@ -125,18 +132,21 @@
           system (automation/create clave-config)]
       (try
         (automation/start system)
-        (automation/manage-domains system subject-names)
-        (let [runtime {:system system
-                       :managed-plan managed-plan
-                       :subject-names subject-names
-                       :http-solver http01-solver
-                       :event-watcher (start-event-watcher! system
-                                                            subject-names)}]
-          (assoc runtime :lookup-fn
-                 (fn [hostname]
-                   (lookup-certificate runtime hostname))))
+        (let [event-watcher (start-event-watcher! system subject-names)]
+          (try
+            (automation/manage-domains system subject-names)
+            (let [runtime {:system system
+                           :managed-plan managed-plan
+                           :subject-names subject-names
+                           :http-solver http01-solver
+                           :event-watcher event-watcher}]
+              (assoc runtime :lookup-fn
+                     (fn [hostname]
+                       (lookup-certificate runtime hostname))))
+            (catch Throwable t
+              (stop-event-watcher! event-watcher)
+              (throw t))))
         (catch Throwable t
-          (stop-event-watcher! nil)
           (automation/stop system)
           (throw t))))))
 
@@ -148,7 +158,9 @@
 
 (defn stop!
   [runtime]
-  (stop-event-watcher! (:event-watcher runtime))
-  (when-let [system (:system runtime)]
-    (automation/stop system))
+  (try
+    (stop-event-watcher! (:event-watcher runtime))
+    (finally
+      (when-let [system (:system runtime)]
+        (automation/stop system))))
   nil)
