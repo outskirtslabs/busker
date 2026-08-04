@@ -5,12 +5,12 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .@"h2o-zig" = .{
-            .url = "git+https://github.com/outskirtslabs/h2o-zig.git#f91016e8accc06eb1e4691463a5650914611b251",
-            .hash = "h2o-0.0.1-7Fp7SvdhAADLdeg5l07sj5L7bK8QyJ92ul--h7J7dtFL",
+            .url = "git+https://github.com/outskirtslabs/h2o-zig.git#156c195431778c3458ad54602ce651e2b60462a5",
+            .hash = "h2o-0.0.1-7Fp7SnZgAAAuNIsRWVvgkGj9Qb3riu12UkuU3K5xT27k",
         },
         .boringssl = .{
-            .url = "git+https://github.com/Ramblurr/boringssl.git?ref=h2o-zig/boringssl-0.20260526.0-pic#56d7f0ece36a500037ab519c0f035fba715ae07d",
-            .hash = "boringssl-0.20260526.0-EhtkNa_1AgAQhAiZ-Q1ik0_32P63WPPBmyoynfjTqH88",
+            .url = "git+https://github.com/Ramblurr/boringssl.git?ref=h2o-zig/boringssl-0.20260713.0-pic#b2c89f632b3bbb4747deb7b686703f6756b8f16b",
+            .hash = "boringssl-0.20260713.0-EhtkNcs5AAC51I0EPLoT7g_y9E0w_9XLnllZTJj9OtFd",
             .lazy = true,
         },
         .openssl = .{
