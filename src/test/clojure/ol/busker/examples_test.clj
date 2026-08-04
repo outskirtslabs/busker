@@ -25,11 +25,10 @@
 (defn- start-example!
   [example]
   (let [{:keys [http https]} (get example-ports example)]
-    (p/process ["bash" "-lc"
-                (format "BUSKER_HTTP_BIND=127.0.0.1:%d BUSKER_HTTPS_BIND=127.0.0.1:%d clojure -M:run"
-                        http
-                        https)]
+    (p/process ["clojure" "-M:run"]
                {:dir (example-path example)
+                :extra-env {"BUSKER_HTTP_BIND" (format "127.0.0.1:%d" http)
+                            "BUSKER_HTTPS_BIND" (format "127.0.0.1:%d" https)}
                 :out :string
                 :err :string
                 :shutdown p/destroy-tree})))

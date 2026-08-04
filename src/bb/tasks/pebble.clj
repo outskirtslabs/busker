@@ -88,7 +88,7 @@
                :extra-env {"PEBBLE_VA_NOSLEEP" (env "PEBBLE_VA_NOSLEEP" "1")
                            "PEBBLE_VA_ALWAYS_VALID"
                            (env "PEBBLE_VA_ALWAYS_VALID" "1")}}
-              "bash" "-lc"
+              "bash" "-c"
               "if command -v setsid >/dev/null 2>&1; then setsid pebble -config \"$1\" </dev/null >>\"$2\" 2>&1 & else nohup pebble -config \"$1\" </dev/null >>\"$2\" 2>&1 & fi; echo $!"
               "pebble-launch" (config-file) (log-file))
         pid (parse-pid out)]

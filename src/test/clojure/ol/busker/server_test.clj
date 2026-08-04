@@ -106,7 +106,7 @@
              "printf 'GET %s HTTP/1.1\\r\\nHost: fallback.example\\r\\nConnection: close\\r\\n\\r\\n' | timeout %d openssl s_client -connect 127.0.0.1:%d -noservername -quiet 2>&1"
              path timeout-seconds port)]
     (p/shell {:out :string :err :string :continue true}
-             "bash" "-lc" cmd)))
+             "bash" "-c" cmd)))
 
 (defmacro with-server
   {:clj-kondo/lint-as 'clojure.core/with-open}

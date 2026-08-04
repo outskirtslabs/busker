@@ -74,7 +74,7 @@
                  " " session-file
                  " 2>&1")
         result (p/shell {:out :string :err :string :continue true}
-                        "bash" "-lc" cmd)
+                        "bash" "-c" cmd)
         out (str (:out result) (:err result))]
     {:exit (:exit result)
      :out out
