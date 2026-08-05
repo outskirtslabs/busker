@@ -145,13 +145,23 @@ libh2o then chooses the framing required by the negotiated HTTP version, such as
 
 == HEAD requests
 
-Busker passes a HEAD request to the handler as `:request-method :head`.
-It does not turn HEAD into GET.
-A handler can return an empty body and an explicit `content-length`, or an application can use Ring's `wrap-head` middleware.
+HTTP defines `HEAD` with the same semantics as `GET` except that the server sends no response content.
+The response headers describe the representation that a corresponding GET request would receive.
+For example, `content-length` on a HEAD response gives the size of the GET response body, not the zero bytes sent for HEAD.
 
-If middleware derives the length from the GET body, calculate the content length before `wrap-head` replaces that body with `nil`.
+Busker passes the request to the application as `:request-method :head`.
+Busker does not suppress or discard a response body based on the request method.
+A Busker application is responsible for returning a bodyless response to HEAD by omitting `:body`, setting it to `nil`, or applying a middlware such as `wrap-head` (see below).
+If a handler returns a non-empty body for HEAD, wtill Busker send that body!
+
+Ring provides the optional `ring.middleware.head/wrap-head` middleware for applications that want to reuse GET behavior.
+For a HEAD request, `wrap-head` calls the wrapped handler with `:request-method :get` and then replaces the returned body with `nil`.
+This lets an existing GET handler produce the status and headers for HEAD without duplicating handler logic.
+Though this may not be for you if you want to explictly handler HEAD requests.
+
+If middleware derives `content-length` from the GET body, it must calculate the length before `wrap-head` replaces the body with `nil`.
 Otherwise Busker sees an empty body and calculates a length of zero.
-For a HEAD response with an explicit length and no body, the client receives that length and an empty body.
+A HEAD handler can instead provide an explicit `content-length` equal to the number of bytes that the corresponding GET response would send.
 
 == Middleware
 
