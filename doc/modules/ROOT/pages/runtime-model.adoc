@@ -1,8 +1,17 @@
 = Runtime model
 
-Busker separates network timing from application timing.
-Dedicated network threads keep sockets and HTTP connections moving, while application handlers run on JVM threads that can wait without holding up the network.
-That boundary determines what happens under load, during reload, and at shutdown.
+Busker is a Clojure server built on libh2o, a native HTTP engine written in C.
+Those two sides have opposite ideas about time.
+The native side owns the sockets and has to answer the network the moment something happens, so it can never afford to wait.
+The Clojure side runs ordinary Ring handlers, and waiting is most of what they do: on request bodies, on databases, on other services.
+If a slow handler could stall a network thread, one unlucky request would delay every client that thread is serving.
+
+Busker's answer is to separate network timing from application timing.
+A small number of dedicated network threads each run an event loop, the loop that accepts connections, negotiates protocols, and moves bytes, and they never call into application code.
+Handlers and middleware run on virtual threads, which the JVM can park while they wait without holding anything the network needs.
+
+This page follows a single server through its life to show the boundary at work: startup, a request's path from socket to Ring handler, a client that cannot keep up, a reload while requests are in flight, and a clean stop.
+Along the way it introduces the terms the rest of the documentation uses, like _generation_, _event loop_, and _draining_.
 
 ////
 The diagram source is `doc/modules/ROOT/images/runtime-request-flow.mmd`.
@@ -14,13 +23,13 @@ image::runtime-request-flow.svg[One Busker request crossing from a network event
 == From startup to a Ring handler
 
 When xref:api/ol-busker.adoc#start-BANG-[`ol.busker/start!`] returns, Busker has created its first _runtime generation_, one running copy of the server built from a configuration snapshot.
-The snapshot is the submitted configuration with Busker's defaults applied.
+The snapshot is your config map with Busker's defaults applied.
 It owns the listeners, network workers, request executor, handlers, and TLS state for that snapshot.
 
-Startup validates the configuration, prepares TLS and certificate services, opens the listeners, and starts the network workers.
+Startup validates the configuration, prepares TLS and certificate services, opens the sockets, and starts the network workers.
 If validation, listener binding, TLS setup, or another startup stage fails, `start!` cleans up the partial generation and throws instead of returning a server handle.
 
-An _event loop_ runs on a dedicated platform thread, an ordinary OS-backed JVM thread, and gives network events to Busker's native HTTP engine.
+An _event loop_ runs on a dedicated platform thread, an ordinary OS-backed JVM thread, and gives network events to Busker's native HTTP engine libh2o.
 When a client connects, one of the generation's event loops notices it.
 The xref:configuration.adoc[`:n-workers` setting] controls how many event loops a generation has and defaults to one.
 
@@ -30,9 +39,8 @@ Only these network threads work with sockets.
 They do not run Ring handlers or middleware.
 
 Once the request headers are ready, the event loop creates a Ring request and submits the handler to the request executor.
-By default, that executor starts a new _virtual thread_, a lightweight JVM thread that the JVM can park without tying up a platform thread, for each request.
+That executor starts a new _virtual thread_, a lightweight JVM thread that the JVM can park without tying up a platform thread, for each request.
 The Ring handler and its synchronous middleware run there, and Busker writes the returned response from the same request task.
-A custom xref:configuration.adoc[`:executor`] replaces this default.
 
 Most web handlers spend much of their time waiting for request data, databases, or other services.
 The JVM can park a virtual thread during ordinary blocking Java I/O, leaving the event loops free to serve other connections.
@@ -41,7 +49,8 @@ This is why a synchronous Ring handler can read an upload or wait for a database
 CPU intensive work does not park.
 A handler that computes for a long time occupies one of the platform threads that runs virtual-thread work for the whole computation.
 Blocking inside native code or a `synchronized` block can keep that platform thread occupied too.
-Move sustained CPU work to an executor sized for that work, and avoid blocking native calls in handlers.
+Move this kind of sustained CPU work to an executor sized for that work, and avoid blocking native calls in handlers.
+
 See xref:ring-compatibility.adoc[Ring compatibility] for the supported handler and middleware model.
 
 == When the client cannot keep up
@@ -58,13 +67,24 @@ Busker also holds the response data currently in flight through the HTTP engine,
 The event loop removes a response chunk from the queue when it can hand that chunk to the HTTP engine.
 It waits for the engine to report progress on the current send before handing over more.
 Once the queue fills, the next application write or flush waits until the network side releases enough space.
-Busker never drops chunks to make room.
 
 For an ordinary Ring body such as an `InputStream` or lazy sequence, Busker writes the body on the request's virtual thread after the handler returns.
-If that write has to wait, the JVM parks the virtual thread rather than the event loop.
+If that write has to wait because of backpressure, the JVM parks the virtual thread rather than the event loop.
+
+For an ordinary Ring body such as an InputStream or a lazy sequence, the handler's job ends when it returns the response map.
+The request task is not finished, though.
+
+Busker streams the body on the request's virtual thread: read a chunk from the body, put it into the response's bounded queue, repeat until the body is exhausted.
+When the queue is full because the client is reading slowly, that put has to wait, and on the virtual thread it looks like an ordinary blocking write.
+
+But underneath the JVM parks the virtual thread and hands its platform thread other work to do, while the event loop keeps serving every other connection as if nothing happened.
+The request task stays alive until the last byte reaches libh2o.
 
 Long-lived responses use Busker's response emitter so application code can send chunks after the handler returns.
-An `emit!` or `flush` call can wait on whichever application thread made the call.
+Backpressure applies to the emitter the same way: when the response queue is full, an `emit!` or `flush` call waits on whichever thread made the call, and that wait costs whatever the thread costs.
+On a virtual thread the JVM parks it, and the wait is cheap.
+On a platform thread there is no parking; the thread is genuinely occupied for as long as the client is slow.
+Drive an emitter from a thread you can afford to block, ideally a virtual thread you start for the stream.
 If the client disconnects, the stream closes and later emitter operations fail as described by the xref:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter` API].
 
 Uploads are bounded in the other direction.
