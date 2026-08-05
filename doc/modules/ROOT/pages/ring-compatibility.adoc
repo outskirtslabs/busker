@@ -1,0 +1,176 @@
+= Ring compatibility
+
+This page is a reference for checking whether an existing Ring application will run on Busker.
+It lists the request fields Busker supplies, the response forms it accepts, and where Busker differs from other Ring servers.
+
+Busker accepts only synchronous (one-argument) Ring handlers; a handler receives one request map and returns one response map.
+
+Ring's asynchronous (three-argument) handler API is not supported, and neither is middleware that requires it.
+Busker requires JDK 25 and runs each handler on a virtual thread.
+Under this architecture threads are no longer a scarce resource that need to be pooled and managed, instead they are an abundant resource that can be created as needed to satisfy your application needs.
+
+When a handler has to wait, for a request body, a database, or another service, it blocks only its own virtual thread, which the JVM parks until the data arrives.
+
+Ring's async callback style was proposed to avoid exactly that kind of blocking, which makes sense when using platform threads (of which there are ususally only the number of CPUs*2 available).
+Busker takes the opinion that one concurrency model for application code is enough, and we chose virtual threads.
+
+Most handlers never need to think about threads at all.
+Waiting is what virtual threads are good at, and web handlers spend most of their time waiting doing IO
+
+However, there are some important exceptions that you need to know about.
+CPU-intensive work does not park a virtual thread, so a heavy handler holds a carrier thread for its whole run; offload that work to a platform-thread pool.
+A handler can also pin its virtual thread to a carrier when it blocks inside a `synchronized` block or a native call.
+
+== Request maps
+
+Busker supplies these Ring keys on every request.
+It sets `:body` or `:query-string` to `nil` when the request has no body or query string.
+
+[cols="1,2,3",options="header"]
+|===
+| Key | Value | Notes
+| `:server-port` | `Integer` | Port selected from the request authority.
+| `:server-name` | `String` | Host selected from the request authority.
+| `:remote-addr` | `String` | Client address, usually numeric for TCP and possibly nonnumeric or empty for Unix sockets or lookup failures.
+| `:uri` | `String` | Path without the query string.
+| `:query-string` | `String` or `nil` | Text after `?`, without the `?`.
+| `:scheme` | `Keyword` | `:http` or `:https`.
+| `:request-method` | `Keyword` | Lowercase method such as `:get`, `:head`, or `:post`.
+| `:protocol` | `String` | `"HTTP/1.1"`, `"HTTP/2.0"`, or `"HTTP/3.0"`.
+| `:headers` | `Map` of `String` to `String`, or `nil` | Header names are lowercase.
+| `:body` | `java.io.InputStream` or `nil` | A stream for the request body.
+|===
+
+Ring requires `:headers` to be a map.
+Busker currently sets it to `nil` when the libh2o request contains no ordinary headers.
+This empty-header case is a known Ring incompatibility.
+
+Busker does not supply Ring's deprecated `:character-encoding`, `:content-length`, or `:content-type` request keys.
+Read those values from `:headers`.
+It also does not supply `:ssl-client-cert`, as client certificate authentication is not implemented.
+
+Busker puts libh2o request header entries into a Clojure map without joining duplicate names.
+The last entry wins.
+Busker does not implement Ring's comma joining rule or its semicolon rule for `cookie`.
+
+=== Busker request keys
+
+[cols="1,2,3",options="header"]
+|===
+| Key | Value | Meaning
+| `:ol.busker/entrypoint` | `Keyword` | The inferred xref:configuration.adoc[entrypoint], a named listener group.
+| `:ol.busker/early-data?` | `Boolean` | True when TLS accepted the request as 0-RTT early data.
+| `:ol.busker.request/emitter` | xref:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter`] | The response stream for this request.
+|===
+
+Busker infers `:ol.busker/entrypoint` by server port, then by a sole entrypoint for the request scheme, and finally by the first configured entrypoint.
+This value can be wrong when listeners cannot be distinguished by port, such as multiple Unix sockets.
+
+The early-data flag is always present, including on ordinary requests where its value is false.
+Busker's xref:api/ol-busker-middleware.adoc#wrap-reject-early-data[`wrap-reject-early-data`] middleware can reject unsafe methods received through 0-RTT.
+
+== Request bodies
+
+A handler reads `:body` as an `InputStream`.
+Busker requests another libh2o body chunk as the handler consumes the current chunk, so a slow reader does not make Busker read the whole upload into JVM memory first.
+A read may wait for the client.
+By default, Busker runs each handler on a virtual thread, a lightweight JVM thread managed by its request executor.
+The configurable xref:configuration.adoc[`:executor`] can replace that default.
+Busker does not run the handler on the event loop thread that drives socket I/O.
+
+The stream is single-use and closes when the request ends or the client disconnects.
+Busker does not parse form, multipart, or other request data into parameters.
+Add the Ring middleware that your application needs.
+Set xref:configuration.adoc[`:max-request-entity-size`] to reject an upload above a chosen byte limit.
+
+== Response maps
+
+An ordinary handler response uses the usual Ring shape:
+
+[source,clojure]
+----
+{:status 200
+ :headers {"content-type" "text/plain; charset=utf-8"}
+ :body "ok"}
+----
+
+Ring defines status codes from 100 through 599.
+Busker's ordinary final response path requires an integer of at least 200 but does not enforce Ring's upper bound.
+Applications should keep ordinary final statuses in the Ring range of 200 through 599.
+Busker treats an omitted `:headers` map as empty and an omitted or `nil` `:body` as an empty body.
+If a handler returns `nil`, Busker sends a 404 response.
+
+Response header names must be lowercase strings.
+Busker does not normalize ordinary final response header names before passing them to libh2o, while HTTP/2 and HTTP/3 require lowercase field names.
+Title-case response headers from an application or middleware are therefore unsupported for HTTP/2 and HTTP/3.
+Busker sends string values unchanged and applies `str` to other values.
+It does not expand a Ring vector value into repeated fields; a vector becomes its printed Clojure form.
+Use one string per header, joining values yourself when the field's syntax permits commas.
+
+Busker does not infer a response `content-type`; set that header in the response or with middleware.
+
+=== Response body types
+
+When `org.ring-clojure/ring-core-protocols` is on the classpath, Busker writes any value that satisfies `ring.core.protocols/StreamableResponseBody`.
+Ring provides implementations for:
+
+* `byte[]`
+* `String`
+* `clojure.lang.ISeq`, including lazy sequences
+* `java.io.InputStream`
+* `java.io.File`
+* `nil`
+
+Applications may extend that Ring protocol for another body type.
+
+Busker does not require Ring.
+Without `ring-core-protocols`, its fallback writer accepts `byte[]`, `String`, `java.nio.ByteBuffer`, `java.io.InputStream`, `nil`, and sequential collections of fallback values.
+The fallback writer always encodes a `String` as UTF-8.
+The fallback writer writes a number as one byte using `OutputStream.write(int)`.
+The fallback writer does not accept `java.io.File` or custom Ring protocol implementations.
+
+== Content length
+
+Busker uses an explicit `content-length` response header when present.
+Header lookup is case-insensitive, and the value must be a decimal string or number.
+Busker removes that field from the ordinary header map and passes its numeric value to libh2o.
+
+Without an explicit value, Busker calculates the byte length of `String`, `byte[]`, `java.io.File`, and `nil` bodies.
+A string length uses the charset in its `content-type` header, or UTF-8 when that header has no charset.
+The fallback writer still encodes strings as UTF-8, so a non-UTF-8 `content-type` can produce the wrong calculated length when `ring-core-protocols` is absent.
+Use UTF-8 for fallback string responses.
+Applications can extend xref:api/ol-busker-protocols.adoc#SizableResponseBody[`SizableResponseBody`] for another fixed-size type.
+
+Busker leaves the length unknown for streams and sequences.
+libh2o then chooses the framing required by the negotiated HTTP version, such as chunked transfer encoding for HTTP/1.1.
+
+== HEAD requests
+
+Busker passes a HEAD request to the handler as `:request-method :head`.
+It does not turn HEAD into GET.
+A handler can return an empty body and an explicit `content-length`, or an application can use Ring's `wrap-head` middleware.
+
+If middleware derives the length from the GET body, calculate the content length before `wrap-head` replaces that body with `nil`.
+Otherwise Busker sees an empty body and calculates a length of zero.
+For a HEAD response with an explicit length and no body, the client receives that length and an empty body.
+
+== Middleware
+
+Synchronous Ring middleware works when it produces the request and response forms supported on this page.
+You can wrap the application handler yourself, or list wrappers in a dispatcher's `:middleware` vector.
+The xref:configuration.adoc[configuration reference] accepts a wrapper function, a qualified symbol, or `[wrapper options]`.
+Middleware responses must keep header names lowercase and use one string value per field.
+
+== Streaming responses
+
+An `ISeq` or `InputStream` Ring body streams through a bounded response queue.
+The queue limits pending response data, and the writer waits for space when a client falls behind.
+Busker does not collect an unknown-size body before the response starts.
+
+These bodies cover the case where the response data exists, or is being produced lazily, when the handler returns.
+Some responses do not work that way.
+A server-sent event stream or a long-polling endpoint stays open and sends chunks as application code produces them, possibly for hours.
+Ring's sync handlers/middlware has no API for that, so Busker adds one: the *response emitter*.
+The handler takes the emitter from the `:ol.busker.request/emitter` request value, returns it as the response `:body`, and then writes chunks to it over time.
+The generated xref:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter` protocol reference] documents writes, flushing, closure, informational responses, and error behavior.
+Emitter calls do not pass through Ring middleware.

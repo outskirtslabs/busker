@@ -28,16 +28,15 @@ Return the number of bytes that `body` will require when it is
 [#ResponseEmitter]
 == ResponseEmitter
 
-Asynchronous server→client stream over a single HTTP response.
- Suitable for Server-Sent Events (SSE), HTTP chunked streaming, and long-polling.
+Controls an asynchronous server-to-client stream for one HTTP response.
 
- A ResponseEmitter represents one open HTTP response that the server can write
- to over time until it is closed.
+ Use this protocol for Server-Sent Events (SSE), response streaming, and long polling.
+ The stream remains active until application code closes it or the request ends.
 
 _protocol_
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/protocols.clj#L12-L83[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/protocols.clj#L12-L77[source,window=_blank]
 
 
 [#open-QMARK-]
@@ -48,7 +47,9 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 (open? this)
 ----
 
-Returns true iff the stream is currently open.
+Returns false after the native response writer stops.
+
+   This value may remain true briefly after <<close,`close`>> requests stream completion.
 
 '''
 
@@ -60,11 +61,10 @@ Returns true iff the stream is currently open.
 (committed? this)
 ----
 
-Returns true iff a final (non-1xx) response has been sent.
-   This becomes true either when a non-1xx status/headers have been sent, or
-   when a body is written before any final response, causing the implementation
-   to implicitly commit a default final response (typically 200).
-   Returns false if no or if only informational (1xx) responses have been sent so far.
+Returns true after a final response is committed.
+
+   Writing body data before a final response commits status 200.
+   Accepted informational responses do not commit the final response.
 
 '''
 
@@ -77,41 +77,41 @@ Returns true iff a final (non-1xx) response has been sent.
 (emit! this data opts)
 ----
 
-Writes data to the client. Returns true if the data was successfully sent,
-   or false if the stream is closed. No ring middleware is applied.
+Writes `data` to the client.
 
-   `data` form:
-     - Ring-style map with any of: {:status} {:status :headers} or {:status :headers :body}
+   Returns true when the writer accepts the data.
+   Returns false when the native writer has stopped.
+   Returns nil when a response map is ignored because another final response is already committed.
+   The call may throw when `data` is invalid or the stream closes during a write.
+   Emitter writes do not pass through Ring middleware.
 
-       Informational responses (1xx): You may emit any number of 1xx by
-       calling `emit!` with {:status 1xx :headers h}. Each 1xx is sent
-       immediately without committing the final response. Including a :body
-       with a 1xx :status will throw an exception.
+   `data` may be a response map or body data.
+   A response map follows these rules:
 
-       Final responses (2xx–5xx): At most one non-1xx may be sent. Use
-       {:status 2xx–5xx :headers h}, optionally with or without :body.  Once a
-       non-1xx is sent, the response is committed.  If :body is provided, it
-       is sent immediately after the headers and the emitter remains open for
-       more data.
+   - Statuses 100 through 199 except 101 are informational and reject `:body`
+   - Status 101 is unsupported
+   - A status of at least 200 commits the only final response
+   - Header names must be lowercase strings, with one value per name
 
-     - Body-like value (any StreamableResponseBody: String, byte[], File,
-       InputStream, etc.).
+   Body data before a final response commits status 200.
+   With `:close-after? false`, chunks may have these types:
 
-       If no final response has been emitted yet, implicitly commits a default
-       final response with status 200 before writing the first bytes.
+   - `nil`, `byte[]`, `Number`, or `String`
+   - `java.nio.ByteBuffer` or `java.io.InputStream`
+   - Sequential collections of these types
 
-       If no content-length header is specified and `close-after?` is true,
-       then it may be calculated automatically.
+   With `:close-after? true`, Busker writes a complete response body.
+   When `ring-core-protocols` is present, the body must satisfy `ring.core.protocols/StreamableResponseBody`.
+   Without it, Busker uses its fallback chunk types.
+   Busker calculates `content-length` when the body size is known, but it does not infer `content-type`.
 
-       If no content-type header is specified, it may be detected
-       automatically by inspecting the initial 512 bytes of body data.
+   Options:
 
-   Options: `opts` is a map containing
-
-     - `:close-after`
-                      When `close-after?` is true, the stream is closed
-                      immediately after emiting this chunk / response.
-                      (default: false)
+[options="header"]
+|===
+| key | description
+| `:close-after?` | Close the stream after writing `data` (default `false`)
+|===
 
 '''
 
@@ -123,8 +123,9 @@ Writes data to the client. Returns true if the data was successfully sent,
 (flush this)
 ----
 
-Sends any buffered data to the client. Has no effect if the stream is
-   unbuffered or already closed.
+Flushes buffered response data to the client.
+
+   This call may throw when the stream is closing or closed.
 
 '''
 
@@ -136,8 +137,9 @@ Sends any buffered data to the client. Has no effect if the stream is
 (close this)
 ----
 
-Closes the stream. Idempotent: returns true if the stream was actually
-   closed, or false if it was already closed.
+Requests stream completion.
+
+   Returns false if the native writer has already stopped and true otherwise.
 
 '''
 
@@ -149,12 +151,6 @@ Closes the stream. Idempotent: returns true if the stream was actually
 (on-close this callback)
 ----
 
-Registers a callback `(fn [info])` invoked at most once when the stream
-   ends for any reason.
+Records `callback`, but callback delivery is not implemented.
 
-   The callback receives a map with at least `:reason`. Any
-   additional keys/values are implementation-defined.
-
-   Reason is one of:
-     :server-closed   closed by the server via `close`
-     :client-aborted   client disconnected before completion
+   The current emitter never invokes callbacks registered by this method.
