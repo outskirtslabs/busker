@@ -114,30 +114,10 @@ fn buildShimForTarget(b: *std.Build, target_config: TargetConfig, optimize: std.
     const is_debug = optimize == .Debug;
     const is_linux = target.result.os.tag == .linux;
     const is_macos = target.result.os.tag == .macos;
-    const needs_pic = true;
 
     const h2o_dep = b.dependency("h2o-zig", .{
         .target = target,
         .optimize = optimize,
-        .@"use-boringssl" = true,
-    });
-
-    const zlib = b.dependency("zlib", .{
-        .target = target,
-        .optimize = optimize,
-        .pie = needs_pic,
-    });
-
-    const zstd = b.dependency("zstd", .{
-        .target = target,
-        .optimize = optimize,
-        .pie = needs_pic,
-    });
-
-    const brotli = b.dependency("brotli_build", .{
-        .target = target,
-        .optimize = optimize,
-        .pie = needs_pic,
     });
 
     const artifact_name = std.fmt.allocPrint(
@@ -192,19 +172,7 @@ fn buildShimForTarget(b: *std.Build, target_config: TargetConfig, optimize: std.
     const h2o_lib = h2o_dep.artifact("h2o-evloop");
     shim.root_module.addIncludePath(h2o_lib.getEmittedIncludeTree());
 
-    if (b.lazyDependency("boringssl", .{
-        .target = target,
-        .optimize = optimize,
-        .pie = needs_pic,
-    })) |boringssl| {
-        const ssl_artifact = boringssl.artifact("ssl");
-        shim.root_module.addIncludePath(ssl_artifact.getEmittedIncludeTree());
-    }
-
     shim.root_module.linkLibrary(h2o_lib);
-    shim.root_module.linkLibrary(zlib.artifact("z"));
-    shim.root_module.linkLibrary(zstd.artifact("zstd"));
-    shim.root_module.linkLibrary(brotli.artifact("brotli_lib"));
 
     shim.root_module.link_libc = true;
     shim.root_module.linkSystemLibrary("pthread", .{});

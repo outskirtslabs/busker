@@ -1,8 +1,8 @@
 {
-  "h2o-0.0.1-7Fp7SnZgAAC8INuPAmyYRcTUE_0bOyqA3zzds3andgWK": {
+  "h2o-0.0.1-7Fp7So5XAADQ9Y8DaxKaUguQ-kVxs9_uTDGjgkFzV8ZA": {
     "name": "h2o-zig",
-    "url": "git+https://github.com/outskirtslabs/h2o-zig.git#d666fce9c7077f492194a05487a819825d397480",
-    "hash": "sha256-HSGBvjgtaiUMZZk75diW1Mk3Xf4KOYGLjbrWRpBiL+M="
+    "url": "git+https://github.com/outskirtslabs/h2o-zig.git#9cb90143f8515abf11898d5de3f8a5e9cc185527",
+    "hash": "sha256-Sor4f9jaXJrbeiClrI4rNH8N6tDEx4II9b9QvX9si+Q="
   },
   "N-V-__8AAGQJoAFAIqzfpmAk5gvm6O2U1WijZkzy4GF-uK9T": {
     "name": "h2o",
@@ -13,16 +13,6 @@
     "name": "wslay",
     "url": "https://github.com/tatsuhiro-t/wslay/archive/refs/tags/release-1.1.1.tar.gz",
     "hash": "sha256-Mo2s1qC7NXiFnXu2rZpr2R3Tux5+fj8dPbPSgoV8OHQ="
-  },
-  "openssl-3.6.0-YymhPkUpAQBvGMYJLeoNCns4esnK4ysEzokvFoypRQv1": {
-    "name": "openssl",
-    "url": "git+https://github.com/dzfrias/openssl-zig.git?ref=main#303ff47bad5d3b4d55d5a85a7ca5053abba3e307",
-    "hash": "sha256-fscZFpNhwGQVls1U8doXAKwqNjszHyE5tMRtcphiBJU="
-  },
-  "N-V-__8AAL0vEgg_3y6FkdXUTcg3WnimiykPSElV4Z2A3uhh": {
-    "name": "openssl",
-    "url": "https://github.com/openssl/openssl/releases/download/openssl-3.6.0/openssl-3.6.0.tar.gz",
-    "hash": "sha256-VQK1jr/sbTv67IJq1yZkfTB+J8L6oibRNBY6FYnNU2Y="
   },
   "zlib-1.3.1-ZZQ7lc8NAABUbHzDe_cSWboCqMbrLkVwvFkKnojgeiT2": {
     "name": "zlib",
