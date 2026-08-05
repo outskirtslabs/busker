@@ -17,15 +17,51 @@
   [example]
   (edn/read-string (slurp (example-path example "deps.edn"))))
 
+(defn- clojure-source-blocks
+  [path]
+  (map second
+       (re-seq #"(?s)\[source,clojure\]\n----\n(.*?)\n----"
+               (slurp path))))
+
 (def example-ports
   {"quickstart" {:http 18080 :https 18443}
    "early-hints" {:http 18081 :https 18444}
-   "sse" {:http 18082 :https 18445}})
+   "sse" {:http 18082 :https 18445}
+   "first-server" {:http 18083 :https 18446}})
+
+(def first-server-local-deps
+  {:aliases
+   {:local
+    {:override-deps
+     {'com.outskirtslabs/busker {:local/root "../../"}
+      'com.outskirtslabs.busker/linux-x86-64 {:local/root "../../shim/linux-x86-64"}}
+     :extra-deps
+     {'com.outskirtslabs.busker/linux-aarch64 {:local/root "../../shim/linux-aarch64"}
+      'com.outskirtslabs.busker/macos-x86-64 {:local/root "../../shim/macos-x86-64"}
+      'com.outskirtslabs.busker/macos-aarch64 {:local/root "../../shim/macos-aarch64"}}}}})
+
+(def first-server-main-form
+  '(let [config-var (requiring-resolve 'main/config)
+         start! (requiring-resolve 'main/start!)
+         stop! (requiring-resolve 'main/stop!)]
+     (alter-var-root config-var assoc-in
+                     [:entrypoints :http :bind]
+                     (System/getenv "BUSKER_HTTP_BIND"))
+     (start!)
+     (.addShutdownHook (Runtime/getRuntime) (Thread. #(stop!)))
+     @(promise)))
+
+(defn- example-command
+  [example]
+  (if (= "first-server" example)
+    ["clojure" "-Sdeps" (pr-str first-server-local-deps)
+     "-M:local:repl" "-e" (pr-str first-server-main-form)]
+    ["clojure" "-M:run"]))
 
 (defn- start-example!
   [example]
   (let [{:keys [http https]} (get example-ports example)]
-    (p/process ["clojure" "-M:run"]
+    (p/process (example-command example)
                {:dir (example-path example)
                 :extra-env {"BUSKER_HTTP_BIND" (format "127.0.0.1:%d" http)
                             "BUSKER_HTTPS_BIND" (format "127.0.0.1:%d" https)}
@@ -75,19 +111,31 @@
                      (str/trim (second (str/split line #":" 2))))))))
 
 (deftest examples-layout-test
-  (doseq [example ["quickstart" "early-hints" "sse"]]
+  (doseq [example ["quickstart" "early-hints" "sse" "first-server"]]
     (testing example
       (is (.exists (io/file (example-path example "main.clj"))))
       (is (.exists (io/file (example-path example "deps.edn"))))
       (is (.exists (io/file (example-path example "README.md"))))
       (let [deps-edn (read-deps-edn example)
             readme (slurp (example-path example "README.md"))]
-        (is (= {:local/root "../../"}
+        (is (= (if (= "first-server" example)
+                 {:git/url "https://github.com/outskirtslabs/busker"
+                  :git/sha "07fb6b7962a8d534bbb11006c78a4c5a99160d97"}
+                 {:local/root "../../"})
                (get-in deps-edn [:deps 'com.outskirtslabs/busker])))
         (is (= ["-m" "main"]
                (get-in deps-edn [:aliases :run :main-opts])))
         (is (str/includes? readme "clojure -M:run"))
         (is (str/includes? readme "curl"))))))
+
+(deftest first-server-doc-source-test
+  (let [[documented-deps _ documented-main]
+        (clojure-source-blocks
+         (io/file "doc" "modules" "ROOT" "pages" "tutorial-first-server.adoc"))]
+    (is (= {:deps (str/trim (slurp (example-path "first-server" "deps.edn")))
+            :main (str/trim (slurp (example-path "first-server" "main.clj")))}
+           {:deps (str/trim documented-deps)
+            :main (str/trim documented-main)}))))
 
 (deftest quickstart-example-test
   (let [{:keys [http https]} (example-ports "quickstart")
@@ -182,5 +230,32 @@
           (is (= "HTTP/1.1" (header-value (:out h1) "x-protocol")))
           (is (= "HTTP/2.0" (header-value (:out h2) "x-protocol")))
           (is (= "HTTP/3.0" (header-value (:out h3) "x-protocol")))))
+      (finally
+        (stop-example! proc)))))
+
+(deftest first-server-example-test
+  (let [{:keys [http]} (example-ports "first-server")
+        proc (start-example! "first-server")]
+    (try
+      (wait-for-server! proc http)
+      (testing "plain HTTP hello"
+        (let [hello (curl* :http :h1 http "/" :args ["-i"])]
+          (is (= {:exit 0
+                  :status? true
+                  :body? true}
+                 {:exit (:exit hello)
+                  :status? (str/includes? (:out hello) "HTTP/1.1 200")
+                  :body? (str/includes? (:out hello) "Hello from Busker over HTTP/1.1")}))))
+      (testing "built-in gzip compression"
+        (let [compressed (curl* :http :h1 http "/"
+                                :args ["--compressed"
+                                       "-H" "accept-encoding: gzip"
+                                       "-i"])]
+          (is (= {:exit 0
+                  :content-encoding "gzip"
+                  :body? true}
+                 {:exit (:exit compressed)
+                  :content-encoding (header-value (:out compressed) "content-encoding")
+                  :body? (str/includes? (:out compressed) "Hello from Busker over HTTP/1.1")}))))
       (finally
         (stop-example! proc)))))

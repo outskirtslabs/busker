@@ -19,7 +19,7 @@ Busker provides:
 
 == Platform requirements
 
-Busker requires JDK 21 or later (25+ is recommended).
+Busker requires JDK 25 or later.
 
 Pre-built jars containing native binaries are available for Linux and macOS on aarch64 and x86-64.
 

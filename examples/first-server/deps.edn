@@ -1,0 +1,7 @@
+{:paths ["."]
+ :deps {org.clojure/clojure {:mvn/version "1.12.5"}
+        com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
+                                  :git/sha "07fb6b7962a8d534bbb11006c78a4c5a99160d97"}
+        ;; Choose the package for your platform.
+        com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.4"}}
+ :aliases {:repl {:jvm-opts ["--enable-native-access=ALL-UNNAMED"]}}}

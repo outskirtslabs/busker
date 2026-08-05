@@ -27,3 +27,4 @@ zig-out
 .zig-cache-global/
 .scratch/
 .scratch-org/
+.worktrees/

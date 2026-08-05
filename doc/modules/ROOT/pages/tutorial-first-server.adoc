@@ -1,0 +1,198 @@
+= Your first Busker server
+
+This tutorial takes you from an empty directory to a running HTTP server that answers a `curl` request and shuts down cleanly.
+It uses plain HTTP with no certificates.
+You only need JDK 25 or later and the Clojure CLI.
+
+The finished project is in https://github.com/outskirtslabs/busker/tree/main/examples/first-server[`examples/first-server`].
+
+== Requirements
+
+* JDK 25 or later
+* The https://clojure.org/guides/install_clojure[Clojure CLI]
+
+== Set up the project
+
+Create a directory and a `deps.edn` in it.
+The file adds Busker and one native package that matches your operating system and CPU.
+Busker ships its native code as a separate jar for each supported platform.
+
+[source,clojure]
+----
+{:paths ["."]
+ :deps {org.clojure/clojure {:mvn/version "1.12.5"}
+        ;; Choose the package for your platform.
+        com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.4"}
+
+        com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
+                                  :git/sha "07fb6b7962a8d534bbb11006c78a4c5a99160d97"}}
+ :aliases {:repl {:jvm-opts ["--enable-native-access=ALL-UNNAMED"]}}}
+----
+
+The example uses the Linux x86-64 package.
+Replace that line with the matching entry below if you use another platform:
+
+[source,clojure]
+----
+com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.4"}
+com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.4"}
+com.outskirtslabs.busker/macos-x86-64 {:mvn/version "0.0.4"}
+com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.4"}
+----
+
+The `--enable-native-access=ALL-UNNAMED` JVM option lets Busker call its native code without a startup warning.
+
+Run this command now, and run it again every time you update the Busker commit hash:
+
+[source,bash]
+----
+clj -X:deps prep
+----
+
+== Write the handler and config
+
+A Busker handler is an ordinary synchronous Ring handler: it takes a request map and returns a response map.
+See xref:ring-compatibility.adoc[Ring compatibility] for the request keys Busker supplies and the response forms it accepts.
+
+Create `main.clj`.
+
+[source,clojure]
+----
+(ns main
+  (:require
+   [ol.busker :as busker]))
+
+(defn handler
+  [req]
+  {:status 200
+   :headers {"content-type" "text/plain; charset=utf-8"}
+   :body (str "Hello from Busker over " (:protocol req) ".\n"
+              "Busker can compress this response automatically when the client asks for it.\n")})
+
+(def config
+  {:entrypoints {:http {:bind "127.0.0.1:8080"
+                        :tls false}}
+   :dispatch [{:handler handler}]})
+
+(def server (atom nil))
+
+(defn start!
+  []
+  (reset! server (busker/start! config))
+  nil)
+
+(defn stop!
+  []
+  (busker/stop! @server)
+  (reset! server nil))
+----
+
+The config is a plain map.
+`:entrypoints` names one listener bound to `127.0.0.1:8080` with TLS turned off, so the server speaks plain HTTP.
+`:dispatch` is the request pipeline; here it holds one dispatcher whose `:handler` is your Ring handler.
+See xref:configuration.adoc[Configuration] for the full config shape.
+
+`start!` saves Busker's opaque server handle in the `server` atom.
+`stop!` uses that handle to stop the server and then clears the atom.
+
+== Run it
+
+Start a Clojure REPL from the project directory:
+
+[source,bash]
+----
+clojure -M:repl
+----
+
+Load the example and start the server:
+
+[source,clojure]
+----
+(require '[main :as app]
+         '[ol.busker :as busker])
+
+(app/start!)
+----
+
+The server now listens on `http://127.0.0.1:8080`.
+Keep this REPL open.
+
+== Verify the response
+
+In another terminal, send a request with `curl`:
+
+[source,bash]
+----
+curl -i http://127.0.0.1:8080/
+----
+
+You get a `200` response whose body names the protocol curl negotiated:
+
+[source,text]
+----
+HTTP/1.1 200 OK
+content-type: text/plain; charset=utf-8
+content-length: 110
+
+Hello from Busker over HTTP/1.1.
+Busker can compress this response automatically when the client asks for it.
+----
+
+== Try built-in compression
+
+Busker compresses eligible responses when the client sends an `accept-encoding` header.
+Compression is enabled by default, so the server config needs no changes.
+Ask for gzip and tell curl to decompress the body:
+
+[source,bash]
+----
+curl --compressed -H 'accept-encoding: gzip' -i http://127.0.0.1:8080/
+----
+
+The response headers show that Busker selected gzip.
+Curl prints the decompressed body because of `--compressed`.
+
+[source,text]
+----
+HTTP/1.1 200 OK
+content-type: text/plain; charset=utf-8
+content-encoding: gzip
+vary: accept-encoding
+
+Hello from Busker over HTTP/1.1.
+Busker can compress this response automatically when the client asks for it.
+----
+
+Busker can also negotiate Brotli and Zstandard when a client advertises `br` or `zstd`.
+
+== Inspect the server state
+
+`app/server` is an atom containing the handle returned by xref:api/ol-busker.adoc#start-BANG-[`ol.busker/start!`].
+Evaluate this in the same REPL:
+
+[source,clojure]
+----
+(select-keys (busker/state @app/server) [:phase])
+;; => {:phase :running}
+----
+
+xref:api/ol-busker.adoc#state[`ol.busker/state`] returns the current phase and the normalized config snapshot.
+Evaluate `(busker/state @app/server)` without `select-keys` to inspect the full map.
+
+== Stop the server
+
+Stop the server from the same REPL:
+
+[source,clojure]
+----
+(app/stop!)
+@app/server
+;; => nil
+----
+
+`app/stop!` calls xref:api/ol-busker.adoc#stop-BANG-[`ol.busker/stop!`], waits for the server to stop, and clears the atom.
+
+== Where to go next
+
+* xref:configuration.adoc[Configuration] covers TLS, HTTP/3, multiple entrypoints, and every other config key
+* xref:ring-compatibility.adoc[Ring compatibility] covers requests, responses, bodies, middleware, and streaming
