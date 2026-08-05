@@ -186,6 +186,15 @@
                                    "content-type"   "text/plain"}}
                         (req :get "/simple" {:headers {"Accept-Encoding" ["gzip"]}}))))))
 
+(deftest handlers-run-on-virtual-threads-test
+  (let [handler-thread (promise)]
+    (with-server [_server (test-server (fn [_]
+                                         (deliver handler-thread (Thread/currentThread))
+                                         {:status 200
+                                          :body "ok"}))]
+      (is (= 200 (:status (req :get "/"))))
+      (is (.isVirtual ^Thread (deref handler-thread 1000 nil))))))
+
 (deftest test-host-header-without-request-body
   (testing "domain Host headers do not make empty requests enter body streaming"
     (let [seen-body (promise)]

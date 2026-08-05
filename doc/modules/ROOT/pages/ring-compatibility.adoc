@@ -73,8 +73,7 @@ Busker's xref:api/ol-busker-middleware.adoc#wrap-reject-early-data[`wrap-reject-
 A handler reads `:body` as an `InputStream`.
 Busker requests another libh2o body chunk as the handler consumes the current chunk, so a slow reader does not make Busker read the whole upload into JVM memory first.
 A read may wait for the client.
-By default, Busker runs each handler on a virtual thread, a lightweight JVM thread managed by its request executor.
-The configurable xref:configuration.adoc[`:executor`] can replace that default.
+Busker runs each handler on a virtual thread, a lightweight JVM thread managed by the request executor for that runtime generation.
 Busker does not run the handler on the event loop thread that drives socket I/O.
 
 The stream is single-use and closes when the request ends or the client disconnects.

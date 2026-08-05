@@ -12,7 +12,6 @@
    [java.lang Thread]
    [java.util.concurrent
     ExecutorService
-    Executors
     LinkedBlockingQueue
     TimeUnit]
    [org.eclipse.jetty.util.component LifeCycle]
@@ -71,17 +70,6 @@
 #_(defn- new-thread-factory [prefix]
     (.factory (.name (Thread/ofPlatform) prefix 0)))
 
-(defn- new-h2o-worker [_opts]
-  ;; ol.busker always executes Ring handlers on virtual threads; the native workers
-  ;; remain fixed platform threads that drive libh2o.
-  (let [executor (Executors/newVirtualThreadPerTaskExecutor)]
-    {:pool executor
-     :type :virtual
-     :allow-virtual? true
-     :queue-size nil
-     :n-min-threads nil
-     :n-max-threads nil}))
-
 ;;;; Server implementations ----------------------------------------------------
 
 (deftype ServerH2O [state_]
@@ -96,13 +84,15 @@
   IServer
   (server-start [_ handler port worker-opts]
     (when (nil? @state_)
-      (let [{:keys [pool] :as worker} (new-h2o-worker worker-opts)
-            #_#_n-workers (max 1 (or (:n-workers worker-opts)
-                                     (:n-threads worker-opts)
-                                     u/num-cores))
+      (let [worker {:type :virtual
+                    :allow-virtual? true
+                    :queue-size nil
+                    :n-min-threads nil
+                    :n-max-threads nil}
             n-workers (min (or (:n-workers worker-opts)
                                (:n-threads worker-opts)
-                               u/num-cores) u/num-cores)
+                               u/num-cores)
+                           u/num-cores)
             _ (prof/start)
             server (busker/start!
                     {:entrypoints {:bench {:bind (str "127.0.0.1:" port)
@@ -110,20 +100,17 @@
                                            :tls false}}
                      :dispatch [{:handler handler}]
                      :n-workers n-workers
-                     :server-name "ol.busker/bench"
-                     :executor pool})]
+                     :server-name "ol.busker/bench"})]
         (reset! state_
                 {:server server
-                 :pool pool
-                 :worker (dissoc worker :pool)
+                 :worker worker
                  :port port})
         true)))
 
-  (server-stop [_ timeout-msecs]
-    (when-let [{:keys [server pool]} @state_]
+  (server-stop [_ _timeout-msecs]
+    (when-let [{:keys [server]} @state_]
       (prof/stop)
       (busker/stop! server)
-      (shutdown-pool pool timeout-msecs)
       (reset! state_ nil)
       true)))
 

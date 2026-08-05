@@ -7,9 +7,7 @@
    [ol.busker.buffer-pool :as bp]
    [ol.clave.issuers :as issuers]
    [ol.clave.specs :as clave]
-   [ol.clave.storage :as storage])
-  (:import
-   [java.util.concurrent ExecutorService]))
+   [ol.clave.storage :as storage]))
 
 (defn- non-blank-string?
   [v]
@@ -425,12 +423,6 @@
    :default 1})
 (s/def ::n-workers pos-int?)
 
-(def executor
-  {:key ::executor
-   :doc "ExecutorService for request execution."
-   :default nil})
-(s/def ::executor #(instance? ExecutorService %))
-
 (def max-connections
   {:key ::max-connections
    :doc "Maximum concurrent connections across all workers."
@@ -620,7 +612,6 @@
                    ::dispatch]
           :opt-un [::tls
                    ::n-workers
-                   ::executor
                    ::max-connections
                    ::output-buffer-size
                    ::server-name
@@ -705,7 +696,6 @@
    clave-config
    managed-plan
    n-workers
-   executor
    max-connections
    output-buffer-size
    server-name

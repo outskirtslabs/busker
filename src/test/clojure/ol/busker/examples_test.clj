@@ -156,25 +156,22 @@
                         (assoc-in [:dispatch 0 :handler]
                                   (fn [_] {:status 200 :body "ok"})))
         loaded (config/load! user-config)]
-    (try
-      (is (= {:manage ["app.example.com"]
-              :entrypoints
-              {:http {:bind ":80"
-                      :tls false
-                      :http1? true
-                      :http2? true
-                      :http3? false}
-               :https {:bind ":443"
-                       :tls {:tls-compatibility-mode :modern}
-                       :http1? true
-                       :http2? true
-                       :http3? true}}}
-             {:manage (get-in loaded [:tls :certificates :manage])
-              :entrypoints
-              (update-vals (:entrypoints loaded)
-                           #(select-keys % [:bind :tls :http1? :http2? :http3?]))}))
-      (finally
-        (.close ^java.util.concurrent.ExecutorService (:executor loaded))))))
+    (is (= {:manage ["app.example.com"]
+            :entrypoints
+            {:http {:bind ":80"
+                    :tls false
+                    :http1? true
+                    :http2? true
+                    :http3? false}
+             :https {:bind ":443"
+                     :tls {:tls-compatibility-mode :modern}
+                     :http1? true
+                     :http2? true
+                     :http3? true}}}
+           {:manage (get-in loaded [:tls :certificates :manage])
+            :entrypoints
+            (update-vals (:entrypoints loaded)
+                         #(select-keys % [:bind :tls :http1? :http2? :http3?]))}))))
 
 (deftest quickstart-example-test
   (let [{:keys [http https]} (example-ports "quickstart")

@@ -14,7 +14,7 @@
    [ol.clave.acme.solver.http :as http-solver]
    [ol.clave.automation :as automation])
   (:import
-   [java.util.concurrent LinkedBlockingQueue]))
+   [java.util.concurrent ExecutorService LinkedBlockingQueue]))
 
 (defn- response-config
   [port handler]
@@ -209,9 +209,19 @@
                                                    {:status 200
                                                     :body "new-generation"}))
                                 {:force? true})))
-        (let [new-request (util/curl :http nil port "/" :max-time 5)]
-          (is (= 0 (:exit new-request)))
-          (is (= "new-generation" (:out new-request))))
+        (let [state @(:busker/state server)
+              active-executor (::generation/executor (:instance (:active state)))
+              draining-executor (::generation/executor
+                                 (:instance (first (:draining state))))]
+          (is (= {:distinct? true
+                  :draining-shutdown? true
+                  :active-shutdown? false}
+                 {:distinct? (not (identical? active-executor draining-executor))
+                  :draining-shutdown? (.isShutdown ^ExecutorService draining-executor)
+                  :active-shutdown? (.isShutdown ^ExecutorService active-executor)}))
+          (let [new-request (util/curl :http nil port "/" :max-time 5)]
+            (is (= 0 (:exit new-request)))
+            (is (= "new-generation" (:out new-request)))))
         (deliver old-release true)
         (let [result (deref old-request 10000 nil)]
           (is (some? result))
@@ -762,6 +772,45 @@
         (is (= "tls-old" (:out result))))
       (finally
         (runtime/stop! server)))))
+
+(deftest config-validation-precedes-request-executor-creation-test
+  (let [port (util/free-port)
+        executor-created? (atom false)]
+    (with-redefs-fn {#'ol.busker.generation/new-request-executor
+                     (fn []
+                       (reset! executor-created? true)
+                       (throw (ex-info "request executor should not be created" {})))}
+      (fn []
+        (try
+          (runtime/start!
+           (assoc (response-config port (constantly {:status 200}))
+                  :n-workers 0))
+          (is false)
+          (catch clojure.lang.ExceptionInfo e
+            (is (= [::config/config-spec-invalid]
+                   (mapv :error (:errors (ex-data e)))))))
+        (is (false? @executor-created?))))))
+
+(deftest failed-startup-shuts-down-request-executor-test
+  (let [port (util/free-port)
+        request-executor_ (atom nil)
+        new-request-executor @#'ol.busker.generation/new-request-executor]
+    (with-redefs-fn {#'ol.busker.native/create-ssl-ctx
+                     (fn [& _]
+                       mem/null)
+                     #'ol.busker.generation/new-request-executor
+                     (fn []
+                       (let [executor (new-request-executor)]
+                         (reset! request-executor_ executor)
+                         executor))}
+      (fn []
+        (try
+          (runtime/start!
+           (tls-response-config port (constantly {:status 200})))
+          (is false)
+          (catch clojure.lang.ExceptionInfo e
+            (is (= :tls-startup (:stage (ex-data e))))))
+        (is (.isShutdown ^ExecutorService @request-executor_))))))
 
 (deftest reload-activates-while-managed-certificates-converge-test
   (let [port (util/free-port)

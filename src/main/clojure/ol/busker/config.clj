@@ -7,8 +7,7 @@
    [ol.busker.specs :as specs]
    [ol.clave.storage :as storage])
   (:import
-   [java.io File]
-   [java.util.concurrent Executors]))
+   [java.io File]))
 
 (defn port-string?
   [s]
@@ -353,11 +352,9 @@
 (defn apply-config-defaults
   [user-config]
   (let [config (base-config-with-defaults user-config)]
-    (-> config
-        (cond-> (not (contains? user-config :executor))
-          (assoc :executor (Executors/newVirtualThreadPerTaskExecutor)))
-        (cond-> (not (contains? user-config :buffer-pool))
-          (assoc :buffer-pool (bp/make-bytebuffer-pool {}))))))
+    (cond-> config
+      (not (contains? user-config :buffer-pool))
+      (assoc :buffer-pool (bp/make-bytebuffer-pool {})))))
 
 (def ^:private callable-placeholder
   ::callable)
@@ -575,12 +572,12 @@
   "Return the normalized pure-data config snapshot for `user-config`.
 
   The snapshot applies Busker defaults, expands listeners, and strips
-  runtime-owned objects such as executors, buffer pools, storage instances,
-  and direct callable values."
+  runtime-owned objects such as buffer pools, storage instances, and direct
+  callable values."
   [user-config]
   (let [config (-> (base-config-with-defaults user-config)
                    config->listeners
-                   (dissoc :executor :buffer-pool))]
+                   (dissoc :buffer-pool))]
     (walk/postwalk
      (fn [value]
        (cond

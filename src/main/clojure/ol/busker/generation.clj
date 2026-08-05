@@ -22,11 +22,14 @@
    [java.io File]
    [java.security.cert CertificateFactory X509Certificate]
    [java.util Base64]
-   [java.util.concurrent ExecutorService TimeUnit]
+   [java.util.concurrent ExecutorService Executors TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]
    [ol.busker.response H2OResponseEmitter]))
 
 (set! *warn-on-reflection* true)
+
+(defn- new-request-executor ^ExecutorService []
+  (Executors/newVirtualThreadPerTaskExecutor))
 
 (defn- wrap-stage-error
   [message stage data t]
@@ -159,7 +162,7 @@
      :compress_args_zstd_quality (num-val :compress-zstd-level)}))
 
 (defn- create-server-config
-  [arena ring-handler config]
+  [arena executor ring-handler config]
   (let [config-ptr (mem/alloc (h2o/globalconf-size) arena)
         flat-config-ptr (mem/serialize (config->flat-globalconf-t config)
                                        ::h2o/clj-h2o-flat-globalconf-t
@@ -171,7 +174,7 @@
                        (h2o/config-register-host config-ptr
                                                  (h2o/str->iovec "default" arena2)
                                                  65535))
-        on-request-cb (partial request/on-request (:executor config)
+        on-request-cb (partial request/on-request executor
                                config
                                ring-handler)
         on-request-cleanup-cb (partial request/on-request-cleanup ring-handler)
@@ -678,7 +681,7 @@
 (defn- prepare-generation-state
   [compiled-config cert-runtime listener-pool listener-claims generation-id
    memory-ticket-service]
-  (let [{:keys [n-workers max-connections executor]} compiled-config
+  (let [{:keys [n-workers max-connections]} compiled-config
         ring-handler (-> compiled-config
                          config/dispatch-handler
                          (clave-adapter/wrap-handler cert-runtime))]
@@ -697,14 +700,14 @@
      ::stop-accepting-remaining_ (AtomicLong. n-workers)
      ::stopped-accepting_ (promise)
      ::n-workers n-workers
-     ::max-connections max-connections
-     ::executor executor}))
+     ::max-connections max-connections}))
 
 (defn- init-core-state
-  [{::keys [ring-handler config n-workers max-connections active-connection-count_] :as state}]
+  [{::keys [ring-handler config executor n-workers max-connections active-connection-count_]
+    :as state}]
   (let [arena (mem/shared-arena)
         _ (h2o/conn-limit-set-max max-connections)
-        server-config (create-server-config arena ring-handler config)
+        server-config (create-server-config arena executor ring-handler config)
         config-ptr (::config-ptr server-config)
         loops (h2o/create-loops n-workers)
         contexts (h2o/create-contexts arena loops config-ptr)
@@ -967,29 +970,31 @@
                                        listener-pool (listen/open-pool)}}]
    (let [compiled-config (config/config->listeners compiled-config)
          listeners (:listeners compiled-config)
-         listener-claims (acquire-listener-claims! listener-pool listeners)]
+         listener-claims (acquire-listener-claims! listener-pool listeners)
+         cleanup-state_ (volatile! nil)]
      (try
-       (cond-> (-> (prepare-generation-state compiled-config
+       (let [state (prepare-generation-state compiled-config
                                              cert-runtime
                                              listener-pool
                                              listener-claims
                                              generation-id
                                              memory-ticket-service)
-                   init-tls-lookup-state
-                   init-core-state
-                   init-listener-state
-                   init-tls-http3-state
-                   init-worker-state
-                   finalize-generation-state)
-         activate-http3-transports? activate-http3-transports!)
+             _ (vreset! cleanup-state_ state)
+             state (assoc state ::executor (new-request-executor))
+             _ (vreset! cleanup-state_ state)]
+         (cond-> (-> state
+                     init-tls-lookup-state
+                     init-core-state
+                     init-listener-state
+                     init-tls-http3-state
+                     init-worker-state
+                     finalize-generation-state)
+           activate-http3-transports? activate-http3-transports!))
        (catch Throwable t
          (try
-           (stop! (prepare-generation-state compiled-config
-                                            cert-runtime
-                                            listener-pool
-                                            listener-claims
-                                            generation-id
-                                            memory-ticket-service))
+           (if-let [state @cleanup-state_]
+             (stop! state)
+             (release-listener-claims! listener-claims))
            (catch Throwable _
              (release-listener-claims! listener-claims)))
          (throw t))))))

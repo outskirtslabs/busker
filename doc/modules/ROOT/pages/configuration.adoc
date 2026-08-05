@@ -74,7 +74,6 @@ either use their documented default or remain unset.
 | `:dispatch` | Ordered vector of dispatcher maps (see below).
 | `:tls` | Global TLS, certificate, ACME, and session ticket config (see below).
 | `:n-workers` | Positive integer event loop worker count, default `1`.
-| `:executor` | `ExecutorService` used for request handlers.
 | `:buffer-pool` | Response buffering pool implementing xref:api/ol-busker-buffer-pool.adoc#BufferPool[`BufferPool`].
 | `:max-connections` | Positive integer connection cap, default `1024`.
 | `:output-buffer-size` | Response aggregation bytes, default `32768`; `0` disables buffering.
