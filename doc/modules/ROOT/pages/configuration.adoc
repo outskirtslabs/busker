@@ -15,11 +15,10 @@ A running server is backed by a runtime _generation_. A generation is the set
 of runtime resources built from one snapshot. For example, it includes open
 sockets, worker threads, native protocol state, handlers, and TLS automation state.
 
-On reload, Busker builds a new generation while the current one keeps serving
-traffic. If the new generation starts successfully, new connections and
-requests move to it. The old generation stops accepting new work and drains
-the connections and requests it already owns. If the new generation fails to
-start, the old generation keeps serving traffic.
+On reload, Busker builds a new generation while the current one keeps serving traffic.
+If the new generation starts successfully, new connections and requests move to it.
+The old generation stops accepting new work and drains the connections and requests it is already handling.
+If the new generation fails to start, the old generation keeps serving traffic.
 
 A minimal HTTP config with HTTP/1.1, HTTP/2, and automatic gzip/zstd/brotli compression is:
 
@@ -334,8 +333,7 @@ does not provide `:dns-01` or `:tls-alpn-01` by default; add those to
 The `:solvers` map contains additional Clave solver entries keyed by challenge
 type:
 
-- `:http-01` - HTTP challenge solver for public HTTP validation. Busker owns
-  this key and always replaces it with its integrated solver.
+- `:http-01` - HTTP challenge solver for public HTTP validation. Busker always replaces the value of this key with its integrated solver.
 - `:dns-01` - DNS challenge solver for DNS-provider validation. This is
   required for wildcard names such as `"*.example.com"`.
 - `:tls-alpn-01` - TLS ALPN challenge solver for port 443 validation.

@@ -2,16 +2,23 @@
 
 Busker is a Clojure server built on libh2o, a native HTTP engine written in C.
 Those two sides have opposite ideas about time.
-The native side owns the sockets and must react promptly to network events, so it cannot block on application work.
+The native side is responsible for the sockets and must react promptly to network events, so it cannot block on application work.
 The Clojure side runs ordinary Ring handlers, and waiting is most of what they do: on request bodies, on databases, on other services.
 If a slow handler could stall a network thread, one unlucky request would delay every client that thread is serving.
 
-Busker's answer is to separate network timing from application timing.
-A small number of dedicated network threads each run an _event loop_, which accepts connections, negotiates protocols, and moves bytes.
+Busker calls each dedicated network thread a _worker_.
+Each worker has one _event loop_ and watches its sockets for activity.
+The `:n-workers` setting fixes the number of network workers, and therefore the number of network threads.
+This setting does not limit application threads because Busker starts one virtual thread for each request.
+
+The `:max-connections` setting limits the number of open connections shared by all workers.
+When that limit is reached, the workers stop accepting new connections until an existing connection closes.
+
+When one of a worker's sockets is ready, its event loop might accept a connection, negotiate TLS and HTTP, read part of a request, or write part of a response.
+The worker then moves to the next ready socket instead of waiting for one client to finish.
+
 Those threads hand requests to application code and return immediately to network work.
 Handlers and middleware run on virtual threads, which the JVM can park while they wait without holding anything the network needs.
-
-This page follows a single server through its life to show the boundary at work: startup, a request's path from socket to Ring handler, a client that cannot keep up, a reload while requests are in flight, and a clean stop.
 
 ////
 The diagram source is `doc/modules/ROOT/images/runtime-request-flow.mmd`.
@@ -24,7 +31,7 @@ image::runtime-request-flow.svg[One Busker request crossing from a network event
 
 When xref:api/ol-busker.adoc#start-BANG-[`ol.busker/start!`] returns, Busker has created its first _runtime generation_, one running copy of the server built from a configuration snapshot.
 The snapshot is your config map with Busker's defaults applied.
-It owns the listeners, network workers, request executor, handlers, and TLS state for that snapshot.
+For as long as that generation runs, Busker keeps the same listeners, network workers, request executor, handlers, and TLS setup.
 
 Startup validates the configuration, prepares TLS and certificate services, opens the sockets, and starts the network workers.
 If validation, listener binding, TLS setup, or another startup stage fails, `start!` cleans up the partial generation and throws instead of returning a server handle.
@@ -101,7 +108,7 @@ A configuration that validates but cannot bind a listener or initialize TLS ther
 
 A successful reload starts the candidate and makes it active before asking the old generation to stop accepting work.
 New requests use the new handlers and configuration.
-Requests and response streams that the old generation already owns keep their old handler and configuration until they finish.
+Requests and response streams already running on the old generation keep using its handler and configuration until they finish.
 A request never jumps to the new generation halfway through.
 
 The old generation then drains in the background.
@@ -110,7 +117,7 @@ Several generations may be draining after several quick reloads, each with the r
 
 == Draining and stopping
 
-_Draining_ means that a generation accepts no new work while requests, response streams, and connections it already owns finish.
+_Draining_ means that a generation accepts no new work while its current requests and response streams finish and its open connections close.
 Reload uses draining to retire one generation without delaying the new one.
 Shutdown uses the same path but waits for it to complete.
 

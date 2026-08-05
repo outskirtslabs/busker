@@ -277,7 +277,7 @@ systemctl show my-app.service \
 ----
 
 A low-port permission error means the service did not receive `CAP_NET_BIND_SERVICE`.
-An `Address already in use` error means another process already owns one of the TCP or UDP ports.
+An `Address already in use` error means another process is already using one of the TCP or UDP ports.
 A storage permission error means the service account or container user cannot write to the configured state directory.
 
 == Check failed certificate issuance

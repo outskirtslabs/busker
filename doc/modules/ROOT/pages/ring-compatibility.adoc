@@ -19,7 +19,7 @@ Waiting is what virtual threads are good at, and web handlers spend most of thei
 
 Two exceptions matter.
 CPU-intensive work does not park a virtual thread, so a heavy handler holds a carrier thread for its whole run; offload that work to a platform-thread pool.
-A virtual thread remains pinned to its carrier platform thread while it executes native code.
+And a virtual thread remains pinned to its carrier platform thread while it executes native code.
 
 == Request maps
 
