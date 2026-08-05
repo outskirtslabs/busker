@@ -15,11 +15,11 @@ Ring's async callback style was proposed to avoid exactly that kind of blocking,
 Busker takes the opinion that one concurrency model for application code is enough, and we chose virtual threads.
 
 Most handlers never need to think about threads at all.
-Waiting is what virtual threads are good at, and web handlers spend most of their time waiting doing IO
+Waiting is what virtual threads are good at, and web handlers spend most of their time waiting for I/O.
 
-However, there are some important exceptions that you need to know about.
+Two exceptions matter.
 CPU-intensive work does not park a virtual thread, so a heavy handler holds a carrier thread for its whole run; offload that work to a platform-thread pool.
-A handler can also pin its virtual thread to a carrier when it blocks inside a `synchronized` block or a native call.
+A virtual thread remains pinned to its carrier platform thread while it executes native code.
 
 == Request maps
 

@@ -1,7 +1,7 @@
 sequenceDiagram
   actor Client
   participant Network as Network event loop<br/>(dedicated platform thread)
-  participant Task as Request task<br/>(virtual thread by default)
+  participant Task as Request task<br/>(virtual thread)
   participant Queue as Bounded response queue
 
   Client->>Network: Request bytes
