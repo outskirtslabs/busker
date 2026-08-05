@@ -1,9 +1,10 @@
 #kaocha/v1
- {:kaocha/reporter
-  [kaocha.report/documentation]
-  :bindings {kaocha.stacktrace/*stacktrace-stop-list* ["kaocha.runner"
+ {:bindings {kaocha.stacktrace/*stacktrace-stop-list* ["kaocha.runner"
                                                        "kaocha.plugin.capture_output"
-                                                       "kaocha.testable"]}
+                                                       "kaocha.testable"]
+             kaocha.stacktrace/*stacktrace-filters*   ["java.lang." "java.util.concurrent."
+                                                       "clojure.test$" "clojure.lang." "clojure.core" "clojure.main"
+                                                       "orchestra." "kaocha."]}
 
   :plugins [:kaocha.plugin.alpha/info
             :kaocha.plugin/randomize
