@@ -117,15 +117,21 @@
       (is (.exists (io/file (example-path example "deps.edn"))))
       (is (.exists (io/file (example-path example "README.md"))))
       (let [deps-edn (read-deps-edn example)
-            readme (slurp (example-path example "README.md"))]
-        (is (= (if (= "first-server" example)
+            readme (slurp (example-path example "README.md"))
+            repl-example? (= "first-server" example)]
+        (is (= (if repl-example?
                  {:git/url "https://github.com/outskirtslabs/busker"
                   :git/sha "07fb6b7962a8d534bbb11006c78a4c5a99160d97"}
                  {:local/root "../../"})
                (get-in deps-edn [:deps 'com.outskirtslabs/busker])))
-        (is (= ["-m" "main"]
-               (get-in deps-edn [:aliases :run :main-opts])))
-        (is (str/includes? readme "clojure -M:run"))
+        (if repl-example?
+          (do
+            (is (nil? (get-in deps-edn [:aliases :run])))
+            (is (str/includes? readme "clojure -M:repl")))
+          (do
+            (is (= ["-m" "main"]
+                   (get-in deps-edn [:aliases :run :main-opts])))
+            (is (str/includes? readme "clojure -M:run"))))
         (is (str/includes? readme "curl"))))))
 
 (deftest first-server-doc-source-test
