@@ -315,11 +315,23 @@
     "commons-codec/commons-codec/1.11/commons-codec-1.11.pom": {
       "sha256": "c1e7140d1dea8fdf3528bc1e3c5444ac0b541297311f45f9806c213ec3ee9a10"
     },
+    "commons-codec/commons-codec/1.15/commons-codec-1.15.jar": {
+      "sha256": "b3e9f6d63a790109bf0d056611fbed1cf69055826defeb9894a71369d246ed63"
+    },
+    "commons-codec/commons-codec/1.15/commons-codec-1.15.pom": {
+      "sha256": "c86ee198a35a3715487860f419cbf642e7e4d9e8714777947dbe6a4e3a20ab58"
+    },
     "commons-codec/commons-codec/1.21.0/commons-codec-1.21.0.jar": {
       "sha256": "4da851cb6abfb98bfe9eb77c5e5fc47f5414fa28b94e21b7fd9a646705dc167f"
     },
     "commons-codec/commons-codec/1.21.0/commons-codec-1.21.0.pom": {
       "sha256": "b230416ba6f5bf9df8fcb6e7f4a6c26b8fb0fe85ce371d13d5846ed3768309b7"
+    },
+    "commons-io/commons-io/2.20.0/commons-io-2.20.0.jar": {
+      "sha256": "df90bba0fe3cb586b7f164e78fe8f8f4da3f2dd5c27fa645f888100ccc25dd72"
+    },
+    "commons-io/commons-io/2.20.0/commons-io-2.20.0.pom": {
+      "sha256": "bdbdf81072c190ee9a8b181a5c58f5bd917a750fb13a256debbf53f5dbd33a2a"
     },
     "commons-logging/commons-logging/1.3.6/commons-logging-1.3.6.jar": {
       "sha256": "f8ead8943401081dea0aa824b5b1ba40a0e4ed297a572a0f02258150a0b62357"
@@ -332,6 +344,18 @@
     },
     "criterium/criterium/0.4.6/criterium-0.4.6.pom": {
       "sha256": "2dbf58b2fea0c93d70d36452e917feb281543699cf1b3b3e22b1a5e9ca689749"
+    },
+    "crypto-equality/crypto-equality/1.0.1/crypto-equality-1.0.1.jar": {
+      "sha256": "ee15cc0b76dcf73f8fc86d02e9effed7160a8a6b40b2f0e9de72e3dd25ed4bdf"
+    },
+    "crypto-equality/crypto-equality/1.0.1/crypto-equality-1.0.1.pom": {
+      "sha256": "632e5702d5d356193d18a50de0a261a19c14aad608734e464e85a3600e74f44b"
+    },
+    "crypto-random/crypto-random/1.2.1/crypto-random-1.2.1.jar": {
+      "sha256": "5c128846d7b66d53c5e9726773b872f7e02844ff651a996a5e3452a1523ae52c"
+    },
+    "crypto-random/crypto-random/1.2.1/crypto-random-1.2.1.pom": {
+      "sha256": "d8e80b034285325e905f54649a1598b687b9a4a99a3a4f4b94eed3597cb21048"
     },
     "dev/weavejester/hashp/0.5.1/hashp-0.5.1.jar": {
       "sha256": "ecf7ed76d9f1bdfb2acfdae73a1f6775e8f17dd2a7d4381e80e053aefbdd9e09"
@@ -537,6 +561,9 @@
     "org/apache/apache/26/apache-26.pom": {
       "sha256": "765b9c71832d2faad9611869c1f07263e3dfd000ebefdcd434d1f14cb2be3ea1"
     },
+    "org/apache/apache/34/apache-34.pom": {
+      "sha256": "3671ae9d4d062ae3bb985731c76088bb2f6f7d7254e2d304ee9f690b97651328"
+    },
     "org/apache/apache/35/apache-35.pom": {
       "sha256": "ea297dcd114136e8b8e8b630230d52a76c2fc69f6c5db25d672b1857000728b8"
     },
@@ -546,6 +573,15 @@
     "org/apache/apache/38/apache-38.pom": {
       "sha256": "9b0a5f28ddfb4b7500a37022bee8245efdd044fb9a3d79fb827550923eccc4b5"
     },
+    "org/apache/commons/commons-fileupload2-core/2.0.0-M4/commons-fileupload2-core-2.0.0-M4.jar": {
+      "sha256": "d285cd8cdde3d9466208b37c7750454b0b280ea773b19b050ae1e2ddb09e6991"
+    },
+    "org/apache/commons/commons-fileupload2-core/2.0.0-M4/commons-fileupload2-core-2.0.0-M4.pom": {
+      "sha256": "9d5af8825271f2295105fb0da8106308ed2809ebecf5030879c1b67485ea8dcf"
+    },
+    "org/apache/commons/commons-fileupload2/2.0.0-M4/commons-fileupload2-2.0.0-M4.pom": {
+      "sha256": "d4ebd5075295bef5eb50bec09d0ea237c5570db65de5d7d57c6328241c4da186"
+    },
     "org/apache/commons/commons-lang3/3.18.0/commons-lang3-3.18.0.jar": {
       "sha256": "4eeeae8d20c078abb64b015ec158add383ac581571cddc45c68f0c9ae0230720"
     },
@@ -554,6 +590,12 @@
     },
     "org/apache/commons/commons-parent/42/commons-parent-42.pom": {
       "sha256": "cd313494c670b483ec256972af1698b330e598f807002354eb765479f604b09c"
+    },
+    "org/apache/commons/commons-parent/52/commons-parent-52.pom": {
+      "sha256": "75dbe8f34e98e4c3ff42daae4a2f9eb4cbcd3b5f1047d54460ace906dbb4502e"
+    },
+    "org/apache/commons/commons-parent/84/commons-parent-84.pom": {
+      "sha256": "9239fb97101db27070e4983d10d33a0e91cf676cad91bf53815422c3561ef9b1"
     },
     "org/apache/commons/commons-parent/85/commons-parent-85.pom": {
       "sha256": "d189ff2c0027e96bb65d31e6f227ed2af966169b36af1e973dd5ba08926dc7b5"
@@ -1359,6 +1401,9 @@
     "org/junit/junit-bom/5.10.5/junit-bom-5.10.5.pom": {
       "sha256": "83e405ccadab37badf22b7dd67a2d2f74bcf2e6801fb55bb2d5d7e7942372e1a"
     },
+    "org/junit/junit-bom/5.12.2/junit-bom-5.12.2.pom": {
+      "sha256": "cef80fec86454f6806bfb0df24669b5c6f32e2cb728539ea859f47dfdc9bbc17"
+    },
     "org/junit/junit-bom/5.13.1/junit-bom-5.13.1.pom": {
       "sha256": "fa68451ea830572ed43ffe51d75b6a05f7a5e665a602a51f49d6be02063a65f3"
     },
@@ -1403,6 +1448,12 @@
     },
     "org/ring-clojure/ring-core-protocols/1.15.3/ring-core-protocols-1.15.3.pom": {
       "sha256": "e404fd9429d3b3ef5428f5cf830f07958efd57a855a7c9ec6809b03f3c2f1b53"
+    },
+    "org/ring-clojure/ring-websocket-protocols/1.15.3/ring-websocket-protocols-1.15.3.jar": {
+      "sha256": "684e1b46039a445229e7e900d77f9627e40ae9651495b1373c7084555a1101e4"
+    },
+    "org/ring-clojure/ring-websocket-protocols/1.15.3/ring-websocket-protocols-1.15.3.pom": {
+      "sha256": "48af8b9fbc70ce00a033994585c911e48343dcf92620b67b262f624fa5039b98"
     },
     "org/slf4j/jcl-over-slf4j/1.7.36/jcl-over-slf4j-1.7.36.jar": {
       "sha256": "ab57ca8fd223772c17365d121f59e94ecbf0ae59d08c03a3cb5b81071c019195"
@@ -1493,6 +1544,18 @@
     },
     "progrock/progrock/0.1.2/progrock-0.1.2.pom": {
       "sha256": "eab50b723c9e78490f583cb99fb1d46bc280ff11fd5f8523b9bed76a64eaf023"
+    },
+    "ring/ring-codec/1.3.0/ring-codec-1.3.0.jar": {
+      "sha256": "a3176d58f2b9e2e4e2c6c75c06d1df2b162247ee09ba98d525547e9e59c880ef"
+    },
+    "ring/ring-codec/1.3.0/ring-codec-1.3.0.pom": {
+      "sha256": "ecd4ea6b36f2cc78e7de31a85084b9ae615d58b8a16fd1a3e06b954fd1d5c714"
+    },
+    "ring/ring-core/1.15.3/ring-core-1.15.3.jar": {
+      "sha256": "4d8d97098898e33e8bb78d3f0f28b0b1c8cede6d88ba3a4ec35ee58e974007bc"
+    },
+    "ring/ring-core/1.15.3/ring-core-1.15.3.pom": {
+      "sha256": "34f2909477378f4d22afa2c77941fc4579808a3cba959b06f1ebaf1ed31ad71d"
     },
     "s3-wagon-private/s3-wagon-private/1.3.5/s3-wagon-private-1.3.5.jar": {
       "sha256": "c17593c220292c03f78977a5b3bcf5826a2b94e6a21d346ecd3cc5ad92954008"

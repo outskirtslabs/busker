@@ -17,7 +17,7 @@
                     :ns-default build}
            :deploy {:extra-deps {slipset/deps-deploy {:mvn/version "0.2.5"}}}
            :test   {:extra-paths ["src/test/clojure"]
-                    :extra-deps  {}}
+                    :extra-deps  {ring/ring-core {:mvn/version "1.15.3"}}}
            :dev    {:extra-paths ["dev"]
                     :jvm-opts
                     ["--enable-native-access=ALL-UNNAMED"

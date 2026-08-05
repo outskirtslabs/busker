@@ -14,7 +14,9 @@
    [ol.busker.test-utils :as util]
    [ol.busker.tickets :as tickets]
    [ol.clave.certificate :as clave-certificate]
-   [ol.clave.storage.file :as file-storage])
+   [ol.clave.storage.file :as file-storage]
+   [ring.middleware.cookies :as ring-cookies]
+   [ring.middleware.session :as ring-session])
   (:import
    java.io.File
    java.nio.file.Files
@@ -98,6 +100,15 @@
                         {:uri (str (base) path)
                          :method method}))
    (dissoc :request)))
+
+(defn- response-header-values
+  [response header-name]
+  (let [prefix (str (str/lower-case header-name) ":")]
+    (->> (str/split-lines (:out response))
+         (keep (fn [line]
+                 (when (str/starts-with? (str/lower-case line) prefix)
+                   (str/trim (subs line (count prefix))))))
+         vec)))
 
 (defn- openssl-no-sni-request
   [port path & {:keys [timeout-seconds]
@@ -262,6 +273,76 @@
           (is (= :http (:scheme req)))
           (is (string? (:protocol req)))
           (is (map? (:headers req))))))))
+
+(deftest repeated-ring-headers-over-http1-and-http2-test
+  (let [requests (atom {})
+        handler (fn [request]
+                  (if (= "/__ready" (:uri request))
+                    {:status 200 :body "ready"}
+                    (do
+                      (swap! requests assoc (:protocol request)
+                             (select-keys (:headers request) ["x-repeat" "cookie"]))
+                      {:status 200
+                       :headers {"x-repeat" ["one" "two"]
+                                 "set-cookie" (list "a=1; Path=/" "b=2; Path=/")}
+                       :body "ok"})))
+        server (busker/start!
+                (util/with-handler
+                  handler
+                  (util/with-static-tls
+                    {:entrypoints {:tls {:bind (str "127.0.0.1:" (tls-port))
+                                         :http3? false
+                                         :tls {:tls-compatibility-mode :modern}}}})))]
+    (try
+      (let [ready (util/wait-for-curl-ready! :https :h1 (tls-port) "/__ready"
+                                             :max-time 2)]
+        (is (= 0 (:exit ready))
+            (str "TLS listener should become ready. stderr: " (:err ready))))
+      (doseq [protocol [:h1 :h2]]
+        (testing (name protocol)
+          (let [response (util/curl :https protocol (tls-port) "/headers"
+                                    :args ["-H" "x-repeat: first"
+                                           "-H" "x-repeat: second"
+                                           "-H" "cookie: a=1"
+                                           "-H" "cookie: b=2"
+                                           "--dump-header" "-"])]
+            (is (= 0 (:exit response))
+                (str "Request should succeed. stderr: " (:err response)))
+            (is (= ["one" "two"]
+                   (response-header-values response "x-repeat")))
+            (is (= ["a=1; Path=/" "b=2; Path=/"]
+                   (response-header-values response "set-cookie"))))))
+      (is (= {"HTTP/1.1" {"x-repeat" "first,second"
+                          "cookie" "a=1;b=2"}
+              "HTTP/2.0" {"x-repeat" "first,second"
+                          "cookie" "a=1;b=2"}}
+             @requests))
+      (finally
+        (busker/stop! server)))))
+
+(deftest ring-cookie-and-session-middleware-response-headers-test
+  (let [cookie-handler (ring-cookies/wrap-cookies
+                        (constantly {:status 200
+                                     :cookies {"a" "1"
+                                               "b" "2"}}))
+        session-handler (ring-session/wrap-session
+                         (constantly {:status 200
+                                      :session {:user "alice"}}))
+        handler (fn [request]
+                  (case (:uri request)
+                    "/cookies" (cookie-handler request)
+                    "/session" (session-handler request)))
+        dump-headers ["--dump-header" "-"]]
+    (with-server [_server (test-server handler)]
+      (let [cookie-response (util/curl :http :h1 (plain-port) "/cookies"
+                                       :args dump-headers)
+            session-response (util/curl :http :h1 (plain-port) "/session"
+                                        :args dump-headers)]
+        (is (= ["a=1" "b=2"]
+               (response-header-values cookie-response "set-cookie")))
+        (is (= [true]
+               (mapv #(boolean (re-matches #"ring-session=.+; Path=/; HttpOnly" %))
+                     (response-header-values session-response "set-cookie"))))))))
 
 (deftest test-ipv6-request-info
   (testing "IPv6 listeners accept requests and expose correct Ring metadata"

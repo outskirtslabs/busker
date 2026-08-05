@@ -49,9 +49,8 @@ Busker does not supply Ring's deprecated `:character-encoding`, `:content-length
 Read those values from `:headers`.
 It also does not supply `:ssl-client-cert`, as client certificate authentication is not implemented.
 
-Busker puts libh2o request header entries into a Clojure map without joining duplicate names.
-The last entry wins.
-Busker does not implement Ring's comma joining rule or its semicolon rule for `cookie`.
+Busker joins duplicate request header values in arrival order.
+It uses the ASCII comma delimiter for ordinary fields and the ASCII semicolon delimiter for `cookie`, as Ring requires.
 
 === Busker request keys
 
@@ -103,9 +102,9 @@ If a handler returns `nil`, Busker sends a 404 response.
 Response header names must be lowercase strings.
 Busker does not normalize ordinary final response header names before passing them to libh2o, while HTTP/2 and HTTP/3 require lowercase field names.
 Title-case response headers from an application or middleware are therefore unsupported for HTTP/2 and HTTP/3.
-Busker sends string values unchanged and applies `str` to other values.
-It does not expand a Ring vector value into repeated fields; a vector becomes its printed Clojure form.
-Use one string per header, joining values yourself when the field's syntax permits commas.
+Busker sends scalar strings unchanged and applies `str` to other scalar values.
+It emits each element of a sequential response header value as a separate field line, in sequence order.
+This supports Ring vector values and the sequential `Set-Cookie` values produced by `wrap-cookies` and `wrap-session`.
 
 Busker does not infer a response `content-type`; set that header in the response or with middleware.
 
@@ -159,7 +158,8 @@ For a HEAD response with an explicit length and no body, the client receives tha
 Synchronous Ring middleware works when it produces the request and response forms supported on this page.
 You can wrap the application handler yourself, or list wrappers in a dispatcher's `:middleware` vector.
 The xref:configuration.adoc[configuration reference] accepts a wrapper function, a qualified symbol, or `[wrapper options]`.
-Middleware responses must keep header names lowercase and use one string value per field.
+Middleware responses must keep header names lowercase for HTTP/2 and HTTP/3.
+Ring's `wrap-cookies` and `wrap-session` emit a title-case `Set-Cookie` name, so their response path remains limited to HTTP/1.1 unless the application lowercases that name.
 
 == Streaming responses
 

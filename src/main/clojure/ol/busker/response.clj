@@ -35,6 +35,14 @@
   (if (number? val) (long val)
       (Long/parseLong val)))
 
+(defn- expand-header-values
+  [headers]
+  (mapcat (fn [[name value]]
+            (if (sequential? value)
+              (map #(vector name %) value)
+              [[name value]]))
+          headers))
+
 ;; TODO intern common header names?
 
 (defn build-headers2
@@ -53,7 +61,7 @@
         filtered-headers (if content-length-val
                            (dissoc-header headers "content-length")
                            headers)
-        header-pairs (vec filtered-headers)
+        header-pairs (vec (expand-header-values filtered-headers))
         headers-count (count header-pairs)]
 
     (if (zero? headers-count)
@@ -95,7 +103,7 @@
         filtered-headers (if content-length-val
                            (dissoc-header headers "content-length")
                            headers)
-        header-pairs (vec filtered-headers)
+        header-pairs (vec (expand-header-values filtered-headers))
         headers-count (count header-pairs)]
 
     (if (zero? headers-count)

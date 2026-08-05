@@ -786,15 +786,20 @@
     (let [header-size (mem/size-of ::clj-header-t)
           total-size (* headers_len header-size)
           sized-headers (mem/reinterpret headers total-size)]
-      (into {}
-            (for [i (range headers_len)]
-              (let [header-seg (mem/slice sized-headers (* i header-size) header-size)
-                    header (mem/deserialize header-seg ::clj-header-t)
-                    {:keys [name name_len
-                            value value_len]} header
-                    name-str (->string name name_len)
-                    value-str (->string value value_len)]
-                [(str/lower-case name-str) value-str]))))))
+      (reduce
+       (fn [result i]
+         (let [header-seg (mem/slice sized-headers (* i header-size) header-size)
+               header (mem/deserialize header-seg ::clj-header-t)
+               {:keys [name name_len
+                       value value_len]} header
+               name-str (str/lower-case (->string name name_len))
+               value-str (->string value value_len)
+               delimiter (if (= "cookie" name-str) ";" ",")]
+           (if (contains? result name-str)
+             (update result name-str str delimiter value-str)
+             (assoc result name-str value-str))))
+       {}
+       (range headers_len)))))
 
 (defn- default-server-port
   [scheme-str]
