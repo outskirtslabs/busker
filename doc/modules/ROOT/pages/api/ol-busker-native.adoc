@@ -293,7 +293,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(evloop-destroy arg8168)
+(evloop-destroy arg8170)
 ----
 
 Destroys an event loop and frees associated resources.
@@ -311,7 +311,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(evloop-run arg8176 arg8177)
+(evloop-run arg8178 arg8179)
 ----
 
 Runs the event loop once. Returns 0 if successful, -1 on error (typically EINTR).
@@ -351,7 +351,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(create-global-conf arg8192 arg8193)
+(create-global-conf arg8194 arg8195)
 ----
 
 Create, initialize, and configure a new h2o_globalconf_t with our configuration
@@ -369,7 +369,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(config-dispose arg8202)
+(config-dispose arg8204)
 ----
 
 Dispose h2o global configuration and free resources
@@ -423,7 +423,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(globalconf-get-hosts arg8222)
+(globalconf-get-hosts arg8224)
 ----
 
 Get hosts pointer (h2o_hostconf_t**) from h2o_globalconf_t
@@ -441,7 +441,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(config-register-host arg8230 arg8231 arg8232)
+(config-register-host arg8232 arg8233 arg8234)
 ----
 
 Register a virtual host with the h2o configuration.
@@ -460,7 +460,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(context-init arg8242 arg8243 arg8244)
+(context-init arg8244 arg8245 arg8246)
 ----
 
 Initialize h2o context for an event loop.
@@ -483,7 +483,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(context-dispose arg8254)
+(context-dispose arg8256)
 ----
 
 Dispose h2o context and free resources
@@ -501,7 +501,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(context-request-shutdown arg8262)
+(context-request-shutdown arg8264)
 ----
 
 Request graceful shutdown of all connections in this context (sends GOAWAY)
@@ -519,7 +519,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(evloop-socket-create arg8270 arg8271 arg8272)
+(evloop-socket-create arg8272 arg8273 arg8274)
 ----
 
 Create h2o socket wrapper for file descriptor.
@@ -544,7 +544,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(socket-read-start arg8282 arg8283)
+(socket-read-start arg8284 arg8285)
 ----
 
 Start reading from socket with callback.
@@ -566,7 +566,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(socket-read-stop arg8292)
+(socket-read-stop arg8294)
 ----
 
 Stop reading from socket.
@@ -587,7 +587,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(socket-reading? arg8300)
+(socket-reading? arg8302)
 ----
 
 
@@ -604,7 +604,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(socket-writing? arg8308)
+(socket-writing? arg8310)
 ----
 
 
@@ -621,7 +621,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(socket-read-cb arg8316)
+(socket-read-cb arg8318)
 ----
 
 
@@ -638,7 +638,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(socket-write-cb arg8324)
+(socket-write-cb arg8326)
 ----
 
 
@@ -655,7 +655,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(socket-set-on-close arg8332 arg8333 arg8334)
+(socket-set-on-close arg8334 arg8335 arg8336)
 ----
 
 Set socket close callback for connection tracking.
@@ -678,7 +678,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(evloop-socket-accept arg8344)
+(evloop-socket-accept arg8346)
 ----
 
 Accept new connection from listening socket.
@@ -697,7 +697,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(socket-close arg8352)
+(socket-close arg8354)
 ----
 
 Close h2o socket
@@ -715,7 +715,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(h2o-accept arg8360 arg8361)
+(h2o-accept arg8362 arg8363)
 ----
 
 Pass accepted socket to h2o for HTTP handling.
@@ -737,7 +737,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(sendvec-init-raw arg8370 arg8371 arg8372)
+(sendvec-init-raw arg8372 arg8373 arg8374)
 ----
 
 Initialize a sendvec with raw bytes
@@ -755,7 +755,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(sendvec arg8382 arg8383 arg8384 arg8385)
+(sendvec arg8384 arg8385 arg8386 arg8387)
 ----
 
 Send response data using sendvec
@@ -773,7 +773,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(start-response arg8396 arg8397 arg8398 arg8399 arg8400 arg8401 arg8402 arg8403)
+(start-response arg8398 arg8399 arg8400 arg8401 arg8402 arg8403 arg8404 arg8405)
 ----
 
 Start sending HTTP response
@@ -791,7 +791,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(send-informational arg8418 arg8419 arg8420 arg8421)
+(send-informational arg8420 arg8421 arg8422 arg8423)
 ----
 
 Sends 1xx response
@@ -809,7 +809,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(cancel-request arg8432)
+(cancel-request arg8434)
 ----
 
 Cancel a request after the response has started
@@ -844,7 +844,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(create-handler* arg8456 arg8457 arg8458 arg8459)
+(create-handler* arg8458 arg8459 arg8460 arg8461)
 ----
 
 FFI binding for handler construction.
@@ -883,7 +883,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(handler-set-shutting-down arg8543 arg8544)
+(handler-set-shutting-down arg8545 arg8546)
 ----
 
 Update the handler shutting_down flag (1 means shutdown in progress).
@@ -901,7 +901,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(proceed-req arg8553)
+(proceed-req arg8555)
 ----
 
 Call req->proceed_req to signal readiness for next request body chunk
@@ -919,7 +919,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(set-on-request-body-chunk-callback arg8561 arg8562)
+(set-on-request-body-chunk-callback arg8563 arg8564)
 ----
 
 Sets the on_request_body_chunk callback in the clj_req_ctx_t struct.
@@ -937,7 +937,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(evloop-now arg8571)
+(evloop-now arg8573)
 ----
 
 Get current time in milliseconds from event loop
@@ -955,7 +955,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(context-get-active-conns arg8579)
+(context-get-active-conns arg8581)
 ----
 
 Get count of active connections for this context
@@ -973,7 +973,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(context-get-idle-conns arg8587)
+(context-get-idle-conns arg8589)
 ----
 
 Get count of idle connections for this context
@@ -991,7 +991,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(context-get-shutdown-conns arg8595)
+(context-get-shutdown-conns arg8597)
 ----
 
 Get count of shutdown connections for this context
@@ -1009,7 +1009,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(cleanup-thread arg8603 arg8604)
+(cleanup-thread arg8605 arg8606)
 ----
 
 Perform periodic cleanup tasks for a context.
@@ -1032,7 +1032,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(mt-create-wakeup-receiver arg8613)
+(mt-create-wakeup-receiver arg8615)
 ----
 
 Register a wakeup receiver on ctx->queue (returns opaque pointer)
@@ -1050,7 +1050,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(mt-destroy-wakeup-receiver arg8621)
+(mt-destroy-wakeup-receiver arg8623)
 ----
 
 Unregister and free the wakeup receiver
@@ -1068,7 +1068,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(mt-wakeup arg8629)
+(mt-wakeup arg8631)
 ----
 
 Send a wakeup message to the loop owning this receiver
@@ -1086,7 +1086,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(create-ssl-ctx arg8637 arg8638 arg8639 arg8640 arg8641)
+(create-ssl-ctx arg8639 arg8640 arg8641 arg8642 arg8643)
 ----
 
 Create and configure SSL_CTX for TLS listener.
@@ -1113,7 +1113,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(free-ssl-ctx arg8653)
+(free-ssl-ctx arg8655)
 ----
 
 Free SSL_CTX created by <<create-ssl-ctx,`create-ssl-ctx`>>.
@@ -1131,7 +1131,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(tls-bytes-dup arg8661 arg8662)
+(tls-bytes-dup arg8663 arg8664)
 ----
 
 Duplicate a byte buffer onto native heap.
@@ -1393,7 +1393,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(http3-create-ptls-ctx arg9240 arg9241 arg9242 arg9243)
+(http3-create-ptls-ctx arg9242 arg9243 arg9244 arg9245)
 ----
 
 Create picotls context for QUIC TLS 1.3.
@@ -1421,7 +1421,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(http3-free-ptls-ctx arg9254)
+(http3-free-ptls-ctx arg9256)
 ----
 
 Free picotls context and associated resources.
@@ -1439,7 +1439,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(http3-create-quicly-ctx arg9262 arg9263)
+(http3-create-quicly-ctx arg9264 arg9265)
 ----
 
 Create quicly context configured for HTTP/3.
@@ -1465,7 +1465,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(http3-free-quicly-ctx arg9272)
+(http3-free-quicly-ctx arg9274)
 ----
 
 Free quicly context and CID encryptor.
@@ -1483,7 +1483,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(http3-open-udp-transport arg9280 arg9281)
+(http3-open-udp-transport arg9282 arg9283)
 ----
 
 Open a pooled UDP transport reservation for HTTP/3.
@@ -1503,7 +1503,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(http3-attach-udp-transport arg9290 arg9291 arg9292 arg9293 arg9294 arg9295 arg9296)
+(http3-attach-udp-transport arg9292 arg9293 arg9294 arg9295 arg9296 arg9297 arg9298)
 ----
 
 Attach an HTTP/3 worker context to a pooled UDP transport.
@@ -1523,7 +1523,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(http3-activate-udp-transport-generation arg9310 arg9311)
+(http3-activate-udp-transport-generation arg9312 arg9313)
 ----
 
 Mark `node-id` as the active acceptor on a pooled UDP transport.
@@ -1543,7 +1543,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(http3-detach-udp-transport arg9320)
+(http3-detach-udp-transport arg9322)
 ----
 
 Detach an HTTP/3 worker context from a pooled UDP transport.
@@ -1562,7 +1562,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(http3-release-udp-transport arg9328)
+(http3-release-udp-transport arg9330)
 ----
 
 Release a pooled UDP transport and close any reservation socket it owns.
@@ -1580,7 +1580,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(http3-stop-accepting arg9336)
+(http3-stop-accepting arg9338)
 ----
 
 Stop accepting new HTTP/3 connections by setting acceptor to NULL.
@@ -1600,7 +1600,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(http3-num-connections arg9344)
+(http3-num-connections arg9346)
 ----
 
 Get the number of active HTTP/3 connections on this context.
@@ -1618,7 +1618,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(http3-free-worker-ctx arg9352)
+(http3-free-worker-ctx arg9354)
 ----
 
 Free HTTP/3 worker context and close UDP socket.
@@ -1637,7 +1637,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(conn-limit-set-max arg9360)
+(conn-limit-set-max arg9362)
 ----
 
 Set the maximum allowed connections. Zero means unlimited.
@@ -1749,7 +1749,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(ticket-manager-create arg9487)
+(ticket-manager-create arg9489)
 ----
 
 Create a new ticket manager with specified ticket lifetime.
@@ -1768,7 +1768,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(ticket-manager-destroy arg9495)
+(ticket-manager-destroy arg9497)
 ----
 
 Destroy ticket manager and securely erase all keys.
@@ -1786,7 +1786,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(ticket-manager-set-keys arg9503 arg9504 arg9505)
+(ticket-manager-set-keys arg9505 arg9506 arg9507)
 ----
 
 Replace all keys atomically. Thread-safe via copy-on-write.
@@ -1805,7 +1805,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(ticket-manager-key-count arg9515)
+(ticket-manager-key-count arg9517)
 ----
 
 Get current key count (for monitoring).
@@ -1823,7 +1823,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(ticket-manager-set-quic-tag arg9523 arg9524)
+(ticket-manager-set-quic-tag arg9525 arg9526)
 ----
 
 Set the QUIC transport params hash for 0-RTT validation.
@@ -1841,7 +1841,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(ticket-manager-create-encrypt-ticket arg9533 arg9534)
+(ticket-manager-create-encrypt-ticket arg9535 arg9536)
 ----
 
 Create encrypt_ticket callback wired to manager.
@@ -1860,7 +1860,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(ptls-ctx-set-tickets arg9543 arg9544 arg9545 arg9546)
+(ptls-ctx-set-tickets arg9545 arg9546 arg9547 arg9548)
 ----
 
 Configure ptls context for session tickets.
@@ -1879,7 +1879,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 [source,clojure]
 ----
-(ssl-ctx-set-tickets arg9557 arg9558 arg9559)
+(ssl-ctx-set-tickets arg9559 arg9560 arg9561)
 ----
 
 Configure SSL_CTX for TCP TLS session tickets and 0-RTT.

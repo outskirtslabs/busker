@@ -23,7 +23,6 @@
 *** xref:api/ol-busker-runtime.adoc[runtime]
 *** xref:api/ol-busker-specs.adoc[specs]
 *** xref:api/ol-busker-tickets.adoc[tickets]
-*** xref:api/ol-busker-tickets2.adoc[tickets2]
 *** xref:api/ol-busker-util.adoc[util]
 **** xref:api/ol-busker-util-headers.adoc[headers]
 **** xref:api/ol-busker-util-parsing.adoc[parsing]

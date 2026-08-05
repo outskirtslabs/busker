@@ -13,7 +13,7 @@
 
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L69-L87[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L58-L76[source,window=_blank]
 
 '''
 
@@ -30,7 +30,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L314-L319[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L303-L308[source,window=_blank]
 
 '''
 
@@ -47,7 +47,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L895-L900[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L884-L889[source,window=_blank]
 
 '''
 
@@ -64,7 +64,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L902-L906[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L891-L895[source,window=_blank]
 
 '''
 
@@ -81,7 +81,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L908-L923[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L897-L912[source,window=_blank]
 
 '''
 
@@ -98,7 +98,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L925-L928[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L914-L917[source,window=_blank]
 
 '''
 
@@ -116,7 +116,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L930-L969[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L919-L958[source,window=_blank]
 
 '''
 
@@ -134,4 +134,4 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L971-L1006[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/generation.clj#L960-L995[source,window=_blank]

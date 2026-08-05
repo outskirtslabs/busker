@@ -461,38 +461,6 @@
     "ticket-rotation-lock-name" "ticket-rotation-lock-name",
     "ticket-storage-key" "ticket-storage-key",
     "with-store-lock" "with-store-lock"}},
-  "ol.busker.tickets2"
-  {:page "api/ol-busker-tickets2.adoc",
-   :vars
-   {"*ticket-rotation-jitter-seconds*"
-    "-STAR-ticket-rotation-jitter-seconds-STAR-",
-    "TicketKeyStore" "TicketKeyStore",
-    "acquire-ticket-state!" "acquire-ticket-state-BANG-",
-    "bytes->hex" "bytes--GT-hex",
-    "current-keys" "current-keys",
-    "default-max-ticket-keys" "default-max-ticket-keys",
-    "default-ticket-lifetime-seconds"
-    "default-ticket-lifetime-seconds",
-    "edn->key" "edn--GT-key",
-    "generate-key" "generate-key",
-    "generate-random-bytes" "generate-random-bytes",
-    "hex->bytes" "hex--GT-bytes",
-    "key->edn" "key--GT-edn",
-    "load-snapshot" "load-snapshot",
-    "memory-ticket-store" "memory-ticket-store",
-    "register-native-ticket-mgr!" "register-native-ticket-mgr-BANG-",
-    "rotate-keys" "rotate-keys",
-    "rotation-check-interval-ms" "rotation-check-interval-ms",
-    "stop-ticket-state!" "stop-ticket-state-BANG-",
-    "storage-ticket-store" "storage-ticket-store",
-    "store-snapshot!" "store-snapshot-BANG-",
-    "sync-keys-to-native!" "sync-keys-to-native-BANG-",
-    "ticket-lifetime-seconds" "ticket-lifetime-seconds",
-    "ticket-rotation-lock-name" "ticket-rotation-lock-name",
-    "ticket-storage-key" "ticket-storage-key",
-    "unregister-native-ticket-mgr!"
-    "unregister-native-ticket-mgr-BANG-",
-    "with-store-lock" "with-store-lock"}},
   "ol.busker.util"
   {:page "api/ol-busker-util.adoc",
    :vars

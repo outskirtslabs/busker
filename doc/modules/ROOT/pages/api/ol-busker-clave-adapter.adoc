@@ -56,7 +56,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L105-L113[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L112-L120[source,window=_blank]
 
 '''
 
@@ -73,7 +73,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L115-L141[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L122-L151[source,window=_blank]
 
 '''
 
@@ -90,7 +90,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L143-L147[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L153-L157[source,window=_blank]
 
 '''
 
@@ -107,4 +107,4 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L149-L154[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/clave_adapter.clj#L159-L166[source,window=_blank]

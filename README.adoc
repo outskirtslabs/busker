@@ -51,6 +51,22 @@ com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.4"}
 If you include multiple native dependencies, Busker chooses the one matching the current platform.
 Including extra native dependencies increases uberjar size.
 
+=== Bundled native dependencies
+
+Busker statically links these security-sensitive upstream dependencies into its native shim jars.
+
+[cols="1,2", options="header"]
+|===
+| Dependency
+| Upstream date
+
+| https://github.com/h2o/h2o[libh2o]
+| https://github.com/h2o/h2o/commit/3a5d2cb898bdb54795f060be7aba478912f65bb0[2026-07-20 (3a5d2cb)]
+
+| https://github.com/google/boringssl[BoringSSL]
+| https://github.com/google/boringssl/commit/30a26e970e14f9d943e3961de49bee5cc7e032d3[2026-08-03 (30a26e9)]
+|===
+
 == Examples
 
 See the example projects in https://github.com/outskirtslabs/busker/tree/main/examples[`examples/`]:
