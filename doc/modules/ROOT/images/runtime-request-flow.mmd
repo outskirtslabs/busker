@@ -1,0 +1,13 @@
+sequenceDiagram
+  actor Client
+  participant Network as Network event loop<br/>(dedicated platform thread)
+  participant Task as Request task<br/>(virtual thread by default)
+  participant Queue as Bounded response queue
+
+  Client->>Network: Request bytes
+  Network->>Task: Submit Ring request with body stream
+  Note over Task: Run Ring middleware and handler
+  Task->>Queue: Write or flush response data
+  Note over Task,Queue: A full queue makes the writer wait
+  Queue->>Network: Send next chunk after network progress
+  Network-->>Client: Response bytes

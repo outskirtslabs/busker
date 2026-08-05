@@ -98,6 +98,7 @@
             }))
             pkgs.cmake
             pkgs.ninja
+            pkgs.mermaid-cli
             pkgs.pkg-config
             pkgs.makeWrapper
             pkgs.brotli

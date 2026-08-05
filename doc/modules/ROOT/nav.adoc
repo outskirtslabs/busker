@@ -11,6 +11,9 @@
 * xref:ring-compatibility.adoc[Ring compatibility]
 include::partial$api-nav.adoc[]
 
+.Explanation
+* xref:runtime-model.adoc[Runtime model]
+
 .Project
 * xref:security.adoc[Security]
 * xref:changelog.adoc[Changelog]
