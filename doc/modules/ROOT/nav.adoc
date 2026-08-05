@@ -3,6 +3,9 @@
 .Tutorials
 * xref:tutorial-first-server.adoc[Your first Busker server]
 
+.How-to guides
+* xref:howto-https-http3.adoc[Serve HTTPS and HTTP/3]
+
 .Reference
 * xref:configuration.adoc[Configuration]
 * xref:ring-compatibility.adoc[Ring compatibility]

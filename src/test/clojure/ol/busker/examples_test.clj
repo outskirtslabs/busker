@@ -5,6 +5,7 @@
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
+   [ol.busker.config :as config]
    [ol.busker.test-utils :as util]))
 
 (def tls-host "localhost.examp1e.net")
@@ -142,6 +143,38 @@
             :main (str/trim (slurp (example-path "first-server" "main.clj")))}
            {:deps (str/trim documented-deps)
             :main (str/trim documented-main)}))))
+
+(deftest https-http3-guide-config-test
+  (let [[documented-config]
+        (clojure-source-blocks
+         (io/file "doc" "modules" "ROOT" "pages" "howto-https-http3.adoc"))
+        user-config (-> (read-string documented-config)
+                        (assoc-in [:tls :storage :factory]
+                                  'ol.clave.storage.file/file-storage)
+                        (assoc-in [:tls :storage :root]
+                                  (str "target/docs-https-http3-" (random-uuid)))
+                        (assoc-in [:dispatch 0 :handler]
+                                  (fn [_] {:status 200 :body "ok"})))
+        loaded (config/load! user-config)]
+    (try
+      (is (= {:manage ["app.example.com"]
+              :entrypoints
+              {:http {:bind ":80"
+                      :tls false
+                      :http1? true
+                      :http2? true
+                      :http3? false}
+               :https {:bind ":443"
+                       :tls {:tls-compatibility-mode :modern}
+                       :http1? true
+                       :http2? true
+                       :http3? true}}}
+             {:manage (get-in loaded [:tls :certificates :manage])
+              :entrypoints
+              (update-vals (:entrypoints loaded)
+                           #(select-keys % [:bind :tls :http1? :http2? :http3?]))}))
+      (finally
+        (.close ^java.util.concurrent.ExecutorService (:executor loaded))))))
 
 (deftest quickstart-example-test
   (let [{:keys [http https]} (example-ports "quickstart")

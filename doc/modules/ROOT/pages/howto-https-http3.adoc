@@ -1,0 +1,308 @@
+= Serve HTTPS and HTTP/3
+
+This guide adds managed certificates, HTTPS, and HTTP/3 to the plain application from xref:tutorial-first-server.adoc[Your first Busker server].
+The Ring handler and its `start!` and `stop!` functions stay the same.
+
+== Prepare the host
+
+Use a real domain such as `app.example.com` and meet these requirements before starting Busker:
+
+* Create an `A` record that points the domain to the server's public IPv4 address
+* Create an `AAAA` record only if the server accepts public IPv6 traffic
+* Allow inbound TCP traffic on ports 80 and 443
+* Allow inbound UDP traffic on port 443
+* Forward all three ports to the Busker host if it is behind NAT
+* Keep ACME account and certificate data in durable, private storage
+* Install a curl build with HTTP/3 support if you want to run the HTTP/3 check
+
+Busker uses the HTTP-01 ACME challenge by default, so the certificate authority must reach the domain on TCP port 80.
+Keep TCP port 80 reachable after the first certificate is issued so later renewals can complete.
+HTTPS uses TCP port 443 for HTTP/1.1 and HTTP/2, while HTTP/3 uses UDP port 443.
+Opening TCP 443 does not open UDP 443.
+On Linux, an ordinary process cannot normally bind ports 80 and 443.
+The startup instructions below keep the JVM unprivileged by granting permission only to the systemd service or by mapping container ports.
+
+== Choose how to start Busker
+
+Choose one of these ways to start Busker.
+The numbers are used throughout the rest of the guide.
+
+. Use a systemd service for an application that should start at boot and keep running
+. Use `systemd-run` to try the server from a terminal without installing a service
+. Use Docker or Podman when the application runs in a container
+
+Options 1 and 2 let Busker bind public ports 80 and 443 directly.
+Option 3 keeps Busker on unprivileged ports inside the container and lets the container runtime publish the public ports.
+
+== Add managed TLS
+
+Replace the plain `config` map from the tutorial with this map.
+Change `app.example.com` to your domain.
+
+[source,clojure]
+----
+{:tls {:certificates {:manage ["app.example.com"]}
+       :storage {:factory 'ol.clave.storage.file/file-storage
+                 :root (or (System/getenv "STATE_DIRECTORY")
+                           (str (System/getProperty "user.home")
+                                "/.local/state/my-app"))}}
+ :entrypoints {:http {:bind ":80"
+                      :tls false}
+               :https {:bind ":443"}}
+ :dispatch [{:handler handler}]}
+----
+
+If you chose option 3, replace only the `:entrypoints` value with this one:
+
+[source,clojure]
+----
+:entrypoints {:http {:bind ":8080"
+                     :tls false}
+              :https {:bind ":8443"}}
+----
+
+The `:http` entrypoint serves the ACME HTTP-01 challenge and accepts ordinary HTTP traffic.
+The `:https` entrypoint enables TLS and HTTP/3 by default because its `:tls` value defaults to the modern TLS settings.
+Busker obtains and renews the managed certificate with Let's Encrypt.
+
+The storage root uses the directory supplied by systemd through `STATE_DIRECTORY`.
+Outside systemd it uses `.local/state/my-app` under the current user's home directory.
+Keep this directory between deployments and back it up with the rest of the service's durable state.
+Repeated issuance from an empty directory can reach certificate authority rate limits.
+
+See xref:configuration.adoc#_certificates_map_tls_certificates[Certificates] for managed certificate options.
+If you already have a certificate and private key, use the xref:configuration.adoc#_certificates_map_tls_certificates[static certificate settings] instead of adding another full example here.
+
+== Add a process entry point
+
+Options 1 and 3 need an entry point that starts Busker, remains running, and stops the server when the JVM shuts down.
+If you chose option 2, continue to <<start-the-server>> because the REPL will keep the process alive.
+
+Add this function to `main.clj`:
+
+[source,clojure]
+----
+(defn -main
+  [& _]
+  (start!)
+  (.addShutdownHook
+   (Runtime/getRuntime)
+   (Thread. stop!))
+  @(promise))
+----
+
+If your application already has a production entry point that calls `start!` and installs a shutdown hook, keep using it.
+
+[#start-the-server]
+== Start the server
+
+Use the numbered section that matches your earlier choice.
+Do not run the JVM as root and do not add capabilities to the Java binary.
+
+=== 1. Run it as a systemd service
+
+Create the `my-app` service account before loading the unit if your deployment does not already provide it.
+Create `/etc/systemd/system/my-app.service` with the following content.
+Replace the working directory and Clojure executable with the paths used by your installation.
+Run `command -v clojure` if you need to find the executable.
+
+[source,ini]
+----
+[Unit]
+Description=My Busker application
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=my-app
+Group=my-app
+WorkingDirectory=/opt/my-app
+ExecStart=/usr/local/bin/clojure -J--enable-native-access=ALL-UNNAMED -M -m main
+
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+
+StateDirectory=my-app
+StateDirectoryMode=0700
+
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+----
+
+`User` and `Group` keep the JVM under the unprivileged `my-app` account.
+`AmbientCapabilities` permits this service to bind low ports, while `CapabilityBoundingSet` excludes unrelated capabilities.
+`NoNewPrivileges` prevents the process from gaining more privileges later.
+`StateDirectory` creates `/var/lib/my-app`, makes it writable by the service account, and supplies that path through `STATE_DIRECTORY`.
+
+Load the unit and start the service:
+
+[source,bash]
+----
+sudo systemctl daemon-reload
+sudo systemctl enable --now my-app.service
+sudo systemctl status my-app.service
+----
+
+Busker is now running under the `my-app` account and listening on the public ports.
+Continue to <<wait-for-the-certificate>>.
+
+=== 2. Try it with `systemd-run`
+
+`systemd-run` can create a temporary service for the current terminal session.
+This lets the REPL bind ports 80 and 443 without running the REPL as root.
+The command uses your user and group IDs, preserves the environment needed by the Clojure CLI, and opens an interactive terminal:
+
+[source,bash]
+----
+sudo systemd-run \
+  --unit=my-app-cli \
+  --pty \
+  --wait \
+  --collect \
+  --uid="$(id -u)" \
+  --gid="$(id -g)" \
+  --working-directory="$PWD" \
+  --setenv=HOME="$HOME" \
+  --setenv=PATH="$PATH" \
+  --property=StateDirectory="my-app-cli-$(id -u)" \
+  --property=AmbientCapabilities=CAP_NET_BIND_SERVICE \
+  --property=CapabilityBoundingSet=CAP_NET_BIND_SERVICE \
+  --property=NoNewPrivileges=yes \
+  "$(command -v clojure)" -M:repl
+----
+
+The `sudo` command authorizes systemd to create the temporary service.
+The Clojure process itself runs with your user and group IDs.
+
+Start Busker from the REPL:
+
+[source,clojure]
+----
+(require '[main :as app])
+(app/start!)
+----
+
+Keep this REPL open and continue to <<wait-for-the-certificate>>.
+
+=== 3. Run it with Docker or Podman
+
+Use the unprivileged entrypoint ports shown for option 3 above.
+
+Create a storage directory owned by the account that starts the container:
+
+[source,bash]
+----
+mkdir -p "$HOME/.local/state/my-app"
+chmod 0700 "$HOME/.local/state/my-app"
+----
+
+Add these flags to `docker run` or `podman run`:
+
+[source,bash]
+----
+--name my-app \
+--user "$(id -u):$(id -g)" \
+--cap-drop ALL \
+--env STATE_DIRECTORY=/var/lib/my-app \
+--volume "$HOME/.local/state/my-app:/var/lib/my-app" \
+--publish 80:8080/tcp \
+--publish 443:8443/tcp \
+--publish 443:8443/udp
+----
+
+Busker needs no capabilities inside the container because it binds ports above 1024.
+The runtime publishes TCP 80, TCP 443, and UDP 443 on the host.
+Do not omit the UDP mapping because HTTP/3 cannot use the TCP mapping.
+On an SELinux host, add the appropriate relabel option to the storage mount.
+A rootless Docker or Podman setup may reject host ports 80 and 443 when the host keeps its default unprivileged-port policy.
+Follow the container runtime's documentation for privileged host ports if that happens.
+
+After the container starts, continue to <<wait-for-the-certificate>>.
+
+[#wait-for-the-certificate]
+== Wait for the certificate
+
+Certificate issuance runs in the background.
+The first TLS connection can fail until the certificate authority has validated the domain and Busker has stored the new certificate.
+Keep the server running while validation completes.
+
+Once the domain has a certificate, continue with the protocol checks.
+
+== Verify each HTTP version
+
+First confirm that your curl build lists `HTTP3` in its features:
+
+[source,bash]
+----
+curl --version
+----
+
+Run each request separately and check the printed version:
+
+[source,bash]
+----
+curl --http1.1 -sS -o /dev/null -w 'HTTP/%{http_version}\n' https://app.example.com/
+curl --http2 -sS -o /dev/null -w 'HTTP/%{http_version}\n' https://app.example.com/
+curl --http3-only -sS -o /dev/null -w 'HTTP/%{http_version}\n' https://app.example.com/
+----
+
+The commands should print `HTTP/1.1`, `HTTP/2`, and `HTTP/3` in that order.
+Use `--http3-only` for the last check because `--http3` may fall back to TCP and hide a blocked UDP route.
+
+== Stop a test server
+
+After the checks finish, stop the server if it should not remain running:
+
+. Leave option 1 running, or stop it with `sudo systemctl stop my-app.service`
+. For option 2, run `(app/stop!)`, then press Ctrl-D to leave the REPL and remove the temporary service
+. Stop option 3 with `docker stop my-app` or `podman stop my-app`
+
+
+== Check startup failures
+
+For a permanent systemd service, inspect its log and current state:
+
+[source,bash]
+----
+sudo systemctl status my-app.service
+sudo journalctl -u my-app.service
+systemctl show my-app.service \
+  -p User \
+  -p AmbientCapabilities \
+  -p CapabilityBoundingSet
+----
+
+A low-port permission error means the service did not receive `CAP_NET_BIND_SERVICE`.
+An `Address already in use` error means another process already owns one of the TCP or UDP ports.
+A storage permission error means the service account or container user cannot write to the configured state directory.
+
+== Check failed certificate issuance
+
+If Busker does not obtain a certificate, check these conditions:
+
+* The domain's `A` record points to the public IPv4 address of this server
+* Any published `AAAA` record points to a working IPv6 listener on this server
+* Public TCP port 80 reaches Busker rather than another service or an unconfigured proxy
+* The service can write to the configured storage directory
+* The domain is not behind a proxy that answers the ACME challenge instead of Busker
+* Certificate authority rate limits have not blocked another issuance attempt
+
+Test the public address from a machine outside the server's network.
+A request from the server itself can succeed even when a firewall or NAT rule blocks public traffic.
+
+== Check failed HTTP/3 connections
+
+If HTTP/1.1 and HTTP/2 work but HTTP/3 fails, check these conditions:
+
+* Public UDP port 443 is allowed by the host firewall, cloud firewall, and network firewall
+* NAT forwards UDP 443 as well as TCP 443 to the Busker host
+* A container deployment publishes `443:8443/udp`
+* No proxy or load balancer in front of Busker drops QUIC traffic
+* The curl build reports HTTP/3 support
+* The test uses `--http3-only` and the same hostname covered by the certificate
+
+HTTP/3 uses QUIC over UDP, so a working HTTPS connection over TCP does not prove that the UDP route works.
