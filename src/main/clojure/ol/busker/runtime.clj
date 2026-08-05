@@ -367,54 +367,55 @@
   "Synchronously stop `server-handle`, waiting for active and draining
   generations to quiesce."
   [{:keys [busker/lifecycle-gate busker/state] :as server-handle}]
-  (let [{:keys [config generations-to-stop memory-ticket-service]}
+  (when server-handle
+    (let [{:keys [config generations-to-stop memory-ticket-service]}
+          (locking lifecycle-gate
+            (let [{:keys [phase config active draining next-generation-id listener-pool]} @state]
+              (cond
+                (= :stopped phase)
+                {:config                config
+                 :generations-to-stop   nil
+                 :memory-ticket-service nil}
+
+                (= :stopping phase)
+                {:config                config
+                 :generations-to-stop   draining
+                 :memory-ticket-service (:memory-ticket-service @state)}
+
+                :else
+                (let [draining (cond-> draining
+                                 active (conj (begin-drain! server-handle active)))]
+                  (reset! state
+                          {:phase                 :stopping
+                           :config                config
+                           :next-generation-id    next-generation-id
+                           :listener-pool         listener-pool
+                           :memory-ticket-service (:memory-ticket-service @state)
+                           :active                nil
+                           :draining              draining})
+                  {:config                config
+                   :generations-to-stop   draining
+                   :memory-ticket-service (:memory-ticket-service @state)}))))]
+      (when generations-to-stop
+        (doseq [generation generations-to-stop]
+          (await-drain! generation))
+        (doseq [cert-runtime (->> generations-to-stop
+                                  (map :cert-automation)
+                                  (remove nil?)
+                                  distinct)]
+          (clave-adapter/stop! cert-runtime))
+        (when memory-ticket-service
+          (tickets/stop-key-service! memory-ticket-service))
         (locking lifecycle-gate
-          (let [{:keys [phase config active draining next-generation-id listener-pool]}  @state]
-            (cond
-              (= :stopped phase)
-              {:config config
-               :generations-to-stop nil
-               :memory-ticket-service nil}
-
-              (= :stopping phase)
-              {:config config
-               :generations-to-stop draining
-               :memory-ticket-service (:memory-ticket-service @state)}
-
-              :else
-              (let [draining (cond-> draining
-                               active (conj (begin-drain! server-handle active)))]
-                (reset! state
-                        {:phase :stopping
-                         :config config
-                         :next-generation-id next-generation-id
-                         :listener-pool listener-pool
-                         :memory-ticket-service (:memory-ticket-service @state)
-                         :active nil
-                         :draining draining})
-                {:config config
-                 :generations-to-stop draining
-                 :memory-ticket-service (:memory-ticket-service @state)}))))]
-    (when generations-to-stop
-      (doseq [generation generations-to-stop]
-        (await-drain! generation))
-      (doseq [cert-runtime (->> generations-to-stop
-                                (map :cert-automation)
-                                (remove nil?)
-                                distinct)]
-        (clave-adapter/stop! cert-runtime))
-      (when memory-ticket-service
-        (tickets/stop-key-service! memory-ticket-service))
-      (locking lifecycle-gate
-        (let [{:keys [next-generation-id listener-pool]} @state]
-          (reset! state
-                  {:phase :stopped
-                   :config config
-                   :next-generation-id next-generation-id
-                   :listener-pool listener-pool
-                   :memory-ticket-service nil
-                   :active nil
-                   :draining []})))))
+          (let [{:keys [next-generation-id listener-pool]} @state]
+            (reset! state
+                    {:phase                 :stopped
+                     :config                config
+                     :next-generation-id    next-generation-id
+                     :listener-pool         listener-pool
+                     :memory-ticket-service nil
+                     :active                nil
+                     :draining              []}))))))
   nil)
 
 (defn state
