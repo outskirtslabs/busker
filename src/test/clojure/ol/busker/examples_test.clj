@@ -94,6 +94,17 @@
         proc (start-example! "quickstart")]
     (try
       (wait-for-server! proc http)
+      (testing "HTTP/1.1 keep-alive promptly serves the next request"
+        (dotimes [_ 10]
+          (let [result (curl* :http :h1 http "/favicon.ico"
+                              :max-time 0.5
+                              :args ["-o" "/dev/null"
+                                     "-w" "%{http_code} %{num_connects}\n"
+                                     (format "http://127.0.0.1:%d/" http)
+                                     "-o" "/dev/null"])]
+            (is (= {:exit 0
+                    :out  "200 1\n404 0\n"}
+                   (select-keys result [:exit :out]))))))
       (testing "hello, echo, and large response"
         (let [hello (curl* :http :h1 http "/" :args ["-i"])
               large (curl* :http :h1 http "/large"

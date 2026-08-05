@@ -14,7 +14,7 @@
    [ol.busker.native :as h2o]
    [ol.busker.native.socket :as socket]
    [ol.busker.request :as request]
-   [ol.busker.response-queue :as response-queue]
+
    [ol.busker.tickets :as tickets]
    [ol.clave.certificate :as clave-certificate]
    [taoensso.trove :as trove])
@@ -23,7 +23,8 @@
    [java.security.cert CertificateFactory X509Certificate]
    [java.util Base64]
    [java.util.concurrent ExecutorService TimeUnit]
-   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]
+   [ol.busker.response H2OResponseEmitter]))
 
 (set! *warn-on-reflection* true)
 
@@ -45,25 +46,13 @@
         in-flight?
         (pos? queued-bytes))))
 
-(defn- request-awaiting-final?
-  [req]
-  (when-let [latency (:latency/state req)]
-    (let [^AtomicLong handler-start (:handler-start latency)
-          ^AtomicLong response-final (:response-final latency)]
-      (and handler-start response-final
-           (pos? (.get handler-start))
-           (zero? (.get response-final))))))
-
 (defn- pending-response-work?
   [worker]
   (let [^java.util.HashMap requests (:requests worker)]
     (boolean
      (some
-      (fn [req]
-        (or (when-let [write-resp (:write-resp req)]
-              (when-let [st (::response-queue/state write-resp)]
-                (response-state-pending? st)))
-            (request-awaiting-final? req)))
+      (fn [[_ ^H2OResponseEmitter emitter]]
+        (response-state-pending? (.write-resp emitter)))
       (.values requests)))))
 
 (defn evloop-msg-processor
