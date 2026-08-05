@@ -13,11 +13,6 @@
             .hash = "boringssl-0.20260803.0-EhtkNcs5AABZbwLHRGfg9683007kfB-ToRrFTmn5PcTr",
             .lazy = true,
         },
-        .openssl = .{
-            .url = "git+https://github.com/dzfrias/openssl-zig.git?ref=main#303ff47bad5d3b4d55d5a85a7ca5053abba3e307",
-            .hash = "openssl-3.6.0-YymhPkUpAQBvGMYJLeoNCns4esnK4ysEzokvFoypRQv1",
-            .lazy = true,
-        },
         .zlib = .{
             .url = "git+https://github.com/allyourcodebase/zlib.git#3599c16d41dbe749ae51b0ff7ab864c61adc779a",
             .hash = "zlib-1.3.1-ZZQ7lc8NAABUbHzDe_cSWboCqMbrLkVwvFkKnojgeiT2",

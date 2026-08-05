@@ -8,7 +8,6 @@ const TargetConfig = struct {
 
 pub fn build(b: *std.Build) void {
     const all_targets = b.option(bool, "all-targets", "Build for all supported platforms") orelse true;
-    const use_boringssl = b.option(bool, "use-boringssl", "Use BoringSSL instead of OpenSSL (default: true)") orelse true;
     const optimize = b.standardOptimizeOption(.{});
     const native_target = b.standardTargetOptions(.{});
 
@@ -50,9 +49,9 @@ pub fn build(b: *std.Build) void {
                     .dir_name = target_config.dir_name,
                     .lib_name = target_config.lib_name,
                 };
-                buildShimForTarget(b, native_config, optimize, use_boringssl);
+                buildShimForTarget(b, native_config, optimize);
             } else {
-                buildShimForTarget(b, target_config, optimize, use_boringssl);
+                buildShimForTarget(b, target_config, optimize);
             }
         }
     } else {
@@ -76,7 +75,7 @@ pub fn build(b: *std.Build) void {
             @panic("Unsupported native platform - add it to all_target_configs");
         };
 
-        buildShimForTarget(b, native_config, optimize, use_boringssl);
+        buildShimForTarget(b, native_config, optimize);
     }
 
     const compile_flags_step = b.step("compile-flags", "Generate compile_flags.txt for LSP");
@@ -110,7 +109,7 @@ pub fn build(b: *std.Build) void {
     compile_flags_step.dependOn(&compile_flags_cmd.step);
 }
 
-fn buildShimForTarget(b: *std.Build, target_config: TargetConfig, optimize: std.builtin.OptimizeMode, use_boringssl: bool) void {
+fn buildShimForTarget(b: *std.Build, target_config: TargetConfig, optimize: std.builtin.OptimizeMode) void {
     const target = b.resolveTargetQuery(target_config.query);
     const is_debug = optimize == .Debug;
     const is_linux = target.result.os.tag == .linux;
@@ -120,7 +119,7 @@ fn buildShimForTarget(b: *std.Build, target_config: TargetConfig, optimize: std.
     const h2o_dep = b.dependency("h2o-zig", .{
         .target = target,
         .optimize = optimize,
-        .@"use-boringssl" = use_boringssl,
+        .@"use-boringssl" = true,
     });
 
     const zlib = b.dependency("zlib", .{
@@ -193,23 +192,13 @@ fn buildShimForTarget(b: *std.Build, target_config: TargetConfig, optimize: std.
     const h2o_lib = h2o_dep.artifact("h2o-evloop");
     shim.root_module.addIncludePath(h2o_lib.getEmittedIncludeTree());
 
-    if (use_boringssl) {
-        if (b.lazyDependency("boringssl", .{
-            .target = target,
-            .optimize = optimize,
-            .pie = needs_pic,
-        })) |boringssl| {
-            const ssl_artifact = boringssl.artifact("ssl");
-            shim.root_module.addIncludePath(ssl_artifact.getEmittedIncludeTree());
-        }
-    } else {
-        if (b.lazyDependency("openssl", .{
-            .target = target,
-            .optimize = optimize,
-        })) |openssl| {
-            const ssl_artifact = openssl.artifact("ssl");
-            shim.root_module.addIncludePath(ssl_artifact.getEmittedIncludeTree());
-        }
+    if (b.lazyDependency("boringssl", .{
+        .target = target,
+        .optimize = optimize,
+        .pie = needs_pic,
+    })) |boringssl| {
+        const ssl_artifact = boringssl.artifact("ssl");
+        shim.root_module.addIncludePath(ssl_artifact.getEmittedIncludeTree());
     }
 
     shim.root_module.linkLibrary(h2o_lib);
