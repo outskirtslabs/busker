@@ -1,4 +1,4 @@
-(ns ol.busker.specs
+(ns ^:no-doc ol.busker.specs
   "clojure.spec definitions and descriptor metadata for Busker configuration."
   (:refer-clojure :exclude [type load])
   (:require

@@ -1,4 +1,4 @@
-(ns ol.busker.runtime
+(ns ^:no-doc ol.busker.runtime
   "Multi-generation runtime lifecycle for Busker."
   (:require
    [ol.busker.clave-adapter :as clave-adapter]

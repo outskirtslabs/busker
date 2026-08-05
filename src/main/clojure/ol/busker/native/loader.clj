@@ -1,4 +1,4 @@
-(ns ol.busker.native.loader
+(ns ^:no-doc ol.busker.native.loader
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]

@@ -137,53 +137,6 @@ Clears all pooled buffers and releases resources.
 
 '''
 
-[#--GT-BufferPoolImpl]
-== ->BufferPoolImpl
-
-
-
-
-[source,clojure]
-----
-(->BufferPoolImpl cfg buckets totals disposed?)
-----
-
-
-[.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/buffer_pool.clj#L149-L220[source,window=_blank]
-
-'''
-
-[#BufferPoolImpl]
-== BufferPoolImpl
-
-
-
-
-
-
-[.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/buffer_pool.clj#L149-L220[source,window=_blank]
-
-'''
-
-[#map--GT-BufferPoolImpl]
-== map->BufferPoolImpl
-
-
-
-
-[source,clojure]
-----
-(map->BufferPoolImpl m)
-----
-
-
-[.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/buffer_pool.clj#L149-L220[source,window=_blank]
-
-'''
-
 [#make-bytebuffer-pool]
 == make-bytebuffer-pool
 

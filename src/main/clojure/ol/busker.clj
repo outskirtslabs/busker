@@ -1,21 +1,22 @@
 (ns ol.busker
   "Public lifecycle API for Busker.
-  See [[ol.busker.config]] for the `config` map accepted by [[start!]] and
-  [[reload!]]."
+
+  See xref:configuration.adoc[Configuration] for the map accepted by [[start!]]
+  and [[reload!]]."
   (:require
    [ol.busker.runtime :as runtime]))
 
 (defn start!
   "Start a Busker server from `config` and return an opaque server handle.
 
-  See [[ol.busker.config]] for the config shape."
+  See xref:configuration.adoc[Configuration] for the config shape."
   [config]
   (runtime/start! config))
 
 (defn reload!
   "Compile and activate a new runtime snapshot for `server` from `config`.
 
-  See [[ol.busker.config]] for the config shape."
+  See xref:configuration.adoc[Configuration] for the config shape."
   ([server config]
    (runtime/reload! server config))
   ([server config opts]
@@ -30,6 +31,6 @@
   "Return pure runtime state for `server`.
 
   The returned state includes the normalized config snapshot.
-  See [[ol.busker.config]] for that config shape."
+  See xref:configuration.adoc[Configuration] for that config shape."
   [server]
   (runtime/state server))

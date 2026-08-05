@@ -1,4 +1,4 @@
-(ns ol.busker.internal.protocols)
+(ns ^:no-doc ol.busker.internal.protocols)
 
 (set! *warn-on-reflection* true)
 

@@ -1,4 +1,4 @@
-(ns ol.busker.response
+(ns ^:no-doc ol.busker.response
   "Response handling for h2o HTTP server."
   (:require
    [clojure.java.io :as io]

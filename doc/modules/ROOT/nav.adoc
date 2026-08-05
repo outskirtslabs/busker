@@ -1,4 +1,5 @@
 * xref:index.adoc[Home]
+* xref:configuration.adoc[Configuration]
 * xref:roadmap.adoc[Roadmap]
 * xref:changelog.adoc[Changelog]
 * xref:security.adoc[Security]

@@ -1,4 +1,4 @@
-(ns ol.busker.clave-adapter
+(ns ^:no-doc ol.busker.clave-adapter
   (:require
    [clojure.spec.alpha :as s]
    [ol.busker.specs :as specs]

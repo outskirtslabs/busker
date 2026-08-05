@@ -1,4 +1,4 @@
-(ns ol.busker.response-channel
+(ns ^:no-doc ol.busker.response-channel
   (:require
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]

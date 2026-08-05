@@ -1,4 +1,4 @@
-(ns ol.busker.tickets
+(ns ^:no-doc ol.busker.tickets
   "Session ticket key management for TLS 1.3 resumption and 0-RTT."
   (:require
    [clojure.edn :as edn]

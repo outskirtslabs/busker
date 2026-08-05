@@ -1,4 +1,4 @@
-(ns ol.busker.native
+(ns ^:no-doc ol.busker.native
   (:require
    [clojure.string :as str]
    [coffi.ffi :as ffi :refer [defcfn]]

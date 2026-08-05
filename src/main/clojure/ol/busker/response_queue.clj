@@ -1,4 +1,4 @@
-(ns ol.busker.response-queue
+(ns ^:no-doc ol.busker.response-queue
   (:require
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]

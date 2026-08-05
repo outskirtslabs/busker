@@ -2,8 +2,9 @@
 
 
 Public lifecycle API for Busker.
-See xref:api/ol-busker-config.adoc[`ol.busker.config`] for the `config` map accepted by <<start-BANG-,`start!`>> and
-<<reload-BANG-,`reload!`>>.
+
+See xref:configuration.adoc[Configuration] for the map accepted by <<start-BANG-,`start!`>>
+and <<reload-BANG-,`reload!`>>.
 
 [#start-BANG-]
 == start!
@@ -18,10 +19,10 @@ See xref:api/ol-busker-config.adoc[`ol.busker.config`] for the `config` map acce
 
 Start a Busker server from `config` and return an opaque server handle.
 
-See xref:api/ol-busker-config.adoc[`ol.busker.config`] for the config shape.
+See xref:configuration.adoc[Configuration] for the config shape.
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker.clj#L8-L13[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker.clj#L9-L14[source,window=_blank]
 
 '''
 
@@ -39,10 +40,10 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 
 Compile and activate a new runtime snapshot for `server` from `config`.
 
-See xref:api/ol-busker-config.adoc[`ol.busker.config`] for the config shape.
+See xref:configuration.adoc[Configuration] for the config shape.
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker.clj#L15-L22[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker.clj#L16-L23[source,window=_blank]
 
 '''
 
@@ -60,7 +61,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 Synchronously stop `server`.
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker.clj#L24-L27[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker.clj#L25-L28[source,window=_blank]
 
 '''
 
@@ -78,7 +79,7 @@ link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/buske
 Return pure runtime state for `server`.
 
 The returned state includes the normalized config snapshot.
-See xref:api/ol-busker-config.adoc[`ol.busker.config`] for that config shape.
+See xref:configuration.adoc[Configuration] for that config shape.
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker.clj#L29-L35[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker.clj#L30-L36[source,window=_blank]

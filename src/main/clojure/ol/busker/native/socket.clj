@@ -1,4 +1,4 @@
-(ns ol.busker.native.socket
+(ns ^:no-doc ol.busker.native.socket
   "low-level socket helpers via coffi/FFM.
 
    - open/bind/listen family-aware TCP listeners

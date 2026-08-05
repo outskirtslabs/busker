@@ -146,7 +146,7 @@
   [cfg]
   (vec (repeat (n-buckets cfg) (atom []))))
 
-(defrecord BufferPoolImpl [cfg buckets totals disposed?]
+(defrecord ^:no-doc BufferPoolImpl [cfg buckets totals disposed?]
   BufferPool
   (borrow [_ size direct?]
     (let [size (long (max 0 (long size)))]

@@ -1,4 +1,4 @@
-(ns ol.busker.byte-bounded-queue
+(ns ^:no-doc ol.busker.byte-bounded-queue
   "Byte-bounded queue for backpressure-aware streaming.
 
   This namespace provides a queue that enforces backpressure based on the total

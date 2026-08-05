@@ -1,4 +1,4 @@
-(ns ol.busker.generation
+(ns ^:no-doc ol.busker.generation
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]

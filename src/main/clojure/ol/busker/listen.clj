@@ -1,4 +1,4 @@
-(ns ol.busker.listen
+(ns ^:no-doc ol.busker.listen
   (:require
    [coffi.mem :as mem]
    [ol.busker.native :as h2o]

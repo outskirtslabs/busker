@@ -1,4 +1,4 @@
-(ns ol.busker.util
+(ns ^:no-doc ol.busker.util
   (:require
    [clojure.string :as str]
    [ol.clave.crypto.impl.parse-ip :as parse-ip]))

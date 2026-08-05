@@ -21,7 +21,7 @@
 ;; WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 ;; FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 ;; OTHER DEALINGS IN THE SOFTWARE.
-(ns ol.busker.util.parsing)
+(ns ^:no-doc ol.busker.util.parsing)
 
 (def ^{:doc "HTTP token: 1*<any CHAR except CTLs or tspecials>. See RFC2068"}
   re-token

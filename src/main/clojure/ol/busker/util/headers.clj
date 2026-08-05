@@ -21,7 +21,7 @@
 ;; WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 ;; FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 ;; OTHER DEALINGS IN THE SOFTWARE.
-(ns ol.busker.util.headers
+(ns ^:no-doc ol.busker.util.headers
   (:require
    [ol.busker.util.parsing :as parsing]
    [taoensso.trove :as trove]))

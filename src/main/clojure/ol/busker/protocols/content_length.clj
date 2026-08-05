@@ -25,7 +25,7 @@
 ;; This protocol is from https://github.com/ring-clojure/ring/blob/content-length/ring-core/src/ring/middleware/content_length.clj
 ;; one day it may make it into the ring spec.
 
-(ns ol.busker.protocols.content-length
+(ns ^:no-doc ol.busker.protocols.content-length
   (:require
    [ol.busker.protocols :as p]
    [ol.busker.util.headers :as hdr.util]))

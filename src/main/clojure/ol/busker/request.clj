@@ -1,4 +1,4 @@
-(ns ol.busker.request
+(ns ^:no-doc ol.busker.request
   (:require
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]

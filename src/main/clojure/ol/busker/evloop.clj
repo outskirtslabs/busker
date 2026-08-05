@@ -1,4 +1,4 @@
-(ns ol.busker.evloop
+(ns ^:no-doc ol.busker.evloop
   (:require
    [ol.busker.internal.protocols :as p]
    [ol.busker.native :as h2o])
