@@ -1,7 +1,7 @@
 {:paths ["src"]
  :deps {org.clojure/clojure {:mvn/version "1.12.4"}
         com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
-                                  :git/sha "6b8d5bc153da4647441320f4c9be47b8ac7586dd"}
+                                  :git/sha "8e99a18812e37e3cbce1e376a47bda76ad48cda7"}
         com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.4"}}
  :aliases {:run {:main-opts ["-m" "busker-demo.main"]
                  :jvm-opts ["--enable-native-access=ALL-UNNAMED"]}

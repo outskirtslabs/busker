@@ -26,13 +26,9 @@
 (defn config
   []
   {:tls {:certificates {:manage [domain]}}
-   :entrypoints {:http {:bind ["127.0.0.1:80"
-                               "204.168.150.117:80"
-                               "[2a01:4f9:c012:b054::1]:80"]
+   :entrypoints {:http {:bind ":80"
                         :tls false}
-                 :https {:bind ["127.0.0.1:443"
-                                "204.168.150.117:443"
-                                "[2a01:4f9:c012:b054::1]:443"]}}
+                 :https {:bind ":443"}}
    :dispatch [{:handler handler}]})
 
 (defonce server_
