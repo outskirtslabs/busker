@@ -1,6 +1,6 @@
 (ns ol.busker.config-test
   (:require
-   [clojure.test :refer [deftest is testing]]
+   [clojure.test :refer [are deftest is testing]]
    [ol.busker.config :as cfg]
    [ol.busker.specs :as specs]
    [ol.busker.test-utils :as util]
@@ -189,6 +189,28 @@
                    :dispatch [{}]})]
       (is (some #(= ::cfg/entrypoint-bind-conflict (:error %)) errors)))))
 
+(deftest validate-entrypoint-bind-conflicts-test
+  (are [binds expected-conflict?]
+       (= expected-conflict?
+          (boolean
+           (some #(= ::cfg/entrypoint-bind-conflict (:error %))
+                 (load-errors
+                  {:entrypoints {:http {:bind binds :tls false}}
+                   :dispatch [{}]}))))
+    ["0.0.0.0:8080" "[::]:8080"] false
+    ["0.0.0.0:8080" "127.0.0.1:8080"] true
+    ["[::]:8080" "[::1]:8080"] true
+    ["127.0.0.1:8080" "127.0.0.1:8080"] true
+    ["unix:/tmp/busker.sock" "unix:/tmp/busker.sock"] true
+    ["unix:/tmp/busker.sock" ":8080"] false
+    [":8080" "0.0.0.0:8080"] true
+    [":8080" "[::]:8080"] true
+    [":8080" "127.0.0.1:8080"] true
+    [":8080" "[::1]:8080"] true
+    [":8080" "example.invalid:8080"] true
+    ["example.invalid:8080" "0.0.0.0:8080"] true
+    ["example.invalid:8080" "[::]:8080"] true))
+
 (deftest validate-top-level-tls-test
   (testing "rejects tls listeners when no global certificates are available"
     (let [errors (load-errors
@@ -211,7 +233,7 @@
       (is (some #(= ::cfg/tls-key-file-not-found (:error %)) errors)))))
 
 (deftest config->listeners-test
-  (testing "flattens entrypoint map into listeners with entrypoint ids"
+  (testing "expands unspecified TCP hosts into IPv4 and IPv6 wildcards"
     (let [listeners (-> {:entrypoints {:http {:bind [":8080" ":8081"]
                                               :tls false}
                                        :https {:bind ":8443"
@@ -222,10 +244,24 @@
                         cfg/config->listeners
                         :listeners)]
       (is (= [{:entrypoint :http
+               :host "0.0.0.0"
                :port 8080}
               {:entrypoint :http
+               :host "::"
+               :port 8080}
+              {:entrypoint :http
+               :host "0.0.0.0"
+               :port 8081}
+              {:entrypoint :http
+               :host "::"
                :port 8081}
               {:entrypoint :https
+               :host "0.0.0.0"
+               :port 8443
+               :tls {:tls-compatibility-mode :modern
+                     :http3? false}}
+              {:entrypoint :https
+               :host "::"
                :port 8443
                :tls {:tls-compatibility-mode :modern
                      :http3? false}}]

@@ -5,6 +5,7 @@
    [clojure.string :as str]
    [ol.busker.buffer-pool :as bp]
    [ol.busker.specs :as specs]
+   [ol.clave.crypto.impl.parse-ip :as parse-ip]
    [ol.clave.storage :as storage])
   (:import
    [java.io File]))
@@ -190,6 +191,15 @@
       (= host "0.0.0.0")
       (= host "::")))
 
+(defn- ip-families
+  [host]
+  (if (nil? host)
+    #{:ipv4 :ipv6}
+    (when-let [[bytes] (parse-ip/ip-string->bytes host)]
+      (case (alength ^bytes bytes)
+        4 #{:ipv4}
+        16 #{:ipv6}))))
+
 (defn- bind-conflict?
   [a b]
   (cond
@@ -202,8 +212,13 @@
     :else
     (and (= (:port a) (:port b))
          (or (= (:address a) (:address b))
-             (wildcard-host? (:address a))
-             (wildcard-host? (:address b))))))
+             (and (or (wildcard-host? (:address a))
+                      (wildcard-host? (:address b)))
+                  (let [families-a (ip-families (:address a))
+                        families-b (ip-families (:address b))]
+                    (or (nil? families-a)
+                        (nil? families-b)
+                        (boolean (some families-a families-b)))))))))
 
 (defn- validate-entrypoint-conflicts
   [entrypoints]
@@ -540,25 +555,28 @@
   [[entrypoint-id entrypoint]]
   (let [{:keys [bind http3? tls]} entrypoint
         binds (bind-values bind)]
-    (mapv (fn [addr]
-            (let [parsed (parse-bind-address addr)
-                  base (cond
-                         (:unix parsed)
-                         {:entrypoint entrypoint-id
-                          :unix (:unix parsed)}
+    (into []
+          (mapcat
+           (fn [addr]
+             (let [parsed (parse-bind-address addr)
+                   base (cond
+                          (:unix parsed)
+                          {:entrypoint entrypoint-id
+                           :unix (:unix parsed)}
 
-                         (:address parsed)
-                         {:entrypoint entrypoint-id
-                          :host (:address parsed)
-                          :port (:port parsed)}
-
-                         :else
-                         {:entrypoint entrypoint-id
-                          :port (:port parsed)})]
-              (if (map? tls)
-                (assoc base :tls (assoc tls :http3? http3?))
-                base)))
-          binds)))
+                          :else
+                          {:entrypoint entrypoint-id
+                           :port (:port parsed)})
+                   hosts (cond
+                           (:unix parsed) [nil]
+                           (:address parsed) [(:address parsed)]
+                           :else ["0.0.0.0" "::"])]
+               (map (fn [host]
+                      (cond-> base
+                        host (assoc :host host)
+                        (map? tls) (assoc :tls (assoc tls :http3? http3?))))
+                    hosts)))
+           binds))))
 
 (defn config->listeners
   [config]
