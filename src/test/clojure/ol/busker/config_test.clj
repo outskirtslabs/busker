@@ -16,28 +16,28 @@
 
 (deftest bind-address-valid-test
   (testing "accepts supported bind address forms"
-    (doseq [addr [":8080"
-                  "0.0.0.0:443"
-                  "example.com:80"
-                  "[::]:443"
-                  "[2001:db8::1]:8443"
-                  "unix:/tmp/busker.sock"
-                  "unix:@busker"]]
-      (is (cfg/bind-address? addr) (str "expected valid: " addr)))))
+    (are [addr] (cfg/bind-address? addr)
+      ":8080"
+      "0.0.0.0:443"
+      "example.com:80"
+      "[::]:443"
+      "[2001:db8::1]:8443"
+      "unix:/tmp/busker.sock"
+      "unix:@busker")))
 
 (deftest bind-address-invalid-test
   (testing "rejects unsupported bind address forms"
-    (doseq [addr [""
-                  "localhost"
-                  "localhost:"
-                  ":0"
-                  ":65536"
-                  "[::]"
-                  "[::]:"
-                  "unix:"
-                  "unix:/"
-                  "unix:@"]]
-      (is (not (cfg/bind-address? addr)) (str "expected invalid: " addr)))))
+    (are [addr] (not (cfg/bind-address? addr))
+      ""
+      "localhost"
+      "localhost:"
+      ":0"
+      ":65536"
+      "[::]"
+      "[::]:"
+      "unix:"
+      "unix:/"
+      "unix:@")))
 
 (deftest parse-bind-test
   (testing "parses tcp binds"
