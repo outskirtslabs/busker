@@ -51,13 +51,6 @@ if ! id -u busker >/dev/null 2>&1; then
 fi
 install -d -o busker -g busker -m 0755 /var/lib/busker
 install -d -o busker -g busker -m 0755 /var/cache/busker
-install -d -o busker -g busker -m 0700 /var/lib/busker/.ssh
-ssh-keyscan github.com >/var/lib/busker/.ssh/known_hosts 2>/dev/null
-chown busker:busker /var/lib/busker/.ssh/known_hosts
-chmod 0644 /var/lib/busker/.ssh/known_hosts
-runuser -u busker -- env HOME=/var/lib/busker git config --global \
-  url.git@github.com:outskirtslabs/busker.insteadOf \
-  https://github.com/outskirtslabs/busker
 /usr/local/bin/clojure -Sdescribe >/dev/null
 java_spec=$(java -XshowSettings:properties -version 2>&1 \
   | awk -F'= ' '/java.specification.version/ {print $2; exit}')
