@@ -1,6 +1,5 @@
 * xref:api.adoc[API Reference]
 ** xref:api/ol-busker.adoc[ol.busker]
 *** xref:api/ol-busker-buffer-pool.adoc[buffer-pool]
-*** xref:api/ol-busker-metrics.adoc[metrics]
 *** xref:api/ol-busker-middleware.adoc[middleware]
 *** xref:api/ol-busker-protocols.adoc[protocols]

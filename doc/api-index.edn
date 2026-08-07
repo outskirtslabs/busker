@@ -17,16 +17,6 @@
     "dispose" "dispose",
     "make-bytebuffer-pool" "make-bytebuffer-pool",
     "return" "return"}},
-  "ol.busker.metrics"
-  {:page "api/ol-busker-metrics.adoc",
-   :vars
-   {"counter!" "counter-BANG-",
-    "gauge-set!" "gauge-set-BANG-",
-    "histogram-observe!" "histogram-observe-BANG-",
-    "meter-mark!" "meter-mark-BANG-",
-    "now-ns" "now-ns",
-    "time!" "time-BANG-",
-    "time-block!" "time-block-BANG-"}},
   "ol.busker.middleware"
   {:page "api/ol-busker-middleware.adoc",
    :vars {"wrap-reject-early-data" "wrap-reject-early-data"}},

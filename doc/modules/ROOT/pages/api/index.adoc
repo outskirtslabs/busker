@@ -1,6 +1,6 @@
 = API Reference
 
-This release publishes 5 namespaces.
+This release publishes 4 namespaces.
 
 [cols="1,3",options="header",stripes=hover]
 |===
@@ -11,9 +11,6 @@ This release publishes 5 namespaces.
 
 | xref:api/ol-busker-buffer-pool.adoc[`ol.busker.buffer-pool`]
 | ByteBuffer pooling response buffers This namespace provides a thread-safe pool that reuses ByteBuffer instances to minimize garbage collection pressure during high-throughput I/O operations.
-
-| xref:api/ol-busker-metrics.adoc[`ol.busker.metrics`]
-| Minimal CLJ metrics facade built on taoensso/trove.
 
 | xref:api/ol-busker-middleware.adoc[`ol.busker.middleware`]
 | Ring middleware for common HTTP handling patterns.
