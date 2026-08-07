@@ -90,10 +90,38 @@ Backpressure applies to the emitter too, so an `emit!` or `flush` call waits on 
 On a virtual thread the JVM parks it, and the wait is cheap.
 On a platform thread the application thread remains blocked for as long as the client is slow.
 Run an emitter from a thread you can afford to block, ideally a virtual thread started for that stream.
-If the client disconnects, the stream closes and later emitter operations fail as described by the xref:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter` API].
+If application code closes an emitter, a final response completes, or libh2o reports request termination, Busker dispatches registered close callbacks on virtual threads.
+The callbacks run after Busker releases blocked response writers, and one failing callback does not suppress later callbacks.
+See the xref:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter` API] for callback registration and stream closure details.
 
 Uploads are bounded in the other direction.
 Busker asks the network side for another request-body chunk as the handler consumes the current chunk instead of copying the entire upload into JVM memory first.
+
+[#http1-idle-disconnects]
+=== When an idle HTTP/1.1 client disconnects
+
+Busker can run a close callback only after libh2o reports that the response has ended.
+This matters for an HTTP/1.1 stream that stays open but has no data to send.
+
+After libh2o reads an HTTP/1.1 request, it stops reading that connection while the response is active.
+HTTP/1.1 lets a client send more requests on the same connection before earlier responses finish.
+If libh2o kept reading, one eager client could fill server memory with future requests while a long response stayed open.
+libh2o declines that invitation and leaves the unread data in the network instead.
+
+The tradeoff is that libh2o may not notice when an idle client disconnects.
+The operating system may have received the close, but Busker does not learn about it until libh2o checks the connection again.
+
+A normal TCP close does not settle the matter, because apparently closing a connection needed nuance.
+A client may stop sending while it continues to receive the response.
+Treating every normal close as an abandoned request would disconnect clients that still expect an answer.
+
+If the application sends no more data, the close callback may wait until a later write or an explicit emitter close.
+Graceful shutdown also waits for the active stream rather than closing it.
+An application that needs a prompt result can choose to send a heartbeat or close the stream after a timeout and force the client to reconnect.
+
+HTTP/2 and HTTP/3 do not have this limitation.
+The close callback runs after an idle client disconnect without waiting for another application write.
+Those protocols keep listening for messages about open streams while a response is idle.
 
 == Reloading while requests are active
 
@@ -122,7 +150,7 @@ Reload uses draining to retire one generation without delaying the new one.
 Shutdown uses the same path but waits for it to complete.
 
 xref:api/ol-busker.adoc#stop-BANG-[`ol.busker/stop!`] starts draining the active generation and waits for every active or already draining generation.
-Busker waits for their request executors, stops their network workers, and releases their listeners and runtime services before `stop!` returns.
+Busker waits for their response streams, close callbacks, request executors, network workers, listeners, and runtime services before `stop!` returns.
 A slow request or open stream can therefore delay application shutdown.
 
 Each generation gives its request executor up to 60 seconds to finish before asking remaining tasks to stop immediately.

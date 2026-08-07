@@ -13,12 +13,13 @@
   "Controls an asynchronous server-to-client stream for one HTTP response.
 
    Use this protocol for Server-Sent Events (SSE), response streaming, and long polling.
-   The stream remains active until application code closes it or the request ends."
+   The stream closes when application code calls [[close]], a final response completes,
+   or libh2o reports request termination."
 
   (open? [this]
-    "Returns false after the native response writer stops.
+    "Returns true while the emitter accepts writes.
 
-     This value may remain true briefly after [[close]] requests stream completion.")
+     [[close]] changes this value to false before it dispatches close callbacks.")
 
   (committed? [this]
     "Returns true after a final response is committed.
@@ -67,11 +68,25 @@
      This call may throw when the stream is closing or closed.")
 
   (close [this]
-    "Requests stream completion.
+    "Closes the stream and begins callback delivery.
 
-     Returns false if the native writer has already stopped and true otherwise.")
+     Returns true only for the call that claims an open emitter.
+     Later calls return false.
+     Registered callbacks run after the writer is closed.")
 
   (on-close [this callback]
-    "Records `callback`, but callback delivery is not implemented.
+    "Registers a zero-argument `callback` to run when the emitter closes.
 
-     The current emitter never invokes callbacks registered by this method."))
+     Callbacks run exactly once on virtual threads after explicit close, final response
+     completion, or request termination reported by libh2o.
+     Busker cannot run the callback for a client disconnect until libh2o reports it.
+
+     An idle HTTP/1.1 client can disconnect without libh2o noticing right away.
+     If the application sends no more data, the callback may wait until a later write
+     or explicit close. Graceful server shutdown waits for the active stream rather than
+     closing it. For HTTP/2 and HTTP/3, the callback runs after an idle client disconnect
+     without waiting for another application write.
+
+     Callbacks registered before termination run in registration order, and an earlier
+     callback failure does not suppress later callbacks.
+     A callback registered after termination runs promptly on a virtual thread."))

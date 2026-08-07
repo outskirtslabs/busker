@@ -119,7 +119,7 @@
     (response/stop-emitter emitter)))
 
 (defn on-request
-  [^ExecutorService executor config ring-handler req-ctx-ptr req-ctx]
+  [^ExecutorService executor close-callback-dispatch config ring-handler req-ctx-ptr req-ctx]
   (if-not (pi/running? (evloop/get-current-worker))
     h2o/CLJ_HANDLER_SHUTTING_DOWN
     (try
@@ -128,7 +128,7 @@
             write-req (when has-body? (set-req-body-channel worker req-ctx-ptr req-ctx))
             req-id    (h2o/cstr-array->string (:req-id req-ctx))
             req       (Request. worker config req-id req-ctx-ptr req-ctx write-req)
-            emitter   (response/new-response-emitter req)
+            emitter   (response/new-response-emitter req close-callback-dispatch)
             ring-req  (assoc (h2o/build-ring-request (:meta req-ctx) (:input-stream write-req))
                              ::emitter emitter)]
         (pi/add-req worker req-id [req emitter])

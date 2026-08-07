@@ -10,7 +10,8 @@
    [ol.busker.protocols.content-length]
    [ol.busker.response-queue :as response-queue]
    [ol.busker.util :refer [compile-if]]
-   [ol.busker.util.headers :as hdr.util])
+   [ol.busker.util.headers :as hdr.util]
+   [taoensso.trove :as trove])
   (:import
    [java.io InputStream OutputStream]
    [java.lang.foreign MemorySegment]
@@ -247,14 +248,92 @@
       (streamable-response-body? chunk)  (throw (ex-info "StreamableResponseBody chunk requires close-after? true" {:type (class chunk)}))
       :else                              (throw (ex-info "Unsupported response chunk" {:type (class chunk)})))))
 
+(defn- start-virtual-thread!
+  [^Runnable task]
+  (Thread/startVirtualThread task))
+
+(defn- run-close-callbacks!
+  [callbacks]
+  (doseq [callback callbacks]
+    (try
+      (callback)
+      (catch Throwable t
+        (trove/log! {:level :error :id ::close-callback-failed :ex t})))))
+
+(defn- reserve-close-callbacks!
+  [callback-tail_ callbacks]
+  (when (seq callbacks)
+    (let [complete (promise)
+          task (reify Runnable
+                 (run [_]
+                   (try
+                     (run-close-callbacks! callbacks)
+                     (finally
+                       (deliver complete true)))))]
+      (loop []
+        (let [previous @callback-tail_
+              chained-task (reify Runnable
+                             (run [_]
+                               (try
+                                 @previous
+                                 (.run task)
+                                 (finally
+                                   (deliver complete true)))))]
+          (if (compare-and-set! callback-tail_ previous complete)
+            chained-task
+            (recur)))))))
+
+(defn- dispatch-close-callback!
+  [callback-dispatch task]
+  (when task
+    (try
+      (callback-dispatch task)
+      (catch Throwable _
+        (start-virtual-thread! task)))))
+
+(defn- terminal!
+  [lifecycle-lock lifecycle_ callback-tail_ callback-dispatch]
+  (let [[changed? task]
+        (locking lifecycle-lock
+          (let [{:keys [phase callbacks]} @lifecycle_]
+            (if (= :closed phase)
+              [false nil]
+              (let [task (reserve-close-callbacks! callback-tail_ callbacks)]
+                (reset! lifecycle_ {:phase :closed :callbacks []})
+                [true task]))))]
+    (dispatch-close-callback! callback-dispatch task)
+    changed?))
+
+(defn- begin-close!
+  [lifecycle-lock lifecycle_]
+  (locking lifecycle-lock
+    (let [{:keys [phase] :as lifecycle} @lifecycle_]
+      (when (= :open phase)
+        (reset! lifecycle_ (assoc lifecycle :phase :closing))
+        true))))
+
+(defn- register-close-callback!
+  [lifecycle-lock lifecycle_ callback-tail_ callback-dispatch callback]
+  (let [task
+        (locking lifecycle-lock
+          (let [{:keys [phase] :as lifecycle} @lifecycle_]
+            (if (= :closed phase)
+              (reserve-close-callbacks! callback-tail_ [callback])
+              (do
+                (reset! lifecycle_ (update lifecycle :callbacks conj callback))
+                nil))))]
+    (dispatch-close-callback! callback-dispatch task)))
+
 (deftype H2OResponseEmitter [^Request req
                              write-resp
                              committed_
-                             close-cb_
-                             closed?_]
+                             lifecycle-lock
+                             lifecycle_
+                             callback-dispatch
+                             callback-tail_]
   p/ResponseEmitter
   (open? [_]
-    (and (not @closed?_)
+    (and (= :open (:phase @lifecycle_))
          (not (.get ^AtomicBoolean (:stopped?_ write-resp)))))
   (committed? [_]
     (boolean @committed_))
@@ -265,7 +344,6 @@
 
     (let [os ^OutputStream (:out-stream write-resp)]
       (cond
-        ;; we are closed
         (not (p/open? this)) false
         ;; map data, possibly with headers/status
         (map? data)
@@ -295,27 +373,42 @@
             true)))))
   (flush [_]
     (.flush ^OutputStream (:out-stream write-resp)))
-  (close [this]
-    (if (not (p/open? this))
-      false
-      (do
+  (close [_]
+    (if (and (not (.get ^AtomicBoolean (:stopped?_ write-resp)))
+             (begin-close! lifecycle-lock lifecycle_))
+      (try
         (.close ^OutputStream (:out-stream write-resp))
-        true)))
-  (on-close [_ cb]
-    (swap! close-cb_ conj cb)))
+        true
+        (finally
+          (terminal! lifecycle-lock lifecycle_ callback-tail_ callback-dispatch)))
+      (if (.get ^AtomicBoolean (:stopped?_ write-resp))
+        (do
+          (terminal! lifecycle-lock lifecycle_ callback-tail_ callback-dispatch)
+          false)
+        false)))
+  (on-close [_ callback]
+    (register-close-callback! lifecycle-lock lifecycle_ callback-tail_ callback-dispatch callback)))
 
-(defn new-response-emitter [req]
-  (let [write-resp (response-queue/create-response-writer req)
-        committed_ (atom nil)
-        closed?_   (atom false)
-        close-cb_  (atom nil)]
-    (H2OResponseEmitter. req write-resp committed_ close-cb_ closed?_)))
+(defn new-response-emitter
+  ([req]
+   (new-response-emitter req start-virtual-thread!))
+  ([req callback-dispatch]
+   (let [write-resp (response-queue/create-response-writer req)
+         committed_ (atom nil)
+         lifecycle-lock (Object.)
+         lifecycle_ (atom {:phase :open :callbacks []})
+         callback-tail_ (atom (promise))]
+     (deliver @callback-tail_ true)
+     (H2OResponseEmitter. req write-resp committed_ lifecycle-lock lifecycle_ callback-dispatch callback-tail_))))
 
 (defn stop-emitter
-  "Stop right away, the connection is closing/closed."
+  "Stops the response writer before dispatching emitter close callbacks."
   [^H2OResponseEmitter emitter]
   (pi/stop (.write-resp emitter))
-  (p/close emitter))
+  (terminal! (.lifecycle-lock emitter)
+             (.lifecycle_ emitter)
+             (.callback-tail_ emitter)
+             (.callback-dispatch emitter)))
 
 (defn send-ring-response!
   [emitter ring-resp]

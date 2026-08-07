@@ -3,6 +3,7 @@
    [clojure.test :refer [deftest is testing]]
    [ol.busker.byte-bounded-queue :as bbq])
   (:import
+   java.lang.Thread$State
    [java.util.concurrent CountDownLatch TimeUnit]))
 
 (extend-protocol bbq/Sized
@@ -14,6 +15,16 @@
 
   clojure.lang.IPersistentVector
   (byte-size [v] (long (reduce + 0 (map bbq/byte-size v)))))
+
+(defn- blocked?
+  [^Thread thread]
+  (loop [attempt 0]
+    (cond
+      (= Thread$State/WAITING (.getState thread)) true
+      (= attempt 100) false
+      :else (do
+              (Thread/sleep 10)
+              (recur (inc attempt))))))
 
 (deftest byte-bounded-spsc-queue-creation-test
   (testing "Creates queue with valid capacity"
@@ -122,10 +133,29 @@
       (bbq/put q "foo")
       (bbq/put q "bar")
       (bbq/close q)
-
+      (is (= 6 (bbq/queued-bytes q)))
+      (is (= 94 (bbq/remaining-bytes q)))
       (let [items (bbq/drain q 100)]
         (is (= ["foo" "bar"] items))
         (is (= 0 (bbq/queued-bytes q))))))
+
+  (testing "Close unblocks a backpressured put"
+    (let [q (bbq/byte-bounded-spsc-queue 5)
+          started_ (promise)
+          stopped_ (promise)]
+      (bbq/put q "12345")
+      (let [producer
+            (Thread/startVirtualThread
+             (fn []
+               (deliver started_ true)
+               (try
+                 (bbq/put q "67890")
+                 (catch IllegalStateException _
+                   (deliver stopped_ true)))))]
+        (is (true? (deref started_ 1000 false)))
+        (is (blocked? producer))
+        (bbq/close q)
+        (is (true? (deref stopped_ 1000 false))))))
 
   (testing "Close is idempotent"
     (let [q (bbq/byte-bounded-spsc-queue 100)]

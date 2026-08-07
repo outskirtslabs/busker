@@ -31,6 +31,17 @@
 (defn- new-request-executor ^ExecutorService []
   (Executors/newVirtualThreadPerTaskExecutor))
 
+(defn- new-close-callback-executor ^ExecutorService []
+  (Executors/newVirtualThreadPerTaskExecutor))
+
+(defn- close-callback-dispatcher
+  [^ExecutorService executor]
+  (fn [^Runnable task]
+    (try
+      (.execute executor task)
+      (catch java.util.concurrent.RejectedExecutionException _
+        (Thread/startVirtualThread task)))))
+
 (defn- wrap-stage-error
   [message stage data t]
   (let [error-data (ex-data t)]
@@ -162,7 +173,7 @@
      :compress_args_zstd_quality (num-val :compress-zstd-level)}))
 
 (defn- create-server-config
-  [arena executor ring-handler config]
+  [arena executor close-callback-executor ring-handler config]
   (let [config-ptr (mem/alloc (h2o/globalconf-size) arena)
         flat-config-ptr (mem/serialize (config->flat-globalconf-t config)
                                        ::h2o/clj-h2o-flat-globalconf-t
@@ -175,6 +186,7 @@
                                                  (h2o/str->iovec "default" arena2)
                                                  65535))
         on-request-cb (partial request/on-request executor
+                               (close-callback-dispatcher close-callback-executor)
                                config
                                ring-handler)
         on-request-cleanup-cb (partial request/on-request-cleanup ring-handler)
@@ -703,11 +715,12 @@
      ::max-connections max-connections}))
 
 (defn- init-core-state
-  [{::keys [ring-handler config executor n-workers max-connections active-connection-count_]
+  [{::keys [ring-handler config executor close-callback-executor n-workers max-connections
+            active-connection-count_]
     :as state}]
   (let [arena (mem/shared-arena)
         _ (h2o/conn-limit-set-max max-connections)
-        server-config (create-server-config arena executor ring-handler config)
+        server-config (create-server-config arena executor close-callback-executor ring-handler config)
         config-ptr (::config-ptr server-config)
         loops (h2o/create-loops n-workers)
         contexts (h2o/create-contexts arena loops config-ptr)
@@ -922,7 +935,8 @@
 (defn stop!
   ([generation]
    (stop! generation 60 TimeUnit/SECONDS))
-  ([{::keys [^ExecutorService executor stop-lock] :as generation} ^long timeout ^TimeUnit timeunit]
+  ([{::keys [^ExecutorService executor ^ExecutorService close-callback-executor stop-lock]
+     :as generation} ^long timeout ^TimeUnit timeunit]
    (assert generation)
    (begin-stop! generation)
    (locking stop-lock
@@ -941,6 +955,12 @@
            (.set ^AtomicReference (:wakeup-receiver_ worker) nil))
          (when (seq (::workers generation))
            (evloop/join-all! (::workers generation)))
+         (when close-callback-executor
+           (.shutdown close-callback-executor)
+           (when-not (.awaitTermination close-callback-executor timeout timeunit)
+             (.shutdownNow close-callback-executor)
+             (when-not (.awaitTermination close-callback-executor timeout timeunit)
+               (println "Virtual thread close callback executor did not shutdown cleanly"))))
          (when-let [http3-contexts (::http3-contexts generation)]
            (free-http3-contexts http3-contexts))
          (when-let [ticket-mgr (::native-ticket-mgr generation)]
@@ -980,7 +1000,9 @@
                                              generation-id
                                              memory-ticket-service)
              _ (vreset! cleanup-state_ state)
-             state (assoc state ::executor (new-request-executor))
+             state (assoc state
+                          ::executor (new-request-executor)
+                          ::close-callback-executor (new-close-callback-executor))
              _ (vreset! cleanup-state_ state)]
          (cond-> (-> state
                      init-tls-lookup-state

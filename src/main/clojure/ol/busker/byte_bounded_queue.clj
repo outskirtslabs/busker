@@ -68,7 +68,8 @@
     (byte-size [buf] (.capacity buf)))
   ```"
   (:import
-   [java.util.concurrent LinkedTransferQueue Semaphore]))
+   [java.util.concurrent LinkedTransferQueue Semaphore]
+   [java.util.concurrent.atomic AtomicLong]))
 
 (defprotocol Sized
   "Protocol for types that can report their size in bytes.
@@ -212,25 +213,33 @@
          [^LinkedTransferQueue q
           ^long bytes-capacity
           ^Semaphore permits
+          ^AtomicLong queued-bytes_
           closed?_]
   ByteBoundedQueue
   (capacity-bytes [_] bytes-capacity)
-  (queued-bytes [_] (- bytes-capacity (.availablePermits permits)))
-  (remaining-bytes [_] (.availablePermits permits))
+  (queued-bytes [_] (.get queued-bytes_))
+  (remaining-bytes [_] (- bytes-capacity (.get queued-bytes_)))
   (closed? [_] @closed?_)
   (close [_]
-    (reset! closed?_ true)
+    (when (compare-and-set! closed?_ false true)
+      ;; Wake the single producer blocked in `acquire`; it rechecks `closed?_` before enqueueing.
+      (.release permits (int bytes-capacity)))
     nil)
   (put [_ item]
     (ensure-open closed?_)
-    (let [b (long (byte-size item))]
+    (let [b (long (byte-size item))
+          queued? (volatile! false)]
       (assert (not (neg? b)) "bytes must be >= 0")
       (when (> b bytes-capacity) (throw (IllegalArgumentException. (str "Chunk bytes " b " exceed capacity " bytes-capacity))))
       (when (pos? b) (.acquire permits (int b)))
       (try
         (ensure-open closed?_)
+        (when (pos? b)
+          (.addAndGet queued-bytes_ b)
+          (vreset! queued? true))
         (.put q item)
         (catch Throwable t
+          (when @queued? (.addAndGet queued-bytes_ (- b)))
           (when (pos? b) (.release permits (int b)))
           (throw t)))))
   (drain [_ max-bytes]
@@ -245,7 +254,9 @@
                 (persistent! acc)
                 (let [polled (.poll q)]
                   (assert (identical? polled head) "drain observed head change; multiple consumers are unsupported")
-                  (when (pos? b) (.release permits (int b)))
+                  (when (pos? b)
+                    (.addAndGet queued-bytes_ (- b))
+                    (.release permits (int b)))
                   (recur (- rem b) (conj! acc polled)))))
             (persistent! acc)))))))
 
@@ -303,4 +314,5 @@
   (->ByteBoundedLinkedTransferQueue (LinkedTransferQueue.)
                                     capacity-bytes
                                     (Semaphore. (int capacity-bytes) false)
+                                    (AtomicLong. 0)
                                     (atom false)))

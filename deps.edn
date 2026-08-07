@@ -17,10 +17,12 @@
                     :ns-default build}
            :deploy {:extra-deps {slipset/deps-deploy {:mvn/version "0.2.5"}}}
            :test   {:extra-paths ["src/test/clojure"]
-                    :extra-deps  {ring/ring-core {:mvn/version "1.15.3"}}}
+                    :extra-deps {ring/ring-core {:mvn/version "1.15.3"}}
+                    :jvm-opts ["-Xmx8g"]}
            :dev    {:extra-paths ["dev"]
                     :jvm-opts
-                    ["--enable-native-access=ALL-UNNAMED"
+                    ["-Xmx8g"
+                     "--enable-native-access=ALL-UNNAMED"
                      "-Duser.timezone=UTC"
                      "-XX:+UseZGC"
                      "-XX:+EnableDynamicAgentLoading"
