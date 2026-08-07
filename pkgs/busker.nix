@@ -62,6 +62,7 @@ clojureLib.mkCljLib {
     "shim/${target.dir}/target"
   ]) shimTargets;
   prepAliases = [
+    "bench"
     "build"
     "dev"
     "test"
@@ -87,7 +88,7 @@ clojureLib.mkCljLib {
     unset CLJ_CACHE CLJ_CONFIG XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME
 
     ${clojure}/bin/clojure -Srepro -P || true
-    ${clojure}/bin/clojure -Srepro -X:deps prep :aliases '[:build :dev :test]'
+    ${clojure}/bin/clojure -Srepro -X:deps prep :aliases '[:bench :build :dev :test]'
     ${clojure}/bin/clojure -Srepro -P -M:dev:test:kaocha || true
 
     coffi_dir="$(find "$GITLIBS/libs" -path '*/org.suskalo/coffi/*' -type d | head -n 1)"

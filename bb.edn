@@ -145,8 +145,24 @@
                                        " --lint src")))}
 
                   bench
-                  {:doc  "Run the benchmark suite (wraps `clojure -M:dev:bench -m ol.busker.benchmark`)"
-                   :task (apply clojure "-M:dev:bench" "-m" "ol.busker.benchmark" *command-line-args*)}
+                  {:doc  "Run the Ring adapter benchmark suite"
+                   :task (apply clojure "-M:bench" *command-line-args*)}
+
+                  bench:smoke
+                  {:doc "Run the short local benchmark smoke profile"
+                   :task (apply clojure "-M:bench" "--smoke" *command-line-args*)}
+
+                  bench:graph
+                  {:doc "Render benchmark JSON as SVG throughput graphs"
+                   :task (apply shell "python3" "bench/graph.py" *command-line-args*)}
+
+                  bench:check-graphs
+                  {:doc "Verify benchmark graph output is reproducible"
+                   :task (shell "bash" "-c"
+                                (str "dir=$(mktemp -d); "
+                                     "python3 bench/graph.py bench/fixtures/sample-results.json $dir/first; "
+                                     "python3 bench/graph.py bench/fixtures/sample-results.json $dir/second; "
+                                     "diff -r $dir/first $dir/second; rm -rf $dir"))}
 
                   deps-tree
                   {:doc  "Show dependency tree"
