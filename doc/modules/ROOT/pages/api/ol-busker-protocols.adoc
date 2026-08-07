@@ -31,7 +31,8 @@ Return the number of bytes that `body` will require when it is
 Controls an asynchronous server-to-client stream for one HTTP response.
 
  Use this protocol for Server-Sent Events (SSE), response streaming, and long polling.
- The stream closes when application code calls <<close,`close`>>, a final response completes, or libh2o reports request termination.
+ The stream closes when application code calls <<close,`close`>>, a final response completes,
+ or libh2o reports request termination.
 
 _protocol_
 
@@ -155,13 +156,16 @@ Closes the stream and begins callback delivery.
 
 Registers a zero-argument `callback` to run when the emitter closes.
 
-   Callbacks run exactly once on virtual threads after explicit close, final response completion, or request termination reported by libh2o.
+   Callbacks run exactly once on virtual threads after explicit close, final response
+   completion, or request termination reported by libh2o.
    Busker cannot run the callback for a client disconnect until libh2o reports it.
 
    An idle HTTP/1.1 client can disconnect without libh2o noticing right away.
-   If the application sends no more data, the callback may wait until a later write or explicit close.
-   Graceful server shutdown waits for the active stream rather than closing it.
-   For HTTP/2 and HTTP/3, the callback runs after an idle client disconnect without waiting for another application write.
+   If the application sends no more data, the callback may wait until a later write
+   or explicit close. Graceful server shutdown waits for the active stream rather than
+   closing it. For HTTP/2 and HTTP/3, the callback runs after an idle client disconnect
+   without waiting for another application write.
 
-   Callbacks registered before termination run in registration order, and an earlier callback failure does not suppress later callbacks.
+   Callbacks registered before termination run in registration order, and an earlier
+   callback failure does not suppress later callbacks.
    A callback registered after termination runs promptly on a virtual thread.
