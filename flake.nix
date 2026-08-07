@@ -96,6 +96,7 @@
                 "--enable-ssls-export"
               ];
             }))
+            pkgs.hcloud
             pkgs.cmake
             pkgs.ninja
             pkgs.mermaid-cli
