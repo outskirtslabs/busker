@@ -109,23 +109,104 @@ Busker does not infer a response `content-type`; set that header in the response
 
 === Response body types
 
-When `org.ring-clojure/ring-core-protocols` is on the classpath, Busker writes any value that satisfies `ring.core.protocols/StreamableResponseBody`.
+`ring.core.protocols/StreamableResponseBody` is Ring's general protocol for writing a response body (and is not specific onlyto streaming responses).
+When `org.ring-clojure/ring-core-protocols` is on the classpath, Busker accepts any value that satisfies this protocol.
 Ring provides implementations for:
 
 * `byte[]`
 * `String`
-* `clojure.lang.ISeq`, including lazy sequences
+* `clojure.lang.ISeq`
 * `java.io.InputStream`
 * `java.io.File`
 * `nil`
 
-Applications may extend that Ring protocol for another body type.
+Applications may extend the protocol for another body type.
+Sequences and input streams can produce data as Busker reads them, as described in the next section.
 
-Busker does not require Ring.
-Without `ring-core-protocols`, its fallback writer accepts `byte[]`, `String`, `java.nio.ByteBuffer`, `java.io.InputStream`, `nil`, and sequential collections of fallback values.
-The fallback writer always encodes a `String` as UTF-8.
-The fallback writer writes a number as one byte using `OutputStream.write(int)`.
-The fallback writer does not accept `java.io.File` or custom Ring protocol implementations.
+Busker does not require `ring-core-protocols`.
+Without it, Busker's writer accepts `byte[]`, `String`, `java.nio.ByteBuffer`, `java.io.InputStream`, `nil`, and sequential collections of fallback values.
+The writer always encodes a `String` as UTF-8.
+The writer writes a number as one byte using `OutputStream.write(int)`.
+The writer does not accept `java.io.File` or custom Ring protocol implementations.
+
+=== Streaming responses
+
+==== Sequences and input streams
+
+The `ISeq` or `InputStream` are the "traditional" streaming response types.
+A handler can return one of those as the `:body` ant the contents will be streamed to the client as it arrives.
+
+Busker reads from that source and sends each part through a bounded response queue.
+The queue limits pending response data, and the writer waits for space when the client cannot keep up.
+Busker does not collect the whole body before the response starts (looking at you http-kit).
+
+==== Response emitters
+
+
+HTTP can do more than Ring's single response map allows.
+Informational responses and responses that continue after the handler returns do not fit that model.
+Busker exposes those parts of HTTP through a xref:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter`] for these HTTP features.
+
+With an emitter, an application can:
+
+* send zero or more informational responses with statuses from 100 through 199, except `101 Switching Protocols`;
+* send `103 Early Hints` with `link` headers so the client can start preloading resources;
+* send `102 Processing` while work continues;
+* send one final status and header map, followed by body data over time;
+* tell Busker when the response is complete; and
+* run application cleanup through an `on-close` callback.
+
+An informational response cannot contain a body.
+Each informational response has its own complete header map.
+After the final response is committed, its status and headers cannot change.
+
+The emitter is available in the request under `:ol.busker.request/emitter`.
+A handler uses it by returning it as the response body.
+
+In the example below, the handler starts a virtual thread to send the informational response, final response, and body data.
+
+[source,clojure]
+----
+(require '[ol.busker.protocols :as response])
+
+(defn my-handler
+  [{emitter :ol.busker.request/emitter}]
+  ;; register an on close handler
+  (response/on-close emitter #(println "event stream closed"))
+  ;; do work in the background and emit events
+  (Thread/startVirtualThread
+   (fn []
+     (try
+       (response/emit! emitter
+        {:status 103
+         :headers {"link" "</events.css>; rel=preload; as=style"}})
+       (Thread/sleep 1000)
+       (response/emit! emitter
+        {:status 200
+         :headers {"cache-control" "no-cache"
+                   "content-type" "text/event-stream"}})
+       (doseq [event ["one" "two" "three"]]
+         (response/emit! emitter (str "data: " event "\n\n"))
+         (response/flush emitter))
+       (finally
+         (response/close emitter)))))
+  ;; return the emitter right away with no additional data in the response map
+  {:body emitter})
+----
+
+The first `emit!` sends `103 Early Hints`, allowing the client to preload the stylesheet.
+The next `emit!` commits the final status and headers.
+Later calls send body data, and `flush` makes buffered data available to the client.
+
+Both `emit!` and `flush` may wait when the response queue is full, so the producer runs on a virtual thread.
+
+The `finally` block closes the emitter whether the producer finishes normally or fails.
+
+The zero-argument `on-close` callback runs when Busker learns that the response has ended.
+
+Emitter calls do not pass through Ring middleware.
+Set the emitted status, headers, and body data in the producer itself.
+See the xref:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter` protocol reference] for the complete API and close behavior.
 
 == Content length
 
@@ -169,17 +250,3 @@ You can wrap the application handler yourself, or list wrappers in a dispatcher'
 The xref:configuration.adoc[configuration reference] accepts a wrapper function, a qualified symbol, or `[wrapper options]`.
 Middleware responses must keep header names lowercase for HTTP/2 and HTTP/3.
 Ring's `wrap-cookies` and `wrap-session` emit a title-case `Set-Cookie` name, so their response path remains limited to HTTP/1.1 unless the application lowercases that name.
-
-== Streaming responses
-
-An `ISeq` or `InputStream` Ring body streams through a bounded response queue.
-The queue limits pending response data, and the writer waits for space when a client falls behind.
-Busker does not collect an unknown-size body before the response starts.
-
-These bodies cover the case where the response data exists, or is being produced lazily, when the handler returns.
-Some responses do not work that way.
-A server-sent event stream or a long-polling endpoint stays open and sends chunks as application code produces them, possibly for hours.
-Ring's sync handlers/middlware has no API for that, so Busker adds one: the *response emitter*.
-The handler takes the emitter from the `:ol.busker.request/emitter` request value, returns it as the response `:body`, and then writes chunks to it over time.
-The generated xref:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter` protocol reference] documents writes, flushing, closure, informational responses, and error behavior.
-Emitter calls do not pass through Ring middleware.
