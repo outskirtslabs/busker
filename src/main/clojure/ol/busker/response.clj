@@ -22,6 +22,8 @@
 
 (set! *warn-on-reflection* true)
 
+(def ^:private clj-header-size (mem/size-of ::h2o/clj-header-t))
+
 (defn dissoc-header
   "Remove all case variations of a header by name (case-insensitive)."
   [headers ^String header-name]
@@ -68,12 +70,11 @@
     (if (zero? headers-count)
       [(mem/as-segment 0) 0 content-length]
 
-      (let [header-size (mem/size-of ::h2o/clj-header-t)
-            total-size (* headers-count header-size)
+      (let [total-size (* headers-count clj-header-size)
             headers-seg (mem/alloc total-size)]
 
         (doseq [[idx [name-key value-val]] (map-indexed vector header-pairs)]
-          (let [offset (* idx header-size)
+          (let [offset (* idx clj-header-size)
                 ;; h2 and h3 require lower case headers
                 name-str (str/lower-case (if (string? name-key) name-key (str name-key)))
                 value-str (if (string? value-val) value-val (str value-val))
@@ -84,7 +85,7 @@
                              :value value-ptr
                              :value_len (dec (.byteSize value-ptr))}
                 header-seg (mem/serialize header-data ::h2o/clj-header-t)
-                dest-seg (mem/slice headers-seg offset header-size)]
+                dest-seg (mem/slice headers-seg offset clj-header-size)]
             (mem/copy-segment dest-seg header-seg)))
         [resp headers-seg headers-count content-length]))))
 
@@ -110,12 +111,11 @@
     (if (zero? headers-count)
       [(mem/as-segment 0) 0 content-length]
 
-      (let [header-size (mem/size-of ::h2o/clj-header-t)
-            total-size (* headers-count header-size)
+      (let [total-size (* headers-count clj-header-size)
             headers-seg (mem/alloc total-size)]
 
         (doseq [[idx [name-key value-val]] (map-indexed vector header-pairs)]
-          (let [offset (* idx header-size)
+          (let [offset (* idx clj-header-size)
                 name-str (if (string? name-key) name-key (str name-key))
                 value-str (if (string? value-val) value-val (str value-val))
                 name-ptr ^MemorySegment (mem/serialize name-str ::mem/c-string)
@@ -125,7 +125,7 @@
                              :value value-ptr
                              :value_len (dec (.byteSize value-ptr))}
                 header-seg (mem/serialize header-data ::h2o/clj-header-t)
-                dest-seg (mem/slice headers-seg offset header-size)]
+                dest-seg (mem/slice headers-seg offset clj-header-size)]
             (mem/copy-segment dest-seg header-seg)))
         [headers-seg headers-count content-length]))))
 
