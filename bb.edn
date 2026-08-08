@@ -7,6 +7,7 @@
  :pods           {clj-kondo/clj-kondo {:version "2026.01.19"}}
  :tasks          {:requires ([babashka.fs :as fs]
                              [tasks.build  :as build]
+                             [tasks.hcloud :as hcloud]
                              [tasks.pebble :as pebble]
                              [tasks.smoke  :as smoke]
                              [clojure.string :as str]
@@ -144,9 +145,17 @@
                                        (str " --lint " (first *command-line-args*))
                                        " --lint src")))}
 
+                  hcloud
+                  {:doc  "Manage the Hetzner Cloud benchmark server"
+                   :task (apply hcloud/run *command-line-args*)}
+
                   bench
                   {:doc  "Run the Ring adapter benchmark suite"
                    :task (apply clojure "-M:bench" *command-line-args*)}
+
+                  bench:busker
+                  {:doc  "Run the benchmark suite with Busker only"
+                   :task (apply clojure "-M:bench" "--adapter" "busker" *command-line-args*)}
 
                   bench:smoke
                   {:doc "Run the short local benchmark smoke profile"
