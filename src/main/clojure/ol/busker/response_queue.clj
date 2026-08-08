@@ -1,6 +1,5 @@
 (ns ^:no-doc ol.busker.response-queue
   (:require
-   [coffi.ffi :as ffi]
    [coffi.mem :as mem]
    [ol.busker.buffer-pool :as bp]
    [ol.busker.byte-bounded-queue :as bbq]
@@ -136,7 +135,11 @@
   (let [worker (-> st :req :worker)]
     (if (.compareAndSet ^AtomicBoolean (:scheduled?_ st) false true)
       (do
-        (pi/send-msg worker [:h2o/sendvec (fn [] (send-vecs st))])
+        (pi/send-msg worker
+                     [:h2o/sendvec
+                      (:dispatch-module-id (:req st))
+                      (:dispatch-request-seq (:req st))
+                      (fn [] (send-vecs st))])
         :sent-msg)
       (do
         (pi/wake worker)
@@ -293,16 +296,9 @@
                        {}))
 
 (defn create-response-writer [req]
-  (let [st            (new-response-state req)
-        on-proceed-cb (fn [_ctx-ptr] (on-proceed st))
-        on-stop-cb    (fn [_ctx-ptr reason] (on-stop st reason))]
+  (let [st (new-response-state req)
+        {:keys [proceed stop]} (:callback-pointers req)]
     (assoc st
-           ;; these must not be GCed until the request is complete
-           ;; but from here they no longer need to be accessed
-           ::on-proceed-cb    on-proceed-cb
-           ::on-stop-cb       on-stop-cb
-           ;; these also musn't be GCed, but they must be accessed later
-           ;; when h2o_start_response or h2o_send_informational is called
-           :on-proceed-cb-ptr (mem/serialize on-proceed-cb [::ffi/fn [::mem/pointer] ::mem/void])
-           :on-stop-cb-ptr    (mem/serialize on-stop-cb [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])
-           :out-stream     (->output-stream st))))
+           :on-proceed-cb-ptr proceed
+           :on-stop-cb-ptr stop
+           :out-stream (->output-stream st))))

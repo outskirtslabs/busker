@@ -1,5 +1,6 @@
 (ns ^:no-doc ol.busker.evloop
   (:require
+   [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.internal.protocols :as p]
    [ol.busker.native :as h2o])
   (:import
@@ -22,6 +23,7 @@
             loop-fn                ;;  the loop iteration body
             message-handler        ;; fn: (op, args) -> void, handles custom messages
             ^AtomicReference wakeup-receiver_
+            callback-dispatch
             ^HashMap requests
             args]
   p/WorkerThread
@@ -115,23 +117,29 @@
 
    Options:
    - :thread-name-prefix - prefix for thread name (default 'h2o-evloop')
+   - :callback-dispatch - worker-local native callback dispatcher
 
    Returns: worker"
 
-  [loop-fn message-handler wakeup-receiver & {:keys [thread-name-prefix]
+  [loop-fn message-handler wakeup-receiver & {:keys [callback-dispatch thread-name-prefix]
                                               :or {thread-name-prefix "h2o-evloop"}}]
+  (when-not callback-dispatch
+    (throw (ex-info "Worker requires a callback dispatcher" {})))
   (let [id (swap! next-id_ inc)
         w (map->Worker {:id id
                         :thread nil
-                        :requests (HashMap. 100)
+                        :callback-dispatch callback-dispatch
+                        :requests (:entries callback-dispatch)
                         :running?_ (AtomicBoolean. true)
                         :mailbox (ArrayBlockingQueue. 256)
                         :evloop nil
                         :loop-fn loop-fn
                         :message-handler message-handler
                         :wakeup-receiver_ (AtomicReference. wakeup-receiver)})
-        t (Thread. #(run-evloop-on-thread! (assoc w :thread (Thread/currentThread))) (format "%s-%d" thread-name-prefix id))
+        t (Thread. #(run-evloop-on-thread! (assoc w :thread (Thread/currentThread)))
+                   (format "%s-%d" thread-name-prefix id))
         w (assoc w :thread t)]
+    (callback-dispatch/bind-thread! callback-dispatch t)
     (.start t)
     w))
 

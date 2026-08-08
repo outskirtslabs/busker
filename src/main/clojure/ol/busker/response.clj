@@ -150,8 +150,10 @@
   [^Request req status headers headers-len content-length compress-hint write-resp]
   (pi/send-msg (:worker req)
                [:h2o/start-response
-                (fn []
-                  (h2o/start-response (:req-ctx-ptr req) status
+                (:dispatch-module-id req)
+                (:dispatch-request-seq req)
+                (fn [live-req]
+                  (h2o/start-response (:req-ctx-ptr live-req) status
                                       headers headers-len
                                       content-length compress-hint
                                       (:on-proceed-cb-ptr write-resp)
@@ -161,8 +163,11 @@
   [^Request req status headers headers-len]
   (pi/send-msg (:worker req)
                [:h2o/send-informational
-                (fn []
-                  (h2o/send-informational (:req-ctx-ptr req) status headers headers-len))]))
+                (:dispatch-module-id req)
+                (:dispatch-request-seq req)
+                (fn [live-req]
+                  (h2o/send-informational (:req-ctx-ptr live-req)
+                                          status headers headers-len))]))
 
 (defn- send-informational!
   [^Request req resp]

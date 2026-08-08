@@ -202,6 +202,8 @@
       [:on-response-generator-stop ::mem/pointer]
       [:preferred-chunk-size ::mem/long]
       [:req-id [::mem/array ::mem/char 64]]
+      [:dispatch-module-id ::mem/long]
+      [:dispatch-request-seq ::mem/long]
       [:cleanup ::mem/int]
       [:closing ::mem/int]
       [:response_started ::mem/int]]]))
@@ -342,6 +344,11 @@
 (defcfn context-size
   "Get size of h2o_context_t structure"
   clj_h2o_context_size
+  [] ::mem/long)
+
+(defcfn req-ctx-size
+  "Gets the native size of `clj_req_ctx_t`."
+  clj_h2o_req_ctx_size
   [] ::mem/long)
 
 (defcfn accept-ctx-size
@@ -497,9 +504,12 @@
                         (on-req-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t)))
         on-request-cb-ptr (mem/serialize on-request-cb [::ffi/fn [::mem/pointer] ::mem/int] arena)
 
-        on-request-cleanup-cb (fn on-request-cleanup-cb [ctx-ptr]
-                                (on-cleanup-callback ctx-ptr (mem/deserialize (mem/reinterpret ctx-ptr (mem/size-of ::clj-req-ctx-t)) ::clj-req-ctx-t)))
-        on-request-cleanup-cb-ptr (mem/serialize on-request-cleanup-cb [::ffi/fn [::mem/pointer] ::mem/void] arena)]
+        on-request-cleanup-cb (fn on-request-cleanup-cb [module-id request-seq]
+                                (on-cleanup-callback module-id request-seq))
+        on-request-cleanup-cb-ptr
+        (mem/serialize on-request-cleanup-cb
+                       [::ffi/fn [::mem/long ::mem/long] ::mem/void]
+                       arena)]
 
     {::on-request-cb on-request-cb
      ::on-request-cleanup-cb on-request-cleanup-cb
@@ -517,10 +527,10 @@
   clj_h2o_proceed_req
   [::mem/pointer] ::mem/void)
 
-(defcfn set-on-request-body-chunk-callback
-  "Sets the on_request_body_chunk callback in the clj_req_ctx_t struct."
-  clj_h2o_set_on_request_body_chunk
-  [::mem/pointer ::mem/pointer] ::mem/void)
+(defcfn install-request-dispatch
+  "Installs scalar request identity and its stable body callback."
+  clj_h2o_install_request_dispatch
+  [::mem/pointer ::mem/long ::mem/long ::mem/pointer] ::mem/void)
 
 (defcfn evloop-now
   "Get current time in milliseconds from event loop"

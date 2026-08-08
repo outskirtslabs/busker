@@ -334,6 +334,8 @@ void clj_h2o_socket_set_on_close(h2o_socket_t *sock, void *callback,
 
 size_t clj_h2o_context_size(void) { return sizeof(h2o_context_t); }
 
+size_t clj_h2o_req_ctx_size(void) { return sizeof(clj_req_ctx_t); }
+
 size_t clj_h2o_globalconf_size(void) { return sizeof(h2o_globalconf_t); }
 
 size_t clj_h2o_accept_ctx_size(void) { return sizeof(h2o_accept_ctx_t); }
@@ -372,41 +374,30 @@ size_t clj_h2o_context_get_shutdown_conns(h2o_context_t *ctx) {
 }
 
 static void clj_generator_proceed(h2o_generator_t *gen, h2o_req_t *req) {
-  (void)req; /* unused parameter */
-
-  if (!gen) {
+  (void)req;
+  if (gen == NULL)
     return;
-  }
 
-  /* gen points to the generator member inside clj_stream_ctx_t, not the start
-   * of the struct. */
   clj_req_ctx_t *ctx = H2O_STRUCT_FROM_MEMBER(clj_req_ctx_t, generator, gen);
-
-  if (!ctx) {
-    return;
-  }
-
-  if (ctx->on_response_generator_proceed) {
-    ctx->on_response_generator_proceed(ctx);
-  }
+  if (ctx != NULL && ctx->dispatch_module_id != 0 &&
+      ctx->dispatch_request_seq != 0 &&
+      ctx->on_response_generator_proceed != NULL)
+    ctx->on_response_generator_proceed(ctx->dispatch_module_id,
+                                       ctx->dispatch_request_seq);
 }
 
 static void clj_generator_stop(h2o_generator_t *gen, h2o_req_t *req) {
-  (void)req; /* unused parameter */
-
-  if (!gen) {
+  (void)req;
+  if (gen == NULL)
     return;
-  }
 
   clj_req_ctx_t *ctx = H2O_STRUCT_FROM_MEMBER(clj_req_ctx_t, generator, gen);
-
-  if (!ctx) {
-    return;
-  }
-
-  if (ctx->on_response_generator_stop) {
-    ctx->on_response_generator_stop(ctx, CLJ_COMPLETE_RESET);
-  }
+  if (ctx != NULL && ctx->dispatch_module_id != 0 &&
+      ctx->dispatch_request_seq != 0 &&
+      ctx->on_response_generator_stop != NULL)
+    ctx->on_response_generator_stop(ctx->dispatch_module_id,
+                                    ctx->dispatch_request_seq,
+                                    CLJ_COMPLETE_RESET);
 }
 
 /* Copy headers from clj_header_t array to h2o_req_t response headers using pool
@@ -453,9 +444,8 @@ void clj_h2o_send_informational(clj_req_ctx_t *ctx, int status,
 size_t clj_h2o_start_response(
     clj_req_ctx_t *ctx, int status, const clj_header_t *headers,
     size_t headers_len, size_t content_length, int compress_hint,
-    void (*on_response_generator_proceed)(clj_req_ctx_t *ctx),
-    void (*on_response_generator_stop)(clj_req_ctx_t *ctx,
-                                       clj_complete_reason_t reason)) {
+    clj_response_generator_proceed_cb on_response_generator_proceed,
+    clj_response_generator_stop_cb on_response_generator_stop) {
   (void)compress_hint; /* TODO: use for per-request compression control */
 
   if (!ctx || !ctx->req)
@@ -556,19 +546,27 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
   }
 }
 
-/* Completion cleanup callback - this is called by h2o when our request dies
-   such as when the client disconnects abruptly
-   We use this to signal to java that this req is no longer alive
-   ref: https://github.com/h2o/h2o/issues/1894#issuecomment-437231273
-   */
 static void cleanup_request(void *ptr) {
-  if (!ptr)
+  if (ptr == NULL)
     return;
+
   clj_req_ctx_t *const ctx = (clj_req_ctx_t *)ptr;
+  clj_request_cleanup_cb cleanup = ctx->on_request_cleanup;
+  uint64_t module_id = ctx->dispatch_module_id;
+  uint64_t request_seq = ctx->dispatch_request_seq;
+
   ctx->cleanup = 1;
-  if (ctx->on_request_cleanup) {
-    ctx->on_request_cleanup(ctx);
-  }
+  ctx->on_request_body_chunk = NULL;
+  ctx->on_response_generator_proceed = NULL;
+  ctx->on_response_generator_stop = NULL;
+  ctx->generator.proceed = NULL;
+  ctx->generator.stop = NULL;
+  if (cleanup != NULL && module_id != 0 && request_seq != 0)
+    cleanup(module_id, request_seq);
+
+  ctx->dispatch_module_id = 0;
+  ctx->dispatch_request_seq = 0;
+  ctx->on_request_cleanup = NULL;
 }
 
 /**
@@ -583,23 +581,18 @@ static void cleanup_request(void *ptr) {
  */
 static int clj_body_write_callback(void *self, int is_end_stream) {
   clj_req_ctx_t *ctx = (clj_req_ctx_t *)self;
-  if (!ctx || !ctx->req) {
+  if (ctx == NULL || ctx->req == NULL || ctx->dispatch_module_id == 0 ||
+      ctx->dispatch_request_seq == 0 || ctx->on_request_body_chunk == NULL)
     return 1;
-  }
-
-  if (ctx->on_request_body_chunk == 0) {
-    return 1;
-  }
 
   h2o_req_t *req = ctx->req;
-
-  if (req->entity.base && req->entity.len > 0) {
-    ctx->on_request_body_chunk(ctx, req->entity.base, req->entity.len,
-                               is_end_stream ? 1 : 0);
-  } else if (is_end_stream) {
-    /* End of stream marker with no data */
-    ctx->on_request_body_chunk(ctx, NULL, 0, 1);
-  }
+  if (req->entity.base != NULL && req->entity.len > 0)
+    ctx->on_request_body_chunk(ctx->dispatch_module_id,
+                               ctx->dispatch_request_seq, req->entity.base,
+                               req->entity.len, is_end_stream ? 1 : 0);
+  else if (is_end_stream)
+    ctx->on_request_body_chunk(ctx->dispatch_module_id,
+                               ctx->dispatch_request_seq, NULL, 0, 1);
 
   return 0;
 }
@@ -655,22 +648,20 @@ static int request_handler(h2o_handler_t *self, h2o_req_t *req) {
     return -1;
   }
 
-  if (ctx->meta.has_body && ctx->on_request_body_chunk != 0) {
+  if (ctx->meta.has_body && ctx->on_request_body_chunk != NULL) {
     if (req->proceed_req != NULL) {
-      // Set up our body write callback to receive chunks
       req->write_req.cb = clj_body_write_callback;
       req->write_req.ctx = ctx;
-      if (req->entity.base != NULL && req->entity.len > 0) {
-        // Deliver the already-buffered chunk
-        ctx->on_request_body_chunk(ctx, req->entity.base, req->entity.len, 0);
-      } else {
-        // Nothing buffered: request the first chunk
+      if (req->entity.base != NULL && req->entity.len > 0)
+        ctx->on_request_body_chunk(ctx->dispatch_module_id,
+                                   ctx->dispatch_request_seq, req->entity.base,
+                                   req->entity.len, 0);
+      else
         req->proceed_req(req, NULL);
-      }
     } else if (req->entity.base != NULL) {
-      // Small body - already buffered by h2o, deliver immediately
-      if (ctx->on_request_body_chunk)
-        ctx->on_request_body_chunk(ctx, req->entity.base, req->entity.len, 1);
+      ctx->on_request_body_chunk(ctx->dispatch_module_id,
+                                 ctx->dispatch_request_seq, req->entity.base,
+                                 req->entity.len, 1);
     }
   }
   return 0;
@@ -694,7 +685,7 @@ static void on_handler_dispose(h2o_handler_t *_self) {
 clj_h2o_handler_t *
 clj_h2o_create_handler(h2o_hostconf_t *hostconf,
                        int (*on_request)(clj_req_ctx_t *),
-                       void (*on_request_cleanup)(clj_req_ctx_t *),
+                       clj_request_cleanup_cb on_request_cleanup,
                        const clj_h2o_flat_globalconf_t *flat) {
 
   h2o_pathconf_t *pathconf = h2o_config_register_path(hostconf, "/", 0);
@@ -728,13 +719,22 @@ void clj_h2o_handler_set_shutting_down(clj_h2o_handler_t *handler,
   handler->shutting_down = shutting_down ? 1 : 0;
 }
 
-void clj_h2o_set_on_request_body_chunk(
-    clj_req_ctx_t *ctx,
-    void (*on_request_body_chunk)(clj_req_ctx_t *ctx, char *chunk,
-                                  size_t chunk_len, int is_end_stream)) {
-  if (ctx) {
-    ctx->on_request_body_chunk = on_request_body_chunk;
+void clj_h2o_install_request_dispatch(
+    clj_req_ctx_t *ctx, uint64_t module_id, uint64_t request_seq,
+    clj_request_body_chunk_cb on_request_body_chunk) {
+  if (ctx == NULL)
+    return;
+
+  if (module_id == 0 || request_seq == 0) {
+    ctx->dispatch_module_id = 0;
+    ctx->dispatch_request_seq = 0;
+    ctx->on_request_body_chunk = NULL;
+    return;
   }
+
+  ctx->dispatch_module_id = module_id;
+  ctx->dispatch_request_seq = request_seq;
+  ctx->on_request_body_chunk = on_request_body_chunk;
 }
 
 void clj_h2o_proceed_req(h2o_req_t *req) {

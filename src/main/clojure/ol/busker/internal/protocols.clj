@@ -11,7 +11,10 @@
             req-id
             req-ctx-ptr
             req-ctx
-            write-req])
+            write-req
+            callback-pointers
+            dispatch-module-id
+            dispatch-request-seq])
 
 (defprotocol WorkerThread
   (running? [_])

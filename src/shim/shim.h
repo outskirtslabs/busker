@@ -69,18 +69,29 @@ typedef struct {
 
 typedef struct clj_req_ctx_t clj_req_ctx_t;
 
+typedef void (*clj_request_cleanup_cb)(uint64_t module_id,
+                                       uint64_t request_seq);
+typedef void (*clj_request_body_chunk_cb)(uint64_t module_id,
+                                           uint64_t request_seq, char *chunk,
+                                           size_t chunk_len, int is_end_stream);
+typedef void (*clj_response_generator_proceed_cb)(uint64_t module_id,
+                                                   uint64_t request_seq);
+typedef void (*clj_response_generator_stop_cb)(uint64_t module_id,
+                                                uint64_t request_seq,
+                                                clj_complete_reason_t reason);
+
 struct clj_req_ctx_t {
   h2o_req_t *req;
   clj_req_meta_t meta;
-  void (*on_request_cleanup)(clj_req_ctx_t *);
-  void (*on_request_body_chunk)(clj_req_ctx_t *ctx, char *chunk,
-                                size_t chunk_len, int is_end_stream);
+  clj_request_cleanup_cb on_request_cleanup;
+  clj_request_body_chunk_cb on_request_body_chunk;
   h2o_generator_t generator;
-  void (*on_response_generator_proceed)(clj_req_ctx_t *ctx);
-  void (*on_response_generator_stop)(clj_req_ctx_t *ctx,
-                                     clj_complete_reason_t reason);
+  clj_response_generator_proceed_cb on_response_generator_proceed;
+  clj_response_generator_stop_cb on_response_generator_stop;
   size_t preferred_chunk_size;
   char req_id[64];
+  uint64_t dispatch_module_id;
+  uint64_t dispatch_request_seq;
   int cleanup;
   int closing;
   int response_started;
@@ -89,7 +100,7 @@ struct clj_req_ctx_t {
 typedef struct {
   h2o_handler_t super; /* Must be first member for safe casting */
   int (*on_request)(clj_req_ctx_t *);
-  void (*on_request_cleanup)(clj_req_ctx_t *);
+  clj_request_cleanup_cb on_request_cleanup;
   int shutting_down;
 } clj_h2o_handler_t;
 
@@ -196,6 +207,7 @@ void clj_h2o_socket_set_on_close(h2o_socket_t *sock, void *callback,
 
 /* Return size of h2o_context_t for FFI allocation */
 size_t clj_h2o_context_size(void);
+size_t clj_h2o_req_ctx_size(void);
 
 /* Return size of h2o_globalconf_t for FFI allocation */
 size_t clj_h2o_globalconf_size(void);
@@ -229,9 +241,8 @@ size_t clj_h2o_context_get_shutdown_conns(h2o_context_t *ctx);
 size_t clj_h2o_start_response(
     clj_req_ctx_t *ctx, int status, const clj_header_t *headers,
     size_t headers_len, size_t content_length, int compress_hint,
-    void (*on_response_generator_proceed)(clj_req_ctx_t *ctx),
-    void (*on_response_generator_stop)(clj_req_ctx_t *ctx,
-                                       clj_complete_reason_t reason));
+    clj_response_generator_proceed_cb on_response_generator_proceed,
+    clj_response_generator_stop_cb on_response_generator_stop);
 
 void clj_h2o_send_informational(clj_req_ctx_t *ctx, int status,
                                 const clj_header_t *headers,
@@ -245,13 +256,12 @@ void clj_h2o_send_informational(clj_req_ctx_t *ctx, int status,
 clj_h2o_handler_t *
 clj_h2o_create_handler(h2o_hostconf_t *hostconf,
                        int (*on_request)(clj_req_ctx_t *),
-                       void (*on_request_cleanup)(clj_req_ctx_t *),
+                       clj_request_cleanup_cb on_request_cleanup,
                        const clj_h2o_flat_globalconf_t *flat);
 
-void clj_h2o_set_on_request_body_chunk(
-    clj_req_ctx_t *ctx,
-    void (*on_request_body_chunk)(clj_req_ctx_t *ctx, char *chunk,
-                                  size_t chunk_len, int is_end_stream));
+void clj_h2o_install_request_dispatch(
+    clj_req_ctx_t *ctx, uint64_t module_id, uint64_t request_seq,
+    clj_request_body_chunk_cb on_request_body_chunk);
 
 void clj_h2o_proceed_req(h2o_req_t *req);
 

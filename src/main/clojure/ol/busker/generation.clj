@@ -5,7 +5,7 @@
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]
    [ol.busker.buffer-pool :as bp]
-   [ol.busker.byte-bounded-queue :as bbq]
+   [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.config :as config]
    [ol.busker.evloop :as evloop]
@@ -14,7 +14,6 @@
    [ol.busker.native :as h2o]
    [ol.busker.native.socket :as socket]
    [ol.busker.request :as request]
-
    [ol.busker.tickets :as tickets]
    [ol.clave.certificate :as clave-certificate]
    [taoensso.trove :as trove])
@@ -23,8 +22,7 @@
    [java.security.cert CertificateFactory X509Certificate]
    [java.util Base64]
    [java.util.concurrent ExecutorService Executors TimeUnit]
-   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]
-   [ol.busker.response H2OResponseEmitter]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
 
 (set! *warn-on-reflection* true)
 
@@ -33,6 +31,17 @@
 
 (defn- new-close-callback-executor ^ExecutorService []
   (Executors/newVirtualThreadPerTaskExecutor))
+
+(defonce ^:private failed-retirements_ (atom []))
+
+(defn- retain-failed-retirement!
+  [generation phase-atom error]
+  (trove/log! {:level :error
+               :id    ::callback-retirement-failed
+               :ex    error
+               :data  {:generation-id (::generation-id generation)}})
+  (swap! failed-retirements_ conj generation)
+  (reset! phase-atom :retirement-failed))
 
 (defn- close-callback-dispatcher
   [^ExecutorService executor]
@@ -51,42 +60,35 @@
                            error-data)
                     t))))
 
-(defn- response-state-pending?
-  [st]
-  (let [scheduled? (.get ^AtomicBoolean (:scheduled?_ st))
-        in-flight? (some? (.get ^AtomicReference (:in-flight_ st)))
-        queued-bytes (bbq/queued-bytes (:bbq st))]
-    (or scheduled?
-        in-flight?
-        (pos? queued-bytes))))
-
-(defn- pending-response-work?
-  [worker]
-  (let [^java.util.HashMap requests (:requests worker)]
-    (boolean
-     (some
-      (fn [[_ ^H2OResponseEmitter emitter]]
-        (response-state-pending? (.write-resp emitter)))
-      (.values requests)))))
+(defn- with-live-request
+  [module-id request-seq f]
+  (when-let [worker (evloop/get-current-worker)]
+    (when-let [[req _] (callback-dispatch/entry (:callback-dispatch worker)
+                                                module-id request-seq)]
+      (f req))))
 
 (defn evloop-msg-processor
   [op args]
   (case op
     :h2o/proceed-request
-    (let [[req-ctx] args]
-      (h2o/proceed-req (:req req-ctx)))
+    (let [[module-id request-seq] args]
+      (with-live-request module-id request-seq
+        (fn [req]
+          (h2o/proceed-req (:req (:req-ctx req))))))
 
     :h2o/sendvec
-    (let [[send-vecs] args]
-      (send-vecs))
+    (let [[module-id request-seq send-vecs] args]
+      (with-live-request module-id request-seq
+        (fn [_]
+          (send-vecs))))
 
     :h2o/send-informational
-    (let [[send-fn] args]
-      (send-fn))
+    (let [[module-id request-seq send-fn] args]
+      (with-live-request module-id request-seq send-fn))
 
     :h2o/start-response
-    (let [[start-fn] args]
-      (start-fn))
+    (let [[module-id request-seq start-fn] args]
+      (with-live-request module-id request-seq start-fn))
     nil))
 
 (defn- create-connection-close-callback
@@ -189,7 +191,7 @@
                                (close-callback-dispatcher close-callback-executor)
                                config
                                ring-handler)
-        on-request-cleanup-cb (partial request/on-request-cleanup ring-handler)
+        on-request-cleanup-cb request/on-request-cleanup
         handler (h2o/create-handler hostconf-ptr
                                     on-request-cb
                                     on-request-cleanup-cb
@@ -252,11 +254,12 @@
 
 (defn- ready-to-dispose?
   [{:keys [context-disposed? shutdown-initiated? receiver-destroyed?]}
-   {:keys [ctx-ptr http3-ctxs active-connection-count_]}]
+   {:keys [ctx-ptr http3-ctxs active-connection-count_]} worker]
   (and (not context-disposed?)
        shutdown-initiated?
        receiver-destroyed?
-       (all-connections-drained? ctx-ptr http3-ctxs active-connection-count_)))
+       (all-connections-drained? ctx-ptr http3-ctxs active-connection-count_)
+       (callback-dispatch/no-live-entries? (:callback-dispatch worker))))
 
 (defn- check-and-initiate-shutdown!
   [loop-state {:keys [shutting-down?] :as state}]
@@ -283,7 +286,7 @@
 
 (defn- dispose-context-if-ready
   [loop-state worker {:keys [ctx-ptr http3-ctxs] :as state}]
-  (if (ready-to-dispose? loop-state state)
+  (if (ready-to-dispose? loop-state state worker)
     (do
       (doseq [http3-ctx http3-ctxs]
         (when (and http3-ctx (not (mem/null? http3-ctx)))
@@ -307,7 +310,8 @@
       (let [now (h2o/evloop-now loop-ptr)
             base-wait (h2o/cleanup-thread now ctx-ptr)
             wait-ms (cond
-                      (pending-response-work? worker) 5
+                      (callback-dispatch/pending-response-work?
+                       (:callback-dispatch worker)) 5
                       shutting? 10
                       :else base-wait)]
         (when-not shutting?
@@ -862,7 +866,7 @@
 
 (defn- init-worker-state
   [{::keys [n-workers loops contexts listener-runtimes http3-worker-contexts
-            max-connections shutting-down? message-handler wakeup-receivers
+            max-connections shutting-down? message-handler wakeup-receivers arena
             stop-accepting-remaining_ stopped-accepting_ active-connection-count_]
     :as state}]
   (let [workers
@@ -870,6 +874,7 @@
          (for [thread-idx (range n-workers)]
            (let [loop-ptr (nth loops thread-idx)
                  ctx-ptr (nth contexts thread-idx)
+                 callback-dispatch (callback-dispatch/create arena)
                  thread-listener-states
                  (mapv #(nth (:thread-states %) thread-idx) listener-runtimes)
                  listener-socks-for-thread (mapv :socket thread-listener-states)
@@ -890,7 +895,8 @@
                               ::stop-accepting-remaining_ stop-accepting-remaining_
                               ::stopped-accepting_ stopped-accepting_}))
               message-handler
-              (nth wakeup-receivers thread-idx)))))]
+              (nth wakeup-receivers thread-idx)
+              :callback-dispatch callback-dispatch))))]
     (assoc state ::workers workers)))
 
 (defn- finalize-generation-state
@@ -921,6 +927,8 @@
       (when-let [key-mgr (::key-manager generation)]
         (tickets/stop-key-manager! key-mgr))
       (when (seq (::workers generation))
+        (doseq [worker (::workers generation)]
+          (callback-dispatch/begin-drain! (:callback-dispatch worker)))
         (evloop/broadcast-wake! (::workers generation)))
       (when-let [^ExecutorService executor (::executor generation)]
         (.shutdown executor))
@@ -953,32 +961,50 @@
            (when (and wr (not (mem/null? wr)))
              (h2o/mt-destroy-wakeup-receiver wr))
            (.set ^AtomicReference (:wakeup-receiver_ worker) nil))
-         (when (seq (::workers generation))
-           (evloop/join-all! (::workers generation)))
-         (when close-callback-executor
-           (.shutdown close-callback-executor)
-           (when-not (.awaitTermination close-callback-executor timeout timeunit)
-             (.shutdownNow close-callback-executor)
-             (when-not (.awaitTermination close-callback-executor timeout timeunit)
-               (println "Virtual thread close callback executor did not shutdown cleanly"))))
-         (when-let [http3-contexts (::http3-contexts generation)]
-           (free-http3-contexts http3-contexts))
-         (when-let [ticket-mgr (::native-ticket-mgr generation)]
-           (h2o/ticket-manager-destroy ticket-mgr))
-         (when (seq (::loops generation))
-           (h2o/destroy-loops (::loops generation)))
-         (when-let [config-ptr (::config-ptr generation)]
-           (h2o/config-dispose config-ptr))
-         (doseq [{:keys [ssl-ctx-ptr]} (::listener-runtimes generation)]
-           (when ssl-ctx-ptr
-             (h2o/free-ssl-ctx ssl-ctx-ptr)))
-         (when-let [buffer-pool (-> generation ::config :buffer-pool)]
-           (bp/dispose buffer-pool))
-         (release-listener-claims! (::listener-claims generation))
-         (when-let [arena (::arena generation)]
-           (.close ^java.lang.AutoCloseable arena))
-         (reset! phase-atom :stopped))))
-   nil))
+         (let [{:keys [joined? error]}
+               (try
+                 (when (seq (::workers generation))
+                   (evloop/join-all! (::workers generation)))
+                 {:joined? (not-any? (fn [worker]
+                                       (.isAlive ^Thread (:thread worker)))
+                                     (::workers generation))}
+                 (catch InterruptedException t
+                   (.interrupt (Thread/currentThread))
+                   {:joined? false :error t})
+                 (catch Throwable t
+                   {:joined? false :error t}))]
+           (if-not joined?
+             (retain-failed-retirement!
+              generation phase-atom
+              (or error
+                  (ex-info "Callback retirement could not establish worker join" {})))
+             (do
+               (doseq [worker (::workers generation)]
+                 (callback-dispatch/finish! (:callback-dispatch worker)))
+               (when close-callback-executor
+                 (.shutdown close-callback-executor)
+                 (when-not (.awaitTermination close-callback-executor timeout timeunit)
+                   (.shutdownNow close-callback-executor)
+                   (when-not (.awaitTermination close-callback-executor timeout timeunit)
+                     (println "Virtual thread close callback executor did not shutdown cleanly"))))
+               (when-let [http3-contexts (::http3-contexts generation)]
+                 (free-http3-contexts http3-contexts))
+               (when-let [ticket-mgr (::native-ticket-mgr generation)]
+                 (h2o/ticket-manager-destroy ticket-mgr))
+               (when (seq (::loops generation))
+                 (h2o/destroy-loops (::loops generation)))
+               (when-let [config-ptr (::config-ptr generation)]
+                 (h2o/config-dispose config-ptr))
+               (doseq [{:keys [ssl-ctx-ptr]} (::listener-runtimes generation)]
+                 (when ssl-ctx-ptr
+                   (h2o/free-ssl-ctx ssl-ctx-ptr)))
+               (when-let [buffer-pool (-> generation ::config :buffer-pool)]
+                 (bp/dispose buffer-pool))
+               (release-listener-claims! (::listener-claims generation))
+               (when-let [arena (::arena generation)]
+                 (.close ^java.lang.AutoCloseable arena))
+               (reset! phase-atom :stopped))))))
+     nil)))
 
 (defn start!
   ([compiled-config cert-runtime]

@@ -1,13 +1,12 @@
 (ns ^:no-doc ol.busker.request
   (:require
-   [coffi.ffi :as ffi]
    [coffi.mem :as mem]
+   [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.evloop :as evloop]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.response :as response])
   (:import
-   [java.io InputStream]
    [java.nio ByteBuffer]
    [java.nio.channels Channels ReadableByteChannel]
    [java.util.concurrent ExecutorService LinkedBlockingQueue RejectedExecutionException]
@@ -76,20 +75,11 @@
                         (.put queue eof-marker))))
      :input-stream (Channels/newInputStream body-channel)}))
 
-(defn set-req-body-channel [worker req-ctx-ptr req-ctx]
-  (let [proceed-callback (fn []
-                           (pi/send-msg worker [:h2o/proceed-request req-ctx]))
-        {:keys [write-chunk]
-         :as write-req} (create-write-req-channel proceed-callback)
-        on-req-body-chunk-cb (fn [_ chunk-seg ^long chunk-len ^long is-last]
-                               (write-chunk
-                                (when-not (mem/null? chunk-seg) (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len))
-                                (if (= 1 is-last) true false)))
-        on-req-body-chunk-cb-ptr (mem/serialize on-req-body-chunk-cb [::ffi/fn [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void])]
-    (h2o/set-on-request-body-chunk-callback req-ctx-ptr on-req-body-chunk-cb-ptr)
-    (assoc write-req
-           ::on-req-body-chunk-cb on-req-body-chunk-cb
-           ::on-req-body-chunk-cb-ptr on-req-body-chunk-cb-ptr)))
+(defn set-req-body-channel
+  [worker module-id request-seq]
+  (create-write-req-channel
+   (fn []
+     (pi/send-msg worker [:h2o/proceed-request module-id request-seq]))))
 
 (defn run-handler
   "Run the handler given the ring request map. Must return a ring response map."
@@ -111,40 +101,41 @@
        :headers {"content-type" "text/plain; charset=utf-8"}
        :body "Page Not Found"}))
 
-(defn close-streams [req emitter]
-  (when req
-    (when-some [^InputStream input-stream (-> req :write-req :input-stream)]
-      (.close input-stream)))
-  (when emitter
-    (response/stop-emitter emitter)))
-
 (defn on-request
   [^ExecutorService executor close-callback-dispatch config ring-handler req-ctx-ptr req-ctx]
   (if-not (pi/running? (evloop/get-current-worker))
     h2o/CLJ_HANDLER_SHUTTING_DOWN
     (try
-      (let [worker    (evloop/get-current-worker)
+      (let [worker (evloop/get-current-worker)
+            dispatch (:callback-dispatch worker)
+            [module-id request-seq] (callback-dispatch/allocate-identity! dispatch)
+            callback-pointers (callback-dispatch/callback-pointers dispatch)
             has-body? (:has_body (:meta req-ctx))
-            write-req (when has-body? (set-req-body-channel worker req-ctx-ptr req-ctx))
-            req-id    (h2o/cstr-array->string (:req-id req-ctx))
-            req       (Request. worker config req-id req-ctx-ptr req-ctx write-req)
-            emitter   (response/new-response-emitter req close-callback-dispatch)
-            ring-req  (assoc (h2o/build-ring-request (:meta req-ctx) (:input-stream write-req))
-                             ::emitter emitter)]
-        (pi/add-req worker req-id [req emitter])
+            write-req (when has-body?
+                        (set-req-body-channel worker module-id request-seq))
+            req-id (h2o/cstr-array->string (:req-id req-ctx))
+            req (Request. worker config req-id req-ctx-ptr req-ctx write-req
+                          callback-pointers module-id request-seq)
+            emitter (response/new-response-emitter req close-callback-dispatch)
+            ring-req (assoc (h2o/build-ring-request (:meta req-ctx)
+                                                    (:input-stream write-req))
+                            ::emitter emitter)]
+        (callback-dispatch/register! dispatch module-id request-seq req emitter)
         (try
+          (h2o/install-request-dispatch req-ctx-ptr module-id request-seq
+                                        (if has-body? (:body callback-pointers) mem/null))
           (letfn [(request-task []
                     (let [ring-resp (run-handler ring-handler ring-req)]
-                      (response/send-ring-response! emitter ring-resp)
-                      #_(response/send-ring-response! req ring-resp)))]
+                      (response/send-ring-response! emitter ring-resp)))]
             (.submit executor ^Runnable request-task))
           h2o/CLJ_HANDLER_OK
-          (catch RejectedExecutionException _e
-            ;; Handler never ran: remove and close local state so the shim cleanup does not see a dangling queue.
-            (pi/reap-req worker req-id)
-            (close-streams req emitter)
-            h2o/CLJ_HANDLER_SHUTTING_DOWN)))
-      (catch InterruptedException _e
+          (catch RejectedExecutionException _
+            (callback-dispatch/retire! dispatch module-id request-seq)
+            h2o/CLJ_HANDLER_SHUTTING_DOWN)
+          (catch Throwable t
+            (callback-dispatch/retire! dispatch module-id request-seq)
+            (throw t))))
+      (catch InterruptedException _
         (.interrupt (Thread/currentThread))
         h2o/CLJ_HANDLER_SHUTTING_DOWN)
       (catch Exception e
@@ -155,15 +146,10 @@
         h2o/CLJ_HANDLER_OVERLOADED))))
 
 (defn on-request-cleanup
-  "Completion cleanup callback - this is called by h2o when our request dies
-   such as when the client disconnects abruptly
-   ref: https://github.com/h2o/h2o/issues/1894#issuecomment-437231273
-
-   Exceptions thrown from this function will crash the jvm."
-  [_ring-handler _req-ctx-ptr req-ctx]
+  "Retires request state using the scalar dispatch identity from native cleanup."
+  [module-id request-seq]
   (try
-    (when-some [req-id (-> req-ctx :req-id (h2o/cstr-array->string))]
-      (let [[req emitter] (pi/reap-req (evloop/get-current-worker) req-id)]
-        (close-streams req emitter)))
+    (when-let [worker (evloop/get-current-worker)]
+      (callback-dispatch/retire! (:callback-dispatch worker) module-id request-seq))
     (catch Exception e
       (h2o/report-almost-fatal-error "The request cleanup callback errored" e))))
