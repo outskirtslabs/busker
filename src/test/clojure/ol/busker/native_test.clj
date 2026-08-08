@@ -47,7 +47,7 @@
                                     (mem/size-of :ol.busker.native/clj-req-ctx-t))
                    :ol.busker.native/clj-req-ctx-t)]
       (is (= (select-keys generic [:req :meta :req-id])
-             (#'native/read-request-context ctx-ptr))))))
+             (native/read-request-context ctx-ptr))))))
 
 (def ^:private request-context-reader-offsets
   {:req                          0

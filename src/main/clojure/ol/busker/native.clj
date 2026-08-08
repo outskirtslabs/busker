@@ -211,7 +211,11 @@
 (def ^:private size-of-clj-req-ctx-t
   (mem/size-of ::clj-req-ctx-t))
 
-(defn- read-request-context [ctx-ptr]
+(defn read-request-context
+  "Returns the `:req`, `:meta`, and `:req-id` projection from `ctx-ptr`.
+
+  `ctx-ptr` must remain valid while native values are read."
+  [ctx-ptr]
   (let [ctx (mem/reinterpret ctx-ptr size-of-clj-req-ctx-t)]
     {:req    (mem/read-address ctx 0)
      :meta   {:authority       (mem/read-address ctx 8)
