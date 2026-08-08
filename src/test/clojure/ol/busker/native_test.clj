@@ -37,7 +37,7 @@
      :closing                       0
      :response_started              0}))
 
-(deftest request-context-reader-preserves-generic-decode
+(deftest request-context-reader-preserves-generic-decode-test
   (with-open [arena (mem/confined-arena)]
     (let [ctx-ptr (mem/serialize (request-context-value arena)
                                  :ol.busker.native/clj-req-ctx-t
@@ -47,3 +47,52 @@
                                     (mem/size-of :ol.busker.native/clj-req-ctx-t))
                    :ol.busker.native/clj-req-ctx-t)]
       (is (= generic (#'native/read-request-context ctx-ptr))))))
+
+(def ^:private request-context-reader-offsets
+  {:req                          0
+   :meta                         8
+   :on-cleanup                   112
+   :on-request-body-chunk        120
+   :generator                    128
+   :on-response-generator-proceed 144
+   :on-response-generator-stop   152
+   :preferred-chunk-size         160
+   :req-id                       168
+   :dispatch-module-id           232
+   :dispatch-request-seq         240
+   :cleanup                      248
+   :closing                      252
+   :response_started             256})
+
+(def ^:private request-metadata-reader-offsets
+  {:authority       0
+   :method          8
+   :path            16
+   :remote_addr     24
+   :scheme          32
+   :headers         40
+   :authority_len   48
+   :method_len      56
+   :path_len        64
+   :remote_addr_len 72
+   :scheme_len      80
+   :headers_len     88
+   :http_version    96
+   :has_body        100
+   :is_early_data   102})
+
+(def ^:private generator-reader-offsets
+  {:proceed 0
+   :stop    8})
+
+(deftest request-context-reader-layout-test
+  (is (= 264 (mem/size-of :ol.busker.native/clj-req-ctx-t)))
+  (doseq [[field expected-offset] request-context-reader-offsets]
+    (is (= expected-offset
+           (native/offset-of :ol.busker.native/clj-req-ctx-t field))))
+  (doseq [[field expected-offset] request-metadata-reader-offsets]
+    (is (= expected-offset
+           (native/offset-of :ol.busker.native/clj-req-meta-t field))))
+  (doseq [[field expected-offset] generator-reader-offsets]
+    (is (= expected-offset
+           (native/offset-of :ol.busker.native/h2o-generator-t field)))))
