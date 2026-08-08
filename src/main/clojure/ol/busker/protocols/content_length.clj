@@ -35,12 +35,13 @@
 (extend (Class/forName "[B")
   p/SizableResponseBody
   {:body-size-in-bytes
-   (fn [bs _] (alength bs))})
+   (fn [^bytes bs _] (alength bs))})
 
 (extend-protocol p/SizableResponseBody
   String
-  (body-size-in-bytes [s response]
-    (alength (.getBytes s (or (hdr.util/get-charset response) "utf-8"))))
+  (body-size-in-bytes [^String s response]
+    (let [^String charset (or (hdr.util/get-charset response) "utf-8")]
+      (alength (.getBytes s charset))))
   java.io.File
   (body-size-in-bytes [f _]
     (.length f))
