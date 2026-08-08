@@ -6,6 +6,8 @@
    [ol.busker.config :as config]
    [ol.busker.evloop :as evloop]
    [ol.busker.generation :as generation]
+   [ol.busker.request :as request]
+   [ol.busker.response-queue :as response-queue]
    [ol.busker.test-utils :as util])
   (:import
    [java.util.concurrent AbstractExecutorService]
@@ -114,6 +116,89 @@
                   (recur (dec remaining)))))))
       (finally
         (generation/stop! instance)))))
+
+(deftest native-callback-lifecycle-runs-on-worker-in-order-test
+  (let [port 18588
+        events_ (atom [])
+        create-write-req-channel request/create-write-req-channel
+        on-proceed response-queue/on-proceed
+        on-stop response-queue/on-stop
+        on-request-cleanup request/on-request-cleanup
+        record! #(swap! events_ conj [% (Thread/currentThread)
+                                      (evloop/get-current-worker)])]
+    (with-redefs [request/create-write-req-channel
+                  (fn [proceed-callback]
+                    (update (create-write-req-channel proceed-callback)
+                            :write-chunk
+                            (fn [write-chunk]
+                              (fn [chunk is-last]
+                                (record! :body)
+                                (write-chunk chunk is-last)))))
+                  response-queue/on-proceed
+                  (fn [st]
+                    (record! :proceed)
+                    (on-proceed st))
+                  response-queue/on-stop
+                  (fn [st reason]
+                    (record! :stop)
+                    (on-stop st reason))
+                  request/on-request-cleanup
+                  (fn [module-id request-seq]
+                    (record! :cleanup)
+                    (on-request-cleanup module-id request-seq))]
+      (let [instance
+            (generation/start!
+             (config/load!
+              {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                    :tls false}}
+               :dispatch [{:handler (fn [request]
+                                      {:status 200
+                                       :body (slurp (:body request))})}]})
+             nil)]
+        (try
+          (let [result (util/curl :http :h1 port "/"
+                                  :max-time 5
+                                  :args ["-X" "POST"
+                                         "--data-binary" "trace-body"])]
+            (is (= {:exit 0
+                    :out "trace-body"}
+                   (select-keys result [:exit :out]))
+                (:err result))
+            (is (loop [remaining 100]
+                  (if (some #(= :cleanup (first %)) @events_)
+                    true
+                    (when (pos? remaining)
+                      (Thread/sleep 10)
+                      (recur (dec remaining))))))
+            (let [indexed-events (map-indexed vector @events_)
+                  [body-index [_ body-thread body-worker]]
+                  (first (filter #(= :body (first (second %))) indexed-events))
+                  [cleanup-index [_ cleanup-thread cleanup-worker]]
+                  (first (filter #(= :cleanup (first (second %))) indexed-events))]
+              (is (= {:body-event?             true
+                      :cleanup-event?          true
+                      :body-thread-affinity?   true
+                      :cleanup-thread-affinity? true
+                      :same-worker?            true
+                      :body-before-cleanup?    true}
+                     {:body-event?             (some? body-index)
+                      :cleanup-event?          (some? cleanup-index)
+                      :body-thread-affinity?
+                      (and body-worker
+                           (identical? body-thread (:thread body-worker)))
+                      :cleanup-thread-affinity?
+                      (and cleanup-worker
+                           (identical? cleanup-thread (:thread cleanup-worker)))
+                      :same-worker?
+                      (and body-worker
+                           cleanup-worker
+                           (identical? body-worker cleanup-worker))
+                      :body-before-cleanup?
+                      (and body-index
+                           cleanup-index
+                           (< body-index cleanup-index))}))))
+          (finally
+            (generation/stop! instance)))))))
 
 (deftest repeated-start-stop-releases-native-callback-state-test
   (doseq [[port request-body] [[18586 "first-cycle"]

@@ -37,10 +37,16 @@
         (throw (ex-info "Server did not become ready" {:port port :ready ready}))))))
 
 (defn- connect
-  [port]
-  (let [socket (Socket.)]
-    (.connect socket (InetSocketAddress. "127.0.0.1" (int port)) 2000)
-    socket))
+  ([port]
+   (connect port {}))
+  ([port {:keys [receive-buffer-size send-buffer-size]}]
+   (let [socket (Socket.)]
+     (when receive-buffer-size
+       (.setReceiveBufferSize socket (int receive-buffer-size)))
+     (when send-buffer-size
+       (.setSendBufferSize socket (int send-buffer-size)))
+     (.connect socket (InetSocketAddress. "127.0.0.1" (int port)) 2000)
+     socket)))
 
 (defn- request-stream!
   [^Socket socket]
@@ -64,6 +70,25 @@
                              :expected expected})))
           (.append response (char b))
           (recur))))))
+
+(defn- post-stream!
+  [^Socket socket content-length]
+  (let [request (.getBytes (str "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\nContent-Length: " content-length "\r\n\r\n")
+                           StandardCharsets/US_ASCII)
+        out (.getOutputStream socket)]
+    (.write out request)
+    (.flush out)
+    out))
+
+(defn- read-response!
+  [^Socket socket]
+  (let [headers (read-through! socket "\r\n\r\n")
+        content-length (some->> (re-find #"(?im)^content-length: (\d+)\r?$" headers)
+                                second
+                                Long/parseLong)
+        body (.readNBytes (.getInputStream socket) (int content-length))]
+    {:headers headers
+     :body body}))
 
 (defrecord TestWriter [stopped?_ out-stream]
   pi/Stopable
@@ -374,3 +399,94 @@
       (deliver release-close_ true)
       (.join first-close 1000)
       (is (true? (deref callback_ 1000 false))))))
+
+(deftest stalled-response-reader-resumes-with-exact-bytes-test
+  (let [payload (byte-array (* 4 1024 1024) (byte 65))
+        write-started_ (promise)
+        write-completed_ (promise)
+        socket-errors_ (atom [])
+        producer_ (promise)
+        [server port]
+        (start-server
+         (fn [{emitter :ol.busker.request/emitter}]
+           (deliver producer_
+                    (Thread/startVirtualThread
+                     (fn []
+                       (deliver write-started_ true)
+                       (protocols/emit! emitter {:status 200
+                                                 :headers {"content-length" (str (alength payload))}})
+                       (protocols/emit! emitter payload)
+                       (protocols/close emitter)
+                       (deliver write-completed_ true))))
+           {:body emitter}))]
+    (try
+      (with-open [^Socket socket (connect port {:receive-buffer-size 1024})]
+        (.setSoTimeout socket 10000)
+        (request-stream! socket)
+        (is (true? (deref write-started_ 2000 false)))
+        (is (= ::stalled (deref write-completed_ 500 ::stalled)))
+        (is (blocked? (deref producer_ 2000 nil)))
+        (let [{:keys [headers body]}
+              (try
+                (read-response! socket)
+                (catch Throwable e
+                  (swap! socket-errors_ conj (ex-message e))
+                  {}))]
+          (is (= [] @socket-errors_))
+          (is (str/starts-with? (or headers "") "HTTP/1.1 200"))
+          (is (= (alength payload) (alength ^bytes body)))
+          (is (java.util.Arrays/equals ^bytes payload ^bytes body))
+          (is (true? (deref write-completed_ 10000 false)))))
+      (finally
+        (busker/stop! server)))))
+
+(deftest stalled-request-upload-resumes-with-exact-bytes-test
+  (let [payload (byte-array (* 4 1024 1024) (byte 66))
+        reader-ready_ (promise)
+        release-reader_ (promise)
+        received_ (promise)
+        upload-started_ (promise)
+        upload-completed_ (promise)
+        socket-errors_ (atom [])
+        [server port]
+        (start-server
+         (fn [{:keys [body]}]
+           (let [^java.io.InputStream body body]
+             (deliver reader-ready_ true)
+             @release-reader_
+             (let [received (.readAllBytes body)]
+               (deliver received_ received)
+               {:status 200 :headers {"content-length" "2"} :body "ok"}))))]
+    (try
+      (with-open [^Socket socket (connect port {:send-buffer-size 1024})]
+        (.setSoTimeout socket 10000)
+        (let [^OutputStream out (post-stream! socket (alength payload))
+              producer (Thread/startVirtualThread
+                        (fn []
+                          (try
+                            (deliver upload-started_ true)
+                            (.write out payload)
+                            (.flush out)
+                            (deliver upload-completed_ true)
+                            (catch Throwable e
+                              (swap! socket-errors_ conj (ex-message e))
+                              (deliver upload-completed_ :error)))))]
+          (is (true? (deref reader-ready_ 2000 false)))
+          (is (true? (deref upload-started_ 2000 false)))
+          (is (= ::stalled (deref upload-completed_ 500 ::stalled)))
+          (is (blocked? producer))
+          (deliver release-reader_ true)
+          (is (true? (deref upload-completed_ 10000 false)))
+          (let [{:keys [headers body]}
+                (try
+                  (read-response! socket)
+                  (catch Throwable e
+                    (swap! socket-errors_ conj (ex-message e))
+                    {}))]
+            (is (= [] @socket-errors_))
+            (is (str/starts-with? (or headers "") "HTTP/1.1 200"))
+            (is (= "ok" (some-> ^bytes body (String. StandardCharsets/US_ASCII))))
+            (is (java.util.Arrays/equals ^bytes payload ^bytes (deref received_ 10000 nil))))))
+      (finally
+        (deliver release-reader_ true)
+        (busker/stop! server)))))
