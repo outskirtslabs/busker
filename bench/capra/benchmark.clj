@@ -165,25 +165,30 @@
 
 (defn- run-adapter [adapter scenario port options]
   (let [{:keys [id label start]} adapter
-        {:keys [handler expected-body]} scenario]
+        {:keys [handler expected-body] scenario-id :id} scenario]
+    (println "Running" label "for" (name scenario-id) "scenario...")
+    (flush)
     (try
       (let [stop (start handler port)]
         (try
           (await-ready port expected-body)
           (let [{:keys [out]} (wrk port options)
-                measurements (wrk-measurements out)]
-            {:adapter (name id)
-             :label label
-             :status "ok"
-             :measurements measurements
-             :wrk-output out})
+                measurements  (wrk-measurements out)
+                error-count   (get-in measurements [:request-errors :total])]
+            (cond-> {:adapter      (name id)
+                     :label        label
+                     :status       (if (zero? error-count) "ok" "failed")
+                     :measurements measurements
+                     :wrk-output   out}
+              (pos? error-count)
+              (assoc :error (str "wrk reported " error-count " request errors"))))
           (finally
             (stop))))
       (catch Throwable error
         {:adapter (name id)
-         :label label
-         :status "failed"
-         :error (or (ex-message error) (str error))}))))
+         :label   label
+         :status  "failed"
+         :error   (or (ex-message error) (str error))}))))
 
 (defn- dependency-version [[group artifact]]
   (let [properties (Properties.)
@@ -205,8 +210,18 @@
                                      [id (dependency-version dependency)])))
                            adapters)})
 
+(defn- selected-items [kind selection items]
+  (if-not selection
+    items
+    (let [matches (filterv #(= selection (name (:id %))) items)]
+      (when (empty? matches)
+        (throw (ex-info (str "Unknown " (name kind))
+                        {kind       selection
+                         :available (mapv (comp name :id) items)})))
+      matches)))
+
 (defn benchmark
-  "Runs both Ring handler scenarios and writes their benchmark results.
+  "Runs selected Ring adapters and handler scenarios, then writes the results.
 
   Options:
 
@@ -216,29 +231,43 @@
   | `:duration`    | `wrk` measurement duration
   | `:connections` | simultaneous connections
   | `:threads`     | `wrk` threads
+  | `:adapter`     | optional adapter ID
+  | `:scenario`    | optional scenario ID
   | `:output`      | JSON result file
 
   Returns the complete result map."
-  [{:keys [output]
+  [{:keys [output adapter scenario]
     :as options}]
-  (let [options (merge {:warmup "5s"
-                        :duration "1m"
-                        :connections 128
-                        :threads 2}
-                       options)
-        environment (environment)
-        parameters (dissoc options :output)
-        _ (println "Benchmark environment:" (json/write-str environment))
-        _ (println "Benchmark parameters:" (json/write-str parameters))
-        result {:run-at (str (Instant/now))
-                :environment environment
-                :parameters parameters
-                :scenarios
-                (mapv (fn [{:keys [id] :as scenario}]
-                        {:scenario (name id)
-                         :results
-                         (mapv #(run-adapter % scenario 5800 options) adapters)})
-                      scenarios)}]
+  (let [options            (merge {:warmup     "5s"
+                                   :duration   "1m"
+                                   :connections 128
+                                   :threads     2}
+                                  options)
+        selected-adapters  (selected-items :adapter adapter adapters)
+        selected-scenarios (selected-items :scenario scenario scenarios)
+        environment        (environment)
+        parameters         (dissoc options :output)
+        _                  (println "Benchmark environment:" (json/write-str environment))
+        _                  (println "Benchmark parameters:" (json/write-str parameters))
+        result             {:run-at      (str (Instant/now))
+                            :environment environment
+                            :parameters  parameters
+                            :scenarios
+                            (mapv
+                             (fn [scenario-index {:keys [id] :as selected-scenario}]
+                               {:scenario (name id)
+                                :results
+                                (mapv
+                                 (fn [adapter-index selected-adapter]
+                                   (run-adapter selected-adapter selected-scenario
+                                                (+ 5800
+                                                   (* scenario-index (count selected-adapters))
+                                                   adapter-index)
+                                                options))
+                                 (range)
+                                 selected-adapters)})
+                             (range)
+                             selected-scenarios)}]
     (io/make-parents output)
     (spit output (json/write-str result))
     result))
@@ -248,19 +277,31 @@
          [arg value & remaining] args]
     (case arg
       nil options
-      "--smoke" (recur (merge options {:warmup "1s"
-                                       :duration "1s"
-                                       :connections 16}) (cons value remaining))
-      "--output" (recur (assoc options :output value) remaining)
+      "--smoke" (recur (merge options {:warmup     "1s"
+                                       :duration   "1s"
+                                       :connections 16})
+                       (cons value remaining))
+      "--adapter" (if value
+                    (recur (assoc options :adapter value) remaining)
+                    (throw (ex-info "Missing --adapter value" {})))
+      "--scenario" (if value
+                     (recur (assoc options :scenario value) remaining)
+                     (throw (ex-info "Missing --scenario value" {})))
+      "--output" (if value
+                   (recur (assoc options :output value) remaining)
+                   (throw (ex-info "Missing --output value" {})))
       (throw (ex-info "Unknown benchmark argument" {:argument arg})))))
 
 (defn -main [& args]
   (let [options (command-line-options args)
-        output (or (:output options)
-                   (str "bench/results/" (System/currentTimeMillis) ".json"))
-        result (benchmark (assoc options :output output))]
+        output  (or (:output options)
+                    (str "bench/results/" (System/currentTimeMillis) ".json"))
+        result  (benchmark (assoc options :output output))]
     (println "Wrote benchmark results to" output)
     (doseq [{:keys [scenario results]} (:scenarios result)]
       (println scenario)
       (doseq [{:keys [label status measurements error]} results]
-        (println " " label status (or (:requests-per-second measurements) error))))))
+        (println " " label status (or (:requests-per-second measurements) error))))
+    (when (some #(not= "ok" (:status %))
+                (mapcat :results (:scenarios result)))
+      (throw (ex-info "Benchmark did not complete successfully" {:output output})))))
