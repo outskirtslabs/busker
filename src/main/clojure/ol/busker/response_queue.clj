@@ -62,6 +62,13 @@
 ;;   send-vecs:       Keeps true while sendvec in-flight; clears to false only if queue empty
 ;;   on-proceed:      Clears to false, releases buffers, schedules next drain if not stopped
 
+(defn pending-work?
+  "Returns true when a response writer has queued or in-flight data."
+  [st]
+  (or (.get ^AtomicBoolean (:scheduled?_ st))
+      (some? (.get ^AtomicReference (:in-flight_ st)))
+      (pos? (bbq/queued-bytes (:bbq st)))))
+
 (defn package-chunks
   "Build a contiguous array of h2o_sendvec_t descriptors from a vector of Chunks.
    Copies ByteBuffer data to arena-allocated stable segments for safe native access.

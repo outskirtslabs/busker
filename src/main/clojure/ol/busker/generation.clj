@@ -43,6 +43,12 @@
   (swap! failed-retirements_ conj generation)
   (reset! phase-atom :retirement-failed))
 
+(defn- remove-failed-retirement!
+  [generation]
+  (swap! failed-retirements_
+         (fn [retirements]
+           (vec (remove #(identical? generation %) retirements)))))
+
 (defn- close-callback-dispatcher
   [^ExecutorService executor]
   (fn [^Runnable task]
@@ -950,17 +956,19 @@
    (locking stop-lock
      (let [phase-atom (::phase generation)]
        (when (not= :stopped @phase-atom)
-         (when executor
-           (when-not (.awaitTermination executor timeout timeunit)
-             (.shutdownNow executor)
+         (when (= :stopping @phase-atom)
+           (reset! phase-atom :retiring)
+           (when executor
              (when-not (.awaitTermination executor timeout timeunit)
-               (println "Virtual thread request executor pool did not shutdown cleanly"))))
-         (when (seq (::workers generation))
-           (evloop/broadcast-wake! (::workers generation)))
-         (doseq [[worker wr] (map vector (::workers generation) (::wakeup-receivers generation))]
-           (when (and wr (not (mem/null? wr)))
-             (h2o/mt-destroy-wakeup-receiver wr))
-           (.set ^AtomicReference (:wakeup-receiver_ worker) nil))
+               (.shutdownNow executor)
+               (when-not (.awaitTermination executor timeout timeunit)
+                 (println "Virtual thread request executor pool did not shutdown cleanly"))))
+           (when (seq (::workers generation))
+             (evloop/broadcast-wake! (::workers generation)))
+           (doseq [[worker wr] (map vector (::workers generation) (::wakeup-receivers generation))]
+             (when (and wr (not (mem/null? wr)))
+               (h2o/mt-destroy-wakeup-receiver wr))
+             (.set ^AtomicReference (:wakeup-receiver_ worker) nil)))
          (let [{:keys [joined? error]}
                (try
                  (when (seq (::workers generation))
@@ -1003,6 +1011,7 @@
                (release-listener-claims! (::listener-claims generation))
                (when-let [arena (::arena generation)]
                  (.close ^java.lang.AutoCloseable arena))
+               (remove-failed-retirement! generation)
                (reset! phase-atom :stopped))))))
      nil)))
 

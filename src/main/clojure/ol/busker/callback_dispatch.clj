@@ -2,7 +2,6 @@
   (:require
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]
-   [ol.busker.byte-bounded-queue :as bbq]
    [ol.busker.response :as response]
    [ol.busker.response-queue :as response-queue]
    [taoensso.trove :as trove])
@@ -147,6 +146,7 @@
                   :wrong-thread  (AtomicLong.)
                   :callback-fault (AtomicLong.)
                   :duplicate      (AtomicLong.)
+                  :retired        (AtomicLong.)
                   :forced         (AtomicLong.)}
         dispatch (->CallbackDispatch module-id
                                      (AtomicLong. 0)
@@ -242,7 +242,9 @@
           (not (pos? request-seq)))
     (increment! dispatch :malformed)
     (if-let [entry (.remove ^HashMap (:entries dispatch) request-seq)]
-      (close-entry! entry)
+      (do
+        (close-entry! entry)
+        (increment! dispatch :retired))
       (increment! dispatch :duplicate))))
 
 (defn pending-response-work?
@@ -251,10 +253,7 @@
   (boolean
    (some
     (fn [[_ ^H2OResponseEmitter emitter]]
-      (let [st (.write-resp emitter)]
-        (or (.get ^java.util.concurrent.atomic.AtomicBoolean (:scheduled?_ st))
-            (some? (.get ^java.util.concurrent.atomic.AtomicReference (:in-flight_ st)))
-            (pos? (bbq/queued-bytes (:bbq st))))))
+      (response-queue/pending-work? (.write-resp emitter)))
     (.values ^HashMap (:entries dispatch)))))
 
 (defn finish!
@@ -274,9 +273,16 @@
   [dispatch]
   (.isEmpty ^HashMap (:entries dispatch)))
 
+(defn retired-count
+  "Returns the number of entries retired by native request cleanup."
+  [dispatch]
+  (.get ^AtomicLong (get (:counters dispatch) :retired)))
+
 (defn diagnostics
   "Returns callback-dispatch diagnostic counters."
   [dispatch]
-  (into {}
-        (map (fn [[k ^AtomicLong counter]] [k (.get counter)]))
-        (:counters dispatch)))
+  (dissoc
+   (into {}
+         (map (fn [[k ^AtomicLong counter]] [k (.get counter)]))
+         (:counters dispatch))
+   :retired))
