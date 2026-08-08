@@ -8,6 +8,7 @@
    [ol.busker.generation :as generation]
    [ol.busker.test-utils :as util])
   (:import
+   [java.util.concurrent AbstractExecutorService]
    [java.util.concurrent.atomic AtomicReference]))
 
 (deftest generation-starts-and-stops-without-runtime-bridge-test
@@ -105,7 +106,8 @@
         (is (= 0 (:exit result)) (:err result))
         (is (= "callback-body" (:out result)))
         (is (loop [remaining 100]
-              (if (pos? (reduce + (map callback-dispatch/retired-count dispatches)))
+              (if (pos? (reduce + (map #(get (callback-dispatch/diagnostics %) :retired)
+                                       dispatches)))
                 true
                 (when (pos? remaining)
                   (Thread/sleep 10)
@@ -133,3 +135,30 @@
           (is (= request-body (:out result))))
         (finally
           (generation/stop! instance))))))
+
+(deftest interrupted-executor-retirement-can-retry-test
+  (let [attempts (atom 0)
+        executor (proxy [AbstractExecutorService] []
+                   (execute [task]
+                     (.run ^Runnable task))
+                   (shutdown [] nil)
+                   (shutdownNow [] [])
+                   (isShutdown [] true)
+                   (isTerminated [] true)
+                   (awaitTermination [_timeout _timeunit]
+                     (if (= 1 (swap! attempts inc))
+                       (throw (InterruptedException. "simulated"))
+                       true)))
+        phase (atom :running)
+        generation-state {::generation/phase phase
+                          ::generation/stop-lock (Object.)
+                          ::generation/executor executor
+                          ::generation/workers []
+                          ::generation/wakeup-receivers []
+                          ::generation/listener-runtimes []
+                          ::generation/listener-claims {}
+                          ::generation/config {}}]
+    (is (thrown? InterruptedException (generation/stop! generation-state)))
+    (is (= :stopping @phase))
+    (generation/stop! generation-state)
+    (is (= :stopped @phase))))

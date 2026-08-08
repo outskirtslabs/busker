@@ -957,7 +957,6 @@
      (let [phase-atom (::phase generation)]
        (when (not= :stopped @phase-atom)
          (when (= :stopping @phase-atom)
-           (reset! phase-atom :retiring)
            (when executor
              (when-not (.awaitTermination executor timeout timeunit)
                (.shutdownNow executor)
@@ -969,6 +968,7 @@
              (when (and wr (not (mem/null? wr)))
                (h2o/mt-destroy-wakeup-receiver wr))
              (.set ^AtomicReference (:wakeup-receiver_ worker) nil)))
+         (reset! phase-atom :retiring)
          (let [{:keys [joined? error]}
                (try
                  (when (seq (::workers generation))

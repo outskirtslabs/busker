@@ -273,16 +273,9 @@
   [dispatch]
   (.isEmpty ^HashMap (:entries dispatch)))
 
-(defn retired-count
-  "Returns the number of entries retired by native request cleanup."
-  [dispatch]
-  (.get ^AtomicLong (get (:counters dispatch) :retired)))
-
 (defn diagnostics
   "Returns callback-dispatch diagnostic counters."
   [dispatch]
-  (dissoc
-   (into {}
-         (map (fn [[k ^AtomicLong counter]] [k (.get counter)]))
-         (:counters dispatch))
-   :retired))
+  (into {}
+        (map (fn [[k ^AtomicLong counter]] [k (.get counter)]))
+        (:counters dispatch)))

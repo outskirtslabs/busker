@@ -36,6 +36,7 @@
               :wrong-thread   1
               :callback-fault 0
               :duplicate      0
+              :retired        1
               :forced         0}
              (callback-dispatch/diagnostics dispatch))))))
 
@@ -53,6 +54,7 @@
               :wrong-thread   0
               :callback-fault 0
               :duplicate      1
+              :retired        1
               :forced         0}
              (callback-dispatch/diagnostics dispatch))))))
 
