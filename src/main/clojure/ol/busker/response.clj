@@ -23,6 +23,10 @@
 (set! *warn-on-reflection* true)
 
 (def ^:private clj-header-size (mem/size-of ::h2o/clj-header-t))
+(def ^:private clj-header-name-offset (mem/struct-field-offset ::h2o/clj-header-t :name))
+(def ^:private clj-header-name-len-offset (mem/struct-field-offset ::h2o/clj-header-t :name_len))
+(def ^:private clj-header-value-offset (mem/struct-field-offset ::h2o/clj-header-t :value))
+(def ^:private clj-header-value-len-offset (mem/struct-field-offset ::h2o/clj-header-t :value_len))
 
 (defn dissoc-header
   "Remove all case variations of a header by name (case-insensitive)."
@@ -79,14 +83,11 @@
                 name-str (str/lower-case (if (string? name-key) name-key (str name-key)))
                 value-str (if (string? value-val) value-val (str value-val))
                 name-ptr ^MemorySegment (mem/serialize name-str ::mem/c-string)
-                value-ptr ^MemorySegment (mem/serialize value-str ::mem/c-string)
-                header-data {:name name-ptr
-                             :name_len (dec (.byteSize name-ptr))
-                             :value value-ptr
-                             :value_len (dec (.byteSize value-ptr))}
-                header-seg (mem/serialize header-data ::h2o/clj-header-t)
-                dest-seg (mem/slice headers-seg offset clj-header-size)]
-            (mem/copy-segment dest-seg header-seg)))
+                value-ptr ^MemorySegment (mem/serialize value-str ::mem/c-string)]
+            (mem/write-address headers-seg (+ offset clj-header-name-offset) name-ptr)
+            (mem/write-int headers-seg (+ offset clj-header-name-len-offset) (dec (.byteSize name-ptr)))
+            (mem/write-address headers-seg (+ offset clj-header-value-offset) value-ptr)
+            (mem/write-int headers-seg (+ offset clj-header-value-len-offset) (dec (.byteSize value-ptr)))))
         [resp headers-seg headers-count content-length]))))
 
 (defn build-headers
@@ -119,14 +120,11 @@
                 name-str (if (string? name-key) name-key (str name-key))
                 value-str (if (string? value-val) value-val (str value-val))
                 name-ptr ^MemorySegment (mem/serialize name-str ::mem/c-string)
-                value-ptr ^MemorySegment (mem/serialize value-str ::mem/c-string)
-                header-data {:name name-ptr
-                             :name_len (dec (.byteSize name-ptr))
-                             :value value-ptr
-                             :value_len (dec (.byteSize value-ptr))}
-                header-seg (mem/serialize header-data ::h2o/clj-header-t)
-                dest-seg (mem/slice headers-seg offset clj-header-size)]
-            (mem/copy-segment dest-seg header-seg)))
+                value-ptr ^MemorySegment (mem/serialize value-str ::mem/c-string)]
+            (mem/write-address headers-seg (+ offset clj-header-name-offset) name-ptr)
+            (mem/write-int headers-seg (+ offset clj-header-name-len-offset) (dec (.byteSize name-ptr)))
+            (mem/write-address headers-seg (+ offset clj-header-value-offset) value-ptr)
+            (mem/write-int headers-seg (+ offset clj-header-value-len-offset) (dec (.byteSize value-ptr)))))
         [headers-seg headers-count content-length]))))
 
 (defn with-content-length [response]

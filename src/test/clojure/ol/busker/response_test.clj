@@ -2,8 +2,10 @@
   (:require
    [clojure.string :as str]
    [clojure.test :refer [deftest is]]
+   [coffi.mem :as mem]
    [ol.busker :as busker]
    [ol.busker.internal.protocols :as pi]
+   [ol.busker.native :as h2o]
    [ol.busker.protocols :as protocols]
    [ol.busker.response :as response]
    [ol.busker.response-queue :as response-queue]
@@ -95,6 +97,28 @@
   (stop [_]
     (.set ^AtomicBoolean stopped?_ true)))
 
+(defn- headers-summary
+  [headers headers-len]
+  (let [header-size (mem/size-of ::h2o/clj-header-t)
+        header-segments (mapv #(mem/slice headers (* % header-size) header-size)
+                              (range headers-len))]
+    {:headers
+     (mapv (fn [header-seg]
+             (let [{:keys [name name_len value value_len]}
+                   (mem/deserialize header-seg ::h2o/clj-header-t)]
+               [(h2o/->string name name_len)
+                (h2o/->string value value_len)]))
+           header-segments)
+     :layout-equivalent?
+     (every? (fn [header-seg]
+               (let [header (mem/deserialize header-seg ::h2o/clj-header-t)
+                     generic (mem/serialize header ::h2o/clj-header-t)]
+                 (java.util.Arrays/equals
+                  ^bytes (mem/read-bytes header-seg header-size)
+                  ^bytes (mem/read-bytes generic header-size))))
+             header-segments)}))
+
+
 (defn- test-emitter
   ([]
    (test-emitter {:stopped?_ (AtomicBoolean. false)
@@ -113,6 +137,26 @@
       (atom {:phase :open :callbacks []})
       callback-dispatch
       callback-tail_))))
+
+(deftest response-header-layout-preserved-test
+  (let [[final-headers final-headers-len final-content-length]
+        (response/build-headers {:headers {"Content-Length" "9"
+                                           "X-Repeat" ["first" "second"]}})
+        [_ informational-headers informational-headers-len informational-content-length]
+        (response/build-headers2 {:headers {"X-Repeat" ["first" "second"]}})]
+    (is (= {:final {:content-length 9
+                   :headers [["X-Repeat" "first"]
+                             ["X-Repeat" "second"]]
+                   :layout-equivalent? true}
+            :informational {:content-length -1
+                            :headers [["x-repeat" "first"]
+                                      ["x-repeat" "second"]]
+                            :layout-equivalent? true}}
+           {:final (assoc (headers-summary final-headers final-headers-len)
+                          :content-length final-content-length)
+            :informational (assoc (headers-summary informational-headers informational-headers-len)
+                                  :content-length informational-content-length)}))))
+
 
 (defn- blocked?
   [^Thread thread]
