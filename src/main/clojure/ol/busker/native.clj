@@ -213,40 +213,27 @@
 
 (defn- read-request-context [ctx-ptr]
   (let [ctx (mem/reinterpret ctx-ptr size-of-clj-req-ctx-t)]
-    {:req                          (mem/read-address ctx 0)
-     :meta                         {:authority       (mem/read-address ctx 8)
-                                    :method          (mem/read-address ctx 16)
-                                    :path            (mem/read-address ctx 24)
-                                    :remote_addr     (mem/read-address ctx 32)
-                                    :scheme          (mem/read-address ctx 40)
-                                    :headers         (mem/read-address ctx 48)
-                                    :authority_len   (mem/read-long ctx 56)
-                                    :method_len      (mem/read-long ctx 64)
-                                    :path_len        (mem/read-long ctx 72)
-                                    :remote_addr_len (mem/read-long ctx 80)
-                                    :scheme_len      (mem/read-long ctx 88)
-                                    :headers_len     (mem/read-long ctx 96)
-                                    :http_version    (mem/read-int ctx 104)
-                                    :has_body        (mem/read-short ctx 108)
-                                    :is_early_data   (mem/read-short ctx 110)}
-     :on-cleanup                   (mem/read-address ctx 112)
-     :on-request-body-chunk        (mem/read-address ctx 120)
-     :generator                    {:proceed (mem/read-address ctx 128)
-                                    :stop    (mem/read-address ctx 136)}
-     :on-response-generator-proceed (mem/read-address ctx 144)
-     :on-response-generator-stop   (mem/read-address ctx 152)
-     :preferred-chunk-size         (mem/read-long ctx 160)
-     :req-id                       (mapv (fn [offset]
-                                           (char (.get ^MemorySegment ctx
-                                                       java.lang.foreign.ValueLayout/JAVA_BYTE
-                                                       (long (+ 168 offset)))))
-                                         (range 64))
-     :dispatch-module-id           (mem/read-long ctx 232)
-     :dispatch-request-seq         (mem/read-long ctx 240)
-     :cleanup                      (mem/read-int ctx 248)
-     :closing                      (mem/read-int ctx 252)
-     :response_started             (mem/read-int ctx 256)
-     :coffi.layout/padding         nil}))
+    {:req    (mem/read-address ctx 0)
+     :meta   {:authority       (mem/read-address ctx 8)
+              :method          (mem/read-address ctx 16)
+              :path            (mem/read-address ctx 24)
+              :remote_addr     (mem/read-address ctx 32)
+              :scheme          (mem/read-address ctx 40)
+              :headers         (mem/read-address ctx 48)
+              :authority_len   (mem/read-long ctx 56)
+              :method_len      (mem/read-long ctx 64)
+              :path_len        (mem/read-long ctx 72)
+              :remote_addr_len (mem/read-long ctx 80)
+              :scheme_len      (mem/read-long ctx 88)
+              :headers_len     (mem/read-long ctx 96)
+              :http_version    (mem/read-int ctx 104)
+              :has_body        (mem/read-short ctx 108)
+              :is_early_data   (mem/read-short ctx 110)}
+     :req-id (mapv (fn [offset]
+                     (char (.get ^MemorySegment ctx
+                                 java.lang.foreign.ValueLayout/JAVA_BYTE
+                                 (long (+ 168 offset)))))
+                   (range 64))}))
 
 #_(print-offsets-for (layout/with-c-layout
                        [::mem/struct

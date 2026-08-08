@@ -37,7 +37,7 @@
      :closing                       0
      :response_started              0}))
 
-(deftest request-context-reader-preserves-generic-decode-test
+(deftest request-context-reader-preserves-consumed-values-test
   (with-open [arena (mem/confined-arena)]
     (let [ctx-ptr (mem/serialize (request-context-value arena)
                                  :ol.busker.native/clj-req-ctx-t
@@ -46,7 +46,8 @@
                    (mem/reinterpret ctx-ptr
                                     (mem/size-of :ol.busker.native/clj-req-ctx-t))
                    :ol.busker.native/clj-req-ctx-t)]
-      (is (= generic (#'native/read-request-context ctx-ptr))))))
+      (is (= (select-keys generic [:req :meta :req-id])
+             (#'native/read-request-context ctx-ptr))))))
 
 (def ^:private request-context-reader-offsets
   {:req                          0
