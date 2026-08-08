@@ -103,7 +103,7 @@
       (if-let [write-chunk (-> req :write-req :write-chunk)]
         (write-chunk
          (when-not (mem/null? chunk-seg)
-           (mem/read-bytes (mem/reinterpret chunk-seg chunk-len) chunk-len))
+           (mem/read-bytes (mem/reinterpret chunk-seg (long chunk-len)) (long chunk-len)))
          (= 1 is-last))
         (increment! dispatch :malformed)))
     (catch Throwable t
