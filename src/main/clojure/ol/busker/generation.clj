@@ -8,6 +8,7 @@
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.config :as config]
+   [ol.busker.fixed-final :as fixed-final]
    [ol.busker.evloop :as evloop]
    [ol.busker.internal.protocols :as p]
    [ol.busker.listen :as listen]
@@ -91,6 +92,12 @@
     :h2o/send-informational
     (let [[module-id request-seq send-fn] args]
       (with-live-request module-id request-seq send-fn))
+
+    :h2o/send-fixed-final
+    (let [[command] args]
+      (with-live-request (:module-id command) (:request-seq command)
+        (fn [req]
+          (fixed-final/execute! req command))))
 
     :h2o/start-response
     (let [[module-id request-seq start-fn] args]

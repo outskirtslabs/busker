@@ -503,6 +503,13 @@
   [::mem/pointer ::mem/int ::mem/pointer ::mem/long]
   ::mem/void)
 
+(defcfn send-fixed-final
+  "Sends a fixed final response with inline body bytes."
+  clj_h2o_send_fixed_final
+  [::mem/pointer ::mem/int ::mem/pointer ::mem/long ::mem/long ::mem/int
+   ::mem/pointer ::mem/long]
+  ::mem/void)
+
 (defcfn cancel-request
   "Cancel a request after the response has started"
   clj_h2o_cancel_request

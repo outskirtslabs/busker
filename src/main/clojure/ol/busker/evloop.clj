@@ -2,41 +2,48 @@
   (:require
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.internal.protocols :as p]
-   [ol.busker.native :as h2o])
+   [ol.busker.native :as h2o]
+   [taoensso.trove :as trove])
   (:import
    [java.util HashMap]
    [java.util.concurrent ArrayBlockingQueue]
-   [java.util.concurrent.atomic AtomicBoolean AtomicReference]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicLong AtomicReference]))
 
 (set! *warn-on-reflection* true)
+
+(declare admit-message! request-stop! stop-msg)
 
 ;; ------------------------------
 ;; Worker control-plane primitives
 ;; ------------------------------
 
 (defrecord Worker
-           [id                     ;; int
-            thread                 ;; java.lang.Thread (platform)
-            ^AtomicBoolean running?_;; AtomicBoolean
-            mailbox                ;; ArrayBlockingQueue of control messages
-            evloop                 ;; opaque: native pointer/handle when interop lands
-            loop-fn                ;;  the loop iteration body
-            message-handler        ;; fn: (op, args) -> void, handles custom messages
+           [id
+            thread
+            ^AtomicBoolean running?_
+            ^AtomicBoolean accepting?_
+            ^AtomicBoolean stop-requested?_
+            ^AtomicInteger admissions_
+            ^AtomicLong mailbox-signal_
+            mailbox
+            evloop
+            loop-fn
+            message-handler
             ^AtomicReference wakeup-receiver_
             callback-dispatch
             ^HashMap requests
             args]
   p/WorkerThread
   (running? [_]
-    (.get running?_))
+    (and (.get running?_) (.get accepting?_)))
   (wake [_]
     (when (.get running?_)
       (when-let [receiver (.get wakeup-receiver_)]
         (h2o/mt-wakeup receiver))))
   (send-msg [this msg]
-    (when (.get running?_)
-      (.offer ^ArrayBlockingQueue mailbox msg)
-      (p/wake this)))
+    (if (= stop-msg msg)
+      (request-stop! this)
+      (admit-message! this msg)))
   (count-msgs [_] (.size ^ArrayBlockingQueue mailbox))
   (add-req [_ req-id r]
     (.put requests req-id r))
@@ -64,42 +71,135 @@
 ;; Worker loop
 ;; ------------------------------
 
+(defn- offer-mailbox!
+  [^Worker worker msg]
+  (.offer ^ArrayBlockingQueue (:mailbox worker) msg))
+
+(defn- log-mailbox-wakeup-failure!
+  [worker msg first-error second-error reset?]
+  (trove/log! {:level :error
+               :id    ::mailbox-wakeup-failed
+               :ex    second-error
+               :data  {:worker-id (:id worker)
+                       :message msg
+                       :first-error first-error
+                       :reset? reset?}}))
+
+(defn- signal-mailbox!
+  [^Worker worker msg]
+  (loop []
+    (let [^AtomicLong signal_ (:mailbox-signal_ worker)
+          token (.get signal_)]
+      (cond
+        (odd? token)
+        nil
+
+        (not (.compareAndSet signal_ token (inc token)))
+        (recur)
+
+        :else
+        (try
+          (p/wake worker)
+          (catch Throwable first-error
+            (when (.compareAndSet signal_ (inc token) (+ token 2))
+              (when (.compareAndSet signal_ (+ token 2) (+ token 3))
+                (try
+                  (p/wake worker)
+                  (catch Throwable second-error
+                    (let [reset? (.compareAndSet signal_ (+ token 3) (+ token 4))]
+                      (log-mailbox-wakeup-failure! worker msg first-error
+                                                   second-error reset?))))))))))))
+
+(defn- admit-message!
+  [^Worker worker msg]
+  (if (and (.get ^AtomicBoolean (:running?_ worker))
+           (.get ^AtomicBoolean (:accepting?_ worker)))
+    (do
+      (.incrementAndGet ^AtomicInteger (:admissions_ worker))
+      (let [accepted?
+            (try
+              (and (.get ^AtomicBoolean (:accepting?_ worker))
+                   (offer-mailbox! worker msg))
+              (finally
+                (.decrementAndGet ^AtomicInteger (:admissions_ worker))))]
+        (when accepted?
+          (signal-mailbox! worker msg))
+        accepted?))
+    false))
+
+(defn- request-stop!
+  [^Worker worker]
+  (if (.compareAndSet ^AtomicBoolean (:accepting?_ worker) true false)
+    (do
+      (while (pos? (.get ^AtomicInteger (:admissions_ worker)))
+        (Thread/onSpinWait))
+      (.set ^AtomicBoolean (:stop-requested?_ worker) true)
+      (p/wake worker)
+      true)
+    false))
+
+(defn- clear-mailbox-signal!
+  [^Worker worker]
+  (loop []
+    (let [^AtomicLong signal_ (:mailbox-signal_ worker)
+          token (.get signal_)]
+      (if (even? token)
+        token
+        (if (.compareAndSet signal_ token (inc token))
+          (inc token)
+          (recur))))))
+
+(defn- mark-mailbox-signalled!
+  [^Worker worker]
+  (loop []
+    (let [^AtomicLong signal_ (:mailbox-signal_ worker)
+          token (.get signal_)]
+      (if (odd? token)
+        token
+        (if (.compareAndSet signal_ token (inc token))
+          (inc token)
+          (recur))))))
+
+(defn- handle-message!
+  [^Worker worker [op & args]]
+  (if (= ::stop op)
+    (request-stop! worker)
+    (when-let [handler (:message-handler worker)]
+      (handler op args))))
+
 (defn- drain-mailbox!
-  "Non-blocking drain. Returns a possibly updated worker state map."
-  [^Worker w]
-  (loop [stop-requested? false]
-    (let [msg (.poll ^ArrayBlockingQueue (:mailbox w))]
-      (if (nil? msg)
-        (do
-          (when stop-requested?
-            (.set ^AtomicBoolean (:running?_ w) false))
-          w)
-        (let [[op & args] msg]
-          (case op
-            ::stop
-            (recur true)
-            (do
-              (when-let [handler (:message-handler w)]
-                (handler op args))
-              (recur stop-requested?))))))))
+  [^Worker worker]
+  (loop []
+    (if-let [message (.poll ^ArrayBlockingQueue (:mailbox worker))]
+      (do
+        (handle-message! worker message)
+        (recur))
+      (do
+        (clear-mailbox-signal! worker)
+        (if-let [message (.poll ^ArrayBlockingQueue (:mailbox worker))]
+          (do
+            (mark-mailbox-signalled! worker)
+            (handle-message! worker message)
+            (recur))
+          (when (.get ^AtomicBoolean (:stop-requested?_ worker))
+            (.set ^AtomicBoolean (:running?_ worker) false)))))))
 
 (defn- run-evloop-on-thread!
-  "Owns the OS thread and drives the event loop until stopped.
-   Calls the worker's loop-fn for each iteration."
-  [^Worker w]
-  (.set worker-context w)
+  [^Worker worker]
+  (.set worker-context worker)
   (try
-    (let [running? ^AtomicBoolean (:running?_ w)
-          loop-fn (:loop-fn w)]
-      (loop [s {}]
-        (when (.get running?)
-          (let [w (drain-mailbox! w)]
-            (recur (loop-fn w s))))))
+    (let [running?_ ^AtomicBoolean (:running?_ worker)
+          loop-fn (:loop-fn worker)]
+      (loop [state {}]
+        (when (.get running?_)
+          (drain-mailbox! worker)
+          (when (.get running?_)
+            (recur (loop-fn worker state))))))
     (catch InterruptedException _
-      (.set ^AtomicBoolean (:running?_ w) false))
-    (catch Throwable t
-      (println "[evloop] worker crashed:" (.getMessage t))
-      (println t))
+      (.set ^AtomicBoolean (:running?_ worker) false))
+    (catch Throwable error
+      (println "[evloop] worker crashed:" (.getMessage error))
+      (println error))
     (finally
       (.remove worker-context))))
 
@@ -131,6 +231,10 @@
                         :callback-dispatch callback-dispatch
                         :requests (:entries callback-dispatch)
                         :running?_ (AtomicBoolean. true)
+                        :accepting?_ (AtomicBoolean. true)
+                        :stop-requested?_ (AtomicBoolean. false)
+                        :admissions_ (AtomicInteger.)
+                        :mailbox-signal_ (AtomicLong.)
                         :mailbox (ArrayBlockingQueue. 256)
                         :evloop nil
                         :loop-fn loop-fn
