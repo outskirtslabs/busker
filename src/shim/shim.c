@@ -441,6 +441,31 @@ void clj_h2o_send_informational(clj_req_ctx_t *ctx, int status,
   h2o_send_informational(req);
 }
 
+void clj_h2o_send_fixed_final(clj_req_ctx_t *ctx, int status,
+                              const clj_header_t *headers,
+                              size_t headers_len, size_t content_length,
+                              int compress_hint, const char *body,
+                              size_t body_len) {
+  (void)compress_hint;
+
+  if (!ctx || !ctx->req || !body)
+    return;
+
+  h2o_req_t *req = ctx->req;
+  req->res.status = status;
+  req->res.reason = "OK";
+  req->res.content_length = content_length;
+  copy_headers_to_response(req, headers, headers_len);
+
+  req->compress_hint = H2O_COMPRESS_HINT_ENABLE;
+  ctx->generator.proceed = NULL;
+  ctx->generator.stop = NULL;
+  ctx->on_response_generator_proceed = NULL;
+  ctx->on_response_generator_stop = NULL;
+  ctx->response_started = 1;
+  h2o_send_inline(req, body, body_len);
+}
+
 size_t clj_h2o_start_response(
     clj_req_ctx_t *ctx, int status, const clj_header_t *headers,
     size_t headers_len, size_t content_length, int compress_hint,

@@ -248,6 +248,10 @@ void clj_h2o_send_informational(clj_req_ctx_t *ctx, int status,
                                 const clj_header_t *headers,
                                 size_t headers_len);
 
+void clj_h2o_send_fixed_final(clj_req_ctx_t *ctx, int status,
+                              const clj_header_t *headers,
+                              size_t headers_len, size_t content_length,
+                              int compress_hint, const char *body, size_t body_len);
 /* Create and configure h2o handler with optional callbacks.
  * All callback parameters can be NULL except on_req_callback.
  * supports_request_streaming: 1 to enable, 0 to disable
