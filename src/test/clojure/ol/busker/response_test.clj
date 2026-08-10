@@ -5,6 +5,7 @@
    [coffi.mem :as mem]
    [ol.busker :as busker]
    [ol.busker.internal.protocols :as pi]
+   [ol.busker.fixed-final :as fixed-final]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as protocols]
    [ol.busker.response :as response]
@@ -18,6 +19,16 @@
    [java.nio.charset StandardCharsets]
    [java.util.concurrent CountDownLatch TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicReference]))
+
+(defn- fixed-final-request
+  [output-buffer-size]
+  (pi/->Request nil
+                {:output-buffer-size output-buffer-size}
+                nil nil nil nil nil 1 1))
+
+(defn- fixed-command
+  [output-buffer-size response final?]
+  (#'response/fixed-final-command (fixed-final-request output-buffer-size) response final?))
 
 (defn- start-server
   [handler]
@@ -49,6 +60,24 @@
        (.setSendBufferSize socket (int send-buffer-size)))
      (.connect socket (InetSocketAddress. "127.0.0.1" (int port)) 2000)
      socket)))
+
+(defn- request-text
+  [port method path]
+  (with-open [^Socket socket (connect port)]
+    (let [out (.getOutputStream socket)
+          request (str method " " path " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")]
+      (.write out (.getBytes request StandardCharsets/US_ASCII))
+      (.flush out)
+      (slurp (.getInputStream socket)))))
+
+(defn- request-bytes
+  [port method path]
+  (with-open [^Socket socket (connect port)]
+    (let [out (.getOutputStream socket)
+          request (str method " " path " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")]
+      (.write out (.getBytes request StandardCharsets/US_ASCII))
+      (.flush out)
+      (.readAllBytes (.getInputStream socket)))))
 
 (defn- request-stream!
   [^Socket socket]
@@ -157,6 +186,147 @@
             :informational (assoc (headers-summary informational-headers informational-headers-len)
                                   :content-length informational-content-length)}))))
 
+(deftest fixed-final-eligibility-enforces-response-budgets
+  (let [header-overhead (fixed-final/header-staging-bytes [["x" ""]])
+        staged-value (apply str (repeat (- fixed-final/max-header-staging-bytes header-overhead) "a"))
+        sixty-four-headers (into {} (map (fn [n] [(str "x-" n) "v"]) (range 64)))
+        sixty-five-headers (assoc sixty-four-headers "x-64" "v")]
+    (is (= "cat" (String. ^bytes (:body (fixed-command 3 {:status 200 :body "cat"} true)) StandardCharsets/UTF_8)))
+    (is (nil? (fixed-command 3 {:status 200 :body "cats"} true)))
+    (is (some? (fixed-command 3 {:status 200 :body (byte-array 3)} true)))
+    (is (= 0 (alength ^bytes (:body (fixed-command 3 {:status 200 :body ""} true)))))
+    (is (= 3 (:content-length (fixed-command 3 {:status 200 :body "cat"} true))))
+    (is (= 99 (:content-length (fixed-command 3 {:status 200
+                                                 :headers {"content-length" "99"}
+                                                 :body "cat"}
+                                              true))))
+    (is (some? (fixed-command 1 {:status 200
+                                 :headers {"content-type" "text/plain; charset=UTF8"}
+                                 :body "x"}
+                              true)))
+    (is (= h2o/H2O_COMPRESS_HINT_DISABLE
+           (:compress-hint (fixed-command 1 {:status 200
+                                             :h2o/compress-hint :h2o.compress/disable
+                                             :body "x"}
+                                          true))))
+    (is (some? (fixed-command 1 {:status 200 :headers sixty-four-headers :body "x"} true)))
+    (is (nil? (fixed-command 1 {:status 200 :headers sixty-five-headers :body "x"} true)))
+    (is (some? (fixed-command 1 {:status 200 :headers {"x" staged-value} :body "x"} true)))
+    (is (nil? (fixed-command 1 {:status 200 :headers {"x" (str staged-value "a")} :body "x"} true)))))
+
+(deftest fixed-final-falls-back-for-ineligible-final-responses
+  (doseq [response [{:status 204 :body "x"}
+                    {:status 304 :body "x"}
+                    {:status 200 :body nil}
+                    {:status 200 :body ["x"]}
+                    {:status 200 :headers {"content-type" "text/plain; charset=iso-8859-1"} :body "x"}]]
+    (is (nil? (fixed-command 1 response true))))
+  (is (nil? (fixed-command 1 {:status 200 :body "x"} false)))
+  (is (nil? (fixed-command 1 {:status 200 :body "xx"} true)))
+  (is (nil? (fixed-command 1 {:status 200
+                              :headers {"content-type" "text/plain; charset=not-a-charset"}
+                              :body "x"}
+                           false))))
+
+(deftest final-status-rejection-precedes-response-preparation
+  (let [writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))
+        failure (try
+                  (#'response/commit-final! (fixed-final-request 1) writer (atom nil)
+                                            {:status 101
+                                             :headers {"content-type" "text/plain; charset=not-a-charset"}
+                                             :body "x"}
+                                            true)
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+    (is (= 101 (:status (ex-data failure))))))
+
+(deftest fixed-final-mailbox-rejection-uses-generic-response-path
+  (let [writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))
+        req (fixed-final-request 3)
+        generic_ (atom nil)
+        committed_ (atom nil)]
+    (with-redefs-fn {#'response/schedule-fixed-final! (constantly false)
+                     #'response/schedule-start-response! (fn [& args] (reset! generic_ args))}
+      #(do
+         (is (= "cat" (:body (#'response/commit-final! req writer committed_
+                                                       {:status 200 :body "cat"}
+                                                       true))))
+         (is (some? @generic_))
+         (is (false? (.get ^AtomicBoolean (:stopped?_ writer))))))))
+
+(deftest fixed-final-admission-stops-generic-writer
+  (let [writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))
+        req (fixed-final-request 3)
+        command_ (atom nil)
+        committed_ (atom nil)]
+    (with-redefs-fn {#'response/schedule-fixed-final! (fn [_ command]
+                                                        (reset! command_ command)
+                                                        true)
+                     #'response/schedule-start-response! (fn [& _] (throw (ex-info "Unexpected generic response" {})))}
+      #(do
+         (is (nil? (:body (#'response/commit-final! req writer committed_
+                                                    {:status 200 :body "cat"}
+                                                    true))))
+         (is (= "cat" (String. ^bytes (:body @command_) StandardCharsets/UTF_8)))
+         (is (true? (.get ^AtomicBoolean (:stopped?_ writer))))))))
+
+(deftest fixed-final-command-copies-ring-byte-array-before-admission
+  (let [body (byte-array [65 66 67])
+        command_ (atom nil)
+        writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))]
+    (with-redefs-fn {#'response/schedule-fixed-final! (fn [_ command]
+                                                        (reset! command_ command)
+                                                        true)}
+      #(do
+         (#'response/commit-final! (fixed-final-request 3) writer (atom nil)
+                                   {:status 200 :body body}
+                                   true)
+         (aset-byte body 0 (byte 90))))
+    (is (= [65 66 67] (vec ^bytes (:body @command_))))))
+
+(deftest fixed-final-ring-path-preserves-final-response-semantics
+  (let [[server port]
+        (start-server
+         (fn [{:keys [uri] emitter :ol.busker.request/emitter}]
+           (case uri
+             "/unicode" {:status 200 :body "λ"}
+             "/empty"   {:status 200 :body (byte-array 0)}
+             "/head"    {:status 200 :body "visible"}
+             "/latin1"  {:status 200
+                         :headers {"content-type" "text/plain; charset=iso-8859-1"}
+                         :body "é"}
+             "/invalid-incremental"
+             (do
+               (protocols/emit! emitter {:status 200
+                                         :headers {"content-type" "text/plain; charset=not-a-charset"}})
+               (protocols/emit! emitter "é")
+               (protocols/close emitter)
+               {:body emitter})
+             "/info"    (do
+                          (protocols/emit! emitter {:status 103
+                                                    :headers {"link" "</style.css>; rel=preload"}})
+                          {:status 200 :body "final"})
+             {:status 404 :body "missing"})))]
+    (try
+      (is (= "λ" (:out (util/curl :http :h1 port "/unicode" :max-time 5))))
+      (is (= "" (:out (util/curl :http :h1 port "/empty" :max-time 5))))
+      (let [^String head-response (request-text port "HEAD" "/head")
+            ^String info-response (request-text port "GET" "/info")
+            ^bytes latin1-response (request-bytes port "GET" "/latin1")
+            ^bytes invalid-response (request-bytes port "GET" "/invalid-incremental")
+            ^String latin1-headers (String. latin1-response StandardCharsets/US_ASCII)
+            head-body (second (str/split head-response #"\r\n\r\n" 2))]
+        (is (re-find #"(?i)content-length: 7" head-response))
+        (is (= "" head-body))
+        (is (< (.indexOf info-response "103") (.indexOf info-response "200")))
+        (is (str/ends-with? info-response "final"))
+        (is (re-find #"(?i)content-length: 1" latin1-headers))
+        (is (= (byte -23) (aget latin1-response (dec (alength latin1-response)))))
+        (is (some #(= [195 169] (mapv (fn [b] (bit-and b 0xff)) %))
+                  (partition 2 1 invalid-response))))
+      (finally
+        (busker/stop! server)))))
 
 (defn- blocked?
   [^Thread thread]

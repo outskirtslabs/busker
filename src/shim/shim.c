@@ -446,7 +446,6 @@ void clj_h2o_send_fixed_final(clj_req_ctx_t *ctx, int status,
                               size_t headers_len, size_t content_length,
                               int compress_hint, const char *body,
                               size_t body_len) {
-  (void)compress_hint;
 
   if (!ctx || !ctx->req || !body)
     return;
@@ -457,7 +456,7 @@ void clj_h2o_send_fixed_final(clj_req_ctx_t *ctx, int status,
   req->res.content_length = content_length;
   copy_headers_to_response(req, headers, headers_len);
 
-  req->compress_hint = H2O_COMPRESS_HINT_ENABLE;
+  req->compress_hint = compress_hint;
   ctx->generator.proceed = NULL;
   ctx->generator.stop = NULL;
   ctx->on_response_generator_proceed = NULL;
@@ -471,7 +470,6 @@ size_t clj_h2o_start_response(
     size_t headers_len, size_t content_length, int compress_hint,
     clj_response_generator_proceed_cb on_response_generator_proceed,
     clj_response_generator_stop_cb on_response_generator_stop) {
-  (void)compress_hint; /* TODO: use for per-request compression control */
 
   if (!ctx || !ctx->req)
     return 0;
@@ -488,7 +486,7 @@ size_t clj_h2o_start_response(
 
   copy_headers_to_response(req, headers, headers_len);
 
-  req->compress_hint = H2O_COMPRESS_HINT_ENABLE;
+  req->compress_hint = compress_hint;
   ctx->generator.proceed = clj_generator_proceed;
   ctx->generator.stop = clj_generator_stop;
   ctx->on_response_generator_proceed = on_response_generator_proceed;
