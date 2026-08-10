@@ -1,7 +1,6 @@
 (ns ^:no-doc ol.busker.fixed-final
   (:require
    [coffi.mem :as mem]
-   [ol.busker.evloop :as evloop]
    [ol.busker.native :as h2o])
   (:import
    [java.lang.foreign MemorySegment]
@@ -11,6 +10,9 @@
 
 (def ^:const max-header-pairs 64)
 (def ^:const max-header-staging-bytes 16384)
+
+(def ^:private get-current-worker
+  (delay (requiring-resolve 'ol.busker.evloop/get-current-worker)))
 
 (def ^:private clj-header-size (mem/size-of ::h2o/clj-header-t))
 (def ^:private clj-header-name-offset (mem/struct-field-offset ::h2o/clj-header-t :name))
@@ -93,7 +95,7 @@
 (defn execute!
   "Stages `command` on its event-loop worker and sends it synchronously."
   [req command]
-  (when-not (identical? (:worker req) (evloop/get-current-worker))
+  (when-not (identical? (:worker req) (@get-current-worker))
     (throw (ex-info "Fixed final command ran outside its event-loop worker" {})))
   (let [{:keys [headers body] header-bytes :header-staging-bytes} command
         body-limit (get-in req [:config :output-buffer-size])]

@@ -4,6 +4,7 @@
    [clojure.java.io :as io]
    [clojure.string :as str]
    [coffi.mem :as mem]
+   [ol.busker.fixed-final :as fixed-final]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as p]
@@ -16,7 +17,7 @@
    [java.io InputStream OutputStream]
    [java.lang.foreign MemorySegment]
    [java.nio ByteBuffer]
-   [java.nio.charset StandardCharsets]
+   [java.nio.charset Charset StandardCharsets]
    [java.util.concurrent.atomic AtomicBoolean]
    [ol.busker.internal.protocols Request]))
 
@@ -179,13 +180,21 @@
 (defn get-compress-hint [resp]
   (get h2o/->compress-hint (:h2o/compress-hint resp) h2o/H2O_COMPRESS_HINT_ENABLE))
 
+(defn- string-body-bytes
+  [^String body response]
+  (try
+    (let [^Charset charset (Charset/forName (or (hdr.util/get-charset response) "utf-8"))]
+      (.getBytes body charset))
+    (catch IllegalArgumentException _
+      (.getBytes body StandardCharsets/UTF_8))))
+
 (defn- write-fallback-body-to-stream!
-  [chunk _response ^OutputStream out]
+  [chunk response ^OutputStream out]
   (cond
     (nil? chunk)                       nil
     (instance? byte-array-class chunk) (.write out ^bytes chunk)
     (number? chunk)                    (.write out (int chunk))
-    (string? chunk)                    (.write out (.getBytes ^String chunk StandardCharsets/UTF_8))
+    (string? chunk)                    (.write out ^bytes (string-body-bytes chunk response))
     (instance? ByteBuffer chunk)       (let [dup   (.duplicate ^ByteBuffer chunk)
                                              len   (.remaining dup)
                                              bytes (byte-array len)]
@@ -193,7 +202,7 @@
                                          (.write out bytes))
     (instance? InputStream chunk)      (io/copy chunk out)
     (sequential? chunk)                (doseq [part chunk]
-                                         (write-fallback-body-to-stream! part nil out))
+                                         (write-fallback-body-to-stream! part response out))
     :else                              (throw (ex-info "Unsupported response chunk" {:type (class chunk)}))))
 
 #_{:clj-kondo/ignore [:unresolved-namespace]}
@@ -216,20 +225,90 @@
      [chunk response ^OutputStream out]
      (write-fallback-body-to-stream! chunk response out))))
 
+(defn- fixed-final-body-bytes
+  [body]
+  (cond
+    (string? body)                     (.getBytes ^String body StandardCharsets/UTF_8)
+    (instance? byte-array-class body) body
+    :else                              nil))
+
+(defn- utf8-charset?
+  [charset]
+  (try
+    (= StandardCharsets/UTF_8 (Charset/forName charset))
+    (catch IllegalArgumentException _
+      false)))
+
+(defn- fixed-final-command
+  [^Request req response final?]
+  (let [status (:status response)
+        body (:body response)
+        output-buffer-size (get-in req [:config :output-buffer-size])
+        charset (hdr.util/get-charset response)]
+    (when (and final?
+               (some? status)
+               (final-status? status)
+               (not (contains? #{204 304} status))
+               (nat-int? output-buffer-size)
+               (or (string? body) (instance? byte-array-class body))
+               (or (not (string? body))
+                   (nil? charset)
+                   (utf8-charset? charset)))
+      (let [headers (->> (dissoc-header (:headers response) "content-length")
+                         expand-header-values
+                         (mapv (fn [[name value]] [(str name) (str value)])))
+            header-staging-bytes (fixed-final/header-staging-bytes headers)]
+        (when (and (<= (count headers) fixed-final/max-header-pairs)
+                   (<= header-staging-bytes fixed-final/max-header-staging-bytes))
+          (let [body-bytes (fixed-final-body-bytes body)]
+            (when (<= (alength ^bytes body-bytes) output-buffer-size)
+              (let [content-length (or (some-> (hdr.util/get-header response "content-length")
+                                               coerce-content-length)
+                                       (alength ^bytes body-bytes))
+                    compress-hint (get-compress-hint response)
+                    compress-hint (if (and (= h2o/H2O_COMPRESS_HINT_ENABLE compress-hint)
+                                           (< (alength ^bytes body-bytes)
+                                              (or (get-in req [:config :compress-min-size]) 0)))
+                                    h2o/H2O_COMPRESS_HINT_DISABLE
+                                    compress-hint)]
+                (fixed-final/command (:dispatch-module-id req)
+                                     (:dispatch-request-seq req)
+                                     status
+                                     headers
+                                     header-staging-bytes
+                                     content-length
+                                     compress-hint
+                                     output-buffer-size
+                                     body-bytes)))))))))
+
+(defn- schedule-fixed-final!
+  [^Request req command]
+  (pi/send-msg (:worker req) [:h2o/send-fixed-final command]))
+
 (defn- commit-final!
   [^Request req write-resp committed_ {:keys [body status] :as response} final?]
-  (when-not (and (some? status) (final-status? status))
-    (throw (ex-info "Final response status must be >= 200" {:status status})))
   (let [response' (cond-> response
-                    (nil? status) (assoc :status 200)
-                    final? with-content-length)
-        head (dissoc response' :body)
-        [headers headers-len content-length] (build-headers head)]
-    (when (compare-and-set! committed_ nil head)
-      (schedule-start-response!
-       req (:status head) headers headers-len content-length (get-compress-hint response') write-resp)
-      {:head head
-       :body body})))
+                    (nil? status) (assoc :status 200))]
+    (when-not (final-status? (:status response'))
+      (throw (ex-info "Final response status must be >= 200" {:status (:status response')})))
+    (let [command (fixed-final-command req response' final?)
+          response' (if command
+                      (if (hdr.util/get-header response' "content-length")
+                        response'
+                        (hdr.util/header response' "content-length" (:content-length command)))
+                      (cond-> response'
+                        final? with-content-length))
+          head (dissoc response' :body)]
+      (when (compare-and-set! committed_ nil head)
+        (if (and command (schedule-fixed-final! req command))
+          (do
+            (pi/stop write-resp)
+            {:head head :body nil})
+          (let [[headers headers-len content-length] (build-headers head)]
+            (schedule-start-response!
+             req (:status head) headers headers-len content-length
+             (get-compress-hint response') write-resp)
+            {:head head :body body}))))))
 
 (defn- write-body-chunk!
   [chunk ^OutputStream out response close-after?]
@@ -239,7 +318,7 @@
       (nil? chunk)                       nil
       (instance? byte-array-class chunk) (.write out ^bytes chunk)
       (number? chunk)                    (.write out (int chunk))
-      (string? chunk)                    (.write out (.getBytes ^String chunk StandardCharsets/UTF_8))
+      (string? chunk)                    (.write out ^bytes (string-body-bytes chunk response))
       (instance? ByteBuffer chunk)       (let [dup   (.duplicate ^ByteBuffer chunk)
                                                len   (.remaining dup)
                                                bytes (byte-array len)]

@@ -186,6 +186,40 @@
                                    "content-type"   "text/plain"}}
                         (req :get "/simple" {:headers {"Accept-Encoding" ["gzip"]}}))))))
 
+(deftest fixed-final-compression-matches-generic-responses
+  (let [enabled-body (apply str (repeat 64 "a"))
+        disabled-body (apply str (repeat 64 "b"))
+        generic-disabled-body (apply str (repeat 40000 "c"))]
+    (with-server [_server
+                  (test-server
+                   (fn [{:keys [uri]}]
+                     (case uri
+                       "/enabled" {:status 200
+                                   :headers {"content-type" "text/plain"}
+                                   :body enabled-body}
+                       "/below" {:status 200
+                                 :headers {"content-type" "text/plain"}
+                                 :body "small"}
+                       "/fixed-disabled" {:status 200
+                                          :headers {"content-type" "text/plain"}
+                                          :h2o/compress-hint :h2o.compress/disable
+                                          :body disabled-body}
+                       "/generic-disabled" {:status 200
+                                            :headers {"content-type" "text/plain"}
+                                            :h2o/compress-hint :h2o.compress/disable
+                                            :body generic-disabled-body}
+                       {:status 404 :body "missing"})))]
+      (let [gzip-headers {"Accept-Encoding" ["gzip"]}
+            enabled (req :get "/enabled" {:headers gzip-headers})
+            below (req :get "/below" {:headers gzip-headers})
+            fixed-disabled (req :get "/fixed-disabled" {:headers gzip-headers})
+            generic-disabled (req :get "/generic-disabled" {:headers gzip-headers})]
+        (is (= "gzip" (get-in enabled [:headers "content-encoding"])))
+        (is (nil? (get-in below [:headers "content-encoding"])))
+        (is (nil? (get-in fixed-disabled [:headers "content-encoding"])))
+        (is (= (get-in generic-disabled [:headers "content-encoding"])
+               (get-in fixed-disabled [:headers "content-encoding"])))))))
+
 (deftest handlers-run-on-virtual-threads-test
   (let [handler-thread (promise)]
     (with-server [_server (test-server (fn [_]
