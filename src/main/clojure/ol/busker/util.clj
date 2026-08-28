@@ -52,7 +52,7 @@
    Invalid authorities are treated as opaque host strings and keep the
    `default-port`."
   [authority-str default-port]
-  (let [authority-str (or authority-str "")]
+  (let [^String authority-str (or authority-str "")]
     (cond
       (str/blank? authority-str)
       (authority-result "localhost" default-port)
@@ -61,20 +61,24 @@
       (str/includes? authority-str "@")
       (authority-result authority-str default-port)
 
-      :else
+      (= \[ (.charAt authority-str 0))
       (if-let [[_ host port-str] (re-matches #"^\[([^\[\]]+)\](?::(\d+))?$"
                                              authority-str)]
-        (if (and (valid-ip-literal? host)
-                 (or (nil? port-str) (some? (parse-port port-str))))
-          (authority-result host
-                            (or (some-> port-str parse-port) default-port))
-          (authority-result authority-str default-port))
-        (if (and (<= (count (re-seq #":" authority-str)) 1)
-                 (not (str/starts-with? authority-str ":")))
-          (let [[host port-str] (str/split authority-str #":" 2)]
+        (let [port (when port-str (parse-port port-str))]
+          (if (and (valid-ip-literal? host)
+                   (or (nil? port-str) (some? port)))
+            (authority-result host (or port default-port))
+            (authority-result authority-str default-port)))
+        (authority-result authority-str default-port))
+
+      :else
+      (let [colon (.indexOf authority-str ":")]
+        (if (= colon (.lastIndexOf authority-str ":"))
+          (let [host (if (neg? colon) authority-str (subs authority-str 0 colon))
+                port-str (when-not (neg? colon) (subs authority-str (inc colon)))
+                port (when port-str (parse-port port-str))]
             (if (and (re-matches re-reg-name host)
-                     (or (nil? port-str) (some? (parse-port port-str))))
-              (authority-result host
-                                (or (some-> port-str parse-port) default-port))
+                     (or (nil? port-str) (some? port)))
+              (authority-result host (or port default-port))
               (authority-result authority-str default-port)))
           (authority-result authority-str default-port))))))

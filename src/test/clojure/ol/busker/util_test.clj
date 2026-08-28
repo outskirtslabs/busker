@@ -1,6 +1,6 @@
 (ns ol.busker.util-test
   (:require
-   [clojure.test :refer [are deftest testing]]
+   [clojure.test :refer [are deftest is testing]]
    [ol.busker.util :as util]))
 
 (deftest parse-authority-test
@@ -36,3 +36,14 @@
       "[::1]extra"         80
       "exa mple"           80
       "[::1%lo0]:443"      80)))
+
+(deftest parse-authority-parses-explicit-port-once-test
+  (let [calls_ (atom 0)
+        parse-port util/parse-port]
+    (with-redefs [util/parse-port
+                  (fn [port-str]
+                    (swap! calls_ inc)
+                    (parse-port port-str))]
+      (is (= {:server-name "example.com" :server-port 8443}
+             (util/parse-authority "example.com:8443" 80))))
+    (is (= 1 @calls_))))
