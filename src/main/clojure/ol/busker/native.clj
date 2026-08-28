@@ -198,6 +198,8 @@
 (def ^:private size-of-clj-req-ctx-t
   (mem/size-of ::clj-req-ctx-t))
 
+(declare copy-request-context)
+
 (defn read-request-context
   "Returns the `:req` and `:meta` projection from `ctx-ptr`.
 
@@ -522,7 +524,7 @@
          (some? flat-config-ptr) (not (mem/null? flat-config-ptr))
          (some? arena)]}
   (let [on-request-cb (fn on-request-cb [ctx-ptr]
-                        (int (on-req-callback ctx-ptr (read-request-context ctx-ptr))))
+                        (int (on-req-callback ctx-ptr (copy-request-context ctx-ptr))))
         on-request-cb-ptr (mem/serialize on-request-cb
                                          [::ffi/fn [::mem/pointer] ::mem/int :raw-fn? true]
                                          arena)
@@ -853,6 +855,23 @@
    :http-version http_version
    :has-body has_body
    :early-data is_early_data})
+
+(defn ^:no-doc copy-request-context
+  [ctx-ptr]
+  (let [ctx (mem/reinterpret ctx-ptr size-of-clj-req-ctx-t)
+        has-body (mem/read-short ctx 108)]
+    {:req (mem/read-address ctx 0)
+     :has-body has-body
+     :ring-data
+     {:method (->string (mem/read-address ctx 16) (mem/read-long ctx 64))
+      :path (->string (mem/read-address ctx 24) (mem/read-long ctx 72))
+      :authority (->string (mem/read-address ctx 8) (mem/read-long ctx 56))
+      :scheme (->string (mem/read-address ctx 40) (mem/read-long ctx 88))
+      :remote-addr (->string (mem/read-address ctx 32) (mem/read-long ctx 80))
+      :headers (build-ring-headers-map (mem/read-address ctx 48) (mem/read-long ctx 96))
+      :http-version (mem/read-int ctx 104)
+      :has-body has-body
+      :early-data (mem/read-short ctx 110)}}))
 
 (defn ^:no-doc assemble-ring-request
   [{:keys [method path authority scheme remote-addr headers

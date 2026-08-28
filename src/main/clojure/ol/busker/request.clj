@@ -110,13 +110,13 @@
             dispatch (:callback-dispatch worker)
             [module-id request-seq] (callback-dispatch/allocate-identity! dispatch)
             callback-pointers (callback-dispatch/callback-pointers dispatch)
-            has-body? (:has_body (:meta req-ctx))
+            has-body? (:has-body req-ctx)
             write-req (when has-body?
                         (set-req-body-channel worker module-id request-seq))
             req (Request. worker config req-ctx-ptr req-ctx write-req
                           callback-pointers module-id request-seq)
             emitter (response/new-response-emitter req close-callback-dispatch)
-            ring-request-data (h2o/copy-ring-request-data (:meta req-ctx))]
+            ring-request-data (:ring-data req-ctx)]
         (callback-dispatch/register! dispatch module-id request-seq req emitter)
         (try
           (h2o/install-request-dispatch req-ctx-ptr module-id request-seq
