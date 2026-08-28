@@ -116,15 +116,17 @@
             req (Request. worker config req-ctx-ptr req-ctx write-req
                           callback-pointers module-id request-seq)
             emitter (response/new-response-emitter req close-callback-dispatch)
-            ring-req (assoc (h2o/build-ring-request (:meta req-ctx)
-                                                    (:input-stream write-req))
-                            ::emitter emitter)]
+            ring-request-data (h2o/copy-ring-request-data (:meta req-ctx))]
         (callback-dispatch/register! dispatch module-id request-seq req emitter)
         (try
           (h2o/install-request-dispatch req-ctx-ptr module-id request-seq
                                         (if has-body? (:body callback-pointers) mem/null))
           (letfn [(request-task []
-                    (let [ring-resp (run-handler ring-handler ring-req)]
+                    (let [ring-req (assoc (h2o/assemble-ring-request
+                                           ring-request-data
+                                           (:input-stream write-req))
+                                          ::emitter emitter)
+                          ring-resp (run-handler ring-handler ring-req)]
                       (response/send-ring-response! emitter ring-resp)))]
             (.submit executor ^Runnable request-task))
           h2o/CLJ_HANDLER_OK

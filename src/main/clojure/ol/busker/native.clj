@@ -840,6 +840,51 @@
     443
     80))
 
+(defn ^:no-doc copy-ring-request-data
+  [{:keys [method method_len path path_len authority authority_len
+           http_version headers headers_len has_body is_early_data
+           scheme scheme_len remote_addr remote_addr_len]}]
+  {:method (->string method method_len)
+   :path (->string path path_len)
+   :authority (->string authority authority_len)
+   :scheme (->string scheme scheme_len)
+   :remote-addr (->string remote_addr remote_addr_len)
+   :headers (build-ring-headers-map headers headers_len)
+   :http-version http_version
+   :has-body has_body
+   :early-data is_early_data})
+
+(defn ^:no-doc assemble-ring-request
+  [{:keys [method path authority scheme remote-addr headers
+           http-version has-body early-data]}
+   ^InputStream input-stream]
+  (let [default-port (default-server-port scheme)
+        {:keys [server-name server-port]}
+        (util/parse-authority authority default-port)
+        [uri query-string] (if path
+                             (let [idx (str/index-of path "?")]
+                               (if idx
+                                 [(subs path 0 idx) (subs path (inc idx))]
+                                 [path nil]))
+                             [nil nil])
+        protocol (case (int http-version)
+                   0x0101 "HTTP/1.1"
+                   0x0200 "HTTP/2.0"
+                   0x0300 "HTTP/3.0"
+                   "HTTP/1.1")]
+    {:server-port server-port
+     :server-name server-name
+     :remote-addr (or remote-addr "")
+     :uri uri
+     :query-string query-string
+     :scheme (keyword (or scheme "http"))
+     :request-method (keyword (str/lower-case (or method "get")))
+     :protocol protocol
+     :headers headers
+     :body (when (= 1 has-body)
+             input-stream)
+     :ol.busker/early-data? (= 1 early-data)}))
+
 (defn build-ring-request
   "Build Ring-compliant request map from h2o request metadata.
 
@@ -853,42 +898,8 @@
    - `:ol.busker/early-data?` true when request arrived via 0-RTT
 
    Protocol version (HTTP/1.1, HTTP/2, HTTP/3) determined from `http_version` field."
-  [{:keys [method method_len path path_len authority authority_len
-           http_version headers headers_len has_body is_early_data
-           scheme scheme_len remote_addr remote_addr_len]}
-   ^InputStream input-stream]
-  (let [method-str (->string method method_len)
-        path-str (->string path path_len)
-        authority-str (->string authority authority_len)
-        scheme-str (->string scheme scheme_len)
-        remote-addr-str (->string remote_addr remote_addr_len)
-        headers-map (build-ring-headers-map headers headers_len)
-        default-port (default-server-port scheme-str)
-        {:keys [server-name server-port]}
-        (util/parse-authority authority-str default-port)
-        [uri query-string] (if path-str
-                             (let [idx (str/index-of path-str "?")]
-                               (if idx
-                                 [(subs path-str 0 idx) (subs path-str (inc idx))]
-                                 [path-str nil]))
-                             [nil nil])
-        version (case (int http_version)
-                  0x0101 [1 1]
-                  0x0200 [2 0]
-                  0x0300 [3 0]
-                  [1 1])]
-    {:server-port server-port
-     :server-name server-name
-     :remote-addr (or remote-addr-str "")
-     :uri uri
-     :query-string query-string
-     :scheme (keyword (or scheme-str "http"))
-     :request-method (keyword (str/lower-case (or method-str "get")))
-     :protocol (str "HTTP/" (first version) "." (second version))
-     :headers headers-map
-     :body (when (= 1 has_body)
-             input-stream)
-     :ol.busker/early-data? (= 1 is_early_data)}))
+  [meta ^InputStream input-stream]
+  (assemble-ring-request (copy-ring-request-data meta) input-stream))
 
 (defcfn http3-create-ptls-ctx
   "Create picotls context for QUIC TLS 1.3.
