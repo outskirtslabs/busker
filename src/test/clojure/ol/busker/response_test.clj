@@ -266,6 +266,19 @@
     (is (some? (fixed-command 1 {:status 200 :headers {"x" staged-value} :body "x"} true)))
     (is (nil? (fixed-command 1 {:status 200 :headers {"x" (str staged-value "a")} :body "x"} true)))))
 
+(deftest fixed-final-command-sizes-headers-once-test
+  (let [call-count_ (atom 0)
+        header-staging-bytes fixed-final/header-staging-bytes]
+    (with-redefs [fixed-final/header-staging-bytes
+                  (fn [headers]
+                    (swap! call-count_ inc)
+                    (header-staging-bytes headers))]
+      (is (some? (fixed-command 3 {:status 200
+                                   :headers {"content-type" "text/plain"}
+                                   :body "cat"}
+                                true))))
+    (is (= 1 @call-count_))))
+
 (deftest fixed-final-falls-back-for-ineligible-final-responses
   (doseq [response [{:status 204 :body "x"}
                     {:status 304 :body "x"}

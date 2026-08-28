@@ -64,6 +64,11 @@
     (->FixedFinalCommand module-id request-seq status headers header-bytes
                          content-length compress-hint (aclone ^bytes body))))
 
+(defn ^:no-doc prepared-command
+  [module-id request-seq status headers header-bytes content-length compress-hint body]
+  (->FixedFinalCommand module-id request-seq status headers header-bytes
+                       content-length compress-hint body))
+
 (defn command
   "Creates a fixed final command with copied JVM body bytes."
   [module-id request-seq status headers header-bytes content-length compress-hint body-limit body]

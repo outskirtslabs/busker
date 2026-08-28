@@ -229,7 +229,7 @@
   [body]
   (cond
     (string? body)                     (.getBytes ^String body StandardCharsets/UTF_8)
-    (instance? byte-array-class body) body
+    (instance? byte-array-class body) (aclone ^bytes body)
     :else                              nil))
 
 (defn- utf8-charset?
@@ -271,15 +271,14 @@
                                               (or (get-in req [:config :compress-min-size]) 0)))
                                     h2o/H2O_COMPRESS_HINT_DISABLE
                                     compress-hint)]
-                (fixed-final/command (:dispatch-module-id req)
-                                     (:dispatch-request-seq req)
-                                     status
-                                     headers
-                                     header-staging-bytes
-                                     content-length
-                                     compress-hint
-                                     output-buffer-size
-                                     body-bytes)))))))))
+                (fixed-final/prepared-command (:dispatch-module-id req)
+                                              (:dispatch-request-seq req)
+                                              status
+                                              headers
+                                              header-staging-bytes
+                                              content-length
+                                              compress-hint
+                                              body-bytes)))))))))
 
 (defn- schedule-fixed-final!
   [^Request req command]
