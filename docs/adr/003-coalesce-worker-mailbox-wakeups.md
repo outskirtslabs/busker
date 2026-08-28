@@ -22,6 +22,13 @@ The consumer drains FIFO messages. After an empty poll, it clears an odd token t
 
 Direct `wake` calls for streaming flow control remain immediate.
 
+After a worker drain handles any mailbox message, the immediately following native loop iteration uses zero wait.
+Native downcalls made while draining can add H2O pending callbacks while `h2o_evloop_run` is inactive.
+H2O polls before it runs those callbacks, so using the ordinary idle wait would delay response completion and HTTP/1.1 request reuse.
+
+Streaming response proceed callbacks drain the next queued chunk directly on the worker thread instead of posting another mailbox command. H2O invokes proceed only after consuming the previous chunk, so the direct call preserves its required `sendvec → proceed → sendvec` sequence and lets H2O update write polling in the same event-loop turn.
+
+Each response writer uses an atomic three-state drain marker: idle, active, or active with a producer signal. A producer changes idle to active before posting the first mailbox command. If a command or native send is already active, the producer records a signal and wakes the worker. An empty worker drain retires to idle only when no signal exists; otherwise it consumes the signal and checks the queue again.
 Stop first closes admission, waits for admission sections already in progress, marks stop requested, and wakes the worker. The worker drains every admitted mailbox message before it exits. Later offers return `false`.
 
 ## Consequences
@@ -29,5 +36,7 @@ Stop first closes admission, waits for admission sections already in progress, m
 Many accepted mailbox messages can share one native wake. The design retains one FIFO mailbox, its existing capacity, and ordering between informational and final response operations.
 
 The worker adds two small atomic fields and exact-token retry logic. Deterministic tests cover coalescing, clear-and-recheck, newer-signal preservation, repeated failures, full and stopped admission, stop coordination, and FIFO delivery.
+
+Long streaming responses avoid one mailbox command per proceed callback. The three-state marker prevents producer work from becoming stranded when enqueue and empty-drain retirement overlap. Deterministic tests cover direct proceed draining and the concurrent producer interleaving; controlled 1-GiB upload and download tests cover sustained backpressure.
 
 A separate fixed-final inbox was rejected. It would require ordering coordination with informational messages, overflow routing, a second shutdown drain, and additional state without evidence that per-command temporary staging dominates the measured delay.

@@ -312,7 +312,8 @@
 (defn- worker-loop
   [worker loop-state
    {:keys [loop-ptr ctx-ptr listener-socks accept-callbacks max-connections] :as state}]
-  (let [loop-state (-> loop-state
+  (let [mailbox-work? (true? (::evloop/mailbox-work? loop-state))
+        loop-state (-> (dissoc loop-state ::evloop/mailbox-work?)
                        (check-and-initiate-shutdown! state)
                        (update-receiver-destruction worker)
                        (dispose-context-if-ready worker state))
@@ -323,6 +324,7 @@
       (let [now (h2o/evloop-now loop-ptr)
             base-wait (h2o/cleanup-thread now ctx-ptr)
             wait-ms (cond
+                      mailbox-work? 0
                       (callback-dispatch/pending-response-work?
                        (:callback-dispatch worker)) 5
                       shutting? 10

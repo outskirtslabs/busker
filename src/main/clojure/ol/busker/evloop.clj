@@ -169,20 +169,22 @@
 
 (defn- drain-mailbox!
   [^Worker worker]
-  (loop []
+  (loop [handled? false]
     (if-let [message (.poll ^ArrayBlockingQueue (:mailbox worker))]
       (do
         (handle-message! worker message)
-        (recur))
+        (recur true))
       (do
         (clear-mailbox-signal! worker)
         (if-let [message (.poll ^ArrayBlockingQueue (:mailbox worker))]
           (do
             (mark-mailbox-signalled! worker)
             (handle-message! worker message)
-            (recur))
-          (when (.get ^AtomicBoolean (:stop-requested?_ worker))
-            (.set ^AtomicBoolean (:running?_ worker) false)))))))
+            (recur true))
+          (do
+            (when (.get ^AtomicBoolean (:stop-requested?_ worker))
+              (.set ^AtomicBoolean (:running?_ worker) false))
+            handled?))))))
 
 (defn- run-evloop-on-thread!
   [^Worker worker]
@@ -192,9 +194,10 @@
           loop-fn (:loop-fn worker)]
       (loop [state {}]
         (when (.get running?_)
-          (drain-mailbox! worker)
-          (when (.get running?_)
-            (recur (loop-fn worker state))))))
+          (let [mailbox-work? (drain-mailbox! worker)]
+            (when (.get running?_)
+              (recur (loop-fn worker
+                              (assoc state ::mailbox-work? mailbox-work?))))))))
     (catch InterruptedException _
       (.set ^AtomicBoolean (:running?_ worker) false))
     (catch Throwable error

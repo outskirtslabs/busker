@@ -10,9 +10,13 @@
    [java.io OutputStream]
    [java.lang.foreign Arena MemorySegment]
    [java.nio ByteBuffer]
-   [java.util.concurrent.atomic AtomicBoolean AtomicReference]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicReference]))
 
 (set! *warn-on-reflection* true)
+
+(def ^:private ^:const drain-idle 0)
+(def ^:private ^:const drain-active 1)
+(def ^:private ^:const drain-signalled 2)
 
 (defrecord
  ^{:doc "A sealed, immutable outbound unit to send in one h2o_sendvec call.
@@ -36,36 +40,24 @@
 ;; the worker thread is the only one allowed to call native functions
 ;; ref ol.busker.evloop
 
-;; the scheduled?_ flag:
+;; The drain-state_ AtomicInteger permits one mailbox command or native send at a time:
 ;;
-;; The scheduled?_ AtomicBoolean ensures only one drain task is pending/in-flight at a time,
-;; enforcing h2o's strict "one sendvec in flight" contract: sendvec → on-proceed → sendvec.
+;;   0 idle: no command or send is active
+;;   1 active: a command, send-vecs call, or native send is active
+;;   2 signalled: active, with data enqueued since the last drain check
 ;;
-;; State transitions:
-;;   false → true:  Writer calls schedule-drain! and successfully posts :h2o/sendvec message
-;;   true → false:  Either (1) on-proceed clears it before scheduling next drain, OR
-;;                        (2) send-vecs clears it when queue is empty (no work to do)
+;; A producer changes idle to active before posting a mailbox command. While active, it
+;; records a signal instead. The worker consumes that signal and checks the queue again
+;; before retiring to idle. This prevents an enqueue between an empty check and retirement
+;; from becoming stranded.
 ;;
-;; Semantics:
-;;   scheduled?_=true means one of:
-;;     - A drain task is in the evloop mailbox (not yet executed)
-;;     - send-vecs is currently executing on the worker thread
-;;     - h2o_sendvec call is in-flight waiting for on-proceed callback
-;;
-;; Guarantees:
-;;   - Prevents duplicate drain messages in the evloop mailbox (CAS gate in schedule-drain!)
-;;   - Ensures on-proceed sees no concurrent drains (cleared before next schedule)
-;;   - Writer can safely enqueue chunks and post drain without blocking on semaphores
-;;
-;; Key functions:
-;;   schedule-drain!: CAS false→true, posts mailbox message if successful
-;;   send-vecs:       Keeps true while sendvec in-flight; clears to false only if queue empty
-;;   on-proceed:      Clears to false, releases buffers, schedules next drain if not stopped
+;; on-proceed keeps the drain active, releases completed buffers, and drains directly before
+;; returning to h2o. Native sends therefore retain h2o's proceed → send call sequence.
 
 (defn pending-work?
   "Returns true when a response writer has queued or in-flight data."
   [st]
-  (or (.get ^AtomicBoolean (:scheduled?_ st))
+  (or (pos? (.get ^AtomicInteger (:drain-state_ st)))
       (some? (.get ^AtomicReference (:in-flight_ st)))
       (pos? (bbq/queued-bytes (:bbq st)))))
 
@@ -126,31 +118,53 @@
   [st]
   (when-not (.get ^AtomicBoolean (:stopped?_ st))
     (when (nil? (.get ^AtomicReference (:in-flight_ st)))
-      (let [arena (Arena/ofAuto)
-            result (drain-chunks (:req st) (:bbq st) (get-in st [:config :preferred-chunk-size] Long/MAX_VALUE)
-                                 arena)]
-        (if result
-          (let [[final? chunks stable-segs] result]
-            (.set ^AtomicReference (:in-flight_ st) [chunks arena stable-segs])
-            (when final?
-              (.set ^AtomicBoolean (:stopped?_ st) true)))
-          (.set ^AtomicBoolean (:scheduled?_ st) false))))))
+      (let [^AtomicInteger drain-state_ (:drain-state_ st)]
+        (loop []
+          (let [arena (Arena/ofAuto)
+                result (drain-chunks (:req st)
+                                     (:bbq st)
+                                     (get-in st [:config :preferred-chunk-size] Long/MAX_VALUE)
+                                     arena)]
+            (if result
+              (let [[final? chunks stable-segs] result]
+                (.set ^AtomicReference (:in-flight_ st) [chunks arena stable-segs])
+                (.compareAndSet drain-state_ drain-signalled drain-active)
+                (when final?
+                  (.set ^AtomicBoolean (:stopped?_ st) true)))
+              (case (.get drain-state_)
+                0 nil
+                1 (when-not (.compareAndSet drain-state_ drain-active drain-idle)
+                    (recur))
+                2 (do
+                    (.compareAndSet drain-state_ drain-signalled drain-active)
+                    (recur))
+                (throw (IllegalStateException. "Invalid response drain state"))))))))))
 
 (defn schedule-drain!
-  "Try to schedule a drain task on the event loop."
+  "Record response work and wake or message the event-loop worker."
   [st]
-  (let [worker (-> st :req :worker)]
-    (if (.compareAndSet ^AtomicBoolean (:scheduled?_ st) false true)
-      (do
-        (pi/send-msg worker
-                     [:h2o/sendvec
-                      (:dispatch-module-id (:req st))
-                      (:dispatch-request-seq (:req st))
-                      (fn [] (send-vecs st))])
-        :sent-msg)
-      (do
-        (pi/wake worker)
-        :woke))))
+  (let [worker (-> st :req :worker)
+        ^AtomicInteger drain-state_ (:drain-state_ st)]
+    (loop []
+      (case (.get drain-state_)
+        0 (if (.compareAndSet drain-state_ drain-idle drain-active)
+            (do
+              (pi/send-msg worker
+                           [:h2o/sendvec
+                            (:dispatch-module-id (:req st))
+                            (:dispatch-request-seq (:req st))
+                            (fn [] (send-vecs st))])
+              :sent-msg)
+            (recur))
+        1 (if (.compareAndSet drain-state_ drain-active drain-signalled)
+            (do
+              (pi/wake worker)
+              :signalled)
+            (recur))
+        2 (do
+            (pi/wake worker)
+            :signalled)
+        (throw (IllegalStateException. "Invalid response drain state"))))))
 
 (defn report-error [e]
   (trove/log! {:level :error :id :h2o/error :ex e}))
@@ -159,9 +173,8 @@
   "Worker thread. Called by libh2o to progress the response generator"
   [st]
   (try
-    (.set ^AtomicBoolean (:scheduled?_ st) false)
     (release-chunks (:buffer-pool st) (:in-flight_ st))
-    (when-not (.get ^AtomicBoolean (:stopped?_ st)) (schedule-drain! st))
+    (when-not (.get ^AtomicBoolean (:stopped?_ st)) (send-vecs st))
     (catch Exception e
       (report-error e))))
 
@@ -261,7 +274,7 @@
    - req: the Request
    - bbq: SPSC ByteBoundedQueue of Chunk (writer enqueues, worker drains).
    - output-buffer-size: size of buffers to grab from the pool
-   - scheduled: AtomicBoolean; true iff a drain task is scheduled/on-going on the event loop.
+   - drain-state: AtomicInteger; idle, active, or active with a producer signal.
    - in-flight: AtomicReference<Chunk>; the currently sent chunk awaiting proceed.
    - closing: AtomicBoolean; producer side. writer set when close() called (no more writes).
    - stopped: AtomicBoolean; consumer side. libh2o drives this when request is stopped/cancelled or consumer sets it when final chunk sent
@@ -275,7 +288,7 @@
         :max-vecs-per-send int}"}
  H2OResponseWriter
  [req bbq output-buffer-size
-  ^AtomicBoolean scheduled?_
+  ^AtomicInteger drain-state_
   ^AtomicReference in-flight_
   ^AtomicBoolean closing?_
   ^AtomicBoolean stopped?_
@@ -293,7 +306,7 @@
   (->H2OResponseWriter req
                        (bbq/byte-bounded-spsc-queue (-> req :config :output-buffer-size))
                        (-> req :config :output-buffer-size)
-                       (AtomicBoolean. false)
+                       (AtomicInteger. drain-idle)
                        (AtomicReference. nil)
                        (AtomicBoolean. false)
                        (AtomicBoolean. false)

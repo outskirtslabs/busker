@@ -26,6 +26,18 @@
 (defn- drain! [worker]
   (@#'evloop/drain-mailbox! worker))
 
+(deftest worker-loop-reports-mailbox-work-before-native-iteration
+  (let [seen_ (atom nil)
+        worker (assoc (worker (fn [_ _]) 1 nil)
+                      :loop-fn
+                      (fn [worker state]
+                        (reset! seen_ state)
+                        (.set ^AtomicBoolean (:running?_ worker) false)
+                        state))]
+    (.offer ^ArrayBlockingQueue (:mailbox worker) [:response])
+    (@#'evloop/run-evloop-on-thread! worker)
+    (is (true? (::evloop/mailbox-work? @seen_)))))
+
 (deftest coalesces-wakeups-before-a-drain
   (let [handled_ (atom [])
         wakeups_ (atom 0)
