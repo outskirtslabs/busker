@@ -522,14 +522,16 @@
          (some? flat-config-ptr) (not (mem/null? flat-config-ptr))
          (some? arena)]}
   (let [on-request-cb (fn on-request-cb [ctx-ptr]
-                        (on-req-callback ctx-ptr (read-request-context ctx-ptr)))
-        on-request-cb-ptr (mem/serialize on-request-cb [::ffi/fn [::mem/pointer] ::mem/int] arena)
+                        (int (on-req-callback ctx-ptr (read-request-context ctx-ptr))))
+        on-request-cb-ptr (mem/serialize on-request-cb
+                                         [::ffi/fn [::mem/pointer] ::mem/int :raw-fn? true]
+                                         arena)
 
         on-request-cleanup-cb (fn on-request-cleanup-cb [module-id request-seq]
                                 (on-cleanup-callback module-id request-seq))
         on-request-cleanup-cb-ptr
         (mem/serialize on-request-cleanup-cb
-                       [::ffi/fn [::mem/long ::mem/long] ::mem/void]
+                       [::ffi/fn [::mem/long ::mem/long] ::mem/void :raw-fn? true]
                        arena)]
 
     {::on-request-cb on-request-cb

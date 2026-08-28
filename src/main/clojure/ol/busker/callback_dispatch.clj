@@ -161,15 +161,15 @@
         body-callback-ptr
         (mem/serialize body-callback
                        [::ffi/fn [::mem/long ::mem/long ::mem/pointer ::mem/long ::mem/int]
-                        ::mem/void]
+                        ::mem/void :raw-fn? true]
                        arena)
         proceed-callback-ptr
         (mem/serialize proceed-callback
-                       [::ffi/fn [::mem/long ::mem/long] ::mem/void]
+                       [::ffi/fn [::mem/long ::mem/long] ::mem/void :raw-fn? true]
                        arena)
         stop-callback-ptr
         (mem/serialize stop-callback
-                       [::ffi/fn [::mem/long ::mem/long ::mem/int] ::mem/void]
+                       [::ffi/fn [::mem/long ::mem/long ::mem/int] ::mem/void :raw-fn? true]
                        arena)]
     (assoc dispatch
            :body-callback body-callback
