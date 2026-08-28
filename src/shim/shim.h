@@ -89,7 +89,6 @@ struct clj_req_ctx_t {
   clj_response_generator_proceed_cb on_response_generator_proceed;
   clj_response_generator_stop_cb on_response_generator_stop;
   size_t preferred_chunk_size;
-  char req_id[64];
   uint64_t dispatch_module_id;
   uint64_t dispatch_request_seq;
   int cleanup;

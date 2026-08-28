@@ -48,18 +48,6 @@
 (import 'java.lang.foreign.MemoryLayout)
 (import 'java.lang.foreign.MemoryLayout$PathElement)
 
-(defn cstr-array->string
-  "Convert a null-terminated C string (char array) to a Clojure string."
-  [char-array]
-  (let [sb (StringBuilder.)]
-    (loop [v (seq char-array)]
-      (when-let [b (first v)]
-        (let [octet (bit-and (long b) 0xFF)]
-          (when (pos? octet)
-            (.append sb (char octet))
-            (recur (next v))))))
-    (str sb)))
-
 (defn offset-of
   "Given a `struct-def`, returns the byte offset of the `field`."
   [struct-def field]
@@ -201,7 +189,6 @@
       [:on-response-generator-proceed ::mem/pointer]
       [:on-response-generator-stop ::mem/pointer]
       [:preferred-chunk-size ::mem/long]
-      [:req-id [::mem/array ::mem/char 64]]
       [:dispatch-module-id ::mem/long]
       [:dispatch-request-seq ::mem/long]
       [:cleanup ::mem/int]
@@ -212,7 +199,7 @@
   (mem/size-of ::clj-req-ctx-t))
 
 (defn read-request-context
-  "Returns the `:req`, `:meta`, and `:req-id` projection from `ctx-ptr`.
+  "Returns the `:req` and `:meta` projection from `ctx-ptr`.
 
   `ctx-ptr` must remain valid while native values are read."
   [ctx-ptr]
@@ -232,12 +219,7 @@
               :headers_len     (mem/read-long ctx 96)
               :http_version    (mem/read-int ctx 104)
               :has_body        (mem/read-short ctx 108)
-              :is_early_data   (mem/read-short ctx 110)}
-     :req-id (mapv (fn [offset]
-                     (char (.get ^MemorySegment ctx
-                                 java.lang.foreign.ValueLayout/JAVA_BYTE
-                                 (long (+ 168 offset)))))
-                   (range 64))}))
+              :is_early_data   (mem/read-short ctx 110)}}))
 
 #_(print-offsets-for (layout/with-c-layout
                        [::mem/struct
@@ -249,7 +231,8 @@
                          [:on-response-generator-proceed ::mem/pointer]
                          [:on-response-generator-stop ::mem/pointer]
                          [:preferred-chunk-size ::mem/long]
-                         [:req-id [::mem/array ::mem/char 64]]
+                         [:dispatch-module-id ::mem/long]
+                         [:dispatch-request-seq ::mem/long]
                          [:cleanup ::mem/int]
                          [:closing ::mem/int]
                          [:response_started ::mem/int]]]))

@@ -29,8 +29,6 @@
      :on-response-generator-proceed (pointer)
      :on-response-generator-stop    (pointer)
      :preferred-chunk-size          16384
-     :req-id                        (vec (concat (map int "probe-request")
-                                                 (repeat 51 0)))
      :dispatch-module-id            42
      :dispatch-request-seq          7
      :cleanup                       0
@@ -46,7 +44,7 @@
                    (mem/reinterpret ctx-ptr
                                     (mem/size-of :ol.busker.native/clj-req-ctx-t))
                    :ol.busker.native/clj-req-ctx-t)]
-      (is (= (select-keys generic [:req :meta :req-id])
+      (is (= (select-keys generic [:req :meta])
              (native/read-request-context ctx-ptr))))))
 
 (def ^:private request-context-reader-offsets
@@ -58,12 +56,11 @@
    :on-response-generator-proceed 144
    :on-response-generator-stop   152
    :preferred-chunk-size         160
-   :req-id                       168
-   :dispatch-module-id           232
-   :dispatch-request-seq         240
-   :cleanup                      248
-   :closing                      252
-   :response_started             256})
+   :dispatch-module-id           168
+   :dispatch-request-seq         176
+   :cleanup                      184
+   :closing                      188
+   :response_started             192})
 
 (def ^:private request-metadata-reader-offsets
   {:authority       0
@@ -87,7 +84,7 @@
    :stop    8})
 
 (deftest request-context-reader-layout-test
-  (is (= 264 (mem/size-of :ol.busker.native/clj-req-ctx-t)))
+  (is (= 200 (mem/size-of :ol.busker.native/clj-req-ctx-t)))
   (doseq [[field expected-offset] request-context-reader-offsets]
     (is (= expected-offset
            (native/offset-of :ol.busker.native/clj-req-ctx-t field))))

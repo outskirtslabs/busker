@@ -113,8 +113,7 @@
             has-body? (:has_body (:meta req-ctx))
             write-req (when has-body?
                         (set-req-body-channel worker module-id request-seq))
-            req-id (h2o/cstr-array->string (:req-id req-ctx))
-            req (Request. worker config req-id req-ctx-ptr req-ctx write-req
+            req (Request. worker config req-ctx-ptr req-ctx write-req
                           callback-pointers module-id request-seq)
             emitter (response/new-response-emitter req close-callback-dispatch)
             ring-req (assoc (h2o/build-ring-request (:meta req-ctx)
