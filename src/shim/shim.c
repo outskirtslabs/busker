@@ -13,7 +13,6 @@
 #include "quicly/defaults.h"
 #include <arpa/inet.h>
 #include <errno.h>
-#include <inttypes.h>
 #include <limits.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -638,16 +637,6 @@ static int request_handler(h2o_handler_t *self, h2o_req_t *req) {
   }
   memset(ctx, 0, sizeof(*ctx));
   ctx->req = req;
-
-  /* Generate req_id string: "{uuid}-{req_id}" */
-  const char *conn_uuid = h2o_conn_get_uuid(req->conn);
-  uint64_t req_num = req->conn->callbacks->get_req_id(req);
-
-  /* req_id is embedded in ctx struct, so it's valid during cleanup */
-  snprintf(ctx->req_id, sizeof(ctx->req_id), "%s-%" PRIu64, conn_uuid, req_num);
-
-  // DEBUG_LOG("request start id=%s uuid=%s req=%" PRIu64,
-  // ctx->req_id, conn_uuid, req_num);
 
   ctx->preferred_chunk_size = req->preferred_chunk_size;
   ctx->cleanup = 0;

@@ -8,7 +8,6 @@
 (defrecord Request
            [worker
             config
-            req-id
             req-ctx-ptr
             req-ctx
             write-req

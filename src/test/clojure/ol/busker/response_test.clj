@@ -24,7 +24,7 @@
   [output-buffer-size]
   (pi/->Request nil
                 {:output-buffer-size output-buffer-size}
-                nil nil nil nil nil 1 1))
+                nil nil nil nil 1 1))
 
 (defn- fixed-command
   [output-buffer-size response final?]
