@@ -11,6 +11,7 @@
    [ol.busker.response :as response]
    [ol.busker.response-queue :as response-queue]
    [ol.busker.byte-bounded-queue :as bbq]
+   [ol.busker.util.headers :as headers]
    [ol.busker.test-utils :as util])
   (:import
    [java.io ByteArrayOutputStream OutputStream]
@@ -29,6 +30,18 @@
 (defn- fixed-command
   [output-buffer-size response final?]
   (#'response/fixed-final-command (fixed-final-request output-buffer-size) response final?))
+
+(deftest lowercase-header-lookup-avoids-case-scan-test
+  (let [scan-count_ (atom 0)
+        core-filter filter]
+    (with-redefs [clojure.core/filter
+                  (fn [pred coll]
+                    (swap! scan-count_ inc)
+                    (core-filter pred coll))]
+      (is (= ["content-type" "text/plain"]
+             (vec (headers/find-header {:headers {"content-type" "text/plain"}}
+                                       "Content-Type")))))
+    (is (zero? @scan-count_))))
 
 (defn- start-server
   [handler]

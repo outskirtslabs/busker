@@ -30,9 +30,12 @@
   "Looks up a header in a Ring response (or request) case insensitively,
   returning the header map entry, or nil if not present."
   [resp ^String header-name]
-  (->> (:headers resp)
-       (filter #(.equalsIgnoreCase header-name (key %)))
-       (first)))
+  (let [headers (:headers resp)]
+    (or (find headers header-name)
+        (find headers (.toLowerCase header-name java.util.Locale/ROOT))
+        (->> headers
+             (filter #(.equalsIgnoreCase header-name (key %)))
+             (first)))))
 
 (defn get-header
   "Looks up a header in a Ring response (or request) case insensitively,
