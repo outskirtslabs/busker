@@ -51,11 +51,6 @@
                                   org.clojure/data.json             {:mvn/version "2.5.1"}
                                   org.clojars.jj/ring-http-exchange {:mvn/version "1.4.8"}
                                   http-kit/http-kit                 {:mvn/version "2.9.0-beta4"}
-                                  info.sunng/ring-jetty9-adapter    {:mvn/version "0.39.0"}
-                                  org.eclipse.jetty/jetty-http       {:mvn/version "12.1.4"}
-                                  org.eclipse.jetty/jetty-io         {:mvn/version "12.1.4"}
-                                  org.eclipse.jetty/jetty-server     {:mvn/version "12.1.4"}
-                                  org.eclipse.jetty/jetty-util       {:mvn/version "12.1.4"}
                                   com.outskirtslabs.busker/linux-aarch64 {:local/root "shim/linux-aarch64"}
                                   com.outskirtslabs.busker/linux-x86-64  {:local/root "shim/linux-x86-64"}
                                   com.outskirtslabs.busker/macos-aarch64 {:local/root "shim/macos-aarch64"}

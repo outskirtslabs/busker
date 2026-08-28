@@ -14,7 +14,6 @@
    [org.httpkit.server :as http-kit]
    [ring-http-exchange.core :as http-exchange]
    [ring.adapter.jetty :as jetty]
-   [ring.adapter.jetty9 :as jetty9]
    [ring.adapter.undertow :as undertow]
    [s-exp.hirundo :as hirundo]
    [ol.busker :as busker])
@@ -112,10 +111,6 @@
   (let [server (jetty/run-jetty handler {:port port :join? false})]
     #(.stop server)))
 
-(defn- jetty9-server [handler port]
-  (let [^org.eclipse.jetty.server.Server server (jetty9/run-jetty handler {:port port :join? false})]
-    #(.stop server)))
-
 (defn- undertow-server [handler port]
   (let [server (undertow/run-undertow handler {:port port})]
     #(.stop server)))
@@ -129,8 +124,6 @@
     :dependency ["org.clojars.jj" "ring-http-exchange"]}
    {:id :http-kit :label "http-kit" :start http-kit-server :dependency ["http-kit" "http-kit"]}
    {:id :jetty :label "Ring Jetty" :start jetty-server :dependency ["ring" "ring-jetty-adapter"]}
-   {:id :jetty9 :label "ring-jetty9-adapter" :start jetty9-server
-    :dependency ["info.sunng" "ring-jetty9-adapter"]}
    {:id :undertow :label "Ring Undertow" :start undertow-server
     :dependency ["luminus" "ring-undertow-adapter"]}])
 
@@ -293,15 +286,18 @@
       (throw (ex-info "Unknown benchmark argument" {:argument arg})))))
 
 (defn -main [& args]
-  (let [options (command-line-options args)
-        output  (or (:output options)
-                    (str "bench/results/" (System/currentTimeMillis) ".json"))
-        result  (benchmark (assoc options :output output))]
-    (println "Wrote benchmark results to" output)
-    (doseq [{:keys [scenario results]} (:scenarios result)]
-      (println scenario)
-      (doseq [{:keys [label status measurements error]} results]
-        (println " " label status (or (:requests-per-second measurements) error))))
-    (when (some #(not= "ok" (:status %))
-                (mapcat :results (:scenarios result)))
-      (throw (ex-info "Benchmark did not complete successfully" {:output output})))))
+  (try
+    (let [options (command-line-options args)
+          output  (or (:output options)
+                      (str "bench/results/" (System/currentTimeMillis) ".json"))
+          result  (benchmark (assoc options :output output))]
+      (println "Wrote benchmark results to" output)
+      (doseq [{:keys [scenario results]} (:scenarios result)]
+        (println scenario)
+        (doseq [{:keys [label status measurements error]} results]
+          (println " " label status (or (:requests-per-second measurements) error))))
+      (when (some #(not= "ok" (:status %))
+                  (mapcat :results (:scenarios result)))
+        (throw (ex-info "Benchmark did not complete successfully" {:output output}))))
+    (finally
+      (shutdown-agents))))

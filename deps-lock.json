@@ -261,9 +261,6 @@
     "com/fasterxml/jackson/jackson-bom/2.18.3/jackson-bom-2.18.3.pom": {
       "sha256": "f1d4c6aeb32118650c805fe9bbc5ee940fa8f2cd7d0f04fa4360551e9a27b290"
     },
-    "com/fasterxml/jackson/jackson-bom/2.20.1/jackson-bom-2.20.1.pom": {
-      "sha256": "0c6467ed4c8c7392524ce703ca6ce3ed88596eec390f13b0c264f2f961308a54"
-    },
     "com/fasterxml/jackson/jackson-bom/2.21.3/jackson-bom-2.21.3.pom": {
       "sha256": "05c72a0f20ae1fd79ced7ed29cff72db2842d160970a7ea0334e9b5fd047d597"
     },
@@ -273,9 +270,6 @@
     "com/fasterxml/jackson/jackson-parent/2.18.1/jackson-parent-2.18.1.pom": {
       "sha256": "d0822fac1a0226844b8ad445c920c49a4f619169d09b1010a7dfeed19910998c"
     },
-    "com/fasterxml/jackson/jackson-parent/2.20/jackson-parent-2.20.pom": {
-      "sha256": "b43b7f5c62e86b164fae70ae17d6911c5db60799af01057360afda82e4845be5"
-    },
     "com/fasterxml/jackson/jackson-parent/2.21/jackson-parent-2.21.pom": {
       "sha256": "3851df627faeb46887b956104630b74a8bbb5f7de22e974cf15982e20e0373de"
     },
@@ -284,9 +278,6 @@
     },
     "com/fasterxml/oss-parent/61/oss-parent-61.pom": {
       "sha256": "3649513cf597e9186da0855986a8c543e12bdbd805edeef9c124db56dd036544"
-    },
-    "com/fasterxml/oss-parent/70/oss-parent-70.pom": {
-      "sha256": "26ca8ed6f82c9d2ed7cd32298105bb65c0f9d899db61757a09741586fa93a639"
     },
     "com/fasterxml/oss-parent/75/oss-parent-75.pom": {
       "sha256": "fcbbf1c18c9047e6917d384f2064e21b42a58fc85fb0523a9e2e015eff7c619d"
@@ -639,17 +630,11 @@
     "hawk/hawk/0.2.11/hawk-0.2.11.pom": {
       "sha256": "ab83f3a161d4639dd6d936568a13e9c3ea970784165959d2d625b75a5bc8c458"
     },
-    "http-kit/http-kit/2.9.0-beta3/http-kit-2.9.0-beta3.jar": {
-      "sha256": "a239b3f2fd94d7e2cd8ee02719bb19632a655f142b521b6170b1358d0229ac15"
+    "http-kit/http-kit/2.9.0-beta4/http-kit-2.9.0-beta4.jar": {
+      "sha256": "d97c94eed50e9e22ca91e98c8f8176f41b79380438527793c39c814d7e0ee0b8"
     },
-    "http-kit/http-kit/2.9.0-beta3/http-kit-2.9.0-beta3.pom": {
-      "sha256": "ab27e408a401418cd09b92acd6484822ce34f999979e8bcbf4dafe647a6ec9b1"
-    },
-    "info/sunng/ring-jetty9-adapter/0.39.0/ring-jetty9-adapter-0.39.0.jar": {
-      "sha256": "0c27fb8986fb66e8696280d09d0e9b2e508cd1d0b77e890886bd87f15d459482"
-    },
-    "info/sunng/ring-jetty9-adapter/0.39.0/ring-jetty9-adapter-0.39.0.pom": {
-      "sha256": "80c2ad31154765bdcb7a0a863c336a39f63e91404e02fba7c1ca730b32d6d02f"
+    "http-kit/http-kit/2.9.0-beta4/http-kit-2.9.0-beta4.pom": {
+      "sha256": "d40e6298c22763b1c97a4498bcc8abec40ceb01d893276a0c7dff6300bdfddff"
     },
     "insn/insn/0.5.4/insn-0.5.4.jar": {
       "sha256": "dac8061f18d55c4b58840fa34e4e152e4c819c58331a7790be17b55297fa0018"
@@ -1076,9 +1061,6 @@
     },
     "io/netty/netty-bom/4.2.0.Final/netty-bom-4.2.0.Final.pom": {
       "sha256": "faad06217912e2a7cb993b45200a79cbd251c97b04333b8b9b99e370af157db9"
-    },
-    "io/netty/netty-bom/4.2.7.Final/netty-bom-4.2.7.Final.pom": {
-      "sha256": "4d5d2ac95b5920541a9b39677137e6ecf9e9ced70f4a81ba3ed7035ca1b09604"
     },
     "io/netty/netty-buffer/4.1.135.Final/netty-buffer-4.1.135.Final.jar": {
       "sha256": "2a194f99fc93d07c4d442d04ac71bd2dc56d3188cd0e4270cdc2a953d1956bf9"
@@ -2289,17 +2271,11 @@
     "org/eclipse/jetty/jetty-core/12.1.0/jetty-core-12.1.0.pom": {
       "sha256": "6b721d3855e7ff70470b7e6d73f7c9ce4563f6003e4d7da45470ff5885bca3d3"
     },
-    "org/eclipse/jetty/jetty-core/12.1.3/jetty-core-12.1.3.pom": {
-      "sha256": "afc160f9d446290045f7388dd705a42d44a681a4ebb7bacd5da0450b3662c230"
+    "org/eclipse/jetty/jetty-http/12.1.0/jetty-http-12.1.0.jar": {
+      "sha256": "109c904a4995ab80c02826fa62abccff93683f91dd0c1f304a1f05e4f094d901"
     },
-    "org/eclipse/jetty/jetty-core/12.1.4/jetty-core-12.1.4.pom": {
-      "sha256": "0886173e7280ea835922776da1b589c59aeb167fbb16dde933da82da49920ab0"
-    },
-    "org/eclipse/jetty/jetty-http/12.1.4/jetty-http-12.1.4.jar": {
-      "sha256": "5d39538104ae5eb808135c161c4f1ac7a51b265a6eeb16c39e98c58a9f5e6f2a"
-    },
-    "org/eclipse/jetty/jetty-http/12.1.4/jetty-http-12.1.4.pom": {
-      "sha256": "ab8b8eed3ef99915e0527a332b09ba86f3364bf6b53671e66fb2710f12149165"
+    "org/eclipse/jetty/jetty-http/12.1.0/jetty-http-12.1.0.pom": {
+      "sha256": "b5521f515d0fb5cd86a3592580f781dc1e46bdd530b2611877a23214c22c7ac5"
     },
     "org/eclipse/jetty/jetty-http/9.4.58.v20250814/jetty-http-9.4.58.v20250814.jar": {
       "sha256": "8f49b8583fc8dbbfe3a0ba80a04c97df64ebabca2981b56ee403c989aba9d4da"
@@ -2307,11 +2283,11 @@
     "org/eclipse/jetty/jetty-http/9.4.58.v20250814/jetty-http-9.4.58.v20250814.pom": {
       "sha256": "f64d6da0aeeb994b1efa31fac44b08ba0c56bf75d923ac01354955c015ac1868"
     },
-    "org/eclipse/jetty/jetty-io/12.1.4/jetty-io-12.1.4.jar": {
-      "sha256": "c012aea14b1021a2e12be3681a2ece8b544c76cbfd92e0ab22c2284064eb22a7"
+    "org/eclipse/jetty/jetty-io/12.1.0/jetty-io-12.1.0.jar": {
+      "sha256": "841f5e57cb9270e8a3a829eaf5b0b091f7fb2ae225bba7be2a3ce866a521451a"
     },
-    "org/eclipse/jetty/jetty-io/12.1.4/jetty-io-12.1.4.pom": {
-      "sha256": "39b4698f3b83c1c04b4d1be99c8b3a167942967d9e2864bf750006c9e9bc032a"
+    "org/eclipse/jetty/jetty-io/12.1.0/jetty-io-12.1.0.pom": {
+      "sha256": "3b10a3858031357d7c7ccccf422f090e145632f60e05bfcf4536d35650763414"
     },
     "org/eclipse/jetty/jetty-io/9.4.58.v20250814/jetty-io-9.4.58.v20250814.jar": {
       "sha256": "f55b2cc7c05244fd7b1773e99979b740002b0186e45b8a688243d89c7006fe21"
@@ -2322,12 +2298,6 @@
     "org/eclipse/jetty/jetty-project/12.1.0/jetty-project-12.1.0.pom": {
       "sha256": "4dac282da6e6ab12b630cd433867e1d400456b883412333c231ec7f3a675cfe2"
     },
-    "org/eclipse/jetty/jetty-project/12.1.3/jetty-project-12.1.3.pom": {
-      "sha256": "02db7a3f8c5deaac1a332c604dc37c0748bff8561a7a03f4f179f52cb68c2c16"
-    },
-    "org/eclipse/jetty/jetty-project/12.1.4/jetty-project-12.1.4.pom": {
-      "sha256": "b4167a4c2fdb79001ef8b00f5b0c7b57293434d5673a161e4afcaa3a0e2ebc4a"
-    },
     "org/eclipse/jetty/jetty-project/9.4.58.v20250814/jetty-project-9.4.58.v20250814.pom": {
       "sha256": "57fb1ce6a8debbdae7e8226ad3e9e5d576c86bc2ec5cdcc0122dd2aa1dccd44c"
     },
@@ -2337,11 +2307,11 @@
     "org/eclipse/jetty/jetty-security/12.1.0/jetty-security-12.1.0.pom": {
       "sha256": "8848f225d14893ee13bb8b741d713081cc2c8a1e80b3a6970207bc941f36cc6d"
     },
-    "org/eclipse/jetty/jetty-server/12.1.4/jetty-server-12.1.4.jar": {
-      "sha256": "7328447b6cd6db4e9b7f0ae705388205e404f605739fc51a829331f92c09b131"
+    "org/eclipse/jetty/jetty-server/12.1.0/jetty-server-12.1.0.jar": {
+      "sha256": "aab8f82ac91f0cd3fab321c89e9f93e75b8b4431c242cd6847392aeee5cea183"
     },
-    "org/eclipse/jetty/jetty-server/12.1.4/jetty-server-12.1.4.pom": {
-      "sha256": "1e0f545aa870f5de600a1d9c864e88dde941b2a25877014757453bfcf0d86e14"
+    "org/eclipse/jetty/jetty-server/12.1.0/jetty-server-12.1.0.pom": {
+      "sha256": "c2f1fa780178635e91099eceab2d0b08ea561f52caafeed1df49c2a500023824"
     },
     "org/eclipse/jetty/jetty-session/12.1.0/jetty-session-12.1.0.jar": {
       "sha256": "29a997d285fbf6fcc905cb165bbbdfb25c3c5a7d2506c00f9fc8310052e60a98"
@@ -2355,11 +2325,11 @@
     "org/eclipse/jetty/jetty-unixdomain-server/12.1.0/jetty-unixdomain-server-12.1.0.pom": {
       "sha256": "c8dc5e7febf21de902a8c5394b52186506befede446f1eb588ddcf7c5f17f9d3"
     },
-    "org/eclipse/jetty/jetty-util/12.1.4/jetty-util-12.1.4.jar": {
-      "sha256": "eb205f0fa11362404f93d04c043bcd703ec771fa2c52f94a75f7cc543b1a53a4"
+    "org/eclipse/jetty/jetty-util/12.1.0/jetty-util-12.1.0.jar": {
+      "sha256": "169f87dcc14a6a4bc2000a75a60b1f1617e1d2017207ba96d6777121017470c4"
     },
-    "org/eclipse/jetty/jetty-util/12.1.4/jetty-util-12.1.4.pom": {
-      "sha256": "1cd46685c35f6876a34545a013cfbbc6afc0af141dd6015dea6f9ed1460a34cc"
+    "org/eclipse/jetty/jetty-util/12.1.0/jetty-util-12.1.0.pom": {
+      "sha256": "874708bbee498a544177205be2ce61f885a233784e4e83a58703b71c9ef84167"
     },
     "org/eclipse/jetty/jetty-util/9.4.58.v20250814/jetty-util-9.4.58.v20250814.jar": {
       "sha256": "8d591679d318d20c8fb2b1e83900562b3c4571ff7a189696be700293e0204146"
@@ -2382,44 +2352,20 @@
     "org/eclipse/jetty/toolchain/jetty-toolchain/1.6/jetty-toolchain-1.6.pom": {
       "sha256": "45563f1175d9859c1c066a0980fbdb9f6bb4c6d3c12e05d89579bb1783f47b6c"
     },
+    "org/eclipse/jetty/websocket/jetty-websocket-core-common/12.1.0/jetty-websocket-core-common-12.1.0.jar": {
+      "sha256": "6145ffb636a5801fb2d9b0e22937fb617a9c22fbaac1ab768ab9f2169196d943"
+    },
     "org/eclipse/jetty/websocket/jetty-websocket-core-common/12.1.0/jetty-websocket-core-common-12.1.0.pom": {
       "sha256": "3676754bcf3e3c397a82d15853bd3b3a7a1c2c0806d4a03dace541acc7e46312"
     },
-    "org/eclipse/jetty/websocket/jetty-websocket-core-common/12.1.3/jetty-websocket-core-common-12.1.3.jar": {
-      "sha256": "bfb82e28782b4bb6e07bc30245494766bed1cab559094351c7802c5ec6801cc9"
+    "org/eclipse/jetty/websocket/jetty-websocket-core-server/12.1.0/jetty-websocket-core-server-12.1.0.jar": {
+      "sha256": "cfd2da45a40844596dab7b27b16060d882966122c8695f2d1e7474dce16343c8"
     },
-    "org/eclipse/jetty/websocket/jetty-websocket-core-common/12.1.3/jetty-websocket-core-common-12.1.3.pom": {
-      "sha256": "1033a229fb65047d1c7f100cbc83b15e512859e10480b8dfe2919c985db031dd"
-    },
-    "org/eclipse/jetty/websocket/jetty-websocket-core-server/12.1.3/jetty-websocket-core-server-12.1.3.jar": {
-      "sha256": "27296e741a15500519bd835bdbbf8a0c7a3647af47bccd1fe6b54942d45d9f34"
-    },
-    "org/eclipse/jetty/websocket/jetty-websocket-core-server/12.1.3/jetty-websocket-core-server-12.1.3.pom": {
-      "sha256": "dab2a65c628a497fb65eb8989aedd2982d263eddbc7e1388c196555fbdbe3dc7"
-    },
-    "org/eclipse/jetty/websocket/jetty-websocket-jetty-api/12.1.3/jetty-websocket-jetty-api-12.1.3.jar": {
-      "sha256": "1c8253dd8f2584965868956275b25fe042b8eb2730a2f30330e9bb057967a538"
-    },
-    "org/eclipse/jetty/websocket/jetty-websocket-jetty-api/12.1.3/jetty-websocket-jetty-api-12.1.3.pom": {
-      "sha256": "9669ff5b9d9843c32e9f1ae14ce3637b3e7cec5beb31dc5ab96fa26c54d6b643"
-    },
-    "org/eclipse/jetty/websocket/jetty-websocket-jetty-common/12.1.3/jetty-websocket-jetty-common-12.1.3.jar": {
-      "sha256": "22837769c7d70f915ea574c19123b5bcdba7f82d0b79c73f70e10f4a23372d43"
-    },
-    "org/eclipse/jetty/websocket/jetty-websocket-jetty-common/12.1.3/jetty-websocket-jetty-common-12.1.3.pom": {
-      "sha256": "b0439783fdf2bd993d0e2471aa232f7e2554616d398ab84d451ee54f2746b4d8"
-    },
-    "org/eclipse/jetty/websocket/jetty-websocket-jetty-server/12.1.3/jetty-websocket-jetty-server-12.1.3.jar": {
-      "sha256": "0dfad9f0ee58a71bd4f581547cc731a637987fdb4053af9d07853ad04ae1d1d0"
-    },
-    "org/eclipse/jetty/websocket/jetty-websocket-jetty-server/12.1.3/jetty-websocket-jetty-server-12.1.3.pom": {
-      "sha256": "5445bd400967909ac50b721f70f1c598b2e756bbdfc91effec6dd96ddeccea6a"
+    "org/eclipse/jetty/websocket/jetty-websocket-core-server/12.1.0/jetty-websocket-core-server-12.1.0.pom": {
+      "sha256": "97808b80d47055a3f2d45330d490981d460a77cd349a5143f1f3d0495378b57c"
     },
     "org/eclipse/jetty/websocket/jetty-websocket/12.1.0/jetty-websocket-12.1.0.pom": {
       "sha256": "a08acfd7b2bc07b9a02aecc26e6380a842eb00de28d2f4dbe24dce4fb9b47086"
-    },
-    "org/eclipse/jetty/websocket/jetty-websocket/12.1.3/jetty-websocket-12.1.3.pom": {
-      "sha256": "da720d53beb95f698578c73e59d4331425a6f7c235205532e569655e9b13ff21"
     },
     "org/eclipse/sisu/org.eclipse.sisu.inject/0.3.5/org.eclipse.sisu.inject-0.3.5.jar": {
       "sha256": "c5994010bcdce1d2bd603a4d50c47191ddbd7875d1157b23aaa26d33c82fda13"
@@ -2451,17 +2397,11 @@
     "org/infinispan/infinispan-bom/15.2.4.Final/infinispan-bom-15.2.4.Final.pom": {
       "sha256": "e38960772accd5093a8783eab3551b6976790b7a21156e22a0da596d560ba6d2"
     },
-    "org/infinispan/infinispan-bom/15.2.6.Final/infinispan-bom-15.2.6.Final.pom": {
-      "sha256": "bb9382b9f62f6b1c2ca794ac00efcdf6bf498229a8d63260fe58b975ecc8b86e"
-    },
     "org/infinispan/infinispan-build-configuration-parent/11.0.19.Final/infinispan-build-configuration-parent-11.0.19.Final.pom": {
       "sha256": "120860c56a4d77bcc1223cbae740eeb26f2f9355d49a17d5f165800ee0afaa7a"
     },
     "org/infinispan/infinispan-build-configuration-parent/15.2.4.Final/infinispan-build-configuration-parent-15.2.4.Final.pom": {
       "sha256": "e9ebf9ee3366fa5e0de070fbc7888c8c7bee9116dd3d9ee789481f5d32f79453"
-    },
-    "org/infinispan/infinispan-build-configuration-parent/15.2.6.Final/infinispan-build-configuration-parent-15.2.6.Final.pom": {
-      "sha256": "3a6f669074f0bb6e33b71d7b14e2f18778c50745f640d7027d0380d6c98c490b"
     },
     "org/jboss/jboss-parent/23/jboss-parent-23.pom": {
       "sha256": "6cfafa155bf4689e4ac926d00f10f05816e9ab255739436dfe42d99352a95613"
@@ -2543,9 +2483,6 @@
     },
     "org/ow2/asm/asm-bom/9.8/asm-bom-9.8.pom": {
       "sha256": "0da1dcb226e6cdfdadb4dac591916bb917b57374674d91bd2f13003137b41520"
-    },
-    "org/ow2/asm/asm-bom/9.9/asm-bom-9.9.pom": {
-      "sha256": "0fa27336fa7b62923ca9bdc69526ebe712a3bfb1f7ee8bf76c4a0b3f85f19d62"
     },
     "org/ow2/asm/asm/9.2/asm-9.2.jar": {
       "sha256": "b9d4fe4d71938df38839f0eca42aaaa64cf8b313d678da036f0cb3ca199b47f5"
