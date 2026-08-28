@@ -6,6 +6,7 @@
    [ol.busker.config :as config]
    [ol.busker.evloop :as evloop]
    [ol.busker.generation :as generation]
+   [ol.busker.native :as h2o]
    [ol.busker.protocols :as protocols]
    [ol.busker.request :as request]
    [ol.busker.response-queue :as response-queue]
@@ -44,6 +45,31 @@
           (.append response (char b))
           (recur))))))
 
+(deftest mailbox-work-forces-a-nonblocking-native-iteration
+  (let [wait-ms_ (atom nil)
+        worker (evloop/map->Worker
+                {:mailbox (java.util.concurrent.ArrayBlockingQueue. 1)
+                 :callback-dispatch nil})
+        loop-state {::evloop/mailbox-work? true}
+        native-state {:loop-ptr :loop
+                      :ctx-ptr :context
+                      :listener-socks []
+                      :accept-callbacks []
+                      :max-connections 0}]
+    (with-redefs-fn
+      {#'generation/check-and-initiate-shutdown! (fn [state _] state)
+       #'generation/update-receiver-destruction (fn [state _] state)
+       #'generation/dispose-context-if-ready (fn [state _ _] state)
+       #'callback-dispatch/pending-response-work? (constantly false)
+       #'generation/update-listener-state! (fn [& _])
+       #'h2o/evloop-now (constantly 0)
+       #'h2o/cleanup-thread (constantly 1000)
+       #'h2o/evloop-run (fn [_ wait-ms]
+                          (reset! wait-ms_ wait-ms)
+                          0)}
+      #(let [result (#'generation/worker-loop worker loop-state native-state)]
+         (is (= 0 @wait-ms_))
+         (is (not (contains? result ::evloop/mailbox-work?)))))))
 (deftest generation-starts-and-stops-without-runtime-bridge-test
   (let [port 18584
         compiled-config

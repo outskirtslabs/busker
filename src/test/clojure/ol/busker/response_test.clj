@@ -18,7 +18,7 @@
    [java.net InetSocketAddress Socket]
    [java.nio.charset StandardCharsets]
    [java.util.concurrent CountDownLatch TimeUnit]
-   [java.util.concurrent.atomic AtomicBoolean AtomicReference]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicReference]))
 
 (defn- fixed-final-request
   [output-buffer-size]
@@ -147,7 +147,6 @@
                   ^bytes (mem/read-bytes generic header-size))))
              header-segments)}))
 
-
 (defn- test-emitter
   ([]
    (test-emitter {:stopped?_ (AtomicBoolean. false)
@@ -167,6 +166,59 @@
       callback-dispatch
       callback-tail_))))
 
+(deftest proceed-drains-response-before-return-test
+  (let [drain-state_ (AtomicInteger. 1)
+        in-flight_ (AtomicReference. ::in-flight)
+        st {:drain-state_ drain-state_
+            :in-flight_ in-flight_
+            :stopped?_ (AtomicBoolean. false)
+            :buffer-pool ::pool}
+        events_ (atom [])]
+    (with-redefs [response-queue/release-chunks
+                  (fn [_pool actual-in-flight_]
+                    (swap! events_ conj :release)
+                    (.set ^AtomicReference actual-in-flight_ nil))
+                  response-queue/send-vecs
+                  (fn [_st]
+                    (swap! events_ conj :send))
+                  response-queue/schedule-drain!
+                  (fn [_st]
+                    (swap! events_ conj :schedule))]
+      (response-queue/on-proceed st))
+    (is (= [:release :send] @events_))
+    (is (= 1 (.get drain-state_)))))
+
+(deftest response-drain-rechecks-a-concurrent-producer-signal-test
+  (let [drain-state_ (AtomicInteger. 1)
+        in-flight_ (AtomicReference.)
+        drain-count_ (atom 0)
+        events_ (atom [])
+        st {:req {:worker ::worker}
+            :bbq ::queue
+            :config {}
+            :buffer-pool ::pool
+            :drain-state_ drain-state_
+            :in-flight_ in-flight_
+            :stopped?_ (AtomicBoolean. false)}]
+    (with-redefs [pi/wake
+                  (fn [_worker]
+                    (swap! events_ conj :wake))
+                  pi/send-msg
+                  (fn [_worker _message]
+                    (swap! events_ conj :message))
+                  response-queue/drain-chunks
+                  (fn [& _args]
+                    (if (= 1 (swap! drain-count_ inc))
+                      (do
+                        (response-queue/schedule-drain! st)
+                        nil)
+                      [false [] []]))]
+      (response-queue/send-vecs st))
+    (is (= 2 @drain-count_))
+    (is (= [:wake] @events_))
+    (is (= 1 (.get drain-state_)))
+    (is (some? (.get in-flight_)))))
+
 (deftest response-header-layout-preserved-test
   (let [[final-headers final-headers-len final-content-length]
         (response/build-headers {:headers {"Content-Length" "9"
@@ -174,9 +226,9 @@
         [_ informational-headers informational-headers-len informational-content-length]
         (response/build-headers2 {:headers {"X-Repeat" ["first" "second"]}})]
     (is (= {:final {:content-length 9
-                   :headers [["X-Repeat" "first"]
-                             ["X-Repeat" "second"]]
-                   :layout-equivalent? true}
+                    :headers [["X-Repeat" "first"]
+                              ["X-Repeat" "second"]]
+                    :layout-equivalent? true}
             :informational {:content-length -1
                             :headers [["x-repeat" "first"]
                                       ["x-repeat" "second"]]
@@ -568,7 +620,7 @@
         stopped?_ (AtomicBoolean. false)
         writer (response-queue/->H2OResponseWriter
                 nil queue 5
-                (AtomicBoolean. false)
+                (AtomicInteger. 0)
                 (AtomicReference. nil)
                 (AtomicBoolean. false)
                 stopped?_

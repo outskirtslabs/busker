@@ -89,7 +89,7 @@
 
                   dev
                   {:doc  "Start a local development repl"
-                   :task (apply clojure "-M:dev:repl/dev" *command-line-args*)}
+                   :task (apply clojure "-M:dev:test:repl/dev" *command-line-args*)}
 
                   pebble:start
                   {:doc  "Start local Pebble ACME fixture in the background"
