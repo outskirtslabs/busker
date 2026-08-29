@@ -77,17 +77,16 @@
         (loop [i 0
                stable-segs (transient [])]
           (if (< i veccnt)
-            (let [^ByteBuffer b (nth bufs-flat i)]
-              (when-not (.isDirect b) (throw (ex-info "Non-direct ByteBuffer in Chunk bufs; must be direct" {:index i})))
-              (let [slot-off (* i elem-size)
-                    slot (mem/slice sendvec-array slot-off elem-size)
-                    len (.remaining b)
-                    byte-arr (byte-array len)
-                    stable-seg (mem/alloc len arena)]
-                (.get ^ByteBuffer b byte-arr)
-                (MemorySegment/copy byte-arr 0 stable-seg java.lang.foreign.ValueLayout/JAVA_BYTE 0 len)
-                (h2o/sendvec-init-raw slot stable-seg len)
-                (recur (inc i) (conj! stable-segs stable-seg))))
+            (let [^ByteBuffer b (nth bufs-flat i)
+                  slot-off (* i elem-size)
+                  slot (mem/slice sendvec-array slot-off elem-size)
+                  len (.remaining b)
+                  byte-arr (byte-array len)
+                  stable-seg (mem/alloc len arena)]
+              (.get ^ByteBuffer b byte-arr)
+              (MemorySegment/copy byte-arr 0 stable-seg java.lang.foreign.ValueLayout/JAVA_BYTE 0 len)
+              (h2o/sendvec-init-raw slot stable-seg len)
+              (recur (inc i) (conj! stable-segs stable-seg)))
             {:seg sendvec-array :veccnt veccnt :final? last-final? :stable-segs (persistent! stable-segs)}))))))
 
 (defn drain-chunks
@@ -219,7 +218,7 @@
                 remaining (int len)]
            (when (pos? remaining)
              (let [^ByteBuffer buf (or (.get cur-ref)
-                                       (let [b (bp/borrow pool (:output-buffer-size st) true)]
+                                       (let [b (bp/borrow pool (:output-buffer-size st) false)]
                                          (when (nil? b) (throw (ex-info "Buffer pool exhausted" {})))
                                          (.clear ^ByteBuffer b)
                                          (.set cur-ref b)

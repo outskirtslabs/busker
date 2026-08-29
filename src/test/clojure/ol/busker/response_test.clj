@@ -3,6 +3,7 @@
    [clojure.string :as str]
    [clojure.test :refer [deftest is]]
    [ol.busker :as busker]
+   [ol.busker.buffer-pool :as bp]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.fixed-final :as fixed-final]
    [ol.busker.native :as h2o]
@@ -15,6 +16,7 @@
    [java.io ByteArrayOutputStream OutputStream]
    [java.lang Thread$State]
    [java.net InetSocketAddress Socket]
+   [java.nio ByteBuffer]
    [java.nio.charset StandardCharsets]
    [java.util.concurrent CountDownLatch TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicReference]))
@@ -173,6 +175,22 @@
                       (fn [^Runnable task] (.run task)))]
          (response/send-ring-response! emitter {:status 200 :body nil})
          (is (= 1 @created_))))))
+
+(deftest streaming-writer-borrows-heap-aggregation-buffer-test
+  (let [direct-flags_ (atom [])
+        pool (reify bp/BufferPool
+               (borrow [_ size direct?]
+                 (swap! direct-flags_ conj direct?)
+                 (ByteBuffer/allocate (int size)))
+               (return [_ _] true)
+               (dispose [_] :disposed))
+        writer (response-queue/create-response-writer
+                {:config {:buffer-pool pool
+                          :output-buffer-size 8}
+                 :callback-pointers {:proceed nil :stop nil}})]
+    (.write ^OutputStream (:out-stream writer) 1)
+    (is (= [false] @direct-flags_))
+    (pi/stop writer)))
 
 (defn- test-emitter
   ([]
