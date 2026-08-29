@@ -2,7 +2,6 @@
   (:require
    [clojure.string :as str]
    [clojure.test :refer [deftest is]]
-   [coffi.mem :as mem]
    [ol.busker :as busker]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.fixed-final :as fixed-final]
@@ -175,27 +174,6 @@
          (response/send-ring-response! emitter {:status 200 :body nil})
          (is (= 1 @created_))))))
 
-(defn- headers-summary
-  [headers headers-len]
-  (let [header-size (mem/size-of ::h2o/clj-header-t)
-        header-segments (mapv #(mem/slice headers (* % header-size) header-size)
-                              (range headers-len))]
-    {:headers
-     (mapv (fn [header-seg]
-             (let [{:keys [name name_len value value_len]}
-                   (mem/deserialize header-seg ::h2o/clj-header-t)]
-               [(h2o/->string name name_len)
-                (h2o/->string value value_len)]))
-           header-segments)
-     :layout-equivalent?
-     (every? (fn [header-seg]
-               (let [header (mem/deserialize header-seg ::h2o/clj-header-t)
-                     generic (mem/serialize header ::h2o/clj-header-t)]
-                 (java.util.Arrays/equals
-                  ^bytes (mem/read-bytes header-seg header-size)
-                  ^bytes (mem/read-bytes generic header-size))))
-             header-segments)}))
-
 (defn- test-emitter
   ([]
    (test-emitter {:stopped?_ (AtomicBoolean. false)
@@ -284,15 +262,17 @@
     (is (= {:final {:content-length 9
                     :headers [["X-Repeat" "first"]
                               ["X-Repeat" "second"]]
-                    :layout-equivalent? true}
+                    :header-count 2}
             :informational {:content-length -1
                             :headers [["x-repeat" "first"]
                                       ["x-repeat" "second"]]
-                            :layout-equivalent? true}}
-           {:final (assoc (headers-summary final-headers final-headers-len)
-                          :content-length final-content-length)
-            :informational (assoc (headers-summary informational-headers informational-headers-len)
-                                  :content-length informational-content-length)}))))
+                            :header-count 2}}
+           {:final {:content-length final-content-length
+                    :headers final-headers
+                    :header-count final-headers-len}
+            :informational {:content-length informational-content-length
+                            :headers informational-headers
+                            :header-count informational-headers-len}}))))
 
 (deftest fixed-final-native-header-token-and-fallback-test
   (let [[server port]

@@ -15,6 +15,7 @@
    [ol.busker.native :as h2o]
    [ol.busker.native.socket :as socket]
    [ol.busker.request :as request]
+   [ol.busker.response-head :as response-head]
    [ol.busker.tickets :as tickets]
    [ol.busker.wake-notifier :as wake-notifier]
    [ol.clave.certificate :as clave-certificate]
@@ -91,8 +92,11 @@
           (send-vecs))))
 
     :h2o/send-informational
-    (let [[module-id request-seq send-fn] args]
-      (with-live-request module-id request-seq send-fn))
+    (let [[command] args]
+      (with-live-request (response-head/command-module-id command)
+        (response-head/command-request-seq command)
+        (fn [req]
+          (response-head/execute-informational! req command))))
 
     :h2o/send-fixed-final
     (let [[command] args]
@@ -102,8 +106,11 @@
           (fixed-final/execute! req command))))
 
     :h2o/start-response
-    (let [[module-id request-seq start-fn] args]
-      (with-live-request module-id request-seq start-fn))
+    (let [[command] args]
+      (with-live-request (response-head/command-module-id command)
+        (response-head/command-request-seq command)
+        (fn [req]
+          (response-head/execute-start! req command))))
     nil))
 
 (defn- create-connection-close-callback

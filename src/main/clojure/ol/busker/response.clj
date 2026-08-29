@@ -3,31 +3,24 @@
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]
-   [coffi.mem :as mem]
    [ol.busker.fixed-final :as fixed-final]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as p]
    [ol.busker.protocols.content-length]
+   [ol.busker.response-head :as response-head]
    [ol.busker.response-queue :as response-queue]
    [ol.busker.util :refer [compile-if]]
    [ol.busker.util.headers :as hdr.util]
    [taoensso.trove :as trove])
   (:import
    [java.io InputStream OutputStream]
-   [java.lang.foreign MemorySegment]
    [java.nio ByteBuffer]
    [java.nio.charset Charset StandardCharsets]
    [java.util.concurrent.atomic AtomicBoolean]
    [ol.busker.internal.protocols Request]))
 
 (set! *warn-on-reflection* true)
-
-(def ^:private clj-header-size (mem/size-of ::h2o/clj-header-t))
-(def ^:private clj-header-name-offset (mem/struct-field-offset ::h2o/clj-header-t :name))
-(def ^:private clj-header-name-len-offset (mem/struct-field-offset ::h2o/clj-header-t :name_len))
-(def ^:private clj-header-value-offset (mem/struct-field-offset ::h2o/clj-header-t :value))
-(def ^:private clj-header-value-len-offset (mem/struct-field-offset ::h2o/clj-header-t :value_len))
 
 (defn dissoc-header
   "Remove all case variations of a header by name (case-insensitive)."
@@ -54,79 +47,36 @@
 ;; TODO intern common header names?
 
 (defn build-headers2
-  "Return a tuple [resp headers headers-len content-length]
-  - headers is a clj_header_t *headers MemorySegment
-  - headers-len is size_t (number of headers, aka length of headers array)
-  - content-length is the content length header if any was found or -1 (SIZE_MAX)
-
-  headers memorysegment should NOT contain content-length if it was found"
+  "Build lowercase Java header pairs for an informational response.
+  Returns `[response headers header-count content-length]`."
   [resp]
-  (let [headers (:headers resp)
-        content-length-val (second (hdr.util/find-header resp "content-length"))
+  (let [content-length-val (second (hdr.util/find-header resp "content-length"))
         content-length (if content-length-val
                          (coerce-content-length content-length-val)
                          -1)
         filtered-headers (if content-length-val
-                           (dissoc-header headers "content-length")
-                           headers)
-        header-pairs (vec (expand-header-values filtered-headers))
-        headers-count (count header-pairs)]
-
-    (if (zero? headers-count)
-      [(mem/as-segment 0) 0 content-length]
-
-      (let [total-size (* headers-count clj-header-size)
-            headers-seg (mem/alloc total-size)]
-
-        (doseq [[idx [name-key value-val]] (map-indexed vector header-pairs)]
-          (let [offset (* idx clj-header-size)
-                ;; h2 and h3 require lower case headers
-                name-str (str/lower-case (if (string? name-key) name-key (str name-key)))
-                value-str (if (string? value-val) value-val (str value-val))
-                name-ptr ^MemorySegment (mem/serialize name-str ::mem/c-string)
-                value-ptr ^MemorySegment (mem/serialize value-str ::mem/c-string)]
-            (mem/write-address headers-seg (+ offset clj-header-name-offset) name-ptr)
-            (mem/write-int headers-seg (+ offset clj-header-name-len-offset) (dec (.byteSize name-ptr)))
-            (mem/write-address headers-seg (+ offset clj-header-value-offset) value-ptr)
-            (mem/write-int headers-seg (+ offset clj-header-value-len-offset) (dec (.byteSize value-ptr)))))
-        [resp headers-seg headers-count content-length]))))
+                           (dissoc-header (:headers resp) "content-length")
+                           (:headers resp))
+        header-pairs (->> (expand-header-values filtered-headers)
+                          (mapv (fn [[name value]]
+                                  [(str/lower-case (str name)) (str value)])))]
+    [resp header-pairs (count header-pairs) content-length]))
 
 (defn build-headers
-  "Return a tuple [headers headers-len content-length]
-  - headers is a clj_header_t *headers MemorySegment
-  - headers-len is size_t (number of headers, aka length of headers array)
-  - content-length is the content length header if any was found or -1 (SIZE_MAX)
-
-  headers memorysegment should NOT contain content-length if it was found"
+  "Build Java header pairs for a final response.
+  Returns `[headers header-count content-length]`."
   [resp]
-  (let [headers (:headers resp)
-        content-length-val (second (hdr.util/find-header resp "content-length"))
+  (let [content-length-val (second (hdr.util/find-header resp "content-length"))
         content-length (if content-length-val
                          (coerce-content-length content-length-val)
                          -1)
         filtered-headers (if content-length-val
-                           (dissoc-header headers "content-length")
-                           headers)
-        header-pairs (vec (expand-header-values filtered-headers))
-        headers-count (count header-pairs)]
-
-    (if (zero? headers-count)
-      [(mem/as-segment 0) 0 content-length]
-
-      (let [total-size (* headers-count clj-header-size)
-            headers-seg (mem/alloc total-size)]
-
-        (doseq [[idx [name-key value-val]] (map-indexed vector header-pairs)]
-          (let [offset (* idx clj-header-size)
-                name-str (if (string? name-key) name-key (str name-key))
-                value-str (if (string? value-val) value-val (str value-val))
-                name-ptr ^MemorySegment (mem/serialize name-str ::mem/c-string)
-                value-ptr ^MemorySegment (mem/serialize value-str ::mem/c-string)]
-            (mem/write-address headers-seg (+ offset clj-header-name-offset) name-ptr)
-            (mem/write-int headers-seg (+ offset clj-header-name-len-offset) (dec (.byteSize name-ptr)))
-            (mem/write-address headers-seg (+ offset clj-header-value-offset) value-ptr)
-            (mem/write-int headers-seg (+ offset clj-header-value-len-offset) (dec (.byteSize value-ptr)))))
-        [headers-seg headers-count content-length]))))
+                           (dissoc-header (:headers resp) "content-length")
+                           (:headers resp))
+        header-pairs (->> (expand-header-values filtered-headers)
+                          (mapv (fn [[name value]]
+                                  [(str name) (str value)])))]
+    [header-pairs (count header-pairs) content-length]))
 
 (defn with-content-length [response]
   (if (hdr.util/get-header response "content-length")
@@ -146,27 +96,26 @@
   (>= status 200))
 
 (defn- schedule-start-response!
-  [^Request req status headers headers-len content-length compress-hint write-resp]
-  (pi/send-msg (:worker req)
-               [:h2o/start-response
-                (:dispatch-module-id req)
-                (:dispatch-request-seq req)
-                (fn [live-req]
-                  (h2o/start-response (:req-ctx-ptr live-req) status
-                                      headers headers-len
-                                      content-length compress-hint
-                                      (:on-proceed-cb-ptr write-resp)
-                                      (:on-stop-cb-ptr write-resp)))]))
+  [^Request req status headers content-length compress-hint]
+  (pi/send-msg
+   (:worker req)
+   [:h2o/start-response
+    (response-head/start-command (:dispatch-module-id req)
+                                 (:dispatch-request-seq req)
+                                 status
+                                 headers
+                                 content-length
+                                 compress-hint)]))
 
 (defn- schedule-informational!
-  [^Request req status headers headers-len]
-  (pi/send-msg (:worker req)
-               [:h2o/send-informational
-                (:dispatch-module-id req)
-                (:dispatch-request-seq req)
-                (fn [live-req]
-                  (h2o/send-informational (:req-ctx-ptr live-req)
-                                          status headers headers-len))]))
+  [^Request req status headers]
+  (pi/send-msg
+   (:worker req)
+   [:h2o/send-informational
+    (response-head/informational-command (:dispatch-module-id req)
+                                         (:dispatch-request-seq req)
+                                         status
+                                         headers)]))
 
 (defn- send-informational!
   [^Request req resp]
@@ -174,8 +123,8 @@
     (throw (ex-info "Body payloads are not allowed for 1xx informational responses" {:status (:status resp)})))
   (let [status (:status resp)
         headers (or (:headers resp) {})
-        [_ headers-seg headers-len _] (build-headers2 {:headers headers})]
-    (schedule-informational! req status headers-seg headers-len)))
+        [_ header-pairs _ _] (build-headers2 {:headers headers})]
+    (schedule-informational! req status header-pairs)))
 
 (defn get-compress-hint [resp]
   (get h2o/->compress-hint (:h2o/compress-hint resp) h2o/H2O_COMPRESS_HINT_ENABLE))
@@ -337,11 +286,11 @@
             (when-let [writer (created-response-writer write-resp)]
               (pi/stop writer))
             {:head head :body nil})
-          (let [writer (response-writer write-resp)
-                [headers headers-len content-length] (build-headers head)]
+          (let [[headers _header-count content-length] (build-headers head)]
+            (response-writer write-resp)
             (schedule-start-response!
-             req (:status head) headers headers-len content-length
-             (get-compress-hint response') writer)
+             req (:status head) headers content-length
+             (get-compress-hint response'))
             {:head head :body body}))))))
 
 (defn- write-body-chunk!
