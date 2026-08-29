@@ -95,7 +95,8 @@
 
     :h2o/send-fixed-final
     (let [[command] args]
-      (with-live-request (:module-id command) (:request-seq command)
+      (with-live-request (fixed-final/command-module-id command)
+        (fixed-final/command-request-seq command)
         (fn [req]
           (fixed-final/execute! req command))))
 

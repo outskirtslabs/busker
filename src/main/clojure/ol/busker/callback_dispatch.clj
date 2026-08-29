@@ -117,7 +117,8 @@
   [dispatch module-id request-seq]
   (try
     (when-let [[_ ^H2OResponseEmitter emitter] (live-entry dispatch module-id request-seq)]
-      (response-queue/on-proceed (.write-resp emitter)))
+      (when-let [writer (response/writer-if-created emitter)]
+        (response-queue/on-proceed writer)))
     (catch Throwable t
       (increment! dispatch :callback-fault)
       (trove/log! {:level :error
@@ -128,7 +129,8 @@
   [dispatch module-id request-seq reason]
   (try
     (when-let [[_ ^H2OResponseEmitter emitter] (live-entry dispatch module-id request-seq)]
-      (response-queue/on-stop (.write-resp emitter) reason))
+      (when-let [writer (response/writer-if-created emitter)]
+        (response-queue/on-stop writer reason)))
     (catch Throwable t
       (increment! dispatch :callback-fault)
       (trove/log! {:level :error
@@ -256,7 +258,8 @@
   (boolean
    (some
     (fn [[_ ^H2OResponseEmitter emitter]]
-      (response-queue/pending-work? (.write-resp emitter)))
+      (some-> (response/writer-if-created emitter)
+              response-queue/pending-work?))
     (.values ^HashMap (:entries dispatch)))))
 
 (defn finish!

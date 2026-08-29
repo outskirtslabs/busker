@@ -20,26 +20,39 @@
 (def ^:private clj-header-value-offset (mem/struct-field-offset ::h2o/clj-header-t :value))
 (def ^:private clj-header-value-len-offset (mem/struct-field-offset ::h2o/clj-header-t :value_len))
 
-(defrecord FixedFinalCommand [module-id
-                              request-seq
-                              status
+(defrecord FixedFinalCommand [^long module-id
+                              ^long request-seq
+                              ^long status
                               headers
-                              header-staging-bytes
-                              content-length
-                              compress-hint
+                              ^long header-staging-bytes
+                              ^long content-length
+                              ^long compress-hint
                               ^bytes body])
+
+(defn command-module-id
+  ^long [^FixedFinalCommand command]
+  (.-module-id command))
+
+(defn command-request-seq
+  ^long [^FixedFinalCommand command]
+  (.-request-seq command))
+
+(defn command-content-length
+  ^long [^FixedFinalCommand command]
+  (.-content-length command))
 
 (defn header-staging-bytes
   "Returns the native descriptor and UTF-8 string space for `headers`."
   [headers]
-  (reduce
-   (fn [total [name value]]
-     (+ total
-        clj-header-size
-        (inc (alength (.getBytes ^String name StandardCharsets/UTF_8)))
-        (inc (alength (.getBytes ^String value StandardCharsets/UTF_8)))))
-   0
-   headers))
+  (let [header-size (long clj-header-size)]
+    (reduce
+     (fn [^long total [name value]]
+       (+ total
+          header-size
+          (inc (alength (.getBytes ^String name StandardCharsets/UTF_8)))
+          (inc (alength (.getBytes ^String value StandardCharsets/UTF_8)))))
+     0
+     headers)))
 
 (defn- command-data
   [module-id request-seq status headers header-bytes content-length compress-hint body-limit body]
@@ -76,18 +89,27 @@
 
 (defn- headers-segment
   [headers arena]
-  (if (empty? headers)
-    (mem/as-segment 0)
-    (let [segment (mem/alloc (* (count headers) clj-header-size) arena)]
-      (doseq [[idx [name value]] (map-indexed vector headers)]
-        (let [offset (* idx clj-header-size)
-              name-ptr ^MemorySegment (mem/serialize name ::mem/c-string arena)
-              value-ptr ^MemorySegment (mem/serialize value ::mem/c-string arena)]
-          (mem/write-address segment (+ offset clj-header-name-offset) name-ptr)
-          (mem/write-int segment (+ offset clj-header-name-len-offset) (dec (.byteSize name-ptr)))
-          (mem/write-address segment (+ offset clj-header-value-offset) value-ptr)
-          (mem/write-int segment (+ offset clj-header-value-len-offset) (dec (.byteSize value-ptr)))))
-      segment)))
+  (let [header-count (long (count headers))
+        header-size (long clj-header-size)
+        name-offset (long clj-header-name-offset)
+        name-len-offset (long clj-header-name-len-offset)
+        value-offset (long clj-header-value-offset)
+        value-len-offset (long clj-header-value-len-offset)]
+    (if (zero? header-count)
+      (mem/as-segment 0)
+      (let [segment (mem/alloc (* header-count header-size) arena)]
+        (loop [idx (long 0)]
+          (when (< idx header-count)
+            (let [[name value] (nth headers idx)
+                  offset (* idx header-size)
+                  name-ptr ^MemorySegment (mem/serialize name ::mem/c-string arena)
+                  value-ptr ^MemorySegment (mem/serialize value ::mem/c-string arena)]
+              (mem/write-address segment (+ offset name-offset) name-ptr)
+              (mem/write-int segment (+ offset name-len-offset) (dec (.byteSize name-ptr)))
+              (mem/write-address segment (+ offset value-offset) value-ptr)
+              (mem/write-int segment (+ offset value-len-offset) (dec (.byteSize value-ptr)))
+              (recur (unchecked-inc idx)))))
+        segment))))
 
 (defn- body-segment
   [^bytes body arena]
@@ -99,24 +121,30 @@
 
 (defn execute!
   "Stages `command` on its event-loop worker and sends it synchronously."
-  [req command]
+  [req ^FixedFinalCommand command]
   (when-not (identical? (:worker req) (@get-current-worker))
     (throw (ex-info "Fixed final command ran outside its event-loop worker" {})))
-  (let [{:keys [headers body] header-bytes :header-staging-bytes} command
-        body-limit (get-in req [:config :output-buffer-size])]
-    (when (or (not (nat-int? body-limit))
-              (> (alength ^bytes body) body-limit)
-              (> (count headers) max-header-pairs)
-              (> header-bytes max-header-staging-bytes))
+  (let [headers (.-headers command)
+        ^bytes body (.-body command)
+        body-limit-value (get-in req [:config :output-buffer-size])]
+    (when-not (nat-int? body-limit-value)
       (throw (ex-info "Fixed final command exceeded its staging budget" {})))
-    (with-open [arena (mem/confined-arena)]
-      (let [headers-segment (headers-segment headers arena)
-            body-segment (body-segment body arena)]
-        (h2o/send-fixed-final (:req-ctx-ptr req)
-                              (:status command)
-                              headers-segment
-                              (count headers)
-                              (:content-length command)
-                              (:compress-hint command)
-                              body-segment
-                              (alength ^bytes body))))))
+    (let [body-limit (long body-limit-value)
+          body-length (long (alength body))
+          header-count (long (count headers))
+          header-bytes (.-header-staging-bytes command)]
+      (when (or (> body-length body-limit)
+                (> header-count max-header-pairs)
+                (> header-bytes max-header-staging-bytes))
+        (throw (ex-info "Fixed final command exceeded its staging budget" {})))
+      (with-open [arena (mem/confined-arena)]
+        (let [headers-segment (headers-segment headers arena)
+              body-segment (body-segment body arena)]
+          (h2o/send-fixed-final (:req-ctx-ptr req)
+                                (.-status command)
+                                headers-segment
+                                header-count
+                                (.-content-length command)
+                                (.-compress-hint command)
+                                body-segment
+                                body-length))))))

@@ -49,6 +49,11 @@
             :content-length 3
             :compress-hint 2}
            (dissoc command :body)))
+    (is (= (:module-id command) (fixed-final/command-module-id command)))
+    (is (= (:request-seq command) (fixed-final/command-request-seq command)))
+    (is (= (:content-length command) (fixed-final/command-content-length command)))
+    (is (= (:status command)
+           (.-status ^ol.busker.fixed_final.FixedFinalCommand command)))
     (is (= [1 2 3] (vec ^bytes (:body command))))
     (is (not-any? #(instance? MemorySegment %)
                   (concat (:headers command) [(:body command)])))))
@@ -173,7 +178,8 @@
                                                            body)
                               head (dissoc response :body)]
                           (when (compare-and-set! committed_ nil head)
-                            (pi/stop write-resp)
+                            (when-let [writer (response/writer-if-created write-resp)]
+                              (pi/stop writer))
                             (pi/send-msg (:worker req) [:h2o/send-fixed-final command])
                             {:head head :body nil})))]
     (try

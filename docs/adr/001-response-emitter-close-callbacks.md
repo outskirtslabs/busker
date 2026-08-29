@@ -33,7 +33,9 @@ Each callback failure is caught so it cannot prevent the remaining callbacks fro
 The dispatcher falls back to `Thread/startVirtualThread` when its generation executor rejects new work.
 This prevents request cleanup from running application code on an event-loop thread.
 
-Request cleanup stops the response writer before it changes the emitter to `:closed`.
+An emitter initializes its response writer only when generic response startup, body streaming, flush, or close before a committed response needs it. Fixed-final responses do not create generic queue state. Closing after fixed-final scheduling changes the emitter to `:closed` without initializing that state.
+
+Request cleanup stops the response writer if it was initialized before it changes the emitter to `:closed`.
 This releases writers blocked by response backpressure before application callback execution begins.
 
 `generation/begin-stop!` starts graceful connection draining and shuts down the request executor while leaving active emitters and the callback executor running.
@@ -55,3 +57,5 @@ Stopping the JVM writer alone is not a valid forced-shutdown mechanism.
 A callback that ignores interruption can extend shutdown for up to two stop timeouts.
 
 Callback work does not enter the response queue, so response backpressure remains independent from application lifecycle work.
+
+Fixed-final responses avoid generic queue and writer allocation. Generic and streaming responses initialize that state once and retain the same backpressure behavior.

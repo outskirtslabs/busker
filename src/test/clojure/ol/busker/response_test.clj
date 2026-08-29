@@ -20,6 +20,19 @@
    [java.util.concurrent CountDownLatch TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicReference]))
 
+(deftype ExtensionBackedEmitter [])
+
+(extend-type ExtensionBackedEmitter
+  protocols/ResponseEmitter
+  (open? [_] true)
+  (committed? [_] false)
+  (emit!
+    ([_ _] true)
+    ([_ _ _] true))
+  (flush [_] nil)
+  (close [_] true)
+  (on-close [_ _] nil))
+
 (defn- fixed-final-request
   [output-buffer-size]
   (pi/->Request nil
@@ -126,6 +139,42 @@
   (stop [_]
     (.set ^AtomicBoolean stopped?_ true)))
 
+(deftest fixed-final-emitter-does-not-create-response-writer-test
+  (let [created_ (atom 0)
+        scheduled_ (atom nil)
+        writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))]
+    (with-redefs-fn {#'response-queue/create-response-writer
+                     (fn [_]
+                       (swap! created_ inc)
+                       writer)
+                     #'response/schedule-fixed-final!
+                     (fn [_ command]
+                       (reset! scheduled_ command)
+                       true)}
+      #(let [emitter (response/new-response-emitter
+                      (fixed-final-request 3)
+                      (fn [^Runnable task] (.run task)))]
+         (is (zero? @created_))
+         (is (true? (protocols/open? emitter)))
+         (response/send-ring-response! emitter {:status 200 :body "cat"})
+         (is (some? @scheduled_))
+         (is (zero? @created_))))))
+
+(deftest generic-response-creates-response-writer-test
+  (let [created_ (atom 0)
+        writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))]
+    (with-redefs-fn {#'response-queue/create-response-writer
+                     (fn [_]
+                       (swap! created_ inc)
+                       writer)
+                     #'response/schedule-fixed-final! (constantly false)
+                     #'response/schedule-start-response! (fn [& _])}
+      #(let [emitter (response/new-response-emitter
+                      (fixed-final-request 3)
+                      (fn [^Runnable task] (.run task)))]
+         (response/send-ring-response! emitter {:status 200 :body nil})
+         (is (= 1 @created_))))))
+
 (defn- headers-summary
   [headers headers-len]
   (let [header-size (mem/size-of ::h2o/clj-header-t)
@@ -165,6 +214,13 @@
       (atom {:phase :open :callbacks []})
       callback-dispatch
       callback-tail_))))
+
+(deftest response-emitter-body-classification-test
+  (is (false? (#'response/response-emitter-body? nil)))
+  (is (false? (#'response/response-emitter-body? "body")))
+  (is (false? (#'response/response-emitter-body? (byte-array [1]))))
+  (is (true? (#'response/response-emitter-body? (test-emitter))))
+  (is (true? (#'response/response-emitter-body? (ExtensionBackedEmitter.)))))
 
 (deftest proceed-drains-response-before-return-test
   (let [drain-state_ (AtomicInteger. 1)
@@ -305,6 +361,10 @@
                               :headers {"content-type" "text/plain; charset=not-a-charset"}
                               :body "x"}
                            false))))
+
+(deftest final-status-primitive-edge-test
+  (is (false? (#'response/final-status? 199)))
+  (is (true? (#'response/final-status? 200))))
 
 (deftest final-status-rejection-precedes-response-preparation
   (let [writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))

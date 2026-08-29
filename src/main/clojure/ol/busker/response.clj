@@ -142,7 +142,7 @@
        (< status 200)
        (not= 101 status)))
 
-(defn- final-status? [status]
+(defn- final-status? [^long status]
   (>= status 200))
 
 (defn- schedule-start-response!
@@ -306,6 +306,16 @@
   [^Request req command]
   (pi/send-msg (:worker req) [:h2o/send-fixed-final command]))
 
+(defn- response-writer
+  [write-resp]
+  (if (delay? write-resp) @write-resp write-resp))
+
+(defn- created-response-writer
+  [write-resp]
+  (if (delay? write-resp)
+    (when (realized? write-resp) @write-resp)
+    write-resp))
+
 (defn- commit-final!
   [^Request req write-resp committed_ {:keys [body status] :as response} final?]
   (let [response' (cond-> response
@@ -316,19 +326,22 @@
           response' (if command
                       (if (hdr.util/get-header response' "content-length")
                         response'
-                        (hdr.util/header response' "content-length" (:content-length command)))
+                        (hdr.util/header response' "content-length"
+                                         (fixed-final/command-content-length command)))
                       (cond-> response'
                         final? with-content-length))
           head (dissoc response' :body)]
       (when (compare-and-set! committed_ nil head)
         (if (and command (schedule-fixed-final! req command))
           (do
-            (pi/stop write-resp)
+            (when-let [writer (created-response-writer write-resp)]
+              (pi/stop writer))
             {:head head :body nil})
-          (let [[headers headers-len content-length] (build-headers head)]
+          (let [writer (response-writer write-resp)
+                [headers headers-len content-length] (build-headers head)]
             (schedule-start-response!
              req (:status head) headers headers-len content-length
-             (get-compress-hint response') write-resp)
+             (get-compress-hint response') writer)
             {:head head :body body}))))))
 
 (defn- write-body-chunk!
@@ -436,8 +449,10 @@
                              callback-tail_]
   p/ResponseEmitter
   (open? [_]
-    (and (= :open (:phase @lifecycle_))
-         (not (.get ^AtomicBoolean (:stopped?_ write-resp)))))
+    (let [writer (created-response-writer write-resp)]
+      (and (= :open (:phase @lifecycle_))
+           (or (nil? writer)
+               (not (.get ^AtomicBoolean (:stopped?_ writer)))))))
   (committed? [_]
     (boolean @committed_))
   (emit! [this data]
@@ -445,58 +460,69 @@
   (emit! [this data {:keys [close-after?]
                      :or   {close-after? false}}]
 
-    (let [os ^OutputStream (:out-stream write-resp)]
-      (cond
-        (not (p/open? this)) false
+    (cond
+      (not (p/open? this)) false
         ;; map data, possibly with headers/status
-        (map? data)
-        (let [status   (:status data)
-              resp-map (assoc data :status status)]
-          (if (informational-status? status)
-            (when (nil? @committed_)
-              (send-informational! req resp-map)
-              true)
-            (when (nil? @committed_)
-              (when-let [{:keys [head body]} (commit-final! req write-resp committed_ resp-map close-after?)]
-                (reset! committed_ head)
-                (when body
-                  (write-body-chunk! body os head true))
-                (when close-after?
-                  (p/close this))
-                true))))
+      (map? data)
+      (let [status   (:status data)
+            resp-map (assoc data :status status)]
+        (if (informational-status? status)
+          (when (nil? @committed_)
+            (send-informational! req resp-map)
+            true)
+          (when (nil? @committed_)
+            (when-let [{:keys [head body]} (commit-final! req write-resp committed_ resp-map close-after?)]
+              (reset! committed_ head)
+              (when body
+                (write-body-chunk! body (:out-stream (response-writer write-resp)) head true))
+              (when close-after?
+                (p/close this))
+              true))))
         ;; body data
-        :else
-        (let [head (if-let [c @committed_]
-                     c
-                     (when-let [{:keys [head]} (commit-final! req write-resp committed_ {:status 200 :headers {}} close-after?)]
-                       (reset! committed_ head)))]
-          (when head
-            (write-body-chunk! data os head close-after?)
-            (when close-after? (p/close this))
-            true)))))
+      :else
+      (let [head (if-let [c @committed_]
+                   c
+                   (when-let [{:keys [head]} (commit-final! req write-resp committed_ {:status 200 :headers {}} close-after?)]
+                     (reset! committed_ head)))]
+        (when head
+          (write-body-chunk! data (:out-stream (response-writer write-resp)) head close-after?)
+          (when close-after? (p/close this))
+          true))))
   (flush [_]
-    (.flush ^OutputStream (:out-stream write-resp)))
+    (.flush ^OutputStream (:out-stream (response-writer write-resp))))
   (close [_]
-    (if (and (not (.get ^AtomicBoolean (:stopped?_ write-resp)))
-             (begin-close! lifecycle-lock lifecycle_))
-      (try
-        (.close ^OutputStream (:out-stream write-resp))
-        true
-        (finally
-          (terminal! lifecycle-lock lifecycle_ callback-tail_ callback-dispatch)))
-      (if (.get ^AtomicBoolean (:stopped?_ write-resp))
-        (do
-          (terminal! lifecycle-lock lifecycle_ callback-tail_ callback-dispatch)
-          false)
-        false)))
+    (let [writer (or (created-response-writer write-resp)
+                     (when (nil? @committed_)
+                       (response-writer write-resp)))]
+      (if (and (or (nil? writer)
+                   (not (.get ^AtomicBoolean (:stopped?_ writer))))
+               (begin-close! lifecycle-lock lifecycle_))
+        (try
+          (when writer
+            (.close ^OutputStream (:out-stream writer)))
+          true
+          (finally
+            (terminal! lifecycle-lock lifecycle_ callback-tail_ callback-dispatch)))
+        (if (and writer (.get ^AtomicBoolean (:stopped?_ writer)))
+          (do
+            (terminal! lifecycle-lock lifecycle_ callback-tail_ callback-dispatch)
+            false)
+          false))))
   (on-close [_ callback]
     (register-close-callback! lifecycle-lock lifecycle_ callback-tail_ callback-dispatch callback)))
+
+(defn ^:no-doc writer-if-created
+  [value]
+  (created-response-writer
+   (if (instance? H2OResponseEmitter value)
+     (.write-resp ^H2OResponseEmitter value)
+     value)))
 
 (defn new-response-emitter
   ([req]
    (new-response-emitter req start-virtual-thread!))
   ([req callback-dispatch]
-   (let [write-resp (response-queue/create-response-writer req)
+   (let [write-resp (delay (response-queue/create-response-writer req))
          committed_ (atom nil)
          lifecycle-lock (Object.)
          lifecycle_ (atom {:phase :open :callbacks []})
@@ -505,18 +531,26 @@
      (H2OResponseEmitter. req write-resp committed_ lifecycle-lock lifecycle_ callback-dispatch callback-tail_))))
 
 (defn stop-emitter
-  "Stops the response writer before dispatching emitter close callbacks."
+  "Stops an initialized response writer before dispatching emitter close callbacks."
   [^H2OResponseEmitter emitter]
-  (pi/stop (.write-resp emitter))
+  (when-let [writer (created-response-writer (.write-resp emitter))]
+    (pi/stop writer))
   (terminal! (.lifecycle-lock emitter)
              (.lifecycle_ emitter)
              (.callback-tail_ emitter)
              (.callback-dispatch emitter)))
 
+(defn- response-emitter-body?
+  [body]
+  (and (some? body)
+       (not (string? body))
+       (not (instance? byte-array-class body))
+       (satisfies? p/ResponseEmitter body)))
+
 (defn send-ring-response!
   [emitter ring-resp]
   (try
-    (if (satisfies? p/ResponseEmitter (:body ring-resp))
+    (if (response-emitter-body? (:body ring-resp))
       (when (:status ring-resp)
         (p/emit! emitter (dissoc ring-resp :body) {:close-after? false}))
       (p/emit! emitter ring-resp {:close-after? true}))
