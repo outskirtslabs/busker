@@ -175,6 +175,7 @@
         (is (= :retirement-failed @phase))
         (is (= 1 (.byteSize (mem/alloc 1 arena))))
         (finally
+          (Thread/interrupted)
           (swap! @#'generation/failed-retirements_
                  (fn [retirements]
                    (vec (remove #(identical? generation-state %) retirements)))))))))
@@ -201,6 +202,7 @@
                                        (when (= 1 (swap! attempts inc))
                                          (throw (InterruptedException. "simulated"))))]
         (generation/stop! generation-state)
+        (Thread/interrupted)
         (generation/stop! generation-state))
       (is (= :stopped @phase))
       (is (not (some #(identical? generation-state %)

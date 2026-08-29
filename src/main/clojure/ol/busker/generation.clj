@@ -762,10 +762,6 @@
            ::wakeup-receivers wakeup-receivers
            ::on-close-callback on-close-callback)))
 
-(defn- init-wake-notifier-state
-  [{::keys [n-workers] :as state}]
-  (assoc state ::wake-notifier (wake-notifier/start! n-workers)))
-
 (defn- init-tls-http3-state
   [{::keys [generation-id listener-runtimes config config-ptr n-workers loops contexts
             tls-lookup-callback listener-claims memory-ticket-service]
@@ -984,9 +980,13 @@
                  (println "Virtual thread request executor pool did not shutdown cleanly"))))
            (when (seq (::workers generation))
              (evloop/broadcast-wake! (::workers generation)))
-           (when-let [notifier (::wake-notifier generation)]
-             (when-not (wake-notifier/stop-and-join! notifier)
-               (throw (ex-info "Wake notifier did not stop" {}))))
+           (doseq [worker (::workers generation)]
+             (when-let [endpoint (:wake-endpoint worker)]
+               (wake-notifier/quiesce-endpoint! endpoint)))
+           (when (not= false (::wake-notifier-owned? generation))
+             (when-let [notifier (::wake-notifier generation)]
+               (when-not (wake-notifier/stop-and-join! notifier)
+                 (throw (ex-info "Wake notifier did not stop" {})))))
            (doseq [[worker wr] (map vector (::workers generation) (::wakeup-receivers generation))]
              (when (and wr (not (mem/null? wr)))
                (h2o/mt-destroy-wakeup-receiver wr))
@@ -1040,12 +1040,20 @@
 
 (defn start!
   ([compiled-config cert-runtime]
-   (start! compiled-config cert-runtime {}))
+   (let [wake-notifier (wake-notifier/start!)]
+     (try
+       (start! compiled-config cert-runtime {:wake-notifier wake-notifier
+                                             :wake-notifier-owned? true})
+       (catch Throwable t
+         (wake-notifier/stop-and-join! wake-notifier)
+         (throw t)))))
   ([compiled-config cert-runtime {:keys [activate-http3-transports? generation-id listener-pool
-                                         memory-ticket-service]
+                                         memory-ticket-service wake-notifier wake-notifier-owned?]
                                   :or {activate-http3-transports? true
                                        generation-id 1
                                        listener-pool (listen/open-pool)}}]
+   (when-not wake-notifier
+     (throw (ex-info "Generation requires a shared wake notifier" {})))
    (let [compiled-config (config/config->listeners compiled-config)
          listeners (:listeners compiled-config)
          listener-claims (acquire-listener-claims! listener-pool listeners)
@@ -1059,13 +1067,14 @@
                                              memory-ticket-service)
              _ (vreset! cleanup-state_ state)
              state (assoc state
+                          ::wake-notifier wake-notifier
+                          ::wake-notifier-owned? (true? wake-notifier-owned?)
                           ::executor (new-request-executor)
                           ::close-callback-executor (new-close-callback-executor))
              _ (vreset! cleanup-state_ state)]
          (cond-> (-> state
                      init-tls-lookup-state
                      init-core-state
-                     init-wake-notifier-state
                      init-listener-state
                      init-tls-http3-state
                      init-worker-state

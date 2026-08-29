@@ -247,7 +247,7 @@
    Options:
    - :thread-name-prefix - prefix for thread name (default 'h2o-evloop')
    - :callback-dispatch - worker-local native callback dispatcher
-   - :wake-notifier - generation notifier for native event-loop wakes
+   - :wake-notifier - shared runtime notifier for native event-loop wakes
 
    Returns: worker"
 

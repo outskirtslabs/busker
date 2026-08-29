@@ -3,24 +3,29 @@
    [ol.busker.native :as h2o]
    [taoensso.trove :as trove])
   (:import
-   [java.util.concurrent ArrayBlockingQueue TimeUnit]
+   [java.util.concurrent LinkedBlockingQueue TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicReference]))
 
 (set! *warn-on-reflection* true)
 
 (defrecord WakeEndpoint
            [^AtomicBoolean pending?_
-            ^AtomicReference receiver_])
+            ^AtomicReference receiver_
+            ^AtomicReference state_
+            ^AtomicInteger in-flight_])
 
 (defrecord WakeNotifier
-           [^ArrayBlockingQueue queue
+           [^LinkedBlockingQueue queue
             ^AtomicBoolean accepting?_
             ^AtomicInteger admissions_
             ^AtomicReference thread_])
 
 (defn endpoint
   [receiver_]
-  (->WakeEndpoint (AtomicBoolean. false) receiver_))
+  (->WakeEndpoint (AtomicBoolean. false)
+                  receiver_
+                  (AtomicReference. :open)
+                  (AtomicInteger.)))
 
 (defn- report-wake-failure!
   [first-error second-error]
@@ -32,20 +37,27 @@
 (defn- wake-endpoint!
   [^WakeEndpoint endpoint]
   (let [^AtomicBoolean pending?_ (.-pending?_ endpoint)
-        ^AtomicReference receiver_ (.-receiver_ endpoint)]
+        ^AtomicReference receiver_ (.-receiver_ endpoint)
+        ^AtomicReference state_ (.-state_ endpoint)
+        ^AtomicInteger in-flight_ (.-in-flight_ endpoint)]
     (.set pending?_ false)
-    (when-let [receiver (.get receiver_)]
-      (try
-        (h2o/mt-wakeup receiver)
-        (catch Throwable first-error
+    (.incrementAndGet in-flight_)
+    (try
+      (when (= :open (.get state_))
+        (when-let [receiver (.get receiver_)]
           (try
             (h2o/mt-wakeup receiver)
-            (catch Throwable second-error
-              (report-wake-failure! first-error second-error))))))))
+            (catch Throwable first-error
+              (try
+                (h2o/mt-wakeup receiver)
+                (catch Throwable second-error
+                  (report-wake-failure! first-error second-error)))))))
+      (finally
+        (.decrementAndGet in-flight_)))))
 
 (defn- run-notifier!
   [^WakeNotifier notifier]
-  (let [^ArrayBlockingQueue queue (.-queue notifier)
+  (let [^LinkedBlockingQueue queue (.-queue notifier)
         ^AtomicBoolean accepting?_ (.-accepting?_ notifier)]
     (loop []
       (when (or (.get accepting?_) (not (.isEmpty queue)))
@@ -56,8 +68,8 @@
         (recur)))))
 
 (defn start!
-  [capacity]
-  (let [notifier (->WakeNotifier (ArrayBlockingQueue. (int capacity))
+  []
+  (let [notifier (->WakeNotifier (LinkedBlockingQueue.)
                                  (AtomicBoolean. true)
                                  (AtomicInteger.)
                                  (AtomicReference.))
@@ -72,12 +84,13 @@
   [^WakeNotifier notifier ^WakeEndpoint endpoint]
   (let [^AtomicBoolean accepting?_ (.-accepting?_ notifier)
         ^AtomicInteger admissions_ (.-admissions_ notifier)
-        ^ArrayBlockingQueue queue (.-queue notifier)]
-    (if (.get accepting?_)
+        ^AtomicReference state_ (.-state_ endpoint)
+        ^LinkedBlockingQueue queue (.-queue notifier)]
+    (if (and (.get accepting?_) (= :open (.get state_)))
       (do
         (.incrementAndGet admissions_)
         (try
-          (if-not (.get accepting?_)
+          (if-not (and (.get accepting?_) (= :open (.get state_)))
             false
             (let [^AtomicBoolean pending?_ (.-pending?_ endpoint)]
               (if-not (.compareAndSet pending?_ false true)
@@ -86,10 +99,22 @@
                   true
                   (do
                     (.set pending?_ false)
-                    (throw (IllegalStateException. "Wake notifier capacity invariant failed")))))))
+                    (throw (IllegalStateException. "Wake notifier queue rejected an endpoint")))))))
           (finally
             (.decrementAndGet admissions_))))
       false)))
+
+(defn quiesce-endpoint!
+  [^WakeEndpoint endpoint]
+  (let [^AtomicReference state_ (.-state_ endpoint)
+        ^AtomicReference receiver_ (.-receiver_ endpoint)
+        ^AtomicInteger in-flight_ (.-in-flight_ endpoint)]
+    (.compareAndSet state_ :open :quiescing)
+    (while (pos? (.get in-flight_))
+      (Thread/onSpinWait))
+    (.set receiver_ nil)
+    (.set state_ :closed)
+    true))
 
 (defn stop-and-join!
   [^WakeNotifier notifier]

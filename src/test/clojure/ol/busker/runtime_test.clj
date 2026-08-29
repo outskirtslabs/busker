@@ -3,6 +3,8 @@
    [clojure.test :refer [deftest is testing]]
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.config :as config]
+   [ol.busker.generation :as generation]
+   [ol.busker.wake-notifier :as wake-notifier]
    [ol.busker.runtime :as runtime]
    [ol.busker.test-utils :as util]))
 
@@ -60,6 +62,34 @@
           (runtime/stop! server))))
     (is (= :stopped (:phase (runtime/state server))))))
 
+(deftest reload-generations-share-one-wake-notifier-test
+  (let [port (util/free-port)
+        user-config {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                          :tls false}}
+                     :dispatch [{:handler (fn [_]
+                                            {:status 200
+                                             :body "shared-notifier"})}]}
+        server (runtime/start! user-config)
+        shared-notifier (:busker/wake-notifier server)]
+    (try
+      (is (identical? shared-notifier
+                      (-> @(:busker/state server)
+                          :active
+                          :instance
+                          ::generation/wake-notifier)))
+      (is (= :activated (runtime/reload! server user-config {:force? true})))
+      (is (identical? shared-notifier
+                      (-> @(:busker/state server)
+                          :active
+                          :instance
+                          ::generation/wake-notifier)))
+      (finally
+        (runtime/stop! server)))
+    (is (false? (wake-notifier/request!
+                 shared-notifier
+                 (wake-notifier/endpoint (java.util.concurrent.atomic.AtomicReference.
+                                          (Object.))))))))
+
 (deftest cert-automation-reuse-and-replacement-test
   (let [started (atom [])
         current-runtime {:managed-plan {:subject-names ["a.example"]
@@ -90,25 +120,34 @@
                @started))))))
 
 (deftest runtime-start-fails-when-automation-startup-fails-test
-  (with-redefs [clave-adapter/build-managed-plan
-                (fn [_]
-                  {:subject-names ["managed.example"]
-                   :clave-config {:issuer :acme}})
-                clave-adapter/start!
-                (fn [_]
-                  (throw (ex-info "automation failed"
-                                  {:stage :automation-startup})))]
-    (let [config {:entrypoints {:http {:bind (str "127.0.0.1:" (util/free-port))
-                                       :tls false}}
-                  :dispatch [{:handler (fn [_]
-                                         {:status 200
-                                          :body "unused"})}]}]
-      (try
-        (runtime/start! config)
-        (is false "start! should throw when automation startup fails")
-        (catch clojure.lang.ExceptionInfo e
-          (is (= {:stage :automation-startup}
-                 (ex-data e))))))))
+  (let [stopped?_ (atom false)
+        test-notifier (Object.)]
+    (with-redefs [wake-notifier/start! (constantly test-notifier)
+                  wake-notifier/stop-and-join!
+                  (fn [notifier]
+                    (is (identical? test-notifier notifier))
+                    (reset! stopped?_ true)
+                    true)
+                  clave-adapter/build-managed-plan
+                  (fn [_]
+                    {:subject-names ["managed.example"]
+                     :clave-config {:issuer :acme}})
+                  clave-adapter/start!
+                  (fn [_]
+                    (throw (ex-info "automation failed"
+                                    {:stage :automation-startup})))]
+      (let [config {:entrypoints {:http {:bind (str "127.0.0.1:" (util/free-port))
+                                         :tls false}}
+                    :dispatch [{:handler (fn [_]
+                                           {:status 200
+                                            :body "unused"})}]}]
+        (try
+          (runtime/start! config)
+          (is false "start! should throw when automation startup fails")
+          (catch clojure.lang.ExceptionInfo e
+            (is (= {:stage :automation-startup}
+                   (ex-data e)))))
+        (is (true? @stopped?_))))))
 
 (deftest candidate-plan-skips-unchanged-snapshots-unless-forced-test
   (let [port (util/free-port)

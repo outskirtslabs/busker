@@ -117,7 +117,7 @@
                      (fn [_ _ _ _]
                        {:action :activate})
                      #'ol.busker.runtime/build-generation!
-                     (fn [_ generation-id listener-pool active memory-ticket-service]
+                     (fn [_ generation-id listener-pool _wake-notifier active memory-ticket-service]
                        (swap! events conj :candidate-built)
                        (is (= 2 generation-id))
                        (is (= ::listener-pool listener-pool))

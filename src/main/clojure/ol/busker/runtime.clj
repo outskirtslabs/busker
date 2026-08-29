@@ -5,6 +5,7 @@
    [ol.busker.config :as config]
    [ol.busker.generation :as generation]
    [ol.busker.listen :as listen]
+   [ol.busker.wake-notifier :as wake-notifier]
    [ol.busker.tickets :as tickets]))
 
 (set! *warn-on-reflection* true)
@@ -145,7 +146,8 @@
                     t))))
 
 (defn- build-generation!
-  [user-config generation-id listener-pool current-generation current-memory-ticket-service]
+  [user-config generation-id listener-pool wake-notifier current-generation
+   current-memory-ticket-service]
   (let [compiled-config
         (try
           (config/load! user-config)
@@ -184,6 +186,7 @@
                                     {:activate-http3-transports? (nil? current-generation)
                                      :generation-id generation-id
                                      :listener-pool listener-pool
+                                     :wake-notifier wake-notifier
                                      :memory-ticket-service service})}
       (catch Throwable t
         (when (and service (not (:reused? memory-ticket-service-result)))
@@ -297,27 +300,34 @@
   "Start a new Busker server from `user-config`."
   [user-config]
   (let [listener-pool (listen/open-pool)
-        generation (build-generation! user-config 1 listener-pool nil nil)]
+        wake-notifier (wake-notifier/start!)]
     (try
-      (let [generation (update generation :instance generation/register-shared-ticket-manager!)]
-        {:busker/lifecycle-gate (Object.)
-         :busker/state
-         (atom {:phase :running
-                :config (:config generation)
-                :next-generation-id 2
-                :listener-pool listener-pool
-                :memory-ticket-service (:memory-ticket-service generation)
-                :active generation
-                :draining []})})
+      (let [generation (build-generation! user-config 1 listener-pool wake-notifier nil nil)]
+        (try
+          (let [generation (update generation :instance generation/register-shared-ticket-manager!)]
+            {:busker/lifecycle-gate (Object.)
+             :busker/wake-notifier wake-notifier
+             :busker/state
+             (atom {:phase :running
+                    :config (:config generation)
+                    :next-generation-id 2
+                    :listener-pool listener-pool
+                    :memory-ticket-service (:memory-ticket-service generation)
+                    :active generation
+                    :draining []})})
+          (catch Throwable t
+            (cleanup-unpublished-generation! generation nil nil)
+            (throw t))))
       (catch Throwable t
-        (cleanup-unpublished-generation! generation nil nil)
+        (wake-notifier/stop-and-join! wake-notifier)
         (throw t)))))
 
 (defn reload!
   "Compile and activate a new runtime snapshot for `server-handle`."
   ([server-handle user-config]
    (reload! server-handle user-config {}))
-  ([{:keys [busker/lifecycle-gate busker/state] :as server-handle} user-config opts]
+  ([{:keys [busker/lifecycle-gate busker/state busker/wake-notifier] :as server-handle}
+    user-config opts]
    (locking lifecycle-gate
      (let [{:keys [phase active next-generation-id listener-pool draining
                    memory-ticket-service]} @state]
@@ -334,6 +344,7 @@
              (let [candidate (build-generation! user-config
                                                 next-generation-id
                                                 listener-pool
+                                                wake-notifier
                                                 active
                                                 memory-ticket-service)]
                (try
@@ -366,7 +377,7 @@
 (defn stop!
   "Synchronously stop `server-handle`, waiting for active and draining
   generations to quiesce."
-  [{:keys [busker/lifecycle-gate busker/state] :as server-handle}]
+  [{:keys [busker/lifecycle-gate busker/state busker/wake-notifier] :as server-handle}]
   (when server-handle
     (let [{:keys [config generations-to-stop memory-ticket-service]}
           (locking lifecycle-gate
@@ -406,6 +417,8 @@
           (clave-adapter/stop! cert-runtime))
         (when memory-ticket-service
           (tickets/stop-key-service! memory-ticket-service))
+        (when-not (wake-notifier/stop-and-join! wake-notifier)
+          (throw (ex-info "Wake notifier did not stop" {})))
         (locking lifecycle-gate
           (let [{:keys [next-generation-id listener-pool]} @state]
             (reset! state

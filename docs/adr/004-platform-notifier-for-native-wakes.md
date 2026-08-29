@@ -16,7 +16,7 @@ The event-loop worker cannot wake itself while it is sleeping inside `h2o_evloop
 
 ## Decision
 
-Each runtime generation creates one platform wake notifier. Application virtual threads publish commands and wake state using Java operations only. They do not call the native H2O wake function.
+Each `SharedRuntime` creates one platform wake notifier shared by active and draining generations. Application virtual threads publish commands and wake state using Java operations only. They do not call the native H2O wake function.
 
 Each worker stores:
 
@@ -24,7 +24,7 @@ Each worker stores:
 - an armed flag that is true only while the worker can sleep in `h2o_evloop_run`;
 - one preallocated notifier endpoint with a pending-token flag and the worker's receiver reference.
 
-A wake request increments the worker's Java generation. If the worker is armed and its endpoint has no pending token, the producer offers that endpoint to the generation's bounded notifier queue. The queue capacity equals the worker count, so one token per worker fits without command-dependent allocation.
+A wake request increments the worker's Java generation. If the worker is armed and its endpoint has no pending token, the producer offers that endpoint to the shared notifier queue. The queue is logically limited by registered endpoints because each endpoint can publish at most one pending token.
 
 Before a normal native wait, the worker arms itself and rechecks its mailbox and Java wake generation. New work found by the recheck prevents the wait and runs the next native pass with zero wait. This sequence prevents work published immediately before sleep from becoming stranded.
 
@@ -32,7 +32,7 @@ The notifier clears an endpoint's pending-token flag before calling `clj_h2o_mt_
 
 The H2O receiver remains a wake-only receiver. Commands, response bytes, and Java request references do not enter H2O's multithread message list.
 
-Shutdown closes producer admission, submits final worker wake requests, closes notifier admission, drains admitted tokens, and joins the notifier thread. Wake receiver destruction starts only after notifier join proves that no notifier downcall can still reference a receiver.
+Generation retirement moves each endpoint from open to quiescing, waits for its in-flight native call to finish, closes the endpoint, and then destroys the receiver. Stale queued tokens observe the closed endpoint and skip native work. Runtime shutdown stops and joins the shared notifier only after all generations retire.
 
 The following behavior remains unchanged:
 
@@ -53,9 +53,9 @@ Tests must demonstrate:
 - a worker does not sleep when work appears before or during its arm-and-recheck sequence;
 - repeated wake requests produce at most one pending endpoint token;
 - work arriving during a notifier downcall can publish another token;
-- notifier queue admission stays bounded for every configured worker count;
+- queued tokens stay logically limited to one per endpoint;
 - notifier close drains admitted tokens and rejects later requests;
-- receiver destruction cannot start before notifier join;
+- endpoint quiescence finishes before receiver destruction;
 - fixed-final, streaming, informational, request-body, stop, reload, and multi-worker behavior remains exact; and
 - full validation and controlled large-payload tests pass.
 
@@ -63,10 +63,9 @@ The canonical benchmark must classify the throughput hypothesis. A matching prof
 
 ## Consequences
 
-Application request paths no longer enter H2O through FFM merely to wake an event loop. Native mutex and eventfd work moves to one platform notifier thread per runtime generation.
+Application request paths no longer enter H2O through FFM merely to wake an event loop. Native mutex and eventfd work moves to one platform notifier thread per `SharedRuntime`.
 
 An idle wake gains one Java queue handoff. Under sustained load, the armed check should avoid most notifier and native wake work because the event-loop worker is already active. The net throughput effect remains a measurement question.
-
-Reload can temporarily run one notifier for each active or draining generation. Keeping notifier lifetime within one generation avoids cross-generation endpoint routing and permits retirement with the generation's receivers.
+Reload keeps one notifier while generations overlap. Endpoint state and in-flight counts prevent an old queued token from reaching a retired receiver.
 
 This decision does not change public Ring behavior or introduce a native command transport. Lifecycle calls made directly by arbitrary virtual threads remain a separate question outside this attempt.
