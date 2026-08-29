@@ -3,7 +3,7 @@
    [clojure.test :refer [deftest is]]
    [ol.busker.evloop :as evloop]
    [ol.busker.internal.protocols :as p]
-   [ol.busker.native :as h2o])
+   [ol.busker.wake-notifier :as notifier])
   (:import
    [java.util HashMap]
    [java.util.concurrent ArrayBlockingQueue CountDownLatch TimeUnit]
@@ -18,6 +18,10 @@
     :stop-requested?_ (AtomicBoolean. false)
     :admissions_ (AtomicInteger.)
     :mailbox-signal_ (AtomicLong.)
+    :wake-generation_ (AtomicLong.)
+    :sleep-armed?_ (AtomicBoolean. false)
+    :wake-notifier (Object.)
+    :wake-endpoint (Object.)
     :mailbox (ArrayBlockingQueue. capacity)
     :message-handler handler
     :wakeup-receiver_ (AtomicReference. receiver)
@@ -38,11 +42,65 @@
     (@#'evloop/run-evloop-on-thread! worker)
     (is (true? (::evloop/mailbox-work? @seen_)))))
 
+(deftest unarmed-worker-records-wake-without-notifier-test
+  (let [requests_ (atom 0)
+        worker (worker (fn [_ _]) 1 (Object.))]
+    (.set ^AtomicBoolean (:sleep-armed?_ worker) false)
+    (with-redefs [notifier/request! (fn [_ _] (swap! requests_ inc))]
+      (p/wake worker)
+      (is (= 1 (.get ^AtomicLong (:wake-generation_ worker))))
+      (is (zero? @requests_)))))
+
+(deftest pending-java-wake-forces-a-nonblocking-native-iteration-test
+  (let [seen_ (atom nil)
+        worker (assoc (worker (fn [_ _]) 1 (Object.))
+                      :loop-fn
+                      (fn [worker state]
+                        (reset! seen_ state)
+                        (.set ^AtomicBoolean (:running?_ worker) false)
+                        state))]
+    (.set ^AtomicBoolean (:sleep-armed?_ worker) false)
+    (with-redefs [notifier/request! (fn [_ _] nil)]
+      (p/wake worker)
+      (@#'evloop/run-evloop-on-thread! worker)
+      (is (true? (::evloop/mailbox-work? @seen_))))))
+
+(deftest worker-rechecks-mailbox-after-arming-for-native-wait-test
+  (let [checking (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        states_ (atom [])
+        requests_ (atom 0)
+        mailbox (ArrayBlockingQueue. 8)
+        mailbox-empty? @#'evloop/mailbox-empty?
+        worker (assoc (worker (fn [_ _]) 8 (Object.))
+                      :mailbox mailbox
+                      :loop-fn
+                      (fn [worker state]
+                        (swap! states_ conj state)
+                        (.set ^AtomicBoolean (:running?_ worker) false)
+                        state))
+        thread (Thread. #(@#'evloop/run-evloop-on-thread! worker))]
+    (with-redefs [notifier/request! (fn [_ _] (swap! requests_ inc))
+                  evloop/mailbox-empty?
+                  (fn [worker]
+                    (.countDown checking)
+                    (.await release 5 TimeUnit/SECONDS)
+                    (mailbox-empty? worker))]
+      (.start thread)
+      (is (.await checking 5 TimeUnit/SECONDS))
+      (is (true? (p/send-msg worker [:raced])))
+      (.countDown release)
+      (.join thread 5000)
+      (is (false? (.isAlive thread)))
+      (is (= 1 @requests_))
+      (is (= [true] (mapv ::evloop/mailbox-work? @states_))))))
+
 (deftest coalesces-wakeups-before-a-drain
   (let [handled_ (atom [])
         wakeups_ (atom 0)
         worker (worker (fn [op _] (swap! handled_ conj op)) 8 (Object.))]
-    (with-redefs [h2o/mt-wakeup (fn [_] (swap! wakeups_ inc))]
+    (.set ^AtomicBoolean (:sleep-armed?_ worker) true)
+    (with-redefs [notifier/request! (fn [_ _] (swap! wakeups_ inc))]
       (is (true? (p/send-msg worker [:first])))
       (is (true? (p/send-msg worker [:second])))
       (is (= 1 @wakeups_))
@@ -56,7 +114,8 @@
         offered?_ (AtomicBoolean. false)
         worker (worker (fn [op _] (swap! handled_ conj op)) 8 (Object.))
         clear-signal! @#'evloop/clear-mailbox-signal!]
-    (with-redefs [h2o/mt-wakeup (constantly nil)
+    (.set ^AtomicBoolean (:sleep-armed?_ worker) true)
+    (with-redefs [notifier/request! (fn [_ _] nil)
                   evloop/clear-mailbox-signal!
                   (fn [worker]
                     (let [result (clear-signal! worker)]
@@ -71,8 +130,9 @@
   (let [worker (worker (fn [_ _]) 8 (Object.))
         clear-signal! @#'evloop/clear-mailbox-signal!
         mark-signalled! @#'evloop/mark-mailbox-signalled!]
-    (with-redefs [h2o/mt-wakeup
-                  (fn [_]
+    (.set ^AtomicBoolean (:sleep-armed?_ worker) true)
+    (with-redefs [notifier/request!
+                  (fn [_ _]
                     (clear-signal! worker)
                     (mark-signalled! worker)
                     (throw (ex-info "wake failed" {})))]
@@ -84,8 +144,9 @@
         attempts_ (atom 0)
         logs_ (atom [])
         worker (worker (fn [op _] (swap! handled_ conj op)) 8 (Object.))]
-    (with-redefs [h2o/mt-wakeup
-                  (fn [_]
+    (.set ^AtomicBoolean (:sleep-armed?_ worker) true)
+    (with-redefs [notifier/request!
+                  (fn [_ _]
                     (if (<= (swap! attempts_ inc) 2)
                       (throw (ex-info "wake failed" {}))
                       nil))
@@ -111,10 +172,11 @@
   (let [wakeups_ (atom 0)
         worker (worker (fn [_ _]) 1 (Object.))]
     (.offer ^ArrayBlockingQueue (:mailbox worker) [:already-full])
-    (with-redefs [h2o/mt-wakeup (fn [_] (swap! wakeups_ inc))]
+    (with-redefs [notifier/request! (fn [_ _] (swap! wakeups_ inc))]
       (is (false? (p/send-msg worker [:full])))
       (is (= 0 @wakeups_))
       (.set ^AtomicReference (:wakeup-receiver_ worker) nil)
+      (.set ^AtomicBoolean (:sleep-armed?_ worker) false)
       (is (true? (p/send-msg worker evloop/stop-msg)))
       (is (false? (p/send-msg worker [:after-stop])))
       (is (= 0 @wakeups_)))))

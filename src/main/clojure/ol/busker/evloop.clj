@@ -2,7 +2,7 @@
   (:require
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.internal.protocols :as p]
-   [ol.busker.native :as h2o]
+   [ol.busker.wake-notifier :as notifier]
    [taoensso.trove :as trove])
   (:import
    [java.util HashMap]
@@ -25,6 +25,10 @@
             ^AtomicBoolean stop-requested?_
             ^AtomicInteger admissions_
             ^AtomicLong mailbox-signal_
+            ^AtomicLong wake-generation_
+            ^AtomicBoolean sleep-armed?_
+            wake-notifier
+            wake-endpoint
             mailbox
             evloop
             loop-fn
@@ -38,8 +42,9 @@
     (and (.get running?_) (.get accepting?_)))
   (wake [_]
     (when (.get running?_)
-      (when-let [receiver (.get wakeup-receiver_)]
-        (h2o/mt-wakeup receiver))))
+      (.incrementAndGet wake-generation_)
+      (when (.get sleep-armed?_)
+        (notifier/request! wake-notifier wake-endpoint))))
   (send-msg [this msg]
     (if (= stop-msg msg)
       (request-stop! this)
@@ -186,18 +191,39 @@
               (.set ^AtomicBoolean (:running?_ worker) false))
             handled?))))))
 
+(defn- mailbox-empty?
+  [^Worker worker]
+  (.isEmpty ^ArrayBlockingQueue (:mailbox worker)))
+
 (defn- run-evloop-on-thread!
   [^Worker worker]
   (.set worker-context worker)
   (try
-    (let [running?_ ^AtomicBoolean (:running?_ worker)
+    (let [^AtomicBoolean running?_ (:running?_ worker)
+          ^AtomicLong wake-generation_ (:wake-generation_ worker)
+          ^AtomicBoolean sleep-armed?_ (:sleep-armed?_ worker)
           loop-fn (:loop-fn worker)]
-      (loop [state {}]
+      (loop [state {}
+             wake-seen (long 0)]
         (when (.get running?_)
-          (let [mailbox-work? (drain-mailbox! worker)]
+          (let [mailbox-work? (drain-mailbox! worker)
+                wake-requested (.get wake-generation_)]
             (when (.get running?_)
-              (recur (loop-fn worker
-                              (assoc state ::mailbox-work? mailbox-work?))))))))
+              (if (or mailbox-work? (not= wake-requested wake-seen))
+                (recur (loop-fn worker (assoc state ::mailbox-work? true))
+                       wake-requested)
+                (do
+                  (.set sleep-armed?_ true)
+                  (if (or (not (mailbox-empty? worker))
+                          (not= wake-requested (.get wake-generation_)))
+                    (do
+                      (.set sleep-armed?_ false)
+                      (recur state wake-seen))
+                    (let [next-state (try
+                                       (loop-fn worker (assoc state ::mailbox-work? false))
+                                       (finally
+                                         (.set sleep-armed?_ false)))]
+                      (recur next-state wake-requested))))))))))
     (catch InterruptedException _
       (.set ^AtomicBoolean (:running?_ worker) false))
     (catch Throwable error
@@ -221,14 +247,19 @@
    Options:
    - :thread-name-prefix - prefix for thread name (default 'h2o-evloop')
    - :callback-dispatch - worker-local native callback dispatcher
+   - :wake-notifier - generation notifier for native event-loop wakes
 
    Returns: worker"
 
-  [loop-fn message-handler wakeup-receiver & {:keys [callback-dispatch thread-name-prefix]
+  [loop-fn message-handler wakeup-receiver & {:keys [callback-dispatch wake-notifier thread-name-prefix]
                                               :or {thread-name-prefix "h2o-evloop"}}]
   (when-not callback-dispatch
     (throw (ex-info "Worker requires a callback dispatcher" {})))
+  (when-not wake-notifier
+    (throw (ex-info "Worker requires a wake notifier" {})))
   (let [id (swap! next-id_ inc)
+        receiver_ (AtomicReference. wakeup-receiver)
+        wake-endpoint (notifier/endpoint receiver_)
         w (map->Worker {:id id
                         :thread nil
                         :callback-dispatch callback-dispatch
@@ -238,11 +269,15 @@
                         :stop-requested?_ (AtomicBoolean. false)
                         :admissions_ (AtomicInteger.)
                         :mailbox-signal_ (AtomicLong.)
+                        :wake-generation_ (AtomicLong.)
+                        :sleep-armed?_ (AtomicBoolean. false)
+                        :wake-notifier wake-notifier
+                        :wake-endpoint wake-endpoint
                         :mailbox (ArrayBlockingQueue. 256)
                         :evloop nil
                         :loop-fn loop-fn
                         :message-handler message-handler
-                        :wakeup-receiver_ (AtomicReference. wakeup-receiver)})
+                        :wakeup-receiver_ receiver_})
         t (Thread. #(run-evloop-on-thread! (assoc w :thread (Thread/currentThread)))
                    (format "%s-%d" thread-name-prefix id))
         w (assoc w :thread t)]

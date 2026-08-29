@@ -16,6 +16,7 @@
    [ol.busker.native.socket :as socket]
    [ol.busker.request :as request]
    [ol.busker.tickets :as tickets]
+   [ol.busker.wake-notifier :as wake-notifier]
    [ol.clave.certificate :as clave-certificate]
    [taoensso.trove :as trove])
   (:import
@@ -761,6 +762,10 @@
            ::wakeup-receivers wakeup-receivers
            ::on-close-callback on-close-callback)))
 
+(defn- init-wake-notifier-state
+  [{::keys [n-workers] :as state}]
+  (assoc state ::wake-notifier (wake-notifier/start! n-workers)))
+
 (defn- init-tls-http3-state
   [{::keys [generation-id listener-runtimes config config-ptr n-workers loops contexts
             tls-lookup-callback listener-claims memory-ticket-service]
@@ -886,7 +891,7 @@
 
 (defn- init-worker-state
   [{::keys [n-workers loops contexts listener-runtimes http3-worker-contexts
-            max-connections shutting-down? message-handler wakeup-receivers arena
+            max-connections shutting-down? message-handler wakeup-receivers wake-notifier arena
             stop-accepting-remaining_ stopped-accepting_ active-connection-count_]
     :as state}]
   (let [workers
@@ -916,7 +921,8 @@
                               ::stopped-accepting_ stopped-accepting_}))
               message-handler
               (nth wakeup-receivers thread-idx)
-              :callback-dispatch callback-dispatch))))]
+              :callback-dispatch callback-dispatch
+              :wake-notifier wake-notifier))))]
     (assoc state ::workers workers)))
 
 (defn- finalize-generation-state
@@ -978,6 +984,9 @@
                  (println "Virtual thread request executor pool did not shutdown cleanly"))))
            (when (seq (::workers generation))
              (evloop/broadcast-wake! (::workers generation)))
+           (when-let [notifier (::wake-notifier generation)]
+             (when-not (wake-notifier/stop-and-join! notifier)
+               (throw (ex-info "Wake notifier did not stop" {}))))
            (doseq [[worker wr] (map vector (::workers generation) (::wakeup-receivers generation))]
              (when (and wr (not (mem/null? wr)))
                (h2o/mt-destroy-wakeup-receiver wr))
@@ -1056,6 +1065,7 @@
          (cond-> (-> state
                      init-tls-lookup-state
                      init-core-state
+                     init-wake-notifier-state
                      init-listener-state
                      init-tls-http3-state
                      init-worker-state
