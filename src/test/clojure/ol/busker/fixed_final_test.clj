@@ -62,39 +62,69 @@
   (is (some? (command (byte-array 3) 3)))
   (is (thrown? clojure.lang.ExceptionInfo
                (command (byte-array 4) 3))))
-(deftest worker-stages-and-releases-fixed-final-source
-  (let [worker (Object.)
+(deftest worker-reuses-and-explicitly-releases-fixed-final-scratch
+  (let [scratch_ (AtomicReference.)
+        worker {:fixed-final-scratch_ scratch_}
         req {:worker worker
              :req-ctx-ptr :request-context
              :config {:output-buffer-size 3}}
-        sent_ (atom nil)
+        sent_ (atom [])
         staging-calls_ (atom 0)
-        command (command (byte-array [65 66 67]))]
+        first-command (command (byte-array [65 66 67]))
+        second-command (command (byte-array [88 89]))]
     (.set evloop/worker-context worker)
     (try
+      (is (nil? (.get scratch_)))
       (with-redefs [fixed-final/header-staging-bytes (fn [_]
                                                        (swap! staging-calls_ inc)
                                                        0)
                     h2o/send-fixed-final
                     (fn [_ status headers headers-len content-length compress-hint body body-len]
-                      (reset! sent_ {:status status
-                                     :headers (serialized-headers headers headers-len)
-                                     :content-length content-length
-                                     :compress-hint compress-hint
-                                     :body (vec (mem/read-bytes body body-len))
-                                     :body-segment body}))]
-        (fixed-final/execute! req command))
+                      (swap! sent_ conj {:status status
+                                         :headers (serialized-headers headers headers-len)
+                                         :content-length content-length
+                                         :compress-hint compress-hint
+                                         :body (vec (mem/read-bytes body (long body-len)))
+                                         :body-segment body}))]
+        (fixed-final/execute! req first-command)
+        (fixed-final/execute! req second-command))
       (is (zero? @staging-calls_))
-      (is (= {:status 200
-              :headers [["content-type" "text/plain"]]
-              :content-length 3
-              :compress-hint 2
-              :body [65 66 67]}
-             (dissoc @sent_ :body-segment)))
+      (is (= [{:status 200
+               :headers [["content-type" "text/plain"]]
+               :content-length 3
+               :compress-hint 2
+               :body [65 66 67]}
+              {:status 200
+               :headers [["content-type" "text/plain"]]
+               :content-length 2
+               :compress-hint 2
+               :body [88 89]}]
+             (mapv #(dissoc % :body-segment) @sent_)))
+      (is (= (mapv #(.address ^MemorySegment (:body-segment %)) @sent_)
+             (repeat 2 (.address ^MemorySegment (:body-segment (first @sent_))))))
+      (is (= [88 89]
+             (vec (mem/read-bytes (:body-segment (first @sent_)) 2))))
+      (is (= (+ fixed-final/max-header-staging-bytes 3)
+             (.-capacity ^ol.busker.fixed_final.FixedFinalScratch (.get scratch_))))
+      (fixed-final/close-worker-scratch! worker)
+      (is (nil? (.get scratch_)))
       (is (thrown? IllegalStateException
-                   (mem/read-bytes (:body-segment @sent_) 3)))
+                   (mem/read-bytes (:body-segment (first @sent_)) 2)))
       (finally
+        (fixed-final/close-worker-scratch! worker)
         (.remove evloop/worker-context)))))
+
+(deftest workers-use-separate-fixed-final-scratch
+  (let [first-worker {:fixed-final-scratch_ (AtomicReference.)}
+        second-worker {:fixed-final-scratch_ (AtomicReference.)}]
+    (try
+      (let [first-segment (#'fixed-final/worker-scratch-segment first-worker 8)
+            second-segment (#'fixed-final/worker-scratch-segment second-worker 8)]
+        (is (not= (.address ^MemorySegment first-segment)
+                  (.address ^MemorySegment second-segment))))
+      (finally
+        (fixed-final/close-worker-scratch! first-worker)
+        (fixed-final/close-worker-scratch! second-worker)))))
 
 (deftest worker-reasserts-output-buffer-size-before-native-send
   (let [worker (Object.)

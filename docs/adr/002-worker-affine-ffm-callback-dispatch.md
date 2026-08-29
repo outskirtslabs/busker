@@ -28,6 +28,8 @@ H2O request-pool cleanup is the only event that retires a dispatch entry. Respon
 
 Every queued native request operation carries the dispatch identity and revalidates the live entry on the event-loop worker immediately before its downcall. A check before enqueue is not sufficient because cleanup can run before mailbox delivery.
 
+Each event-loop worker has one lazily allocated, fixed-capacity native scratch region for complete fixed responses. The worker creates its confined arena on the first fixed send, reuses descriptor, header-text, and body slices only after the synchronous shim call returns, and closes the arena in the worker loop's `finally` block. The capacity is `max-header-staging-bytes + max(1, output-buffer-size)`. Workers that send no fixed response allocate no scratch.
+
 Application handlers, middleware, and emitter close callbacks remain on virtual threads. Callback dispatch performs only identity checks, worker-local state changes, native-byte copying required before return, and existing flow-control work. It introduces no lock, semaphore, future wait, executor handoff, or application callback on an event-loop thread.
 
 Request-body queue capacity, response byte limits, one-send-in-flight behavior, native credit, and cleanup behavior remain unchanged.
@@ -67,6 +69,8 @@ Any supported protocol path that violates the worker-thread or final-cleanup pre
 ## Consequences
 
 A runtime generation creates three stubs per event-loop worker rather than three per request. This adds negligible startup work proportional to worker count and removes the verified request-path cost.
+
+A worker that sends fixed responses retains one bounded native segment until that worker exits. This removes native allocation and arena close from each fixed send while preserving an explicit release thread and time.
 
 The callback function pointer directly selects one worker module. Scalar identity avoids request-ID conversion, native-address routing, Java native-context reads, and concurrent global lookup.
 

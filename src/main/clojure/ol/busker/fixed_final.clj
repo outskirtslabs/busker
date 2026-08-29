@@ -3,8 +3,9 @@
    [coffi.mem :as mem]
    [ol.busker.native :as h2o])
   (:import
-   [java.lang.foreign MemorySegment]
-   [java.nio.charset StandardCharsets]))
+   [java.lang.foreign Arena MemorySegment]
+   [java.nio.charset StandardCharsets]
+   [java.util.concurrent.atomic AtomicReference]))
 
 (set! *warn-on-reflection* true)
 
@@ -29,6 +30,7 @@
                               ^long compress-hint
                               ^bytes body])
 
+(deftype FixedFinalScratch [^Arena arena ^MemorySegment segment ^long capacity])
 (defn command-module-id
   ^long [^FixedFinalCommand command]
   (.-module-id command))
@@ -87,37 +89,69 @@
   [module-id request-seq status headers header-bytes content-length compress-hint body-limit body]
   (command-data module-id request-seq status headers header-bytes content-length compress-hint body-limit body))
 
-(defn- headers-segment
-  [headers arena]
-  (let [header-count (long (count headers))
-        header-size (long clj-header-size)
-        name-offset (long clj-header-name-offset)
-        name-len-offset (long clj-header-name-len-offset)
-        value-offset (long clj-header-value-offset)
-        value-len-offset (long clj-header-value-len-offset)]
-    (if (zero? header-count)
-      (mem/as-segment 0)
-      (let [segment (mem/alloc (* header-count header-size) arena)]
-        (loop [idx (long 0)]
-          (when (< idx header-count)
-            (let [[name value] (nth headers idx)
-                  offset (* idx header-size)
-                  name-ptr ^MemorySegment (mem/serialize name ::mem/c-string arena)
-                  value-ptr ^MemorySegment (mem/serialize value ::mem/c-string arena)]
-              (mem/write-address segment (+ offset name-offset) name-ptr)
-              (mem/write-int segment (+ offset name-len-offset) (dec (.byteSize name-ptr)))
-              (mem/write-address segment (+ offset value-offset) value-ptr)
-              (mem/write-int segment (+ offset value-len-offset) (dec (.byteSize value-ptr)))
-              (recur (unchecked-inc idx)))))
-        segment))))
+(defn- worker-scratch-segment
+  [worker ^long body-limit]
+  (let [^AtomicReference scratch_ (:fixed-final-scratch_ worker)]
+    (when-not scratch_
+      (throw (ex-info "Worker has no fixed-final scratch state" {})))
+    (let [capacity (+ max-header-staging-bytes (max 1 body-limit))]
+      (if-let [^FixedFinalScratch scratch (.get scratch_)]
+        (do
+          (when-not (= capacity (.-capacity scratch))
+            (throw (ex-info "Fixed-final scratch capacity changed"
+                            {:expected (.-capacity scratch) :actual capacity})))
+          (.-segment scratch))
+        (let [arena (Arena/ofConfined)]
+          (try
+            (let [segment (mem/alloc capacity arena)
+                  scratch (FixedFinalScratch. arena segment capacity)]
+              (.set scratch_ scratch)
+              segment)
+            (catch Throwable error
+              (.close arena)
+              (throw error))))))))
 
-(defn- body-segment
-  [^bytes body arena]
-  (let [length (alength body)
-        segment (mem/alloc (max 1 length) arena)]
-    (when (pos? length)
-      (mem/write-bytes segment length body))
-    segment))
+(defn close-worker-scratch!
+  "Releases fixed-final scratch on its event-loop worker."
+  [worker]
+  (when-let [^AtomicReference scratch_ (:fixed-final-scratch_ worker)]
+    (when-let [^FixedFinalScratch scratch (.getAndSet scratch_ nil)]
+      (let [^Arena arena (.-arena scratch)]
+        (.close arena)))))
+
+(defn- stage-segments
+  [^MemorySegment segment headers ^long header-bytes ^bytes body]
+  (let [header-count (long (count headers))
+        descriptors-size (* header-count (long clj-header-size))
+        body-length (long (alength body))
+        headers-segment (if (zero? header-count)
+                          (mem/as-segment 0)
+                          (mem/slice segment 0 descriptors-size))]
+    (loop [idx (long 0)
+           cursor descriptors-size]
+      (when (< idx header-count)
+        (let [[^String name ^String value] (nth headers idx)
+              name-bytes (.getBytes name StandardCharsets/UTF_8)
+              name-length (long (alength name-bytes))
+              name-segment (mem/slice segment cursor (inc name-length))
+              value-offset (+ cursor name-length 1)
+              value-bytes (.getBytes value StandardCharsets/UTF_8)
+              value-length (long (alength value-bytes))
+              value-segment (mem/slice segment value-offset (inc value-length))
+              descriptor-offset (* idx (long clj-header-size))]
+          (mem/write-bytes name-segment name-length name-bytes)
+          (mem/write-byte name-segment name-length (byte 0))
+          (mem/write-bytes value-segment value-length value-bytes)
+          (mem/write-byte value-segment value-length (byte 0))
+          (mem/write-address headers-segment (+ descriptor-offset (long clj-header-name-offset)) name-segment)
+          (mem/write-int headers-segment (+ descriptor-offset (long clj-header-name-len-offset)) name-length)
+          (mem/write-address headers-segment (+ descriptor-offset (long clj-header-value-offset)) value-segment)
+          (mem/write-int headers-segment (+ descriptor-offset (long clj-header-value-len-offset)) value-length)
+          (recur (unchecked-inc idx) (+ value-offset value-length 1)))))
+    (let [body-segment (mem/slice segment header-bytes (max 1 body-length))]
+      (when (pos? body-length)
+        (mem/write-bytes body-segment body-length body))
+      [headers-segment body-segment])))
 
 (defn execute!
   "Stages `command` on its event-loop worker and sends it synchronously."
@@ -137,14 +171,14 @@
                 (> header-count max-header-pairs)
                 (> header-bytes max-header-staging-bytes))
         (throw (ex-info "Fixed final command exceeded its staging budget" {})))
-      (with-open [arena (mem/confined-arena)]
-        (let [headers-segment (headers-segment headers arena)
-              body-segment (body-segment body arena)]
-          (h2o/send-fixed-final (:req-ctx-ptr req)
-                                (.-status command)
-                                headers-segment
-                                header-count
-                                (.-content-length command)
-                                (.-compress-hint command)
-                                body-segment
-                                body-length))))))
+      (let [scratch-segment (worker-scratch-segment (:worker req) body-limit)
+            [headers-segment body-segment]
+            (stage-segments scratch-segment headers header-bytes body)]
+        (h2o/send-fixed-final (:req-ctx-ptr req)
+                              (.-status command)
+                              headers-segment
+                              header-count
+                              (.-content-length command)
+                              (.-compress-hint command)
+                              body-segment
+                              body-length)))))

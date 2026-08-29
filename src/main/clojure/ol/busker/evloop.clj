@@ -1,6 +1,7 @@
 (ns ^:no-doc ol.busker.evloop
   (:require
    [ol.busker.callback-dispatch :as callback-dispatch]
+   [ol.busker.fixed-final :as fixed-final]
    [ol.busker.internal.protocols :as p]
    [ol.busker.wake-notifier :as notifier]
    [taoensso.trove :as trove])
@@ -38,6 +39,7 @@
             loop-fn
             message-handler
             ^AtomicReference wakeup-receiver_
+            ^AtomicReference fixed-final-scratch_
             callback-dispatch
             ^HashMap requests
             args]
@@ -282,7 +284,10 @@
       (println "[evloop] worker crashed:" (.getMessage error))
       (println error))
     (finally
-      (.remove worker-context))))
+      (try
+        (fixed-final/close-worker-scratch! worker)
+        (finally
+          (.remove worker-context))))))
 
 ;; ------------------------------
 ;; Public API
@@ -333,7 +338,8 @@
                         :evloop nil
                         :loop-fn loop-fn
                         :message-handler message-handler
-                        :wakeup-receiver_ receiver_})
+                        :wakeup-receiver_ receiver_
+                        :fixed-final-scratch_ (AtomicReference.)})
         t (Thread. #(run-evloop-on-thread! (assoc w :thread (Thread/currentThread)))
                    (format "%s-%d" thread-name-prefix id))
         w (assoc w :thread t)]

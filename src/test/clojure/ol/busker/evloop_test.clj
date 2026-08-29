@@ -2,6 +2,7 @@
   (:require
    [clojure.test :refer [deftest is]]
    [ol.busker.evloop :as evloop]
+   [ol.busker.fixed-final :as fixed-final]
    [ol.busker.internal.protocols :as p]
    [ol.busker.wake-notifier :as notifier])
   (:import
@@ -30,6 +31,7 @@
       :mailbox (ArrayBlockingQueue. capacity)
       :message-handler handler
       :wakeup-receiver_ (AtomicReference. receiver)
+      :fixed-final-scratch_ (AtomicReference.)
       :requests (HashMap.)})))
 
 (defn- drain! [worker]
@@ -46,6 +48,25 @@
     (.offer ^ArrayBlockingQueue (:mailbox worker) [:response])
     (@#'evloop/run-evloop-on-thread! worker)
     (is (true? (::evloop/mailbox-work? @seen_)))))
+
+(deftest worker-exit-releases-fixed-scratch-on-platform-thread-without-eager-allocation
+  (let [closed_ (atom [])
+        worker (assoc (worker (fn [_ _]) 1 nil)
+                      :loop-fn
+                      (fn [worker state]
+                        (.set ^AtomicBoolean (:running?_ worker) false)
+                        state))]
+    (is (nil? (.get ^AtomicReference (:fixed-final-scratch_ worker))))
+    (with-redefs [fixed-final/close-worker-scratch!
+                  (fn [actual-worker]
+                    (swap! closed_ conj
+                           {:worker actual-worker
+                            :thread (Thread/currentThread)
+                            :virtual? (.isVirtual (Thread/currentThread))}))]
+      (@#'evloop/run-evloop-on-thread! worker))
+    (is (= 1 (count @closed_)))
+    (is (identical? worker (:worker (first @closed_))))
+    (is (false? (:virtual? (first @closed_))))))
 
 (deftest unarmed-worker-records-wake-without-notifier-test
   (let [requests_ (atom 0)
