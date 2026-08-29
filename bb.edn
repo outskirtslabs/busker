@@ -114,7 +114,11 @@
                   test
                   {:doc  "Run tests"
                    :depends [build:shim]
-                   :task (apply clojure "-M:dev:test:kaocha" *command-line-args*)}
+                   :task (apply clojure
+                                "-M:dev:test:kaocha"
+                                "--skip"
+                                "ol.busker.large-payload-test"
+                                *command-line-args*)}
 
                   test:large-payloads
                   {:doc  "Run large payload tests"
