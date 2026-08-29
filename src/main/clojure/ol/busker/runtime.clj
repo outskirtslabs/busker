@@ -6,9 +6,40 @@
    [ol.busker.generation :as generation]
    [ol.busker.listen :as listen]
    [ol.busker.wake-notifier :as wake-notifier]
-   [ol.busker.tickets :as tickets]))
+   [ol.busker.tickets :as tickets])
+  (:import
+   [java.util.concurrent Callable ExecutionException ExecutorService Executors Future
+    RejectedExecutionException ThreadFactory TimeUnit]
+   [java.util.concurrent.atomic AtomicReference]))
 
 (set! *warn-on-reflection* true)
+
+(defn- new-lifecycle-executor
+  []
+  (Executors/newSingleThreadExecutor
+   (reify ThreadFactory
+     (newThread [_ task]
+       (doto (Thread. task "busker-lifecycle")
+         (.setDaemon true))))))
+
+(defn- await-lifecycle
+  [^Future result]
+  (try
+    (.get result)
+    (catch InterruptedException e
+      (.interrupt (Thread/currentThread))
+      (throw e))
+    (catch ExecutionException e
+      (throw (.getCause e)))))
+
+(defn- call-on-lifecycle
+  [^ExecutorService executor f]
+  (await-lifecycle
+   (.submit executor
+            ^Callable
+            (reify Callable
+              (call [_]
+                (f))))))
 
 (defn- memory-session-tickets?
   [compiled-config]
@@ -296,9 +327,8 @@
           nil))))
   nil)
 
-(defn start!
-  "Start a new Busker server from `user-config`."
-  [user-config]
+(defn- start-on-lifecycle!
+  [user-config lifecycle-executor]
   (let [listener-pool (listen/open-pool)
         wake-notifier (wake-notifier/start!)]
     (try
@@ -306,6 +336,8 @@
         (try
           (let [generation (update generation :instance generation/register-shared-ticket-manager!)]
             {:busker/lifecycle-gate (Object.)
+             :busker/lifecycle-executor lifecycle-executor
+             :busker/stop-result_ (AtomicReference.)
              :busker/wake-notifier wake-notifier
              :busker/state
              (atom {:phase :running
@@ -322,10 +354,20 @@
         (wake-notifier/stop-and-join! wake-notifier)
         (throw t)))))
 
-(defn reload!
+(defn start!
+  "Start a new Busker server from `user-config`."
+  [user-config]
+  (let [executor (new-lifecycle-executor)]
+    (try
+      (call-on-lifecycle executor #(start-on-lifecycle! user-config executor))
+      (catch Throwable t
+        (.shutdownNow ^ExecutorService executor)
+        (throw t)))))
+
+(defn- reload-on-lifecycle!
   "Compile and activate a new runtime snapshot for `server-handle`."
   ([server-handle user-config]
-   (reload! server-handle user-config {}))
+   (reload-on-lifecycle! server-handle user-config {}))
   ([{:keys [busker/lifecycle-gate busker/state busker/wake-notifier] :as server-handle}
     user-config opts]
    (locking lifecycle-gate
@@ -373,8 +415,19 @@
                                          :stage (or (:stage data) :activation)}
                                         data)
                                  t)))))))))))
+(defn reload!
+  "Compile and activate a new runtime snapshot for `server-handle`."
+  ([server-handle user-config]
+   (reload! server-handle user-config {}))
+  ([{:keys [busker/lifecycle-executor] :as server-handle} user-config opts]
+   (try
+     (call-on-lifecycle lifecycle-executor
+                        #(reload-on-lifecycle! server-handle user-config opts))
+     (catch RejectedExecutionException _
+       (throw (ex-info "Server is stopping"
+                       {:reason :server-stopping}))))))
 
-(defn stop!
+(defn- stop-on-lifecycle!
   "Synchronously stop `server-handle`, waiting for active and draining
   generations to quiesce."
   [{:keys [busker/lifecycle-gate busker/state busker/wake-notifier] :as server-handle}]
@@ -430,6 +483,38 @@
                      :active                nil
                      :draining              []}))))))
   nil)
+
+(defn stop!
+  "Synchronously stop `server-handle`, waiting for active and draining
+   generations to quiesce."
+  [{:keys [busker/lifecycle-executor busker/stop-result_] :as server-handle}]
+  (when server-handle
+    (let [candidate (promise)
+          leader? (.compareAndSet ^AtomicReference stop-result_ nil candidate)
+          result_ ^clojure.lang.IDeref (.get ^AtomicReference stop-result_)]
+      (when leader?
+        (try
+          (.execute
+           ^ExecutorService lifecycle-executor
+           ^Runnable
+           (reify Runnable
+             (run [_]
+               (let [outcome (try
+                               {:value (stop-on-lifecycle! server-handle)}
+                               (catch Throwable t
+                                 {:error t}))]
+                 (.shutdown ^ExecutorService lifecycle-executor)
+                 (deliver candidate outcome)))))
+          (catch Throwable t
+            (deliver candidate {:error t})
+            (.shutdownNow ^ExecutorService lifecycle-executor))))
+      (let [{:keys [value error]} @result_]
+        (when-not (.awaitTermination ^ExecutorService lifecycle-executor
+                                     10 TimeUnit/SECONDS)
+          (throw (ex-info "Lifecycle executor did not stop" {})))
+        (when error
+          (throw error))
+        value))))
 
 (defn state
   "Return pure data describing the current runtime state."

@@ -135,7 +135,8 @@
                               (future :ok)))}
       (fn []
         (is (= :activated
-               (runtime/reload! server ::next-config {:force? true})))
+               (@#'ol.busker.runtime/reload-on-lifecycle!
+                server ::next-config {:force? true})))
         (is (= [:candidate-built :begin-drain] @events))
         (is (= candidate (:active @state-atom)))
         (is (= [1] (mapv :generation-id (:draining @state-atom))))))))

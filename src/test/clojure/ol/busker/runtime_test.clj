@@ -8,6 +8,25 @@
    [ol.busker.runtime :as runtime]
    [ol.busker.test-utils :as util]))
 
+(defn- invoke-on-virtual-thread
+  [f]
+  (let [result_ (promise)]
+    (Thread/startVirtualThread
+     #(try
+        (deliver result_ {:value (f)})
+        (catch Throwable t
+          (deliver result_ {:error t}))))
+    (let [{:keys [value error]} @result_]
+      (when error
+        (throw error))
+      value)))
+(defn- lifecycle-thread-count
+  []
+  (->> (.keySet (Thread/getAllStackTraces))
+       (filter #(= "busker-lifecycle" (.getName ^Thread %)))
+       (filter #(.isAlive ^Thread %))
+       count))
+
 (deftest runtime-starts-and-serves-one-generation-test
   (let [port (util/free-port)
         server (runtime/start!
@@ -44,9 +63,13 @@
           (is (deref entered 5000 false)
               "The request should enter the handler before stop begins")
           (let [stop-fut (future
-                           (runtime/stop! server))]
+                           (runtime/stop! server))
+                second-stop-fut (future
+                                  (runtime/stop! server))]
             (is (= ::timeout (deref stop-fut 200 ::timeout))
                 "stop! should wait for the in-flight request to finish")
+            (is (= ::timeout (deref second-stop-fut 200 ::timeout))
+                "concurrent stop! should wait for the same in-flight request")
             (deliver release true)
             (let [result (deref request-fut 10000 nil)]
               (is (some? result))
@@ -56,7 +79,9 @@
                          (:err result)))
                 (is (= "released" (:out result)))))
             (is (not= ::timeout (deref stop-fut 10000 ::timeout))
-                "stop! should complete after the request finishes"))))
+                "stop! should complete after the request finishes")
+            (is (not= ::timeout (deref second-stop-fut 10000 ::timeout))
+                "concurrent stop! should complete with the same result"))))
       (finally
         (when (= :running (:phase (runtime/state server)))
           (runtime/stop! server))))
@@ -90,6 +115,49 @@
                  (wake-notifier/endpoint (java.util.concurrent.atomic.AtomicReference.
                                           (Object.))))))))
 
+(deftest virtual-thread-lifecycle-calls-run-generation-work-on-platform-threads-test
+  (let [port (util/free-port)
+        user-config {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                          :tls false}}
+                     :dispatch [{:handler (fn [_]
+                                            {:status 200
+                                             :body "lifecycle-platform"})}]}
+        calls_ (atom [])
+        start-generation generation/start!
+        begin-stop generation/begin-stop!
+        record! (fn [operation]
+                  (swap! calls_ conj {:operation operation
+                                      :virtual? (.isVirtual (Thread/currentThread))}))]
+    (with-redefs [generation/start!
+                  (fn [& args]
+                    (record! :start)
+                    (apply start-generation args))
+                  generation/begin-stop!
+                  (fn [instance]
+                    (record! :begin-stop)
+                    (begin-stop instance))]
+      (let [server (invoke-on-virtual-thread #(runtime/start! user-config))]
+        (try
+          (is (= :activated
+                 (invoke-on-virtual-thread
+                  #(runtime/reload! server user-config {:force? true}))))
+          (finally
+            (invoke-on-virtual-thread #(runtime/stop! server)))))
+      (is (seq @calls_))
+      (is (every? (comp false? :virtual?) @calls_)))))
+(deftest repeated-stop-reuses-lifecycle-result-test
+  (let [port (util/free-port)
+        server (runtime/start!
+                {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                      :tls false}}
+                 :dispatch [{:handler (fn [_]
+                                        {:status 200
+                                         :body "stop-twice"})}]})]
+    (is (nil? (invoke-on-virtual-thread #(runtime/stop! server))))
+    (is (nil? (invoke-on-virtual-thread #(runtime/stop! server))))
+    (is (.isShutdown ^java.util.concurrent.ExecutorService
+         (:busker/lifecycle-executor server)))))
+
 (deftest cert-automation-reuse-and-replacement-test
   (let [started (atom [])
         current-runtime {:managed-plan {:subject-names ["a.example"]
@@ -121,7 +189,8 @@
 
 (deftest runtime-start-fails-when-automation-startup-fails-test
   (let [stopped?_ (atom false)
-        test-notifier (Object.)]
+        test-notifier (Object.)
+        lifecycle-threads-before (lifecycle-thread-count)]
     (with-redefs [wake-notifier/start! (constantly test-notifier)
                   wake-notifier/stop-and-join!
                   (fn [notifier]
@@ -147,7 +216,13 @@
           (catch clojure.lang.ExceptionInfo e
             (is (= {:stage :automation-startup}
                    (ex-data e)))))
-        (is (true? @stopped?_))))))
+        (is (true? @stopped?_))
+        (is (loop [remaining 100]
+              (if (<= (lifecycle-thread-count) lifecycle-threads-before)
+                true
+                (when (pos? remaining)
+                  (Thread/sleep 10)
+                  (recur (dec remaining))))))))))
 
 (deftest candidate-plan-skips-unchanged-snapshots-unless-forced-test
   (let [port (util/free-port)
