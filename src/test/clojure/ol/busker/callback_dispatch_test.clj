@@ -13,6 +13,7 @@
           first-identity (callback-dispatch/allocate-identity! dispatch)
           second-identity (callback-dispatch/allocate-identity! dispatch)]
       (is (= pointers (callback-dispatch/callback-pointers dispatch)))
+      (is (identical? pointers (callback-dispatch/callback-pointers dispatch)))
       (is (= #{:body :proceed :stop} (set (keys pointers))))
       (is (every? some? (vals pointers)))
       (is (= (:module-id dispatch) (first first-identity) (first second-identity)))

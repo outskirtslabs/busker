@@ -63,10 +63,14 @@
              :req-ctx-ptr :request-context
              :config {:output-buffer-size 3}}
         sent_ (atom nil)
+        staging-calls_ (atom 0)
         command (command (byte-array [65 66 67]))]
     (.set evloop/worker-context worker)
     (try
-      (with-redefs [h2o/send-fixed-final
+      (with-redefs [fixed-final/header-staging-bytes (fn [_]
+                                                       (swap! staging-calls_ inc)
+                                                       0)
+                    h2o/send-fixed-final
                     (fn [_ status headers headers-len content-length compress-hint body body-len]
                       (reset! sent_ {:status status
                                      :headers (serialized-headers headers headers-len)
@@ -75,6 +79,7 @@
                                      :body (vec (mem/read-bytes body body-len))
                                      :body-segment body}))]
         (fixed-final/execute! req command))
+      (is (zero? @staging-calls_))
       (is (= {:status 200
               :headers [["content-type" "text/plain"]]
               :content-length 3

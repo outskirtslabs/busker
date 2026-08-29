@@ -107,8 +107,7 @@
     (when (or (not (nat-int? body-limit))
               (> (alength ^bytes body) body-limit)
               (> (count headers) max-header-pairs)
-              (> header-bytes max-header-staging-bytes)
-              (not= header-bytes (header-staging-bytes headers)))
+              (> header-bytes max-header-staging-bytes))
       (throw (ex-info "Fixed final command exceeded its staging budget" {})))
     (with-open [arena (mem/confined-arena)]
       (let [headers-segment (headers-segment headers arena)

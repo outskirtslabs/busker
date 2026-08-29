@@ -279,6 +279,19 @@
                                 true))))
     (is (= 1 @call-count_))))
 
+(deftest fixed-final-expands-headers-eagerly-test
+  (let [command (fixed-command 3
+                               {:status 200
+                                :headers (array-map "Content-Length" "3"
+                                                    "content-length" "99"
+                                                    "X-Repeat" [1 "two"])
+                                :body "cat"}
+                               true)]
+    (is (= 3 (:content-length command)))
+    (is (vector? (:headers command)))
+    (is (= [["X-Repeat" "1"] ["X-Repeat" "two"]]
+           (:headers command)))))
+
 (deftest fixed-final-falls-back-for-ineligible-final-responses
   (doseq [response [{:status 204 :body "x"}
                     {:status 304 :body "x"}

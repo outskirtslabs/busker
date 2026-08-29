@@ -43,8 +43,12 @@
 (defn get-charset
   "Gets the character encoding of a Ring response."
   [resp]
-  (some-> (get-header resp "Content-Type")
-          parsing/find-content-type-charset))
+  (let [headers (:headers resp)
+        content-type (if (contains? headers "content-type")
+                       (get headers "content-type")
+                       (get-header resp "Content-Type"))]
+    (some-> content-type
+            parsing/find-content-type-charset)))
 
 (defn header
   "Returns an updated Ring response with the specified header added."

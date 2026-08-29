@@ -200,10 +200,14 @@
                        (h2o/config-register-host config-ptr
                                                  (h2o/str->iovec "default" arena2)
                                                  65535))
-        on-request-cb (partial request/on-request executor
-                               (close-callback-dispatcher close-callback-executor)
-                               config
-                               ring-handler)
+        close-callback-dispatch (close-callback-dispatcher close-callback-executor)
+        on-request-cb (fn [req-ctx-ptr req-ctx]
+                        (request/on-request executor
+                                            close-callback-dispatch
+                                            config
+                                            ring-handler
+                                            req-ctx-ptr
+                                            req-ctx))
         on-request-cleanup-cb request/on-request-cleanup
         handler (h2o/create-handler hostconf-ptr
                                     on-request-cb

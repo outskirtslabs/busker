@@ -239,11 +239,36 @@
     (catch IllegalArgumentException _
       false)))
 
+(def ^:private missing-content-length (Object.))
+
+(defn- append-fixed-header
+  [headers name value]
+  (let [name (str name)]
+    (if (sequential? value)
+      (reduce (fn [result item]
+                (conj result [name (str item)]))
+              headers
+              value)
+      (conj headers [name (str value)]))))
+
+(defn- fixed-final-header-data
+  [headers]
+  (reduce-kv
+   (fn [[result content-length] name value]
+     (if (.equalsIgnoreCase ^String (str name) "content-length")
+       [result (if (identical? missing-content-length content-length)
+                 value
+                 content-length)]
+       [(append-fixed-header result name value) content-length]))
+   [[] missing-content-length]
+   (or headers {})))
+
 (defn- fixed-final-command
   [^Request req response final?]
   (let [status (:status response)
         body (:body response)
         output-buffer-size (get-in req [:config :output-buffer-size])
+        [headers content-length-value] (fixed-final-header-data (:headers response))
         charset (hdr.util/get-charset response)]
     (when (and final?
                (some? status)
@@ -254,17 +279,14 @@
                (or (not (string? body))
                    (nil? charset)
                    (utf8-charset? charset)))
-      (let [headers (->> (dissoc-header (:headers response) "content-length")
-                         expand-header-values
-                         (mapv (fn [[name value]] [(str name) (str value)])))
-            header-staging-bytes (fixed-final/header-staging-bytes headers)]
+      (let [header-staging-bytes (fixed-final/header-staging-bytes headers)]
         (when (and (<= (count headers) fixed-final/max-header-pairs)
                    (<= header-staging-bytes fixed-final/max-header-staging-bytes))
           (let [body-bytes (fixed-final-body-bytes body)]
             (when (<= (alength ^bytes body-bytes) output-buffer-size)
-              (let [content-length (or (some-> (hdr.util/get-header response "content-length")
-                                               coerce-content-length)
-                                       (alength ^bytes body-bytes))
+              (let [content-length (if (identical? missing-content-length content-length-value)
+                                     (alength ^bytes body-bytes)
+                                     (coerce-content-length content-length-value))
                     compress-hint (get-compress-hint response)
                     compress-hint (if (and (= h2o/H2O_COMPRESS_HINT_ENABLE compress-hint)
                                            (< (alength ^bytes body-bytes)

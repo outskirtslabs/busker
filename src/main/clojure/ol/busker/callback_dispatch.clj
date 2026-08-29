@@ -28,7 +28,8 @@
             stop-callback
             body-callback-ptr
             proceed-callback-ptr
-            stop-callback-ptr])
+            stop-callback-ptr
+            callback-pointers])
 
 (defn- increment!
   [dispatch counter]
@@ -154,7 +155,7 @@
                                      thread_
                                      entries
                                      counters
-                                     nil nil nil nil nil nil)
+                                     nil nil nil nil nil nil nil)
         body-callback (partial body-callback! dispatch)
         proceed-callback (partial proceed-callback! dispatch)
         stop-callback (partial stop-callback! dispatch)
@@ -170,14 +171,18 @@
         stop-callback-ptr
         (mem/serialize stop-callback
                        [::ffi/fn [::mem/long ::mem/long ::mem/int] ::mem/void :raw-fn? true]
-                       arena)]
+                       arena)
+        callback-pointers {:body body-callback-ptr
+                           :proceed proceed-callback-ptr
+                           :stop stop-callback-ptr}]
     (assoc dispatch
            :body-callback body-callback
            :proceed-callback proceed-callback
            :stop-callback stop-callback
            :body-callback-ptr body-callback-ptr
            :proceed-callback-ptr proceed-callback-ptr
-           :stop-callback-ptr stop-callback-ptr)))
+           :stop-callback-ptr stop-callback-ptr
+           :callback-pointers callback-pointers)))
 
 (defn bind-thread!
   "Binds `dispatch` to its event-loop `thread`."
@@ -197,9 +202,7 @@
 (defn callback-pointers
   "Returns the stable callback pointers for `dispatch`."
   [dispatch]
-  {:body    (:body-callback-ptr dispatch)
-   :proceed (:proceed-callback-ptr dispatch)
-   :stop    (:stop-callback-ptr dispatch)})
+  (:callback-pointers dispatch))
 
 (defn allocate-identity!
   "Allocates a nonrepeating dispatch identity for the current worker."
