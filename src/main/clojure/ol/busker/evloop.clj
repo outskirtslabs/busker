@@ -7,11 +7,12 @@
   (:import
    [java.util HashMap]
    [java.util.concurrent ArrayBlockingQueue]
+   [java.util.concurrent.locks Condition ReentrantLock]
    [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicLong AtomicReference]))
 
 (set! *warn-on-reflection* true)
 
-(declare admit-message! request-stop! stop-msg)
+(declare admit-message! request-stop! required-message! stop-msg)
 
 ;; ------------------------------
 ;; Worker control-plane primitives
@@ -24,6 +25,9 @@
             ^AtomicBoolean accepting?_
             ^AtomicBoolean stop-requested?_
             ^AtomicInteger admissions_
+            ^AtomicInteger mailbox-waiters_
+            ^ReentrantLock mailbox-lock
+            ^Condition mailbox-space
             ^AtomicLong mailbox-signal_
             ^AtomicLong wake-generation_
             ^AtomicBoolean sleep-armed?_
@@ -49,6 +53,10 @@
     (if (= stop-msg msg)
       (request-stop! this)
       (admit-message! this msg)))
+  (send-required-msg [this msg]
+    (if (= stop-msg msg)
+      (request-stop! this)
+      (required-message! this msg)))
   (count-msgs [_] (.size ^ArrayBlockingQueue mailbox))
   (add-req [_ req-id r]
     (.put requests req-id r))
@@ -115,6 +123,32 @@
                       (log-mailbox-wakeup-failure! worker msg first-error
                                                    second-error reset?))))))))))))
 
+(defn- signal-mailbox-space!
+  [^Worker worker]
+  (when (pos? (.get ^AtomicInteger (:mailbox-waiters_ worker)))
+    (let [^ReentrantLock lock (:mailbox-lock worker)]
+      (.lock lock)
+      (try
+        (.signalAll ^Condition (:mailbox-space worker))
+        (finally
+          (.unlock lock))))))
+
+(defn- await-mailbox-space!
+  [^Worker worker]
+  (let [^AtomicInteger waiters_ (:mailbox-waiters_ worker)
+        ^ReentrantLock lock (:mailbox-lock worker)
+        ^Condition space (:mailbox-space worker)]
+    (.incrementAndGet waiters_)
+    (.lock lock)
+    (try
+      (while (and (.get ^AtomicBoolean (:running?_ worker))
+                  (.get ^AtomicBoolean (:accepting?_ worker))
+                  (zero? (.remainingCapacity ^ArrayBlockingQueue (:mailbox worker))))
+        (.await space))
+      (finally
+        (.unlock lock)
+        (.decrementAndGet waiters_)))))
+
 (defn- admit-message!
   [^Worker worker msg]
   (if (and (.get ^AtomicBoolean (:running?_ worker))
@@ -127,21 +161,37 @@
                    (offer-mailbox! worker msg))
               (finally
                 (.decrementAndGet ^AtomicInteger (:admissions_ worker))))]
-        (when accepted?
-          (signal-mailbox! worker msg))
-        accepted?))
-    false))
+        (if accepted?
+          (do
+            (signal-mailbox! worker msg)
+            :accepted)
+          (if (and (.get ^AtomicBoolean (:running?_ worker))
+                   (.get ^AtomicBoolean (:accepting?_ worker)))
+            :overloaded
+            :closed))))
+    :closed))
+
+(defn- required-message!
+  [^Worker worker msg]
+  (loop []
+    (case (admit-message! worker msg)
+      :accepted :accepted
+      :closed :closed
+      :overloaded (do
+                    (await-mailbox-space! worker)
+                    (recur)))))
 
 (defn- request-stop!
   [^Worker worker]
   (if (.compareAndSet ^AtomicBoolean (:accepting?_ worker) true false)
     (do
+      (signal-mailbox-space! worker)
       (while (pos? (.get ^AtomicInteger (:admissions_ worker)))
         (Thread/onSpinWait))
       (.set ^AtomicBoolean (:stop-requested?_ worker) true)
       (p/wake worker)
-      true)
-    false))
+      :accepted)
+    :closed))
 
 (defn- clear-mailbox-signal!
   [^Worker worker]
@@ -189,6 +239,8 @@
           (do
             (when (.get ^AtomicBoolean (:stop-requested?_ worker))
               (.set ^AtomicBoolean (:running?_ worker) false))
+            (when handled?
+              (signal-mailbox-space! worker))
             handled?))))))
 
 (defn- mailbox-empty?
@@ -260,6 +312,7 @@
   (let [id (swap! next-id_ inc)
         receiver_ (AtomicReference. wakeup-receiver)
         wake-endpoint (notifier/endpoint receiver_)
+        mailbox-lock (ReentrantLock.)
         w (map->Worker {:id id
                         :thread nil
                         :callback-dispatch callback-dispatch
@@ -268,6 +321,9 @@
                         :accepting?_ (AtomicBoolean. true)
                         :stop-requested?_ (AtomicBoolean. false)
                         :admissions_ (AtomicInteger.)
+                        :mailbox-waiters_ (AtomicInteger.)
+                        :mailbox-lock mailbox-lock
+                        :mailbox-space (.newCondition mailbox-lock)
                         :mailbox-signal_ (AtomicLong.)
                         :wake-generation_ (AtomicLong.)
                         :sleep-armed?_ (AtomicBoolean. false)
@@ -306,8 +362,9 @@
    - workers: a seq of workers
    - msg: message to broadcast"
   [workers msg]
-  (doseq [^Worker w workers]
-    (p/send-msg w msg)))
+  (mapv (fn [^Worker worker]
+          (p/send-required-msg worker msg))
+        workers))
 
 (defn broadcast-wake!
   "Wake all workers.

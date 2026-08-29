@@ -151,7 +151,7 @@
                      #'response/schedule-fixed-final!
                      (fn [_ command]
                        (reset! scheduled_ command)
-                       true)}
+                       :accepted)}
       #(let [emitter (response/new-response-emitter
                       (fixed-final-request 3)
                       (fn [^Runnable task] (.run task)))]
@@ -168,8 +168,8 @@
                      (fn [_]
                        (swap! created_ inc)
                        writer)
-                     #'response/schedule-fixed-final! (constantly false)
-                     #'response/schedule-start-response! (fn [& _])}
+                     #'response/schedule-fixed-final! (constantly :overloaded)
+                     #'response/schedule-start-response! (constantly :accepted)}
       #(let [emitter (response/new-response-emitter
                       (fixed-final-request 3)
                       (fn [^Runnable task] (.run task)))]
@@ -270,6 +270,25 @@
     (is (= [:wake] @events_))
     (is (= 1 (.get drain-state_)))
     (is (some? (.get in-flight_)))))
+
+(deftest closed-required-response-drain-fails-without-stranding-active-state
+  (let [drain-state_ (AtomicInteger. 0)
+        stopped?_ (AtomicBoolean. false)
+        calls_ (atom [])
+        st {:req {:worker :worker
+                  :dispatch-module-id 7
+                  :dispatch-request-seq 11}
+            :drain-state_ drain-state_
+            :stopped?_ stopped?_}]
+    (with-redefs [pi/send-required-msg
+                  (fn [worker message]
+                    (swap! calls_ conj [worker (first message)])
+                    :closed)]
+      (is (thrown-with-msg? java.io.IOException #"Response worker closed"
+                            (response-queue/schedule-drain! st))))
+    (is (= [[:worker :h2o/sendvec]] @calls_))
+    (is (true? (.get stopped?_)))
+    (is (zero? (.get drain-state_)))))
 
 (deftest response-header-layout-preserved-test
   (let [[final-headers final-headers-len final-content-length]
@@ -406,14 +425,40 @@
         req (fixed-final-request 3)
         generic_ (atom nil)
         committed_ (atom nil)]
-    (with-redefs-fn {#'response/schedule-fixed-final! (constantly false)
-                     #'response/schedule-start-response! (fn [& args] (reset! generic_ args))}
+    (with-redefs-fn {#'response/schedule-fixed-final! (constantly :overloaded)
+                     #'response/schedule-start-response! (fn [& args]
+                                                           (reset! generic_ args)
+                                                           :accepted)}
       #(do
          (is (= "cat" (:body (#'response/commit-final! req writer committed_
                                                        {:status 200 :body "cat"}
                                                        true))))
          (is (some? @generic_))
          (is (false? (.get ^AtomicBoolean (:stopped?_ writer))))))))
+
+(deftest closed-fixed-final-admission-stops-writer-and-reports-no-commit
+  (let [writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))]
+    (with-redefs-fn {#'response/schedule-fixed-final! (constantly :closed)}
+      #(is (nil? (#'response/commit-final!
+                  (fixed-final-request 3) writer (atom nil)
+                  {:status 200 :body "cat"} true))))
+    (is (true? (.get ^AtomicBoolean (:stopped?_ writer))))))
+
+(deftest closed-generic-start-stops-writer-and-reports-no-commit
+  (let [writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))]
+    (with-redefs-fn {#'response/schedule-fixed-final! (constantly :overloaded)
+                     #'response/schedule-start-response! (constantly :closed)}
+      #(is (nil? (#'response/commit-final!
+                  (fixed-final-request 3) writer (atom nil)
+                  {:status 200 :body "cat"} true))))
+    (is (true? (.get ^AtomicBoolean (:stopped?_ writer))))))
+
+(deftest closed-informational-admission-returns-false
+  (with-redefs-fn {#'response/schedule-informational! (constantly :closed)}
+    #(let [emitter (response/new-response-emitter
+                    (fixed-final-request 3)
+                    (fn [^Runnable task] (.run task)))]
+       (is (false? (protocols/emit! emitter {:status 103}))))))
 
 (deftest fixed-final-admission-stops-generic-writer
   (let [writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))
@@ -422,7 +467,7 @@
         committed_ (atom nil)]
     (with-redefs-fn {#'response/schedule-fixed-final! (fn [_ command]
                                                         (reset! command_ command)
-                                                        true)
+                                                        :accepted)
                      #'response/schedule-start-response! (fn [& _] (throw (ex-info "Unexpected generic response" {})))}
       #(do
          (is (nil? (:body (#'response/commit-final! req writer committed_
@@ -437,7 +482,7 @@
         writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))]
     (with-redefs-fn {#'response/schedule-fixed-final! (fn [_ command]
                                                         (reset! command_ command)
-                                                        true)}
+                                                        :accepted)}
       #(do
          (#'response/commit-final! (fixed-final-request 3) writer (atom nil)
                                    {:status 200 :body body}

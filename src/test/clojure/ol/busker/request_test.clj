@@ -1,6 +1,7 @@
 (ns ol.busker.request-test
   (:require
    [clojure.test :refer [deftest is testing]]
+   [ol.busker.internal.protocols :as pi]
    [ol.busker.request :as request])
   (:import
    [java.nio.charset StandardCharsets]
@@ -25,6 +26,18 @@
   (is (false? (#'request/request-has-body? {:has-body 0})))
   (is (true? (#'request/request-has-body? {:has-body 1}))))
 
+(deftest closed-required-proceed-fails-request-body-read
+  (let [calls_ (atom [])]
+    (with-redefs [pi/send-required-msg
+                  (fn [worker message]
+                    (swap! calls_ conj [worker message])
+                    :closed)]
+      (let [{:keys [input-stream write-chunk]}
+            (request/set-req-body-channel :worker 7 11)]
+        (write-chunk (byte-array [(byte 65)]) false)
+        (is (thrown-with-msg? java.io.IOException #"Request worker closed"
+                              (.read input-stream)))
+        (is (= [[:worker [:h2o/proceed-request 7 11]]] @calls_))))))
 (deftest write-request-channel-final-chunk-test
   (testing "a final chunk and EOF can be delivered before the handler reads"
     (let [{:keys [input-stream write-chunk]}

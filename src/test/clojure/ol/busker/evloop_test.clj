@@ -7,25 +7,30 @@
   (:import
    [java.util HashMap]
    [java.util.concurrent ArrayBlockingQueue CountDownLatch TimeUnit]
+   [java.util.concurrent.locks ReentrantLock]
    [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicLong AtomicReference]))
 
 (defn- worker
   [handler capacity receiver]
-  (evloop/map->Worker
-   {:id 1
-    :running?_ (AtomicBoolean. true)
-    :accepting?_ (AtomicBoolean. true)
-    :stop-requested?_ (AtomicBoolean. false)
-    :admissions_ (AtomicInteger.)
-    :mailbox-signal_ (AtomicLong.)
-    :wake-generation_ (AtomicLong.)
-    :sleep-armed?_ (AtomicBoolean. false)
-    :wake-notifier (Object.)
-    :wake-endpoint (Object.)
-    :mailbox (ArrayBlockingQueue. capacity)
-    :message-handler handler
-    :wakeup-receiver_ (AtomicReference. receiver)
-    :requests (HashMap.)}))
+  (let [lock (ReentrantLock.)]
+    (evloop/map->Worker
+     {:id 1
+      :running?_ (AtomicBoolean. true)
+      :accepting?_ (AtomicBoolean. true)
+      :stop-requested?_ (AtomicBoolean. false)
+      :admissions_ (AtomicInteger.)
+      :mailbox-waiters_ (AtomicInteger.)
+      :mailbox-lock lock
+      :mailbox-space (.newCondition lock)
+      :mailbox-signal_ (AtomicLong.)
+      :wake-generation_ (AtomicLong.)
+      :sleep-armed?_ (AtomicBoolean. false)
+      :wake-notifier (Object.)
+      :wake-endpoint (Object.)
+      :mailbox (ArrayBlockingQueue. capacity)
+      :message-handler handler
+      :wakeup-receiver_ (AtomicReference. receiver)
+      :requests (HashMap.)})))
 
 (defn- drain! [worker]
   (@#'evloop/drain-mailbox! worker))
@@ -88,7 +93,7 @@
                     (mailbox-empty? worker))]
       (.start thread)
       (is (.await checking 5 TimeUnit/SECONDS))
-      (is (true? (p/send-msg worker [:raced])))
+      (is (= :accepted (p/send-msg worker [:raced])))
       (.countDown release)
       (.join thread 5000)
       (is (false? (.isAlive thread)))
@@ -101,13 +106,22 @@
         worker (worker (fn [op _] (swap! handled_ conj op)) 8 (Object.))]
     (.set ^AtomicBoolean (:sleep-armed?_ worker) true)
     (with-redefs [notifier/request! (fn [_ _] (swap! wakeups_ inc))]
-      (is (true? (p/send-msg worker [:first])))
-      (is (true? (p/send-msg worker [:second])))
+      (is (= :accepted (p/send-msg worker [:first])))
+      (is (= :accepted (p/send-msg worker [:second])))
       (is (= 1 @wakeups_))
       (drain! worker)
       (is (= [:first :second] @handled_))
       (is (= 2 (.get ^AtomicLong (:mailbox-signal_ worker)))))))
 
+(deftest mailbox-reports-overload-at-exact-worker-capacity
+  (let [handled_ (atom [])
+        worker (worker (fn [op _] (swap! handled_ conj op)) 256 nil)]
+    (doseq [idx (range 256)]
+      (is (= :accepted (p/send-msg worker [idx]))))
+    (is (= 256 (p/count-msgs worker)))
+    (is (= :overloaded (p/send-msg worker [:overflow])))
+    (drain! worker)
+    (is (= (vec (range 256)) @handled_))))
 (deftest clears-and-rechecks-a-racing-mailbox-offer
   (let [handled_ (atom [])
         accepted_ (atom nil)
@@ -123,7 +137,7 @@
                         (reset! accepted_ (p/send-msg worker [:raced])))
                       result))]
       (drain! worker)
-      (is (true? @accepted_))
+      (is (= :accepted @accepted_))
       (is (= [:raced] @handled_)))))
 
 (deftest failed-wakeup-cannot-clear-a-newer-signal
@@ -136,7 +150,7 @@
                     (clear-signal! worker)
                     (mark-signalled! worker)
                     (throw (ex-info "wake failed" {})))]
-      (is (true? (p/send-msg worker [:first])))
+      (is (= :accepted (p/send-msg worker [:first])))
       (is (= 3 (.get ^AtomicLong (:mailbox-signal_ worker)))))))
 
 (deftest later-admission-retries-after-two-wakeup-failures
@@ -156,14 +170,14 @@
                                        :first-error? (some? first-error)
                                        :second-error? (some? second-error)
                                        :reset? reset?}))]
-      (is (true? (p/send-msg worker [:first])))
+      (is (= :accepted (p/send-msg worker [:first])))
       (is (= 4 (.get ^AtomicLong (:mailbox-signal_ worker))))
       (is (= [{:message [:first]
                :first-error? true
                :second-error? true
                :reset? true}]
              @logs_))
-      (is (true? (p/send-msg worker [:second])))
+      (is (= :accepted (p/send-msg worker [:second])))
       (drain! worker)
       (is (= [:first :second] @handled_))
       (is (= 3 @attempts_)))))
@@ -173,13 +187,52 @@
         worker (worker (fn [_ _]) 1 (Object.))]
     (.offer ^ArrayBlockingQueue (:mailbox worker) [:already-full])
     (with-redefs [notifier/request! (fn [_ _] (swap! wakeups_ inc))]
-      (is (false? (p/send-msg worker [:full])))
+      (is (= :overloaded (p/send-msg worker [:full])))
       (is (= 0 @wakeups_))
       (.set ^AtomicReference (:wakeup-receiver_ worker) nil)
       (.set ^AtomicBoolean (:sleep-armed?_ worker) false)
-      (is (true? (p/send-msg worker evloop/stop-msg)))
-      (is (false? (p/send-msg worker [:after-stop])))
+      (is (= :accepted (p/send-msg worker evloop/stop-msg)))
+      (is (= :closed (p/send-msg worker [:after-stop])))
       (is (= 0 @wakeups_)))))
+
+(defn- await-mailbox-waiter
+  [worker]
+  (loop [attempt 0]
+    (when (and (zero? (.get ^AtomicInteger (:mailbox-waiters_ worker)))
+               (< attempt 1000))
+      (Thread/sleep 1)
+      (recur (inc attempt))))
+  (pos? (.get ^AtomicInteger (:mailbox-waiters_ worker))))
+
+(deftest required-submission-waits-for-drain-and-remains-on-a-virtual-thread
+  (let [handled_ (atom [])
+        result (promise)
+        virtual?_ (promise)
+        worker (worker (fn [op _] (swap! handled_ conj op)) 1 nil)]
+    (.offer ^ArrayBlockingQueue (:mailbox worker) [:existing])
+    (Thread/startVirtualThread
+     #(do
+        (deliver virtual?_ (.isVirtual (Thread/currentThread)))
+        (deliver result (p/send-required-msg worker [:required]))))
+    (is (true? @virtual?_))
+    (is (true? (await-mailbox-waiter worker)))
+    (is (= :pending (deref result 20 :pending)))
+    (drain! worker)
+    (is (= :accepted (deref result 5000 :timeout)))
+    (drain! worker)
+    (is (= [:existing :required] @handled_))))
+
+(deftest required-submission-wakes-closed-when-stop-closes-admission
+  (let [result (promise)
+        worker (worker (fn [_ _]) 1 nil)]
+    (.offer ^ArrayBlockingQueue (:mailbox worker) [:existing])
+    (Thread/startVirtualThread
+     #(deliver result (p/send-required-msg worker [:required])))
+    (is (true? (await-mailbox-waiter worker)))
+    (is (= :accepted (p/send-msg worker evloop/stop-msg)))
+    (is (= :closed (deref result 5000 :timeout)))
+    (drain! worker)
+    (is (false? (.get ^AtomicBoolean (:running?_ worker))))))
 
 (deftest stop-waits-for-admission-and-drains-accepted-messages
   (let [handled_ (atom [])
@@ -199,8 +252,8 @@
       (Thread/startVirtualThread #(deliver stopped (p/send-msg worker evloop/stop-msg)))
       (is (= :pending (deref stopped 50 :pending)))
       (.countDown release)
-      (is (true? @admitted))
-      (is (true? @stopped))
+      (is (= :accepted @admitted))
+      (is (= :accepted @stopped))
       (drain! worker)
       (is (= [:accepted] @handled_))
-      (is (false? (p/send-msg worker [:after-stop]))))))
+      (is (= :closed (p/send-msg worker [:after-stop]))))))

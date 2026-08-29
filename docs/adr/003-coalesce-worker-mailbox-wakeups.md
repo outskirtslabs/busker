@@ -16,6 +16,10 @@ Each worker stores an atomic mailbox-signal generation and a short admission cou
 
 A producer checks that admission remains open, increments the counter, checks again, and offers to the mailbox. It decrements the counter before signalling. A successful offer advances an even generation to an odd token and then calls the native wake helper. Other producers that observe an odd token leave that batch signalled without another native wake.
 
+Every nonblocking submission returns `:accepted`, `:overloaded`, or `:closed`. Required commands use the same offer path but wait on a Java condition when the result is `:overloaded`. The consumer signals waiting producers after a complete mailbox drain. Closing admission signals them immediately, and they return `:closed` without offering work. This wait performs no native call and does not change mailbox capacity.
+
+Fixed-final selection remains nonblocking so overload can use its generic response fallback. Generic response start, informational responses, request-body proceed, first stream drain, legacy sendvec, and receiver retirement use required submission. Their callers handle `:closed` as an explicit false return, stream error, or lifecycle failure.
+
 If a wake throws, the producer resets only its exact odd token to the next even generation. It then retries once after acquiring a new odd token. A second failure resets only that retry token, logs the accepted message and both failures, and returns successful admission. A later producer can acquire the resulting even generation and retry wake delivery.
 
 The consumer drains FIFO messages. After an empty poll, it clears an odd token to its next even generation and polls again. If the second poll finds a message, it marks the generation odd and continues draining before entering the native event loop. If a producer adds work after the second poll, that producer sees an even generation and wakes the event loop.

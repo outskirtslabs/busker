@@ -147,13 +147,19 @@
     (loop []
       (case (.get drain-state_)
         0 (if (.compareAndSet drain-state_ drain-idle drain-active)
-            (do
-              (pi/send-msg worker
-                           [:h2o/sendvec
-                            (:dispatch-module-id (:req st))
-                            (:dispatch-request-seq (:req st))
-                            (fn [] (send-vecs st))])
-              :sent-msg)
+            (let [result
+                  (pi/send-required-msg
+                   worker
+                   [:h2o/sendvec
+                    (:dispatch-module-id (:req st))
+                    (:dispatch-request-seq (:req st))
+                    (fn [] (send-vecs st))])]
+              (if (= :accepted result)
+                :sent-msg
+                (do
+                  (.set ^AtomicBoolean (:stopped?_ st) true)
+                  (.set drain-state_ drain-idle)
+                  (throw (java.io.IOException. "Response worker closed")))))
             (recur))
         1 (if (.compareAndSet drain-state_ drain-active drain-signalled)
             (do

@@ -79,7 +79,9 @@
   [worker module-id request-seq]
   (create-write-req-channel
    (fn []
-     (pi/send-msg worker [:h2o/proceed-request module-id request-seq]))))
+     (when (= :closed
+              (pi/send-required-msg worker [:h2o/proceed-request module-id request-seq]))
+       (throw (java.io.IOException. "Request worker closed"))))))
 
 (defn run-handler
   "Run the handler given the ring request map. Must return a ring response map."

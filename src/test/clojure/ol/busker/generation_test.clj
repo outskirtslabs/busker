@@ -25,6 +25,7 @@
   (running? [_] true)
   (wake [_] true)
   (send-msg [_ msg] (send-fn msg))
+  (send-required-msg [_ msg] (send-fn msg))
   (count-msgs [_] 0)
   (add-req [_ _ _] nil)
   (reap-req [_ _] nil))
@@ -184,7 +185,7 @@
                     (is (= [:h2o/retire-wakeup-receiver] msg))
                     (swap! events_ conj :receiver-destroy)
                     (.set receiver_ nil)
-                    true))
+                    :accepted))
           phase (atom :running)
           generation-state {::generation/phase phase
                             ::generation/stop-lock (Object.)
@@ -210,7 +211,7 @@
 (deftest failed-worker-retirement-retains-the-callback-arena-test
   (with-open [arena (mem/shared-arena)]
     (let [dispatch (callback-dispatch/create arena)
-          worker (->RetirementWorker dispatch (AtomicReference.) nil (constantly true))
+          worker (->RetirementWorker dispatch (AtomicReference.) nil (constantly :accepted))
           phase (atom :running)
           generation-state {::generation/phase phase
                             ::generation/stop-lock (Object.)
@@ -236,7 +237,7 @@
 (deftest successful-retirement-retry-releases-retained-generation-test
   (let [arena (mem/shared-arena)
         dispatch (callback-dispatch/create arena)
-        worker (->RetirementWorker dispatch (AtomicReference.) (Thread.) (constantly true))
+        worker (->RetirementWorker dispatch (AtomicReference.) (Thread.) (constantly :accepted))
         phase (atom :running)
         generation-state {::generation/phase phase
                           ::generation/stop-lock (Object.)

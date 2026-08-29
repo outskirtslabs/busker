@@ -102,22 +102,26 @@
         (fn [vecs vec-count is-final]
 
           (swap! in-flight-segments conj vecs)
-          (p/send-msg (:worker req)
-                      [:h2o/sendvec
-                       (fn []
-                         (doseq [[idx {:keys [seg len]}] (map-indexed vector vecs)]
-                           (let [offset (* idx (mem/size-of ::h2o/h2o-sendvec-t))
-                                 vec-seg (mem/slice send-vec-array-seg offset (mem/size-of ::h2o/h2o-sendvec-t))]
-                             (h2o/sendvec-init-raw vec-seg seg len)))
-                         (try
-                           (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg vec-count
-                                        (if is-final
-                                          h2o/H2O_SEND_STATE_FINAL
-                                          h2o/H2O_SEND_STATE_IN_PROGRESS))
-                           (when is-final
-                             (reset! closed? true))
-                           (catch Exception e
-                             (handle-error! e :release-proceed? true))))]))
+          (let [result
+                (p/send-required-msg
+                 (:worker req)
+                 [:h2o/sendvec
+                  (fn []
+                    (doseq [[idx {:keys [seg len]}] (map-indexed vector vecs)]
+                      (let [offset (* idx (mem/size-of ::h2o/h2o-sendvec-t))
+                            vec-seg (mem/slice send-vec-array-seg offset (mem/size-of ::h2o/h2o-sendvec-t))]
+                        (h2o/sendvec-init-raw vec-seg seg len)))
+                    (try
+                      (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg vec-count
+                                   (if is-final
+                                     h2o/H2O_SEND_STATE_FINAL
+                                     h2o/H2O_SEND_STATE_IN_PROGRESS))
+                      (when is-final
+                        (reset! closed? true))
+                      (catch Exception e
+                        (handle-error! e :release-proceed? true))))])]
+            (when (= :closed result)
+              (throw (java.io.IOException. "Response worker closed")))))
 
         flush-buffer!
         (fn [is-final]

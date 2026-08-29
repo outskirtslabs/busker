@@ -97,7 +97,7 @@
 
 (defn- schedule-start-response!
   [^Request req status headers content-length compress-hint]
-  (pi/send-msg
+  (pi/send-required-msg
    (:worker req)
    [:h2o/start-response
     (response-head/start-command (:dispatch-module-id req)
@@ -109,7 +109,7 @@
 
 (defn- schedule-informational!
   [^Request req status headers]
-  (pi/send-msg
+  (pi/send-required-msg
    (:worker req)
    [:h2o/send-informational
     (response-head/informational-command (:dispatch-module-id req)
@@ -281,17 +281,31 @@
                         final? with-content-length))
           head (dissoc response' :body)]
       (when (compare-and-set! committed_ nil head)
-        (if (and command (schedule-fixed-final! req command))
-          (do
-            (when-let [writer (created-response-writer write-resp)]
-              (pi/stop writer))
-            {:head head :body nil})
-          (let [[headers _header-count content-length] (build-headers head)]
-            (response-writer write-resp)
-            (schedule-start-response!
-             req (:status head) headers content-length
-             (get-compress-hint response'))
-            {:head head :body body}))))))
+        (let [fixed-result (when command (schedule-fixed-final! req command))]
+          (cond
+            (= :accepted fixed-result)
+            (do
+              (when-let [writer (created-response-writer write-resp)]
+                (pi/stop writer))
+              {:head head :body nil})
+
+            (= :closed fixed-result)
+            (do
+              (when-let [writer (created-response-writer write-resp)]
+                (pi/stop writer))
+              nil)
+
+            :else
+            (let [[headers _header-count content-length] (build-headers head)
+                  writer (response-writer write-resp)
+                  result (schedule-start-response!
+                          req (:status head) headers content-length
+                          (get-compress-hint response'))]
+              (if (= :accepted result)
+                {:head head :body body}
+                (do
+                  (pi/stop writer)
+                  nil)))))))))
 
 (defn- write-body-chunk!
   [chunk ^OutputStream out response close-after?]
@@ -417,8 +431,7 @@
             resp-map (assoc data :status status)]
         (if (informational-status? status)
           (when (nil? @committed_)
-            (send-informational! req resp-map)
-            true)
+            (= :accepted (send-informational! req resp-map)))
           (when (nil? @committed_)
             (when-let [{:keys [head body]} (commit-final! req write-resp committed_ resp-map close-after?)]
               (reset! committed_ head)

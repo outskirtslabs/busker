@@ -332,7 +332,10 @@
         (when (and http3-ctx (not (mem/null? http3-ctx)))
           (h2o/http3-free-worker-ctx http3-ctx)))
       (h2o/context-dispose ctx-ptr)
-      (p/send-msg worker evloop/stop-msg)
+      (case (p/send-msg worker evloop/stop-msg)
+        :accepted nil
+        :closed nil
+        :overloaded (throw (IllegalStateException. "Stop request cannot overload")))
       (assoc loop-state :context-disposed? true))
     loop-state))
 
@@ -985,15 +988,10 @@
 
 (defn- request-wakeup-receiver-retirement!
   [worker]
-  (loop []
-    (if (p/send-msg worker [:h2o/retire-wakeup-receiver])
-      true
-      (if (p/running? worker)
-        (do
-          (Thread/onSpinWait)
-          (recur))
-        (throw (ex-info "Worker stopped before wake receiver retirement"
-                        {:worker-id (:id worker)}))))))
+  (case (p/send-required-msg worker [:h2o/retire-wakeup-receiver])
+    :accepted true
+    :closed (throw (ex-info "Worker stopped before wake receiver retirement"
+                            {:worker-id (:id worker)}))))
 
 (defn stop!
   ([generation]
