@@ -107,12 +107,10 @@
 (defn quiesce-endpoint!
   [^WakeEndpoint endpoint]
   (let [^AtomicReference state_ (.-state_ endpoint)
-        ^AtomicReference receiver_ (.-receiver_ endpoint)
         ^AtomicInteger in-flight_ (.-in-flight_ endpoint)]
     (.compareAndSet state_ :open :quiescing)
     (while (pos? (.get in-flight_))
       (Thread/onSpinWait))
-    (.set receiver_ nil)
     (.set state_ :closed)
     true))
 

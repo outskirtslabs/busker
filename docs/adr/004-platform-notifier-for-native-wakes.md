@@ -32,7 +32,7 @@ The notifier clears an endpoint's pending-token flag before calling `clj_h2o_mt_
 
 The H2O receiver remains a wake-only receiver. Commands, response bytes, and Java request references do not enter H2O's multithread message list.
 
-Generation retirement moves each endpoint from open to quiescing, waits for its in-flight native call to finish, closes the endpoint, and then destroys the receiver. Stale queued tokens observe the closed endpoint and skip native work. Runtime shutdown stops and joins the shared notifier only after all generations retire.
+Generation retirement submits a control command while the endpoint is open and wakeable. The event-loop worker handles that command by moving its endpoint from open to quiescing, waiting for any in-flight notifier call, closing the endpoint, unregistering and freeing its receiver, and clearing the receiver reference. Stale queued tokens observe the closed endpoint and skip native work. Runtime shutdown stops and joins the shared notifier only after all generations retire.
 
 The following behavior remains unchanged:
 
@@ -55,7 +55,7 @@ Tests must demonstrate:
 - work arriving during a notifier downcall can publish another token;
 - queued tokens stay logically limited to one per endpoint;
 - notifier close drains admitted tokens and rejects later requests;
-- endpoint quiescence finishes before receiver destruction;
+- endpoint quiescence and receiver destruction run in order on the H2O worker;
 - fixed-final, streaming, informational, request-body, stop, reload, and multi-worker behavior remains exact; and
 - full validation and controlled large-payload tests pass.
 

@@ -6,6 +6,7 @@
    [ol.busker.config :as config]
    [ol.busker.evloop :as evloop]
    [ol.busker.generation :as generation]
+   [ol.busker.internal.protocols :as p]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as protocols]
    [ol.busker.request :as request]
@@ -17,6 +18,16 @@
    [java.nio.charset StandardCharsets]
    [java.util.concurrent AbstractExecutorService]
    [java.util.concurrent.atomic AtomicBoolean AtomicReference]))
+
+(defrecord RetirementWorker
+           [callback-dispatch wakeup-receiver_ thread send-fn]
+  p/WorkerThread
+  (running? [_] true)
+  (wake [_] true)
+  (send-msg [_ msg] (send-fn msg))
+  (count-msgs [_] 0)
+  (add-req [_ _ _] nil)
+  (reap-req [_ _] nil))
 
 (defn- connect
   [port]
@@ -71,6 +82,47 @@
       #(let [result (#'generation/worker-loop worker loop-state native-state)]
          (is (= 0 @wait-ms_))
          (is (not (contains? result ::evloop/mailbox-work?)))))))
+
+(deftest wake-receiver-retires-on-event-loop-worker-test
+  (let [events_ (atom [])
+        receiver (Object.)
+        receiver_ (AtomicReference. receiver)
+        worker {:wake-endpoint ::endpoint
+                :wakeup-receiver_ receiver_}]
+    (.set evloop/worker-context worker)
+    (try
+      (with-redefs [wake-notifier/quiesce-endpoint!
+                    (fn [endpoint]
+                      (is (= ::endpoint endpoint))
+                      (swap! events_ conj :quiesce))
+                    h2o/mt-destroy-wakeup-receiver
+                    (fn [actual-receiver]
+                      (is (identical? receiver actual-receiver))
+                      (is (false? (.isVirtual (Thread/currentThread))))
+                      (swap! events_ conj :destroy))]
+        (generation/evloop-msg-processor :h2o/retire-wakeup-receiver []))
+      (is (= [:quiesce :destroy] @events_))
+      (is (nil? (.get receiver_)))
+      (finally
+        (.remove evloop/worker-context)))))
+(deftest startup-receiver-without-worker-retires-on-lifecycle-platform-test
+  (let [receiver (Object.)
+        destroyed_ (atom [])
+        phase (atom :running)
+        generation-state {::generation/phase phase
+                          ::generation/stop-lock (Object.)
+                          ::generation/workers []
+                          ::generation/wakeup-receivers [receiver]
+                          ::generation/listener-runtimes []
+                          ::generation/listener-claims {}
+                          ::generation/config {}}]
+    (with-redefs [h2o/mt-destroy-wakeup-receiver
+                  (fn [actual-receiver]
+                    (swap! destroyed_ conj actual-receiver))]
+      (generation/stop! generation-state))
+    (is (= [receiver] @destroyed_))
+    (is (= :stopped @phase))))
+
 (deftest generation-starts-and-stops-without-runtime-bridge-test
   (let [port 18584
         compiled-config
@@ -119,16 +171,20 @@
           (finally
             (generation/stop! instance)))))))
 
-(deftest notifier-joins-before-native-wake-receiver-destruction-test
+(deftest worker-receiver-retirement-precedes-notifier-stop-test
   (with-open [arena (mem/shared-arena)]
     (let [events_ (atom [])
           dispatch (callback-dispatch/create arena)
           receiver (Object.)
           notifier (Object.)
           receiver_ (AtomicReference. receiver)
-          worker {:callback-dispatch dispatch
-                  :wakeup-receiver_ receiver_
-                  :thread (Thread.)}
+          worker (->RetirementWorker
+                  dispatch receiver_ (Thread.)
+                  (fn [msg]
+                    (is (= [:h2o/retire-wakeup-receiver] msg))
+                    (swap! events_ conj :receiver-destroy)
+                    (.set receiver_ nil)
+                    true))
           phase (atom :running)
           generation-state {::generation/phase phase
                             ::generation/stop-lock (Object.)
@@ -142,11 +198,9 @@
                     wake-notifier/stop-and-join! (fn [_]
                                                    (swap! events_ conj :notifier-stop)
                                                    true)
-                    h2o/mt-destroy-wakeup-receiver (fn [_]
-                                                     (swap! events_ conj :receiver-destroy))
                     evloop/join-all! (fn [_] (swap! events_ conj :join))]
         (generation/stop! generation-state))
-      (is (= {:retirement-order [:notifier-stop :receiver-destroy :join]
+      (is (= {:retirement-order [:receiver-destroy :join :notifier-stop]
               :phase :stopped
               :receiver nil}
              {:retirement-order (filterv #{:notifier-stop :receiver-destroy :join} @events_)
@@ -156,8 +210,7 @@
 (deftest failed-worker-retirement-retains-the-callback-arena-test
   (with-open [arena (mem/shared-arena)]
     (let [dispatch (callback-dispatch/create arena)
-          worker {:callback-dispatch dispatch
-                  :wakeup-receiver_ (AtomicReference.)}
+          worker (->RetirementWorker dispatch (AtomicReference.) nil (constantly true))
           phase (atom :running)
           generation-state {::generation/phase phase
                             ::generation/stop-lock (Object.)
@@ -183,9 +236,7 @@
 (deftest successful-retirement-retry-releases-retained-generation-test
   (let [arena (mem/shared-arena)
         dispatch (callback-dispatch/create arena)
-        worker {:callback-dispatch dispatch
-                :wakeup-receiver_ (AtomicReference.)
-                :thread (Thread.)}
+        worker (->RetirementWorker dispatch (AtomicReference.) (Thread.) (constantly true))
         phase (atom :running)
         generation-state {::generation/phase phase
                           ::generation/stop-lock (Object.)

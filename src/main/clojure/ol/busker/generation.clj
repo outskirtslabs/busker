@@ -76,9 +76,23 @@
                                                 module-id request-seq)]
       (f req))))
 
+(defn- retire-current-wakeup-receiver!
+  []
+  (when-let [worker (evloop/get-current-worker)]
+    (when-let [endpoint (:wake-endpoint worker)]
+      (wake-notifier/quiesce-endpoint! endpoint))
+    (let [^AtomicReference receiver_ (:wakeup-receiver_ worker)
+          receiver (.get receiver_)]
+      (when (and receiver (not (mem/null? receiver)))
+        (h2o/mt-destroy-wakeup-receiver receiver))
+      (.compareAndSet receiver_ receiver nil))))
+
 (defn evloop-msg-processor
   [op args]
   (case op
+    :h2o/retire-wakeup-receiver
+    (retire-current-wakeup-receiver!)
+
     :h2o/proceed-request
     (let [[module-id request-seq] args]
       (with-live-request module-id request-seq
@@ -969,6 +983,18 @@
   @stopped-accepting_
   nil)
 
+(defn- request-wakeup-receiver-retirement!
+  [worker]
+  (loop []
+    (if (p/send-msg worker [:h2o/retire-wakeup-receiver])
+      true
+      (if (p/running? worker)
+        (do
+          (Thread/onSpinWait)
+          (recur))
+        (throw (ex-info "Worker stopped before wake receiver retirement"
+                        {:worker-id (:id worker)}))))))
+
 (defn stop!
   ([generation]
    (stop! generation 60 TimeUnit/SECONDS))
@@ -979,71 +1005,71 @@
    (locking stop-lock
      (let [phase-atom (::phase generation)]
        (when (not= :stopped @phase-atom)
-         (when (= :stopping @phase-atom)
-           (when executor
-             (when-not (.awaitTermination executor timeout timeunit)
-               (.shutdownNow executor)
+         (when (contains? #{:stopping :retirement-failed} @phase-atom)
+           (when (= :stopping @phase-atom)
+             (when executor
                (when-not (.awaitTermination executor timeout timeunit)
-                 (println "Virtual thread request executor pool did not shutdown cleanly"))))
-           (when (seq (::workers generation))
-             (evloop/broadcast-wake! (::workers generation)))
-           (doseq [worker (::workers generation)]
-             (when-let [endpoint (:wake-endpoint worker)]
-               (wake-notifier/quiesce-endpoint! endpoint)))
-           (when (not= false (::wake-notifier-owned? generation))
-             (when-let [notifier (::wake-notifier generation)]
-               (when-not (wake-notifier/stop-and-join! notifier)
-                 (throw (ex-info "Wake notifier did not stop" {})))))
-           (doseq [[worker wr] (map vector (::workers generation) (::wakeup-receivers generation))]
-             (when (and wr (not (mem/null? wr)))
-               (h2o/mt-destroy-wakeup-receiver wr))
-             (.set ^AtomicReference (:wakeup-receiver_ worker) nil)))
-         (reset! phase-atom :retiring)
-         (let [{:keys [joined? error]}
-               (try
-                 (when (seq (::workers generation))
-                   (evloop/join-all! (::workers generation)))
-                 {:joined? (not-any? (fn [worker]
-                                       (.isAlive ^Thread (:thread worker)))
-                                     (::workers generation))}
-                 (catch InterruptedException t
-                   (.interrupt (Thread/currentThread))
-                   {:joined? false :error t})
-                 (catch Throwable t
-                   {:joined? false :error t}))]
-           (if-not joined?
-             (retain-failed-retirement!
-              generation phase-atom
-              (or error
-                  (ex-info "Callback retirement could not establish worker join" {})))
-             (do
+                 (.shutdownNow executor)
+                 (when-not (.awaitTermination executor timeout timeunit)
+                   (println "Virtual thread request executor pool did not shutdown cleanly"))))
+             (when (seq (::workers generation))
+               (evloop/broadcast-wake! (::workers generation)))
+             (if (seq (::workers generation))
                (doseq [worker (::workers generation)]
-                 (callback-dispatch/finish! (:callback-dispatch worker)))
-               (when close-callback-executor
-                 (.shutdown close-callback-executor)
-                 (when-not (.awaitTermination close-callback-executor timeout timeunit)
-                   (.shutdownNow close-callback-executor)
+                 (request-wakeup-receiver-retirement! worker))
+               (doseq [receiver (::wakeup-receivers generation)]
+                 (when (and receiver (not (mem/null? receiver)))
+                   (h2o/mt-destroy-wakeup-receiver receiver))))
+             (reset! phase-atom :retiring))
+           (let [{:keys [joined? error]}
+                 (try
+                   (when (seq (::workers generation))
+                     (evloop/join-all! (::workers generation)))
+                   {:joined? (not-any? (fn [worker]
+                                         (.isAlive ^Thread (:thread worker)))
+                                       (::workers generation))}
+                   (catch InterruptedException t
+                     (.interrupt (Thread/currentThread))
+                     {:joined? false :error t})
+                   (catch Throwable t
+                     {:joined? false :error t}))]
+             (if-not joined?
+               (retain-failed-retirement!
+                generation phase-atom
+                (or error
+                    (ex-info "Callback retirement could not establish worker join" {})))
+               (do
+                 (when (not= false (::wake-notifier-owned? generation))
+                   (when-let [notifier (::wake-notifier generation)]
+                     (when-not (wake-notifier/stop-and-join! notifier)
+                       (throw (ex-info "Wake notifier did not stop" {})))))
+                 (doseq [worker (::workers generation)]
+                   (callback-dispatch/finish! (:callback-dispatch worker)))
+                 (when close-callback-executor
+                   (.shutdown close-callback-executor)
                    (when-not (.awaitTermination close-callback-executor timeout timeunit)
-                     (println "Virtual thread close callback executor did not shutdown cleanly"))))
-               (when-let [http3-contexts (::http3-contexts generation)]
-                 (free-http3-contexts http3-contexts))
-               (when-let [ticket-mgr (::native-ticket-mgr generation)]
-                 (h2o/ticket-manager-destroy ticket-mgr))
-               (when (seq (::loops generation))
-                 (h2o/destroy-loops (::loops generation)))
-               (when-let [config-ptr (::config-ptr generation)]
-                 (h2o/config-dispose config-ptr))
-               (doseq [{:keys [ssl-ctx-ptr]} (::listener-runtimes generation)]
-                 (when ssl-ctx-ptr
-                   (h2o/free-ssl-ctx ssl-ctx-ptr)))
-               (when-let [buffer-pool (-> generation ::config :buffer-pool)]
-                 (bp/dispose buffer-pool))
-               (release-listener-claims! (::listener-claims generation))
-               (when-let [arena (::arena generation)]
-                 (.close ^java.lang.AutoCloseable arena))
-               (remove-failed-retirement! generation)
-               (reset! phase-atom :stopped))))))
-     nil)))
+                     (.shutdownNow close-callback-executor)
+                     (when-not (.awaitTermination close-callback-executor timeout timeunit)
+                       (println "Virtual thread close callback executor did not shutdown cleanly"))))
+                 (when-let [http3-contexts (::http3-contexts generation)]
+                   (free-http3-contexts http3-contexts))
+                 (when-let [ticket-mgr (::native-ticket-mgr generation)]
+                   (h2o/ticket-manager-destroy ticket-mgr))
+                 (when (seq (::loops generation))
+                   (h2o/destroy-loops (::loops generation)))
+                 (when-let [config-ptr (::config-ptr generation)]
+                   (h2o/config-dispose config-ptr))
+                 (doseq [{:keys [ssl-ctx-ptr]} (::listener-runtimes generation)]
+                   (when ssl-ctx-ptr
+                     (h2o/free-ssl-ctx ssl-ctx-ptr)))
+                 (when-let [buffer-pool (-> generation ::config :buffer-pool)]
+                   (bp/dispose buffer-pool))
+                 (release-listener-claims! (::listener-claims generation))
+                 (when-let [arena (::arena generation)]
+                   (.close ^java.lang.AutoCloseable arena))
+                 (remove-failed-retirement! generation)
+                 (reset! phase-atom :stopped))))))
+       nil))))
 
 (defn start!
   ([compiled-config cert-runtime]

@@ -86,7 +86,7 @@
           (is (= ::waiting (deref quiesced 100 ::waiting)))
           (.countDown release)
           (is (true? (deref quiesced 5000 false)))
-          (is (nil? (.get receiver_)))
+          (is (some? (.get receiver_)))
           (is (false? (notifier/request! wake-notifier endpoint)))))
       (finally
         (.countDown release)
