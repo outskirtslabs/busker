@@ -294,6 +294,30 @@
             :informational (assoc (headers-summary informational-headers informational-headers-len)
                                   :content-length informational-content-length)}))))
 
+(deftest fixed-final-native-header-token-and-fallback-test
+  (let [[server port]
+        (start-server
+         (fn [{:keys [uri]}]
+           (if (= "/mixed" uri)
+             {:status 200
+              :headers {"Content-Type" "text/plain"}
+              :body "mixed"}
+             {:status 200
+              :headers {"content-type" "text/plain"
+                        "X-Custom" "value"
+                        "X-Repeat" ["first" "second"]}
+              :body "lower"})))]
+    (try
+      (let [lower (request-text port "GET" "/lower")
+            mixed (request-text port "GET" "/mixed")]
+        (is (re-find #"(?m)^content-type: text/plain\r?$" lower))
+        (is (re-find #"(?m)^X-Custom: value\r?$" lower))
+        (is (= ["first" "second"]
+               (mapv second (re-seq #"(?m)^X-Repeat: ([^\r]+)\r?$" lower))))
+        (is (re-find #"(?m)^Content-Type: text/plain\r?$" mixed)))
+      (finally
+        (busker/stop! server)))))
+
 (deftest fixed-final-eligibility-enforces-response-budgets
   (let [header-overhead (fixed-final/header-staging-bytes [["x" ""]])
         staged-value (apply str (repeat (- fixed-final/max-header-staging-bytes header-overhead) "a"))

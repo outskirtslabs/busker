@@ -410,17 +410,22 @@ static void copy_headers_to_response(h2o_req_t *req,
     size_t name_len = headers[i].name_len;
     size_t value_len = headers[i].value_len;
 
-    char *pool_name = h2o_mem_alloc_pool(&req->pool, char, name_len + 1);
+    const h2o_token_t *token = h2o_lookup_token(name_data, name_len);
     char *pool_value = h2o_mem_alloc_pool(&req->pool, char, value_len + 1);
-
-    memcpy(pool_name, name_data, name_len);
-    pool_name[name_len] = '\0';
 
     memcpy(pool_value, value_data, value_len);
     pool_value[value_len] = '\0';
 
-    h2o_add_header_by_str(&req->pool, &req->res.headers, pool_name, name_len, 0,
-                          pool_name, pool_value, value_len);
+    if (token != NULL) {
+      h2o_add_header(&req->pool, &req->res.headers, token, NULL, pool_value,
+                     value_len);
+    } else {
+      char *pool_name = h2o_mem_alloc_pool(&req->pool, char, name_len + 1);
+      memcpy(pool_name, name_data, name_len);
+      pool_name[name_len] = '\0';
+      h2o_add_header_by_str(&req->pool, &req->res.headers, pool_name, name_len,
+                            0, pool_name, pool_value, value_len);
+    }
   }
 }
 
