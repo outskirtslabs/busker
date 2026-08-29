@@ -9,7 +9,7 @@
    [taoensso.trove :as trove])
   (:import
    [java.io InputStream]
-   [java.lang.foreign MemorySegment]))
+   [java.lang.foreign Arena MemorySegment]))
 
 (set! *warn-on-reflection* true)
 
@@ -524,7 +524,8 @@
          (some? flat-config-ptr) (not (mem/null? flat-config-ptr))
          (some? arena)]}
   (let [on-request-cb (fn on-request-cb [ctx-ptr]
-                        (int (on-req-callback ctx-ptr (copy-request-context ctx-ptr))))
+                        (int (on-req-callback ctx-ptr
+                                              (copy-request-context ctx-ptr arena))))
         on-request-cb-ptr (mem/serialize on-request-cb
                                          [::ffi/fn [::mem/pointer] ::mem/int :raw-fn? true]
                                          arena)
@@ -811,30 +812,38 @@
     (mem/serialize accept-ctx-data ::h2o-accept-ctx-t arena)))
 
 (defn ->string
-  "Read bytes from a pointer with given length as a UTF-8 string. Returns nil if pointer is null."
-  [ptr ^long len]
-  (when (and ptr (not (mem/null? ptr)) (pos? len))
-    (String. (mem/read-bytes (mem/reinterpret ptr len) len) "UTF-8")))
+  "Reads `len` UTF-8 bytes from `ptr`. Returns nil for a null pointer.
+  The optional `arena` supplies the scope for the temporary native view."
+  ([ptr ^long len]
+   (when (and ptr (not (mem/null? ptr)) (pos? len))
+     (->string ptr len (mem/auto-arena))))
+  ([ptr ^long len ^Arena arena]
+   (when (and ptr (not (mem/null? ptr)) (pos? len))
+     (String. (mem/read-bytes (mem/reinterpret ptr len arena) len) "UTF-8"))))
 
-(defn build-ring-headers-map [headers headers_len]
-  (when (and (not (mem/null? headers)) (pos? headers_len))
-    (let [header-size (mem/size-of ::clj-header-t)
-          total-size (* headers_len header-size)
-          sized-headers (mem/reinterpret headers total-size)]
-      (reduce
-       (fn [result i]
-         (let [header-seg (mem/slice sized-headers (* i header-size) header-size)
-               header (mem/deserialize header-seg ::clj-header-t)
-               {:keys [name name_len
-                       value value_len]} header
-               name-str (str/lower-case (->string name name_len))
-               value-str (->string value value_len)
-               delimiter (if (= "cookie" name-str) ";" ",")]
-           (if (contains? result name-str)
-             (update result name-str str delimiter value-str)
-             (assoc result name-str value-str))))
-       {}
-       (range headers_len)))))
+(defn build-ring-headers-map
+  ([headers headers-len]
+   (when (and (not (mem/null? headers)) (pos? headers-len))
+     (build-ring-headers-map headers headers-len (mem/auto-arena))))
+  ([headers headers-len ^Arena arena]
+   (when (and (not (mem/null? headers)) (pos? headers-len))
+     (let [header-size (mem/size-of ::clj-header-t)
+           total-size (* headers-len header-size)
+           sized-headers (mem/reinterpret headers total-size arena)]
+       (reduce
+        (fn [result i]
+          (let [header-seg (mem/slice sized-headers (* i header-size) header-size)
+                header (mem/deserialize header-seg ::clj-header-t)
+                {:keys [name name_len
+                        value value_len]} header
+                name-str (str/lower-case (->string name name_len arena))
+                value-str (->string value value_len arena)
+                delimiter (if (= "cookie" name-str) ";" ",")]
+            (if (contains? result name-str)
+              (update result name-str str delimiter value-str)
+              (assoc result name-str value-str))))
+        {}
+        (range headers-len))))))
 
 (defn- default-server-port
   [scheme-str]
@@ -857,21 +866,23 @@
    :early-data is_early_data})
 
 (defn ^:no-doc copy-request-context
-  [ctx-ptr]
-  (let [ctx (mem/reinterpret ctx-ptr size-of-clj-req-ctx-t)
-        has-body (mem/read-short ctx 108)]
-    {:req (mem/read-address ctx 0)
-     :has-body has-body
-     :ring-data
-     {:method (->string (mem/read-address ctx 16) (mem/read-long ctx 64))
-      :path (->string (mem/read-address ctx 24) (mem/read-long ctx 72))
-      :authority (->string (mem/read-address ctx 8) (mem/read-long ctx 56))
-      :scheme (->string (mem/read-address ctx 40) (mem/read-long ctx 88))
-      :remote-addr (->string (mem/read-address ctx 32) (mem/read-long ctx 80))
-      :headers (build-ring-headers-map (mem/read-address ctx 48) (mem/read-long ctx 96))
-      :http-version (mem/read-int ctx 104)
+  ([ctx-ptr]
+   (copy-request-context ctx-ptr (mem/auto-arena)))
+  ([ctx-ptr ^Arena arena]
+   (let [ctx (mem/reinterpret ctx-ptr size-of-clj-req-ctx-t arena)
+         has-body (mem/read-short ctx 108)]
+     {:req (mem/read-address ctx 0)
       :has-body has-body
-      :early-data (mem/read-short ctx 110)}}))
+      :ring-data
+      {:method (->string (mem/read-address ctx 16) (mem/read-long ctx 64) arena)
+       :path (->string (mem/read-address ctx 24) (mem/read-long ctx 72) arena)
+       :authority (->string (mem/read-address ctx 8) (mem/read-long ctx 56) arena)
+       :scheme (->string (mem/read-address ctx 40) (mem/read-long ctx 88) arena)
+       :remote-addr (->string (mem/read-address ctx 32) (mem/read-long ctx 80) arena)
+       :headers (build-ring-headers-map (mem/read-address ctx 48) (mem/read-long ctx 96) arena)
+       :http-version (mem/read-int ctx 104)
+       :has-body has-body
+       :early-data (mem/read-short ctx 110)}})))
 
 (defn ^:no-doc assemble-ring-request
   [{:keys [method path authority scheme remote-addr headers

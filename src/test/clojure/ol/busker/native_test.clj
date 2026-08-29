@@ -94,3 +94,99 @@
   (doseq [[field expected-offset] generator-reader-offsets]
     (is (= expected-offset
            (native/offset-of :ol.busker.native/h2o-generator-t field)))))
+
+(defn- copied-request-context [arena]
+  (let [request (mem/alloc 1 arena)
+        string-pointer #(mem/serialize % ::mem/c-string arena)
+        context (-> (request-context-value arena)
+                    (assoc :req request)
+                    (assoc :meta
+                           {:authority (string-pointer "example.test:8443")
+                            :method (string-pointer "POST")
+                            :path (string-pointer "/things?q=1")
+                            :remote_addr (string-pointer "192.0.2.10")
+                            :scheme (string-pointer "https")
+                            :headers mem/null
+                            :authority_len 17
+                            :method_len 4
+                            :path_len 11
+                            :remote_addr_len 10
+                            :scheme_len 5
+                            :headers_len 0
+                            :http_version 0x0200
+                            :has_body 1
+                            :is_early_data 1}))]
+    {:pointer (mem/serialize context :ol.busker.native/clj-req-ctx-t arena)
+     :request request}))
+
+(defn- copied-request-values [{:keys [req has-body ring-data]}]
+  {:request-address (.address ^java.lang.foreign.MemorySegment req)
+   :has-body has-body
+   :ring-data ring-data})
+
+(def ^:private expected-copied-request-values
+  {:has-body 1
+   :ring-data {:method "POST"
+               :path "/things?q=1"
+               :authority "example.test:8443"
+               :scheme "https"
+               :remote-addr "192.0.2.10"
+               :headers nil
+               :http-version 0x0200
+               :has-body 1
+               :early-data 1}})
+(defn- recording-arena [^java.lang.foreign.Arena arena scope-calls_ allocation-calls_]
+  (reify java.lang.foreign.Arena
+    (scope [_]
+      (swap! scope-calls_ inc)
+      (.scope arena))
+    (^java.lang.foreign.MemorySegment allocate [_ ^long bytes ^long alignment]
+      (swap! allocation-calls_ inc)
+      (.allocate arena bytes alignment))
+    (close [_])))
+
+(deftest explicit-arena-request-copy-uses-supplied-arena-test
+  (with-open [arena (mem/shared-arena)]
+    (let [{:keys [pointer request]} (copied-request-context arena)
+          scope-calls_ (atom 0)
+          allocation-calls_ (atom 0)
+          supplied-arena (recording-arena arena scope-calls_ allocation-calls_)
+          result (native/copy-request-context pointer supplied-arena)]
+      (is (= {:arena-scope-calls 6
+              :arena-allocation-calls 0
+              :request-values (assoc expected-copied-request-values
+                                     :request-address (.address ^java.lang.foreign.MemorySegment request))}
+             {:arena-scope-calls @scope-calls_
+              :arena-allocation-calls @allocation-calls_
+              :request-values (copied-request-values result)})))))
+
+(deftest explicit-arena-header-copy-uses-supplied-arena-test
+  (with-open [arena (mem/shared-arena)]
+    (let [name (mem/serialize "X-Test" ::mem/c-string arena)
+          value (mem/serialize "value" ::mem/c-string arena)
+          header (mem/serialize {:name name
+                                 :name_len 6
+                                 :value value
+                                 :value_len 5}
+                                :ol.busker.native/clj-header-t
+                                arena)
+          scope-calls_ (atom 0)
+          allocation-calls_ (atom 0)
+          supplied-arena (recording-arena arena scope-calls_ allocation-calls_)]
+      (is (= {:headers {"x-test" "value"}
+              :arena-scope-calls 3
+              :arena-allocation-calls 0}
+             {:headers (native/build-ring-headers-map header 1 supplied-arena)
+              :arena-scope-calls @scope-calls_
+              :arena-allocation-calls @allocation-calls_})))))
+
+(deftest default-request-copy-retains-an-implicit-scope-test
+  (with-open [source-arena (mem/shared-arena)]
+    (let [{:keys [pointer request]} (copied-request-context source-arena)
+          result (native/copy-request-context pointer)]
+      (is (= {:source-scope? false
+              :request-values (assoc expected-copied-request-values
+                                     :request-address (.address ^java.lang.foreign.MemorySegment request))}
+             {:source-scope? (identical? (.scope source-arena)
+                                         (.scope ^java.lang.foreign.MemorySegment (:req result)))
+              :request-values (copied-request-values result)})))))
