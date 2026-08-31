@@ -18,6 +18,7 @@
    [java.nio ByteBuffer]
    [java.nio.charset Charset StandardCharsets]
    [java.util.concurrent.atomic AtomicBoolean]
+   [ol.busker.fixed_final DirectResponsePlan]
    [ol.busker.internal.protocols Request]))
 
 (set! *warn-on-reflection* true)
@@ -224,7 +225,7 @@
    [[] missing-content-length]
    (or headers {})))
 
-(defn- fixed-final-command
+(defn- fixed-final-data
   [^Request req response final?]
   (let [status (:status response)
         body (:body response)
@@ -240,35 +241,56 @@
                (or (not (string? body))
                    (nil? charset)
                    (utf8-charset? charset)))
-      (let [[encoded-headers header-staging-bytes]
-            (fixed-final/encode-headers headers)]
+      (let [[header-staging-bytes header-payload-bytes]
+            (fixed-final/header-sizes headers)]
         (when (and (<= (count headers) fixed-final/max-header-pairs)
                    (<= header-staging-bytes fixed-final/max-header-staging-bytes))
-          (let [body-bytes (fixed-final-body-bytes body)]
-            (when (<= (alength ^bytes body-bytes)
+          (let [body-length (if (string? body)
+                              (fixed-final/utf8-length body)
+                              (alength ^bytes body))]
+            (when (<= body-length
                       (min output-buffer-size
                            fixed-final/response-ring-max-body-bytes))
               (let [content-length (if (identical? missing-content-length content-length-value)
-                                     (alength ^bytes body-bytes)
+                                     body-length
                                      (coerce-content-length content-length-value))
                     compress-hint (get-compress-hint response)
                     compress-hint (if (and (= h2o/H2O_COMPRESS_HINT_ENABLE compress-hint)
-                                           (< (alength ^bytes body-bytes)
+                                           (< body-length
                                               (or (get-in req [:config :compress-min-size]) 0)))
                                     h2o/H2O_COMPRESS_HINT_DISABLE
                                     compress-hint)]
-                (fixed-final/prepared-command (:dispatch-module-id req)
-                                              (:dispatch-request-seq req)
-                                              status
-                                              encoded-headers
-                                              header-staging-bytes
-                                              content-length
-                                              compress-hint
-                                              body-bytes)))))))))
+                (DirectResponsePlan. (long (:dispatch-module-id req))
+                                     (long (:dispatch-request-seq req))
+                                     (long status)
+                                     headers
+                                     (long header-payload-bytes)
+                                     body
+                                     (long body-length)
+                                     (long content-length)
+                                     (long compress-hint))))))))))
+
+(defn- fixed-final-command-from-data
+  [^Request req ^DirectResponsePlan plan]
+  (let [status (.-status plan)
+        headers (.-headers plan)
+        body (.-body plan)
+        content-length (.-content-length plan)
+        compress-hint (.-compress-hint plan)
+        [encoded-headers header-staging-bytes] (fixed-final/encode-headers headers)
+        body-bytes (fixed-final-body-bytes body)]
+    (fixed-final/prepared-command (:dispatch-module-id req)
+                                  (:dispatch-request-seq req)
+                                  status
+                                  encoded-headers
+                                  header-staging-bytes
+                                  content-length
+                                  compress-hint
+                                  body-bytes)))
 
 (defn- schedule-fixed-final!
-  [^Request req command]
-  (fixed-final/try-publish-response! (:worker req) command))
+  [^Request req ^DirectResponsePlan plan]
+  (fixed-final/try-publish-direct-response! (:worker req) plan))
 
 (defn- schedule-fixed-final-mailbox!
   [^Request req command]
@@ -290,22 +312,23 @@
                     (nil? status) (assoc :status 200))]
     (when-not (final-status? (:status response'))
       (throw (ex-info "Final response status must be >= 200" {:status (:status response')})))
-    (let [command (fixed-final-command req response' final?)
-          response' (if command
+    (let [fixed-data (fixed-final-data req response' final?)
+          response' (if fixed-data
                       (if (hdr.util/get-header response' "content-length")
                         response'
                         (hdr.util/header response' "content-length"
-                                         (fixed-final/command-content-length command)))
+                                         (.-content-length ^DirectResponsePlan fixed-data)))
                       (cond-> response'
                         final? with-content-length))
           head (dissoc response' :body)
           state @committed_]
       (when (and (not (map? state))
                  (compare-and-set! committed_ state head))
-        (let [fixed-result (when command
+        (let [fixed-result (when fixed-data
                              (if (identical? informational-sent state)
-                               (schedule-fixed-final-mailbox! req command)
-                               (schedule-fixed-final! req command)))]
+                               (schedule-fixed-final-mailbox!
+                                req (fixed-final-command-from-data req fixed-data))
+                               (schedule-fixed-final! req fixed-data)))]
           (cond
             (= :accepted fixed-result)
             (do

@@ -804,11 +804,13 @@
         (+ fixed-final/max-header-staging-bytes
            (min (:output-buffer-size config)
                 fixed-final/response-ring-max-body-bytes))
+        ;; MemorySegment.setString writes a trailing NUL outside the logical payload.
+        response-slot-storage-capacity (inc response-slot-payload-capacity)
         response-receivers
         (mapv #(h2o/mt-create-response-receiver
                 %
                 fixed-final/response-ring-capacity
-                response-slot-payload-capacity)
+                response-slot-storage-capacity)
               contexts)
         _ (when (some #(or (nil? %) (mem/null? %)) response-receivers)
             (doseq [receiver wakeup-receivers]
@@ -819,7 +821,7 @@
                 (h2o/mt-destroy-response-receiver receiver)))
             (throw (ex-info "Could not create native response receiver" {})))
         response-slot-size (+ (h2o/mt-response-slot-data-size)
-                              response-slot-payload-capacity)
+                              response-slot-storage-capacity)
         response-slots
         (mapv (fn [receiver]
                 (mapv (fn [index]

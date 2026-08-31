@@ -18,6 +18,7 @@
    [java.lang.foreign Arena]
    [java.net InetSocketAddress Socket]
    [java.nio.charset StandardCharsets]
+   [ol.busker.fixed_final DirectResponsePlan]
    [java.util.concurrent AbstractExecutorService]
    [java.util.concurrent.atomic AtomicBoolean AtomicReference]))
 
@@ -32,6 +33,10 @@
   (add-req [_ _ _] nil)
   (reap-req [_ _] nil))
 
+(defn- direct-plan
+  [module-id request-seq ^bytes body]
+  (DirectResponsePlan. (long module-id) (long request-seq) 200 [] 0 body
+                       (alength body) (alength body) 0))
 (defn- connect
   [port]
   (doto (Socket.)
@@ -188,16 +193,14 @@
     (try
       (let [worker (first (::generation/workers instance))
             receiver (.get ^AtomicReference (:response-receiver_ worker))
-            command (fixed-final/command
-                     999 999 200 [] 0 1 0 32
-                     (.getBytes "x" StandardCharsets/UTF_8))
             result_ (promise)
             thread (Thread/startVirtualThread
                     #(let [capacity (h2o/mt-response-ring-capacity receiver)
                            handles (mapv (fn [_] (h2o/mt-response-try-claim receiver))
                                          (range capacity))
                            overflow (h2o/mt-response-try-claim receiver)
-                           fallback (fixed-final/try-publish-response! worker command)
+                           fallback (fixed-final/try-publish-direct-response!
+                                     worker (direct-plan 999 999 (byte-array [120])))
                            aborted (mapv (fn [claim-handle]
                                            (h2o/mt-response-abort receiver claim-handle))
                                          handles)
@@ -240,8 +243,8 @@
     (try
       (let [worker (first (::generation/workers instance))
             receiver (.get ^AtomicReference (:response-receiver_ worker))]
-        (is (= (+ fixed-final/max-header-staging-bytes
-                  fixed-final/response-ring-max-body-bytes)
+        (is (= (inc (+ fixed-final/max-header-staging-bytes
+                       fixed-final/response-ring-max-body-bytes))
                (h2o/mt-response-slot-payload-capacity receiver))))
       (finally
         (generation/stop! instance)))))
@@ -298,11 +301,11 @@
       (let [worker (first (::generation/workers instance))
             receiver (.get ^AtomicReference (:response-receiver_ worker))
             body (.getBytes "stale" StandardCharsets/UTF_8)
-            command (fixed-final/command 999 999 200 [] 0 5 0 32 body)
             result_ (promise)
             thread (Thread/startVirtualThread
                     #(deliver result_
-                              {:result (fixed-final/try-publish-response! worker command)
+                              {:result (fixed-final/try-publish-direct-response!
+                                        worker (direct-plan 999 999 body))
                                :virtual? (.isVirtual (Thread/currentThread))}))]
         (.join thread 5000)
         (is (= {:result :accepted :virtual? true}
@@ -336,11 +339,11 @@
           (let [claim-handle (h2o/mt-response-try-claim receiver)]
             (h2o/mt-response-abort receiver claim-handle)))
         (let [body (.getBytes "ready" StandardCharsets/UTF_8)
-              command (fixed-final/command 999 999 200 [] 0 5 0 32 body)
               claim-handle (h2o/mt-response-try-claim receiver)
               slot (response-claim-slot worker claim-handle)]
-          (fixed-final/write-response-slot!
-           slot (:response-slot-payload-capacity worker) command)
+          (fixed-final/write-direct-response-slot!
+           slot (:response-slot-payload-capacity worker)
+           (direct-plan 999 999 body))
           (is (= (response-claim-index invalid-handle)
                  (response-claim-index claim-handle)))
           (is (zero? (h2o/mt-response-publish receiver invalid-handle)))
@@ -432,11 +435,11 @@
       (let [worker (first (::generation/workers instance))
             receiver (.get ^AtomicReference (:response-receiver_ worker))
             body (.getBytes "ready" StandardCharsets/UTF_8)
-            command (fixed-final/command 999 999 200 [] 0 5 0 32 body)
             claim-handle (h2o/mt-response-try-claim receiver)
             slot (response-claim-slot worker claim-handle)]
-        (fixed-final/write-response-slot!
-         slot (:response-slot-payload-capacity worker) command)
+        (fixed-final/write-direct-response-slot!
+         slot (:response-slot-payload-capacity worker)
+         (direct-plan 999 999 body))
         (is (= 1 (h2o/mt-response-publish receiver claim-handle)))
         (generation/stop! instance)
         (reset! stopped?_ true)

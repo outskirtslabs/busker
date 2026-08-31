@@ -16,6 +16,7 @@
    [java.lang.foreign MemorySegment]
    [java.net InetSocketAddress Socket]
    [java.nio.charset StandardCharsets]
+   [ol.busker.fixed_final DirectResponsePlan]
    [java.util.concurrent.atomic AtomicReference]))
 
 (defn- command
@@ -25,6 +26,17 @@
          header-bytes (fixed-final/header-staging-bytes headers)]
      (fixed-final/command 1 1 200 headers header-bytes (alength ^bytes body) 2 body-limit body))))
 
+(defn- direct-plan
+  [module-id request-seq status headers content-length compress-hint body body-length]
+  (DirectResponsePlan. (long module-id)
+                       (long request-seq)
+                       (long status)
+                       headers
+                       (fixed-final/header-utf8-bytes headers)
+                       body
+                       (long body-length)
+                       (long content-length)
+                       (long compress-hint)))
 (defn- serialized-headers
   [headers headers-len]
   (let [header-size (mem/size-of ::h2o/clj-header-t)]
@@ -75,10 +87,11 @@
 (deftest response-slot-contains-packed-metadata-headers-and-body
   (with-open [arena (mem/confined-arena)]
     (let [body (.getBytes "cat" StandardCharsets/UTF_8)
-          command (command body)
+          headers [["content-type" "text/plain"]]
           data-size (mem/size-of ::h2o/clj-fixed-response-slot-data-t)
-          slot (mem/alloc (+ data-size 64) arena)
-          _ (fixed-final/write-response-slot! slot 64 command)
+          slot (mem/alloc (+ data-size 65) arena)
+          _ (fixed-final/write-direct-response-slot!
+             slot 64 (direct-plan 1 1 200 headers 3 2 body 3))
           data (mem/deserialize (mem/slice slot 0 data-size)
                                 ::h2o/clj-fixed-response-slot-data-t)
           header (first (:headers data))
@@ -103,7 +116,60 @@
                     :header header
                     :payload (String. payload StandardCharsets/UTF_8)))))))
 
-(deftest response-slot-is-aborted-when-packing-fails
+(deftest direct-response-slot-utf8-matches-java-encoding
+  (doseq [body ["ascii" "λ" "🐈" (str (char 0xd800) "x") (str "x" (char 0xdc00))]]
+    (with-open [arena (mem/confined-arena)]
+      (let [expected (.getBytes ^String body StandardCharsets/UTF_8)
+            headers [["x-🐈" "välue"]]
+            header-bytes (fixed-final/header-utf8-bytes headers)
+            data-size (mem/size-of ::h2o/clj-fixed-response-slot-data-t)
+            slot (mem/alloc (+ data-size 129) arena)]
+        (fixed-final/write-direct-response-slot!
+         slot 128 (direct-plan 7 9 201 headers (alength expected) 1 body
+                               (alength expected)))
+        (let [data (mem/deserialize (mem/slice slot 0 data-size)
+                                    ::h2o/clj-fixed-response-slot-data-t)
+              payload (mem/read-bytes (mem/slice slot data-size 128)
+                                      (long (:payload-len data)))]
+          (is (= {:module-id 7
+                  :request-seq 9
+                  :headers-len 1
+                  :content-length (alength expected)
+                  :body-offset header-bytes
+                  :payload-len (+ header-bytes (alength expected))
+                  :status 201
+                  :compress-hint 1}
+                 (select-keys data [:module-id :request-seq :headers-len
+                                    :content-length :body-offset :payload-len
+                                    :status :compress-hint])))
+          (is (= (alength expected) (:body-len data)))
+          (is (= (vec expected)
+                 (vec (drop header-bytes payload)))))))))
+(deftest direct-string-body-uses-hidden-terminator-byte-at-logical-capacity
+  (with-open [arena (mem/confined-arena)]
+    (let [data-size (mem/size-of ::h2o/clj-fixed-response-slot-data-t)
+          slot (mem/alloc (+ data-size 4) arena)]
+      (fixed-final/write-direct-response-slot!
+       slot 3 (direct-plan 1 1 200 [] 3 0 "cat" 3))
+      (is (= [99 97 116 0]
+             (vec (mem/read-bytes (mem/slice slot data-size 4) 4)))))))
+
+(deftest full-response-ring-does-not-pack-direct-response
+  (with-open [arena (mem/confined-arena)]
+    (let [receiver (mem/alloc 1 arena)
+          worker {:response-receiver_ (AtomicReference. receiver)
+                  :response-slots []
+                  :response-slot-payload-capacity 64}
+          writes_ (atom 0)]
+      (with-redefs [h2o/mt-response-try-claim (constantly 0)
+                    fixed-final/write-direct-response-slot!
+                    (fn [& _] (swap! writes_ inc))]
+        (is (= :overloaded
+               (fixed-final/try-publish-direct-response!
+                worker (direct-plan 1 1 200 [] 0 0 (byte-array 0) 0))))
+        (is (zero? @writes_))))))
+
+(deftest direct-response-slot-is-aborted-when-packing-fails
   (with-open [arena (mem/confined-arena)]
     (let [receiver (mem/alloc 1 arena)
           slot (mem/alloc (mem/size-of ::h2o/clj-fixed-response-slot-data-t) arena)
@@ -111,20 +177,19 @@
           worker {:response-receiver_ (AtomicReference. receiver)
                   :response-slots [slot]
                   :response-slot-payload-capacity 0}
-          aborted_ (atom [])
-          published_ (atom 0)]
+          aborted_ (atom [])]
       (with-redefs [h2o/mt-response-try-claim (constantly claim-handle)
-                    h2o/mt-response-publish (fn [& _] (swap! published_ inc))
+                    h2o/mt-response-publish (fn [& _] 1)
                     h2o/mt-response-abort
                     (fn [actual-receiver actual-handle]
                       (swap! aborted_ conj [actual-receiver actual-handle])
                       1)]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo
                               #"does not fit"
-                              (fixed-final/try-publish-response!
-                               worker (command (byte-array [1])))))
-        (is (= [[receiver claim-handle]] @aborted_))
-        (is (zero? @published_))))))
+                              (fixed-final/try-publish-direct-response!
+                               worker (direct-plan 1 1 200 [] 1 0
+                                                   (byte-array [1]) 1))))
+        (is (= [[receiver claim-handle]] @aborted_))))))
 (deftest worker-reuses-and-explicitly-releases-fixed-final-scratch
   (let [scratch_ (AtomicReference.)
         worker {:fixed-final-scratch_ scratch_}
@@ -277,30 +342,10 @@
         drain-threads_ (atom [])
         try-claim h2o/mt-response-try-claim
         wake h2o/mt-wakeup
-        drain h2o/mt-response-ring-drain
-        commit-final!
-        (fn [req write-resp committed_ response _]
-          (let [body (.getBytes "ring-inline" StandardCharsets/UTF_8)
-                headers [["content-type" "text/plain"]]
-                command (fixed-final/command (:dispatch-module-id req)
-                                             (:dispatch-request-seq req)
-                                             (:status response)
-                                             headers
-                                             (fixed-final/header-staging-bytes headers)
-                                             (alength body)
-                                             h2o/H2O_COMPRESS_HINT_ENABLE
-                                             (get-in req [:config :output-buffer-size])
-                                             body)
-                head (dissoc response :body)]
-            (when (compare-and-set! committed_ nil head)
-              (when-let [writer (response/writer-if-created write-resp)]
-                (pi/stop writer))
-              (when (= :accepted (fixed-final/try-publish-response! (:worker req) command))
-                {:head head :body nil}))))]
+        drain h2o/mt-response-ring-drain]
     (try
       (with-redefs-fn
-        {#'response/commit-final! commit-final!
-         #'h2o/mt-response-try-claim
+        {#'h2o/mt-response-try-claim
          (fn [receiver]
            (swap! claim-threads_ conj (Thread/currentThread))
            (try-claim receiver))
@@ -313,7 +358,7 @@
            (swap! drain-threads_ conj (Thread/currentThread))
            (drain receiver))}
         #(let [http-response (request-text port "GET")]
-           (is (.contains ^String http-response "ring-inline"))))
+           (is (.contains ^String http-response "generic"))))
       (is (seq @claim-threads_))
       (is (every? #(.isVirtual ^Thread %) @claim-threads_))
       (is (seq @wake-threads_))

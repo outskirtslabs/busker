@@ -66,6 +66,15 @@
                               ^long compress-hint
                               ^bytes body])
 
+(deftype DirectResponsePlan [^long module-id
+                             ^long request-seq
+                             ^long status
+                             headers
+                             ^long header-bytes
+                             body
+                             ^long body-length
+                             ^long content-length
+                             ^long compress-hint])
 (deftype FixedFinalScratch [^Arena arena ^MemorySegment segment ^long capacity])
 
 (defn command-module-id
@@ -80,6 +89,7 @@
   ^long [^FixedFinalCommand command]
   (.-content-length command))
 
+(declare header-sizes utf8-length)
 (defn encode-headers
   "Returns encoded header pairs and their native staging size."
   [headers]
@@ -97,8 +107,8 @@
 
 (defn header-staging-bytes
   "Returns the native descriptor and UTF-8 string space for `headers`."
-  [headers]
-  (second (encode-headers headers)))
+  ^long [headers]
+  (long (first (header-sizes headers))))
 
 (defn- command-data
   [module-id request-seq status headers header-bytes content-length compress-hint body-limit body]
@@ -135,60 +145,128 @@
   [module-id request-seq status headers header-bytes content-length compress-hint body-limit body]
   (command-data module-id request-seq status headers header-bytes content-length compress-hint body-limit body))
 
-(defn ^:no-doc write-response-slot!
-  "Writes `command` into claimed `slot` storage and returns the slot segment."
-  [slot ^long payload-capacity ^FixedFinalCommand command]
-  (let [encoded-headers (.-headers command)
-        header-bytes
-        (reduce (fn [^long total [^bytes name ^bytes value]]
-                  (+ total (alength name) (alength value)))
-                0
-                encoded-headers)
-        ^bytes body (.-body command)
-        body-length (long (alength body))
+(def ^:private byte-array-class (Class/forName "[B"))
+
+(defn ^:no-doc utf8-length
+  ^long [^String value]
+  (loop [index (long 0)
+         length (long 0)]
+    (if (< index (.length value))
+      (let [character (int (.charAt value index))]
+        (cond
+          (< character 0x80)
+          (recur (unchecked-inc index) (unchecked-inc length))
+
+          (< character 0x800)
+          (recur (unchecked-inc index) (+ length 2))
+
+          (Character/isHighSurrogate (char character))
+          (if (and (< (unchecked-inc index) (.length value))
+                   (Character/isLowSurrogate (.charAt value (unchecked-inc index))))
+            (recur (+ index 2) (+ length 4))
+            (recur (unchecked-inc index) (unchecked-inc length)))
+
+          (Character/isLowSurrogate (char character))
+          (recur (unchecked-inc index) (unchecked-inc length))
+
+          :else
+          (recur (unchecked-inc index) (+ length 3))))
+      length)))
+
+(defn ^:no-doc header-sizes
+  "Returns `[native-staging-bytes packed-utf8-bytes]` for string header pairs."
+  [headers]
+  (loop [index (long 0)
+         staging-bytes (long 0)
+         packed-bytes (long 0)]
+    (if (< index (count headers))
+      (let [[^String name ^String value] (nth headers index)
+            name-length (utf8-length name)
+            value-length (utf8-length value)]
+        (recur (unchecked-inc index)
+               (long (+ staging-bytes (long clj-header-size)
+                        name-length value-length 2))
+               (long (+ packed-bytes name-length value-length))))
+      [staging-bytes packed-bytes])))
+
+(defn ^:no-doc header-utf8-bytes
+  ^long [headers]
+  (long (second (header-sizes headers))))
+
+(defn- write-utf8!
+  ^long [^MemorySegment segment ^long offset ^String value ^long length]
+  (.setString segment offset value StandardCharsets/UTF_8)
+  (+ offset length))
+
+(defn ^:no-doc write-direct-response-slot!
+  "Packs original response strings and body directly into claimed `slot` storage."
+  [slot ^long payload-capacity ^DirectResponsePlan plan]
+  (let [module-id (.-module-id plan)
+        request-seq (.-request-seq plan)
+        status (.-status plan)
+        headers (.-headers plan)
+        header-bytes (.-header-bytes plan)
+        body (.-body plan)
+        body-length (.-body-length plan)
+        content-length (.-content-length plan)
+        compress-hint (.-compress-hint plan)
         payload-length (+ header-bytes body-length)]
-    (when (or (> (count encoded-headers) max-header-pairs)
+    (when (or (> (count headers) max-header-pairs)
               (> payload-length payload-capacity))
       (throw (ex-info "Fixed response does not fit its claimed slot"
-                      {:header-count (count encoded-headers)
+                      {:header-count (count headers)
                        :payload-bytes payload-length
                        :payload-capacity payload-capacity})))
     (let [data slot
-          payload (mem/slice data response-slot-data-size payload-capacity)
+          payload (mem/slice data response-slot-data-size (inc payload-capacity))
           body-offset
           (loop [index (long 0)
                  cursor (long 0)]
-            (if (< index (count encoded-headers))
-              (let [[^bytes name ^bytes value] (nth encoded-headers index)
-                    name-length (long (alength name))
-                    value-offset (+ cursor name-length)
-                    value-length (long (alength value))
+            (if (< index (count headers))
+              (let [[^String name ^String value] (nth headers index)
+                    name-offset cursor
+                    name-length (utf8-length name)
+                    value-offset (write-utf8! payload name-offset name name-length)
+                    value-length (utf8-length value)
+                    next-cursor (write-utf8! payload value-offset value value-length)
                     descriptor (+ response-slot-headers-offset
                                   (* index packed-header-size))]
-                (mem/write-bytes payload name-length cursor name)
-                (mem/write-bytes payload value-length value-offset value)
-                (mem/write-int data (+ descriptor packed-name-offset) cursor)
-                (mem/write-int data (+ descriptor packed-name-len-offset) name-length)
+                (mem/write-int data (+ descriptor packed-name-offset) name-offset)
+                (mem/write-int data (+ descriptor packed-name-len-offset)
+                               (- value-offset name-offset))
                 (mem/write-int data (+ descriptor packed-value-offset) value-offset)
-                (mem/write-int data (+ descriptor packed-value-len-offset) value-length)
-                (recur (unchecked-inc index) (+ value-offset value-length)))
+                (mem/write-int data (+ descriptor packed-value-len-offset)
+                               (- next-cursor value-offset))
+                (recur (unchecked-inc index) next-cursor))
               cursor))]
-      (when (pos? body-length)
-        (mem/write-bytes payload body-length body-offset body))
-      (mem/write-long data response-slot-module-id-offset (.-module-id command))
-      (mem/write-long data response-slot-request-seq-offset (.-request-seq command))
-      (mem/write-long data response-slot-headers-len-offset (count encoded-headers))
-      (mem/write-long data response-slot-content-length-offset (.-content-length command))
+      (when-not (= header-bytes body-offset)
+        (throw (ex-info "Fixed response header size changed while packing"
+                        {:expected header-bytes :actual body-offset})))
+      (cond
+        (zero? body-length) nil
+        (string? body) (let [end (write-utf8! payload body-offset body body-length)]
+                         (when-not (= payload-length end)
+                           (throw (ex-info "Fixed response body size changed while packing"
+                                           {:expected body-length
+                                            :actual (- end body-offset)}))))
+        (instance? byte-array-class body)
+        (mem/write-bytes payload body-length body-offset ^bytes body)
+        :else
+        (throw (ex-info "Unsupported direct fixed response body" {:type (class body)})))
+      (mem/write-long data response-slot-module-id-offset module-id)
+      (mem/write-long data response-slot-request-seq-offset request-seq)
+      (mem/write-long data response-slot-headers-len-offset (count headers))
+      (mem/write-long data response-slot-content-length-offset content-length)
       (mem/write-long data response-slot-body-offset-offset body-offset)
       (mem/write-long data response-slot-body-len-offset body-length)
       (mem/write-long data response-slot-payload-len-offset payload-length)
-      (mem/write-int data response-slot-status-offset (.-status command))
-      (mem/write-int data response-slot-compress-hint-offset (.-compress-hint command))
+      (mem/write-int data response-slot-status-offset status)
+      (mem/write-int data response-slot-compress-hint-offset compress-hint)
       data)))
 
-(defn ^:no-doc try-publish-response!
-  "Publishes `command` through `worker` without waiting, or returns a fallback status."
-  [worker ^FixedFinalCommand command]
+(defn ^:no-doc try-publish-direct-response!
+  "Packs and publishes an eligible response without waiting, or returns a fallback status."
+  [worker ^DirectResponsePlan plan]
   (let [receiver_ (:response-receiver_ worker)
         receiver (when receiver_ (.get ^AtomicReference receiver_))]
     (if (or (nil? receiver) (mem/null? receiver))
@@ -201,7 +279,7 @@
                 payload-capacity (long (:response-slot-payload-capacity worker))
                 published?_ (volatile! false)]
             (try
-              (write-response-slot! slot payload-capacity command)
+              (write-direct-response-slot! slot payload-capacity plan)
               (if (= 1 (h2o/mt-response-publish receiver claim-handle))
                 (do
                   (vreset! published?_ true)

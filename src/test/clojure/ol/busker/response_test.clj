@@ -19,6 +19,7 @@
    [java.nio ByteBuffer]
    [java.nio.charset StandardCharsets]
    [java.util.concurrent CountDownLatch TimeUnit]
+   [ol.busker.fixed_final DirectResponsePlan]
    [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicReference]))
 
 (deftype ExtensionBackedEmitter [])
@@ -42,7 +43,7 @@
 
 (defn- fixed-command
   [output-buffer-size response final?]
-  (#'response/fixed-final-command (fixed-final-request output-buffer-size) response final?))
+  (#'response/fixed-final-data (fixed-final-request output-buffer-size) response final?))
 
 (defn- start-server
   [handler]
@@ -340,7 +341,8 @@
         staged-value (apply str (repeat (- fixed-final/max-header-staging-bytes header-overhead) "a"))
         sixty-four-headers (into {} (map (fn [n] [(str "x-" n) "v"]) (range 64)))
         sixty-five-headers (assoc sixty-four-headers "x-64" "v")]
-    (is (= "cat" (String. ^bytes (:body (fixed-command 3 {:status 200 :body "cat"} true)) StandardCharsets/UTF_8)))
+    (is (= "cat" (.-body ^DirectResponsePlan
+                  (fixed-command 3 {:status 200 :body "cat"} true))))
     (is (nil? (fixed-command 3 {:status 200 :body "cats"} true)))
     (is (some? (fixed-command 3 {:status 200 :body (byte-array 3)} true)))
     (is (some? (fixed-command fixed-final/response-ring-max-body-bytes
@@ -351,54 +353,63 @@
                              {:status 200
                               :body (byte-array (inc fixed-final/response-ring-max-body-bytes))}
                              true)))
-    (is (= 0 (alength ^bytes (:body (fixed-command 3 {:status 200 :body ""} true)))))
-    (is (= 3 (:content-length (fixed-command 3 {:status 200 :body "cat"} true))))
-    (is (= 99 (:content-length (fixed-command 3 {:status 200
-                                                 :headers {"content-length" "99"}
-                                                 :body "cat"}
-                                              true))))
+    (is (= "" (.-body ^DirectResponsePlan
+               (fixed-command 3 {:status 200 :body ""} true))))
+    (is (= 3 (.-content-length ^DirectResponsePlan
+              (fixed-command 3 {:status 200 :body "cat"} true))))
+    (is (= 99 (.-content-length
+               ^DirectResponsePlan
+               (fixed-command 3 {:status 200
+                                 :headers {"content-length" "99"}
+                                 :body "cat"}
+                              true))))
     (is (some? (fixed-command 1 {:status 200
                                  :headers {"content-type" "text/plain; charset=UTF8"}
                                  :body "x"}
                               true)))
     (is (= h2o/H2O_COMPRESS_HINT_DISABLE
-           (:compress-hint (fixed-command 1 {:status 200
-                                             :h2o/compress-hint :h2o.compress/disable
-                                             :body "x"}
-                                          true))))
+           (.-compress-hint
+            ^DirectResponsePlan
+            (fixed-command 1 {:status 200
+                              :h2o/compress-hint :h2o.compress/disable
+                              :body "x"}
+                           true))))
     (is (some? (fixed-command 1 {:status 200 :headers sixty-four-headers :body "x"} true)))
     (is (nil? (fixed-command 1 {:status 200 :headers sixty-five-headers :body "x"} true)))
     (is (some? (fixed-command 1 {:status 200 :headers {"x" staged-value} :body "x"} true)))
     (is (nil? (fixed-command 1 {:status 200 :headers {"x" (str staged-value "a")} :body "x"} true)))))
 
-(deftest fixed-final-command-encodes-headers-once
-  (let [call-count_ (atom 0)
-        encode-headers fixed-final/encode-headers]
-    (with-redefs [fixed-final/encode-headers
-                  (fn [headers]
-                    (swap! call-count_ inc)
-                    (encode-headers headers))]
-      (is (some? (fixed-command 3 {:status 200
-                                   :headers {"content-type" "text/plain"}
-                                   :body "cat"}
-                                true))))
-    (is (= 1 @call-count_))))
-
+(deftest ordinary-fixed-final-does-not-encode-before-direct-admission
+  (let [body (byte-array [1 2 3])
+        admitted_ (atom nil)
+        writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))]
+    (with-redefs-fn {#'fixed-final/encode-headers
+                     (fn [& _] (throw (ex-info "Unexpected header encoding" {})))
+                     #'response/schedule-fixed-final!
+                     (fn [_ data]
+                       (reset! admitted_ data)
+                       :accepted)}
+      #(is (some? (#'response/commit-final!
+                   (fixed-final-request 3) writer (atom nil)
+                   {:status 200 :headers {"content-type" "text/plain"} :body body}
+                   true))))
+    (let [^DirectResponsePlan plan @admitted_]
+      (is (= [200 [["content-type" "text/plain"]] 3 3]
+             [(.-status plan) (.-headers plan)
+              (.-body-length plan) (.-content-length plan)]))
+      (is (identical? body (.-body plan))))))
 (deftest fixed-final-expands-headers-eagerly-test
-  (let [command (fixed-command 3
-                               {:status 200
-                                :headers (array-map "Content-Length" "3"
-                                                    "content-length" "99"
-                                                    "X-Repeat" [1 "two"])
-                                :body "cat"}
-                               true)]
-    (is (= 3 (:content-length command)))
-    (is (vector? (:headers command)))
+  (let [data (fixed-command 3
+                            {:status 200
+                             :headers (array-map "Content-Length" "3"
+                                                 "content-length" "99"
+                                                 "X-Repeat" [1 "two"])
+                             :body "cat"}
+                            true)]
+    (is (= 3 (.-content-length ^DirectResponsePlan data)))
+    (is (vector? (.-headers ^DirectResponsePlan data)))
     (is (= [["X-Repeat" "1"] ["X-Repeat" "two"]]
-           (mapv (fn [[^bytes name ^bytes value]]
-                   [(String. name StandardCharsets/UTF_8)
-                    (String. value StandardCharsets/UTF_8)])
-                 (:headers command))))))
+           (.-headers ^DirectResponsePlan data)))))
 
 (deftest fixed-final-falls-back-for-ineligible-final-responses
   (doseq [response [{:status 204 :body "x"}
@@ -506,33 +517,31 @@
 (deftest fixed-final-admission-stops-generic-writer
   (let [writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))
         req (fixed-final-request 3)
-        command_ (atom nil)
+        data_ (atom nil)
         committed_ (atom nil)]
-    (with-redefs-fn {#'response/schedule-fixed-final! (fn [_ command]
-                                                        (reset! command_ command)
+    (with-redefs-fn {#'response/schedule-fixed-final! (fn [_ data]
+                                                        (reset! data_ data)
                                                         :accepted)
                      #'response/schedule-start-response! (fn [& _] (throw (ex-info "Unexpected generic response" {})))}
       #(do
          (is (nil? (:body (#'response/commit-final! req writer committed_
                                                     {:status 200 :body "cat"}
                                                     true))))
-         (is (= "cat" (String. ^bytes (:body @command_) StandardCharsets/UTF_8)))
+         (is (= "cat" (.-body ^DirectResponsePlan @data_)))
          (is (true? (.get ^AtomicBoolean (:stopped?_ writer))))))))
 
-(deftest fixed-final-command-copies-ring-byte-array-before-admission
+(deftest fixed-final-ring-admission-retains-byte-array-until-synchronous-pack
   (let [body (byte-array [65 66 67])
-        command_ (atom nil)
+        data_ (atom nil)
         writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))]
-    (with-redefs-fn {#'response/schedule-fixed-final! (fn [_ command]
-                                                        (reset! command_ command)
-                                                        :accepted)}
-      #(do
-         (#'response/commit-final! (fixed-final-request 3) writer (atom nil)
-                                   {:status 200 :body body}
-                                   true)
-         (aset-byte body 0 (byte 90))))
-    (is (= [65 66 67] (vec ^bytes (:body @command_))))))
-
+    (with-redefs-fn {#'response/schedule-fixed-final!
+                     (fn [_ data]
+                       (reset! data_ data)
+                       :accepted)}
+      #(#'response/commit-final! (fixed-final-request 3) writer (atom nil)
+                                 {:status 200 :body body}
+                                 true))
+    (is (identical? body (.-body ^DirectResponsePlan @data_)))))
 (deftest fixed-final-ring-path-preserves-final-response-semantics
   (let [[server port]
         (start-server
