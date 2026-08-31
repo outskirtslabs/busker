@@ -64,6 +64,57 @@
   (is (thrown? clojure.lang.ExceptionInfo
                (command (byte-array 4) 3))))
 
+(deftest response-slot-contains-packed-metadata-headers-and-body
+  (with-open [arena (mem/confined-arena)]
+    (let [body (.getBytes "cat" StandardCharsets/UTF_8)
+          command (command body)
+          data-size (mem/size-of ::h2o/clj-fixed-response-slot-data-t)
+          slot (mem/alloc (+ data-size 64) arena)
+          _ (fixed-final/write-response-slot! slot 64 command)
+          data (mem/deserialize (mem/slice slot 0 data-size)
+                                ::h2o/clj-fixed-response-slot-data-t)
+          header (first (:headers data))
+          payload (mem/read-bytes (mem/slice slot data-size 64)
+                                  (long (:payload-len data)))]
+      (is (= {:module-id 1
+              :claim-token 0
+              :request-seq 1
+              :headers-len 1
+              :content-length 3
+              :body-offset 22
+              :body-len 3
+              :payload-len 25
+              :status 200
+              :compress-hint 2
+              :header {:name-offset 0
+                       :name-len 12
+                       :value-offset 12
+                       :value-len 10}
+              :payload "content-typetext/plaincat"}
+             (assoc (dissoc data :headers)
+                    :header header
+                    :payload (String. payload StandardCharsets/UTF_8)))))))
+
+(deftest response-slot-is-aborted-when-packing-fails
+  (with-open [arena (mem/confined-arena)]
+    (let [receiver (mem/alloc 1 arena)
+          slot (mem/alloc (mem/size-of ::h2o/clj-fixed-response-slot-data-t) arena)
+          worker {:response-receiver_ (AtomicReference. receiver)}
+          aborted_ (atom [])
+          published_ (atom 0)]
+      (with-redefs [h2o/mt-response-try-claim (constantly slot)
+                    h2o/mt-response-slot-payload-capacity (constantly 0)
+                    h2o/mt-response-publish (fn [& _] (swap! published_ inc))
+                    h2o/mt-response-abort
+                    (fn [actual-receiver actual-slot claim-token]
+                      (swap! aborted_ conj [actual-receiver actual-slot claim-token])
+                      1)]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                              #"does not fit"
+                              (fixed-final/try-publish-response!
+                               worker (command (byte-array [1])))))
+        (is (= [[receiver slot 0]] @aborted_))
+        (is (zero? @published_))))))
 (deftest dispatcher-stages-on-a-platform-thread
   (let [receiver (mem/alloc 1 (mem/global-arena))
         seen_ (promise)
@@ -317,6 +368,67 @@
            (finally
              (busker/stop! server)))))
     (is (zero? (count (filter #{:h2o/send-fixed-final} @ops_))))))
+
+(deftest response-ring-applies-live-response-from-a-virtual-thread
+  (let [[server port] (fixed-final-server)
+        claim-threads_ (atom [])
+        wake-threads_ (atom [])
+        drain-threads_ (atom [])
+        old-submissions_ (atom 0)
+        try-claim h2o/mt-response-try-claim
+        wake h2o/mt-wakeup
+        drain h2o/mt-response-ring-drain
+        commit-final!
+        (fn [req write-resp committed_ response _]
+          (let [body (.getBytes "ring-inline" StandardCharsets/UTF_8)
+                headers [["content-type" "text/plain"]]
+                command (fixed-final/command (:dispatch-module-id req)
+                                             (:dispatch-request-seq req)
+                                             (:status response)
+                                             headers
+                                             (fixed-final/header-staging-bytes headers)
+                                             (alength body)
+                                             h2o/H2O_COMPRESS_HINT_ENABLE
+                                             (get-in req [:config :output-buffer-size])
+                                             body)
+                head (dissoc response :body)]
+            (when (compare-and-set! committed_ nil head)
+              (when-let [writer (response/writer-if-created write-resp)]
+                (pi/stop writer))
+              (when (= :accepted (fixed-final/try-publish-response! (:worker req) command))
+                {:head head :body nil}))))]
+    (try
+      (with-redefs-fn
+        {#'response/commit-final! commit-final!
+         #'h2o/mt-response-try-claim
+         (fn [receiver]
+           (swap! claim-threads_ conj (Thread/currentThread))
+           (try-claim receiver))
+         #'h2o/mt-wakeup
+         (fn [receiver]
+           (swap! wake-threads_ conj (Thread/currentThread))
+           (wake receiver))
+         #'h2o/mt-response-ring-drain
+         (fn [receiver]
+           (swap! drain-threads_ conj (Thread/currentThread))
+           (drain receiver))
+         #'h2o/mt-submit-fixed-final
+         (fn [& _]
+           (swap! old-submissions_ inc)
+           0)}
+        #(let [http-response (request-text port "GET")]
+           (is (.contains ^String http-response "ring-inline"))))
+      (is (seq @claim-threads_))
+      (is (every? #(.isVirtual ^Thread %) @claim-threads_))
+      (is (seq @wake-threads_))
+      (is (every? (fn [^Thread thread] (not (.isVirtual thread)))
+                  @wake-threads_))
+      (is (seq @drain-threads_))
+      (is (every? (fn [^Thread thread] (not (.isVirtual thread)))
+                  @drain-threads_))
+      (is (zero? @old-submissions_))
+      (finally
+        (busker/stop! server)))))
 (deftest native-helper-sends-final-body-and-suppresses-head-body
   (let [[server port] (fixed-final-server)
         commit-final! (fn [req write-resp committed_ response _]

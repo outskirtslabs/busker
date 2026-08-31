@@ -99,6 +99,30 @@
     (is (= expected-offset
            (native/offset-of :ol.busker.native/h2o-generator-t field)))))
 
+(deftest response-slot-layout-matches-native
+  (is (= 1096
+         (mem/size-of :ol.busker.native/clj-fixed-response-slot-data-t)
+         (native/mt-response-slot-data-size)))
+  (doseq [[field expected] {:claim-token 0
+                            :module-id 8
+                            :request-seq 16
+                            :headers-len 24
+                            :content-length 32
+                            :body-offset 40
+                            :body-len 48
+                            :payload-len 56
+                            :status 64
+                            :compress-hint 68
+                            :headers 72}]
+    (is (= expected
+           (native/offset-of :ol.busker.native/clj-fixed-response-slot-data-t field))))
+  (is (= 16 (mem/size-of :ol.busker.native/clj-packed-header-t)))
+  (doseq [[field expected] {:name-offset 0
+                            :name-len 4
+                            :value-offset 8
+                            :value-len 12}]
+    (is (= expected
+           (native/offset-of :ol.busker.native/clj-packed-header-t field)))))
 (defn- copied-request-context [arena]
   (let [request (mem/alloc 1 arena)
         string-pointer #(mem/serialize % ::mem/c-string arena)

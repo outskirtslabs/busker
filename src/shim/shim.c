@@ -66,6 +66,19 @@ typedef struct {
   unsigned char storage[];
 } clj_mt_fixed_final_msg_t;
 
+typedef enum {
+  CLJ_RESPONSE_SLOT_FREE = 0,
+  CLJ_RESPONSE_SLOT_CLAIMED = 1,
+  CLJ_RESPONSE_SLOT_READY = 2,
+  CLJ_RESPONSE_SLOT_DRAINING = 3
+} clj_response_slot_state_t;
+
+typedef struct {
+  _Atomic uint32_t state;
+  uint32_t index;
+  clj_fixed_response_slot_data_t data;
+} clj_response_slot_t;
+
 struct clj_mt_receiver_t {
   h2o_multithread_receiver_t receiver;
   h2o_multithread_queue_t *queue;
@@ -73,7 +86,15 @@ struct clj_mt_receiver_t {
   size_t request_capacity;
   size_t request_size;
   _Atomic size_t pending;
-  bool accepts_responses;
+  _Atomic size_t ring_claimed;
+  _Atomic size_t ring_ready;
+  _Atomic size_t claim_cursor;
+  _Atomic uint64_t claim_sequence;
+  unsigned char *ring_storage;
+  size_t ring_capacity;
+  size_t ring_stride;
+  size_t slot_payload_capacity;
+  _Atomic bool accepts_responses;
 };
 
 typedef enum {
@@ -854,7 +875,8 @@ int clj_h2o_install_request_dispatch(
     uint64_t module_id, uint64_t request_seq,
     clj_request_body_chunk_cb on_request_body_chunk) {
   if (ctx == NULL || response_receiver == NULL ||
-      !response_receiver->accepts_responses ||
+      !atomic_load_explicit(&response_receiver->accepts_responses,
+                            memory_order_acquire) ||
       response_receiver->request_buckets == NULL || module_id == 0 ||
       request_seq == 0)
     return 0;
@@ -899,6 +921,225 @@ static clj_req_ctx_t *response_request(clj_mt_receiver_t *receiver,
   return ctx;
 }
 
+static clj_response_slot_t *response_slot_at(clj_mt_receiver_t *receiver,
+                                             size_t index) {
+  if (receiver == NULL || receiver->ring_storage == NULL ||
+      index >= receiver->ring_capacity)
+    return NULL;
+  return (clj_response_slot_t *)(receiver->ring_storage +
+                                 index * receiver->ring_stride);
+}
+
+static clj_response_slot_t *
+response_slot_from_data(clj_mt_receiver_t *receiver,
+                        clj_fixed_response_slot_data_t *data) {
+  if (receiver == NULL || receiver->ring_storage == NULL || data == NULL)
+    return NULL;
+
+  uintptr_t data_address = (uintptr_t)data;
+  size_t data_offset = offsetof(clj_response_slot_t, data);
+  if (data_address < data_offset)
+    return NULL;
+
+  uintptr_t slot_address = data_address - data_offset;
+  uintptr_t storage_address = (uintptr_t)receiver->ring_storage;
+  if (slot_address < storage_address)
+    return NULL;
+
+  size_t offset = (size_t)(slot_address - storage_address);
+  if (receiver->ring_stride == 0 || offset % receiver->ring_stride != 0)
+    return NULL;
+
+  size_t index = offset / receiver->ring_stride;
+  clj_response_slot_t *slot = response_slot_at(receiver, index);
+  if (slot == NULL || &slot->data != data || slot->index != index)
+    return NULL;
+  return slot;
+}
+
+static bool response_range_valid(size_t offset, size_t length, size_t total) {
+  return offset <= total && length <= total - offset;
+}
+
+static unsigned char *
+response_slot_payload(clj_fixed_response_slot_data_t *data) {
+  return (unsigned char *)data + sizeof(*data);
+}
+
+static bool response_slot_data_valid(clj_mt_receiver_t *receiver,
+                                     clj_fixed_response_slot_data_t *data) {
+  if (receiver == NULL || data == NULL || data->module_id == 0 ||
+      data->request_seq == 0 || data->status < 200 ||
+      data->headers_len > CLJ_RESPONSE_MAX_HEADERS ||
+      data->payload_len > receiver->slot_payload_capacity ||
+      !response_range_valid(data->body_offset, data->body_len,
+                            data->payload_len))
+    return false;
+
+  for (size_t index = 0; index < data->headers_len; ++index) {
+    const clj_packed_header_t *header = data->headers + index;
+    if (!response_range_valid(header->name_offset, header->name_len,
+                              data->payload_len) ||
+        !response_range_valid(header->value_offset, header->value_len,
+                              data->payload_len))
+      return false;
+  }
+  return true;
+}
+
+size_t clj_h2o_response_slot_data_size(void) {
+  return sizeof(clj_fixed_response_slot_data_t);
+}
+
+size_t clj_h2o_response_ring_capacity(clj_mt_receiver_t *receiver) {
+  return receiver != NULL ? receiver->ring_capacity : 0;
+}
+
+size_t
+clj_h2o_response_slot_payload_capacity(clj_mt_receiver_t *receiver) {
+  return receiver != NULL ? receiver->slot_payload_capacity : 0;
+}
+
+size_t clj_h2o_response_ring_claimed(clj_mt_receiver_t *receiver) {
+  return receiver != NULL
+             ? atomic_load_explicit(&receiver->ring_claimed, memory_order_acquire)
+             : 0;
+}
+
+size_t clj_h2o_response_ring_ready(clj_mt_receiver_t *receiver) {
+  return receiver != NULL
+             ? atomic_load_explicit(&receiver->ring_ready, memory_order_acquire)
+             : 0;
+}
+
+clj_fixed_response_slot_data_t *
+clj_h2o_response_try_claim(clj_mt_receiver_t *receiver) {
+  if (receiver == NULL ||
+      !atomic_load_explicit(&receiver->accepts_responses,
+                            memory_order_acquire) ||
+      receiver->ring_capacity == 0)
+    return NULL;
+
+  size_t start = atomic_fetch_add_explicit(&receiver->claim_cursor, 1,
+                                            memory_order_relaxed);
+  for (size_t attempt = 0; attempt < receiver->ring_capacity; ++attempt) {
+    size_t index = (start + attempt) % receiver->ring_capacity;
+    clj_response_slot_t *slot = response_slot_at(receiver, index);
+    uint32_t expected = CLJ_RESPONSE_SLOT_FREE;
+    if (atomic_compare_exchange_strong_explicit(
+            &slot->state, &expected, CLJ_RESPONSE_SLOT_CLAIMED,
+            memory_order_acq_rel, memory_order_relaxed)) {
+      memset(&slot->data, 0, sizeof(slot->data));
+      uint64_t token =
+          atomic_fetch_add_explicit(&receiver->claim_sequence, 1,
+                                    memory_order_relaxed) +
+          1;
+      if (token == 0)
+        token = atomic_fetch_add_explicit(&receiver->claim_sequence, 1,
+                                          memory_order_relaxed) +
+                1;
+      slot->data.claim_token = token;
+      atomic_fetch_add_explicit(&receiver->ring_claimed, 1,
+                                memory_order_release);
+      return &slot->data;
+    }
+  }
+  return NULL;
+}
+
+int clj_h2o_response_publish(clj_mt_receiver_t *receiver,
+                             clj_fixed_response_slot_data_t *data,
+                             uint64_t claim_token) {
+  clj_response_slot_t *slot = response_slot_from_data(receiver, data);
+  if (slot == NULL ||
+      !atomic_load_explicit(&receiver->accepts_responses,
+                            memory_order_acquire) ||
+      claim_token == 0 || data->claim_token != claim_token ||
+      !response_slot_data_valid(receiver, data))
+    return 0;
+
+  atomic_fetch_add_explicit(&receiver->ring_ready, 1, memory_order_release);
+  uint32_t expected = CLJ_RESPONSE_SLOT_CLAIMED;
+  if (!atomic_compare_exchange_strong_explicit(
+          &slot->state, &expected, CLJ_RESPONSE_SLOT_READY,
+          memory_order_release, memory_order_relaxed)) {
+    atomic_fetch_sub_explicit(&receiver->ring_ready, 1,
+                              memory_order_release);
+    return 0;
+  }
+
+  atomic_fetch_sub_explicit(&receiver->ring_claimed, 1,
+                            memory_order_release);
+  return 1;
+}
+
+int clj_h2o_response_abort(clj_mt_receiver_t *receiver,
+                           clj_fixed_response_slot_data_t *data,
+                           uint64_t claim_token) {
+  clj_response_slot_t *slot = response_slot_from_data(receiver, data);
+  if (slot == NULL || claim_token == 0 ||
+      data->claim_token != claim_token)
+    return 0;
+
+  uint32_t expected = CLJ_RESPONSE_SLOT_CLAIMED;
+  if (!atomic_compare_exchange_strong_explicit(
+          &slot->state, &expected, CLJ_RESPONSE_SLOT_FREE,
+          memory_order_release, memory_order_relaxed))
+    return 0;
+
+  atomic_fetch_sub_explicit(&receiver->ring_claimed, 1,
+                            memory_order_release);
+  return 1;
+}
+
+size_t clj_h2o_response_ring_drain(clj_mt_receiver_t *receiver) {
+  if (receiver == NULL || receiver->ring_capacity == 0 ||
+      atomic_load_explicit(&receiver->ring_ready, memory_order_acquire) == 0)
+    return 0;
+
+  size_t drained = 0;
+  for (size_t index = 0; index < receiver->ring_capacity; ++index) {
+    clj_response_slot_t *slot = response_slot_at(receiver, index);
+    uint32_t expected = CLJ_RESPONSE_SLOT_READY;
+    if (!atomic_compare_exchange_strong_explicit(
+            &slot->state, &expected, CLJ_RESPONSE_SLOT_DRAINING,
+            memory_order_acquire, memory_order_relaxed))
+      continue;
+
+    clj_fixed_response_slot_data_t *data = &slot->data;
+    if (response_slot_data_valid(receiver, data)) {
+      clj_req_ctx_t *ctx =
+          response_request(receiver, data->module_id, data->request_seq);
+      if (ctx != NULL) {
+        unsigned char *payload = response_slot_payload(data);
+        clj_header_t headers[CLJ_RESPONSE_MAX_HEADERS];
+        for (size_t header_index = 0; header_index < data->headers_len;
+             ++header_index) {
+          const clj_packed_header_t *packed = data->headers + header_index;
+          headers[header_index].name =
+              (const char *)payload + packed->name_offset;
+          headers[header_index].name_len = packed->name_len;
+          headers[header_index].value =
+              (const char *)payload + packed->value_offset;
+          headers[header_index].value_len = packed->value_len;
+        }
+
+        clj_h2o_send_fixed_final(
+            ctx, data->status, headers, data->headers_len,
+            data->content_length, data->compress_hint,
+            (const char *)payload + data->body_offset, data->body_len);
+      }
+    }
+
+    atomic_store_explicit(&slot->state, CLJ_RESPONSE_SLOT_FREE,
+                          memory_order_release);
+    atomic_fetch_sub_explicit(&receiver->ring_ready, 1,
+                              memory_order_release);
+    ++drained;
+  }
+  return drained;
+}
+
 static void clj_mt_response_on_recv(h2o_multithread_receiver_t *h2o_receiver,
                                     h2o_linklist_t *messages) {
   clj_mt_receiver_t *receiver = H2O_STRUCT_FROM_MEMBER(
@@ -939,7 +1180,27 @@ clj_mt_receiver_t *clj_h2o_mt_create_wakeup_receiver(h2o_context_t *ctx) {
   return receiver;
 }
 
-clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(h2o_context_t *ctx) {
+clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(
+    h2o_context_t *ctx, size_t ring_capacity, size_t slot_payload_capacity) {
+  if (ctx == NULL || ring_capacity == 0 || ring_capacity > UINT32_MAX ||
+      slot_payload_capacity == 0)
+    return NULL;
+
+  size_t slot_base_size = sizeof(clj_response_slot_t);
+  if (slot_payload_capacity > SIZE_MAX - slot_base_size)
+    return NULL;
+  size_t ring_stride = slot_base_size + slot_payload_capacity;
+  size_t alignment = _Alignof(max_align_t);
+  size_t remainder = ring_stride % alignment;
+  if (remainder != 0) {
+    size_t padding = alignment - remainder;
+    if (ring_stride > SIZE_MAX - padding)
+      return NULL;
+    ring_stride += padding;
+  }
+  if (ring_capacity > SIZE_MAX / ring_stride)
+    return NULL;
+
   clj_mt_receiver_t *receiver = calloc(1, sizeof(*receiver));
   if (receiver == NULL)
     return NULL;
@@ -947,14 +1208,42 @@ clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(h2o_context_t *ctx) {
   receiver->request_capacity = 256;
   receiver->request_buckets =
       calloc(receiver->request_capacity, sizeof(*receiver->request_buckets));
-  if (receiver->request_buckets == NULL) {
+  receiver->ring_storage = calloc(ring_capacity, ring_stride);
+  if (receiver->request_buckets == NULL || receiver->ring_storage == NULL) {
+    free(receiver->ring_storage);
+    free(receiver->request_buckets);
     free(receiver);
     return NULL;
   }
 
+  receiver->ring_capacity = ring_capacity;
+  receiver->ring_stride = ring_stride;
+  receiver->slot_payload_capacity = slot_payload_capacity;
+  for (size_t index = 0; index < ring_capacity; ++index) {
+    clj_response_slot_t *slot = response_slot_at(receiver, index);
+    atomic_init(&slot->state, CLJ_RESPONSE_SLOT_FREE);
+    slot->index = (uint32_t)index;
+  }
+
   receiver->queue = ctx->queue;
-  receiver->accepts_responses = true;
+  atomic_init(&receiver->accepts_responses, true);
   atomic_init(&receiver->pending, 0);
+  atomic_init(&receiver->ring_claimed, 0);
+  atomic_init(&receiver->ring_ready, 0);
+  atomic_init(&receiver->claim_cursor, 0);
+  atomic_init(&receiver->claim_sequence, 0);
+  clj_response_slot_t *first_slot = response_slot_at(receiver, 0);
+  if (!atomic_is_lock_free(&first_slot->state) ||
+      !atomic_is_lock_free(&receiver->ring_claimed) ||
+      !atomic_is_lock_free(&receiver->ring_ready) ||
+      !atomic_is_lock_free(&receiver->claim_cursor) ||
+      !atomic_is_lock_free(&receiver->claim_sequence) ||
+      !atomic_is_lock_free(&receiver->accepts_responses)) {
+    free(receiver->ring_storage);
+    free(receiver->request_buckets);
+    free(receiver);
+    return NULL;
+  }
   h2o_multithread_register_receiver(receiver->queue, &receiver->receiver,
                                     clj_mt_response_on_recv);
   return receiver;
@@ -970,10 +1259,16 @@ void clj_h2o_mt_destroy_wakeup_receiver(clj_mt_receiver_t *receiver) {
 void clj_h2o_mt_destroy_response_receiver(clj_mt_receiver_t *receiver) {
   if (receiver == NULL)
     return;
+  atomic_store_explicit(&receiver->accepts_responses, false,
+                        memory_order_release);
   assert(atomic_load_explicit(&receiver->pending, memory_order_acquire) == 0);
+  assert(atomic_load_explicit(&receiver->ring_claimed,
+                              memory_order_acquire) == 0);
+  assert(atomic_load_explicit(&receiver->ring_ready, memory_order_acquire) ==
+         0);
   assert(receiver->request_size == 0);
-  receiver->accepts_responses = false;
   h2o_multithread_unregister_receiver(receiver->queue, &receiver->receiver);
+  free(receiver->ring_storage);
   free(receiver->request_buckets);
   free(receiver);
 }
@@ -987,7 +1282,9 @@ void clj_h2o_mt_wakeup(clj_mt_receiver_t *receiver) {
 size_t clj_h2o_mt_response_pending(clj_mt_receiver_t *receiver) {
   if (receiver == NULL)
     return 0;
-  return atomic_load_explicit(&receiver->pending, memory_order_acquire);
+  return atomic_load_explicit(&receiver->pending, memory_order_acquire) +
+         atomic_load_explicit(&receiver->ring_claimed, memory_order_acquire) +
+         atomic_load_explicit(&receiver->ring_ready, memory_order_acquire);
 }
 
 static bool checked_size_add(size_t *total, size_t value) {
@@ -1002,7 +1299,9 @@ int clj_h2o_mt_submit_fixed_final(
     int status, const clj_header_t *headers, size_t headers_len,
     size_t content_length, int compress_hint, const char *body,
     size_t body_len) {
-  if (receiver == NULL || !receiver->accepts_responses ||
+  if (receiver == NULL ||
+      !atomic_load_explicit(&receiver->accepts_responses,
+                            memory_order_acquire) ||
       module_id == 0 || request_seq == 0 ||
       status < 200 || (headers_len != 0 && headers == NULL) ||
       (body_len != 0 && body == NULL) ||

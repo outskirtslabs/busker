@@ -5,6 +5,7 @@
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.config :as config]
    [ol.busker.evloop :as evloop]
+   [ol.busker.fixed-final :as fixed-final]
    [ol.busker.generation :as generation]
    [ol.busker.internal.protocols :as p]
    [ol.busker.native :as h2o]
@@ -14,7 +15,7 @@
    [ol.busker.wake-notifier :as wake-notifier]
    [ol.busker.test-utils :as util])
   (:import
-   [java.lang.foreign Arena]
+   [java.lang.foreign Arena MemorySegment]
    [java.net InetSocketAddress Socket]
    [java.nio.charset StandardCharsets]
    [java.util.concurrent AbstractExecutorService]
@@ -35,6 +36,10 @@
   [port]
   (doto (Socket.)
     (.connect (InetSocketAddress. "127.0.0.1" (int port)) 2000)))
+
+(defn- response-slot-token
+  [slot]
+  (mem/read-long (mem/reinterpret slot (h2o/mt-response-slot-data-size))))
 
 (defn- request-stream!
   [^Socket socket path]
@@ -85,6 +90,36 @@
          (is (= 0 @wait-ms_))
          (is (not (contains? result ::evloop/mailbox-work?)))))))
 
+(deftest response-ring-work-forces-a-nonblocking-native-iteration
+  (let [wait-ms_ (atom nil)
+        receiver (Object.)
+        worker (evloop/map->Worker
+                {:mailbox (java.util.concurrent.ArrayBlockingQueue. 1)
+                 :callback-dispatch nil
+                 :response-receiver_ (AtomicReference. receiver)})
+        native-state {:loop-ptr :loop
+                      :ctx-ptr :context
+                      :listener-socks []
+                      :accept-callbacks []
+                      :max-connections 0}]
+    (with-redefs-fn
+      {#'generation/check-and-initiate-shutdown! (fn [state _] state)
+       #'generation/update-receiver-destruction (fn [state _] state)
+       #'generation/dispose-context-if-ready (fn [state _ _] state)
+       #'callback-dispatch/pending-response-work? (constantly false)
+       #'generation/update-listener-state! (fn [& _])
+       #'h2o/mt-response-ring-drain
+       (fn [actual]
+         (is (identical? receiver actual))
+         1)
+       #'h2o/evloop-now (constantly 0)
+       #'h2o/cleanup-thread (constantly 1000)
+       #'h2o/evloop-run (fn [_ wait-ms]
+                          (reset! wait-ms_ wait-ms)
+                          0)}
+      #(let [result (#'generation/worker-loop worker {} native-state)]
+         (is (= 0 @wait-ms_))
+         (is (= {} result))))))
 (deftest wake-receiver-retires-on-event-loop-worker-test
   (let [events_ (atom [])
         receiver (Object.)
@@ -132,6 +167,206 @@
            @destroyed_))
     (is (= :stopped @phase))))
 
+(deftest response-ring-claim-is-bounded-and-reusable-from-a-virtual-thread
+  (let [port (util/free-port)
+        instance (generation/start!
+                  (config/load!
+                   {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                         :tls false}}
+                    :dispatch [{:handler (constantly {:status 200 :body "ring-ready"})}]})
+                  nil)]
+    (try
+      (let [worker (first (::generation/workers instance))
+            receiver (.get ^AtomicReference (:response-receiver_ worker))
+            command (fixed-final/command
+                     999 999 200 [] 0 1 0 32
+                     (.getBytes "x" StandardCharsets/UTF_8))
+            result_ (promise)
+            thread (Thread/startVirtualThread
+                    #(let [capacity (h2o/mt-response-ring-capacity receiver)
+                           slots (mapv (fn [_] (h2o/mt-response-try-claim receiver))
+                                       (range capacity))
+                           overflow (h2o/mt-response-try-claim receiver)
+                           fallback (fixed-final/try-publish-response! worker command)
+                           aborted (mapv (fn [slot]
+                                           (h2o/mt-response-abort
+                                            receiver slot (response-slot-token slot)))
+                                         slots)
+                           reused (h2o/mt-response-try-claim receiver)]
+                       (deliver result_
+                                {:virtual? (.isVirtual (Thread/currentThread))
+                                 :capacity capacity
+                                 :unique-slots (count (distinct (map (fn [^MemorySegment slot]
+                                                                       (.address slot))
+                                                                     slots)))
+                                 :all-slots? (every? (fn [slot] (not (mem/null? slot))) slots)
+                                 :overflow? (mem/null? overflow)
+                                 :fallback fallback
+                                 :aborted aborted
+                                 :reused? (not (mem/null? reused))})
+                       (h2o/mt-response-abort
+                        receiver reused (response-slot-token reused))))]
+        (.join thread 5000)
+        (is (= {:virtual? true
+                :capacity 256
+                :unique-slots 256
+                :all-slots? true
+                :overflow? true
+                :fallback :overloaded
+                :aborted (vec (repeat 256 1))
+                :reused? true}
+               (deref result_ 1000 :timeout)))
+        (is (zero? (h2o/mt-response-claimed receiver)))
+        (is (zero? (h2o/mt-response-ring-ready receiver))))
+      (finally
+        (generation/stop! instance)))))
+
+(deftest stale-ring-response-is-drained-after-a-platform-notifier-wake
+  (let [port (util/free-port)
+        instance (generation/start!
+                  (config/load!
+                   {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                         :tls false}}
+                    :dispatch [{:handler (constantly {:status 200 :body "ring-ready"})}]})
+                  nil)]
+    (try
+      (let [worker (first (::generation/workers instance))
+            receiver (.get ^AtomicReference (:response-receiver_ worker))
+            body (.getBytes "stale" StandardCharsets/UTF_8)
+            command (fixed-final/command 999 999 200 [] 0 5 0 32 body)
+            result_ (promise)
+            thread (Thread/startVirtualThread
+                    #(deliver result_
+                              {:result (fixed-final/try-publish-response! worker command)
+                               :virtual? (.isVirtual (Thread/currentThread))}))]
+        (.join thread 5000)
+        (is (= {:result :accepted :virtual? true}
+               (deref result_ 1000 :timeout)))
+        (loop [remaining 200]
+          (when (and (pos? remaining)
+                     (pos? (h2o/mt-response-ring-ready receiver)))
+            (Thread/sleep (long 10))
+            (recur (dec remaining))))
+        (is (zero? (h2o/mt-response-ring-ready receiver)))
+        (is (zero? (h2o/mt-response-claimed receiver))))
+      (finally
+        (generation/stop! instance)))))
+
+(deftest response-ring-rejects-invalid-and-duplicate-slot-transitions
+  (let [port (util/free-port)
+        instance (generation/start!
+                  (config/load!
+                   {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                         :tls false}}
+                    :dispatch [{:handler (constantly {:status 200 :body "ring-ready"})}]})
+                  nil)]
+    (try
+      (let [worker (first (::generation/workers instance))
+            receiver (.get ^AtomicReference (:response-receiver_ worker))
+            invalid (h2o/mt-response-try-claim receiver)
+            invalid-token (response-slot-token invalid)]
+        (is (zero? (h2o/mt-response-publish receiver invalid invalid-token)))
+        (is (= 1 (h2o/mt-response-abort receiver invalid invalid-token)))
+        (is (zero? (h2o/mt-response-abort receiver invalid invalid-token)))
+        (let [body (.getBytes "ready" StandardCharsets/UTF_8)
+              command (fixed-final/command 999 999 200 [] 0 5 0 32 body)
+              slot (h2o/mt-response-try-claim receiver)
+              claim-token (response-slot-token slot)]
+          (fixed-final/write-response-slot!
+           slot (h2o/mt-response-slot-payload-capacity receiver) command)
+          (is (zero? (h2o/mt-response-publish receiver slot (inc claim-token))))
+          (is (zero? (h2o/mt-response-abort receiver slot (inc claim-token))))
+          (is (= 1 (h2o/mt-response-publish receiver slot claim-token)))
+          (is (zero? (h2o/mt-response-publish receiver slot claim-token)))
+          (is (zero? (h2o/mt-response-abort receiver slot claim-token)))
+          (p/wake worker)
+          (loop [remaining 200]
+            (when (and (pos? remaining)
+                       (pos? (h2o/mt-response-ring-ready receiver)))
+              (Thread/sleep (long 10))
+              (recur (dec remaining))))
+          (is (zero? (h2o/mt-response-ring-ready receiver)))
+          (is (zero? (h2o/mt-response-claimed receiver)))))
+      (finally
+        (generation/stop! instance)))))
+
+(deftest response-ring-claim-and-abort-remain-bounded-under-contention
+  (let [port (util/free-port)
+        instance (generation/start!
+                  (config/load!
+                   {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                         :tls false}}
+                    :dispatch [{:handler (constantly {:status 200 :body "ring-ready"})}]})
+                  nil)]
+    (try
+      (let [worker (first (::generation/workers instance))
+            receiver (.get ^AtomicReference (:response-receiver_ worker))
+            start (promise)
+            first-result (promise)
+            second-result (promise)
+            run-claims
+            (fn [result]
+              @start
+              (let [started (System/nanoTime)
+                    counts
+                    (loop [remaining 10000
+                           accepted 0
+                           unavailable 0]
+                      (if (zero? remaining)
+                        {:accepted accepted :unavailable unavailable}
+                        (let [slot (h2o/mt-response-try-claim receiver)]
+                          (if (mem/null? slot)
+                            (recur (dec remaining) accepted (inc unavailable))
+                            (do
+                              (h2o/mt-response-abort
+                               receiver slot (response-slot-token slot))
+                              (recur (dec remaining) (inc accepted) unavailable))))))]
+                (deliver result (assoc counts :elapsed-nanos (- (System/nanoTime) started)))))
+            first-thread (Thread/startVirtualThread (fn [] (run-claims first-result)))
+            second-thread (Thread/startVirtualThread (fn [] (run-claims second-result)))]
+        (deliver start true)
+        (.join first-thread 10000)
+        (.join second-thread 10000)
+        (let [results [(deref first-result 1000 :timeout)
+                       (deref second-result 1000 :timeout)]]
+          (is (every? map? results))
+          (is (every? (fn [{:keys [accepted unavailable]}]
+                        (= 10000 (+ accepted unavailable)))
+                      results))
+          (is (every? (fn [{:keys [elapsed-nanos]}]
+                        (< elapsed-nanos 10000000000))
+                      results)))
+        (is (zero? (h2o/mt-response-claimed receiver)))
+        (is (zero? (h2o/mt-response-ring-ready receiver))))
+      (finally
+        (generation/stop! instance)))))
+
+(deftest generation-stop-drains-a-ready-response-slot
+  (let [port (util/free-port)
+        instance (generation/start!
+                  (config/load!
+                   {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                         :tls false}}
+                    :dispatch [{:handler (constantly {:status 200 :body "ring-ready"})}]})
+                  nil)
+        stopped?_ (atom false)]
+    (try
+      (let [worker (first (::generation/workers instance))
+            receiver (.get ^AtomicReference (:response-receiver_ worker))
+            body (.getBytes "ready" StandardCharsets/UTF_8)
+            command (fixed-final/command 999 999 200 [] 0 5 0 32 body)
+            slot (h2o/mt-response-try-claim receiver)
+            claim-token (response-slot-token slot)]
+        (fixed-final/write-response-slot!
+         slot (h2o/mt-response-slot-payload-capacity receiver) command)
+        (is (= 1 (h2o/mt-response-publish receiver slot claim-token)))
+        (is (= 1 (h2o/mt-response-ring-ready receiver)))
+        (generation/stop! instance)
+        (reset! stopped?_ true)
+        (is (= :stopped @(::generation/phase instance))))
+      (finally
+        (when-not @stopped?_
+          (generation/stop! instance))))))
 (deftest generation-starts-and-stops-without-runtime-bridge-test
   (let [port 18584
         compiled-config

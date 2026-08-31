@@ -1,6 +1,7 @@
 (ns ^:no-doc ol.busker.fixed-final
   (:require
    [coffi.mem :as mem]
+   [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o])
   (:import
    [java.lang.foreign Arena MemorySegment]
@@ -12,6 +13,7 @@
 
 (def ^:const max-header-pairs 64)
 (def ^:const max-header-staging-bytes 16384)
+(def ^:const response-ring-capacity 256)
 
 (def ^:private get-current-worker
   (delay (requiring-resolve 'ol.busker.evloop/get-current-worker)))
@@ -21,6 +23,40 @@
 (def ^:private clj-header-name-len-offset (mem/struct-field-offset ::h2o/clj-header-t :name_len))
 (def ^:private clj-header-value-offset (mem/struct-field-offset ::h2o/clj-header-t :value))
 (def ^:private clj-header-value-len-offset (mem/struct-field-offset ::h2o/clj-header-t :value_len))
+
+(def ^:private response-slot-data-size
+  (mem/size-of ::h2o/clj-fixed-response-slot-data-t))
+(def ^:private response-slot-claim-token-offset
+  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :claim-token))
+(def ^:private response-slot-module-id-offset
+  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :module-id))
+(def ^:private response-slot-request-seq-offset
+  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :request-seq))
+(def ^:private response-slot-headers-len-offset
+  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :headers-len))
+(def ^:private response-slot-content-length-offset
+  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :content-length))
+(def ^:private response-slot-body-offset-offset
+  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :body-offset))
+(def ^:private response-slot-body-len-offset
+  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :body-len))
+(def ^:private response-slot-payload-len-offset
+  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :payload-len))
+(def ^:private response-slot-status-offset
+  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :status))
+(def ^:private response-slot-compress-hint-offset
+  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :compress-hint))
+(def ^:private response-slot-headers-offset
+  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :headers))
+(def ^:private packed-header-size (mem/size-of ::h2o/clj-packed-header-t))
+(def ^:private packed-name-offset
+  (mem/struct-field-offset ::h2o/clj-packed-header-t :name-offset))
+(def ^:private packed-name-len-offset
+  (mem/struct-field-offset ::h2o/clj-packed-header-t :name-len))
+(def ^:private packed-value-offset
+  (mem/struct-field-offset ::h2o/clj-packed-header-t :value-offset))
+(def ^:private packed-value-len-offset
+  (mem/struct-field-offset ::h2o/clj-packed-header-t :value-len))
 
 (defrecord FixedFinalCommand [^long module-id
                               ^long request-seq
@@ -98,6 +134,89 @@
   "Creates a fixed final command with copied JVM body bytes."
   [module-id request-seq status headers header-bytes content-length compress-hint body-limit body]
   (command-data module-id request-seq status headers header-bytes content-length compress-hint body-limit body))
+
+(defn ^:no-doc write-response-slot!
+  "Writes `command` into claimed `slot` storage and returns the slot segment."
+  [slot ^long payload-capacity ^FixedFinalCommand command]
+  (let [headers (.-headers command)
+        encoded-headers
+        (mapv (fn [[^String name ^String value]]
+                [(.getBytes name StandardCharsets/UTF_8)
+                 (.getBytes value StandardCharsets/UTF_8)])
+              headers)
+        header-bytes
+        (reduce (fn [^long total [^bytes name ^bytes value]]
+                  (+ total (alength name) (alength value)))
+                0
+                encoded-headers)
+        ^bytes body (.-body command)
+        body-length (long (alength body))
+        payload-length (+ header-bytes body-length)]
+    (when (or (> (count headers) max-header-pairs)
+              (> payload-length payload-capacity))
+      (throw (ex-info "Fixed response does not fit its claimed slot"
+                      {:header-count (count headers)
+                       :payload-bytes payload-length
+                       :payload-capacity payload-capacity})))
+    (let [data (mem/reinterpret slot (+ response-slot-data-size payload-capacity))
+          payload (mem/slice data response-slot-data-size payload-capacity)
+          body-offset
+          (loop [index (long 0)
+                 cursor (long 0)]
+            (if (< index (count encoded-headers))
+              (let [[^bytes name ^bytes value] (nth encoded-headers index)
+                    name-length (long (alength name))
+                    value-offset (+ cursor name-length)
+                    value-length (long (alength value))
+                    descriptor (+ response-slot-headers-offset
+                                  (* index packed-header-size))]
+                (mem/write-bytes payload name-length cursor name)
+                (mem/write-bytes payload value-length value-offset value)
+                (mem/write-int data (+ descriptor packed-name-offset) cursor)
+                (mem/write-int data (+ descriptor packed-name-len-offset) name-length)
+                (mem/write-int data (+ descriptor packed-value-offset) value-offset)
+                (mem/write-int data (+ descriptor packed-value-len-offset) value-length)
+                (recur (unchecked-inc index) (+ value-offset value-length)))
+              cursor))]
+      (when (pos? body-length)
+        (mem/write-bytes payload body-length body-offset body))
+      (mem/write-long data response-slot-module-id-offset (.-module-id command))
+      (mem/write-long data response-slot-request-seq-offset (.-request-seq command))
+      (mem/write-long data response-slot-headers-len-offset (count headers))
+      (mem/write-long data response-slot-content-length-offset (.-content-length command))
+      (mem/write-long data response-slot-body-offset-offset body-offset)
+      (mem/write-long data response-slot-body-len-offset body-length)
+      (mem/write-long data response-slot-payload-len-offset payload-length)
+      (mem/write-int data response-slot-status-offset (.-status command))
+      (mem/write-int data response-slot-compress-hint-offset (.-compress-hint command))
+      data)))
+
+(defn ^:no-doc try-publish-response!
+  "Publishes `command` through `worker` without waiting, or returns a fallback status."
+  [worker ^FixedFinalCommand command]
+  (let [receiver_ (:response-receiver_ worker)
+        receiver (when receiver_ (.get ^AtomicReference receiver_))]
+    (if (or (nil? receiver) (mem/null? receiver))
+      :closed
+      (let [slot (h2o/mt-response-try-claim receiver)]
+        (if (mem/null? slot)
+          :overloaded
+          (let [data (mem/reinterpret slot response-slot-data-size)
+                claim-token (mem/read-long data (long response-slot-claim-token-offset))
+                published?_ (volatile! false)]
+            (try
+              (write-response-slot! slot
+                                    (h2o/mt-response-slot-payload-capacity receiver)
+                                    command)
+              (if (= 1 (h2o/mt-response-publish receiver slot claim-token))
+                (do
+                  (vreset! published?_ true)
+                  (pi/wake worker)
+                  :accepted)
+                :overloaded)
+              (finally
+                (when-not @published?_
+                  (h2o/mt-response-abort receiver slot claim-token))))))))))
 
 (defn- worker-scratch-segment
   [worker ^long body-limit]

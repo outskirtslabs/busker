@@ -47,6 +47,29 @@ typedef struct {
   size_t value_len;
 } clj_header_t;
 
+#define CLJ_RESPONSE_MAX_HEADERS 64
+
+typedef struct {
+  uint32_t name_offset;
+  uint32_t name_len;
+  uint32_t value_offset;
+  uint32_t value_len;
+} clj_packed_header_t;
+
+typedef struct {
+  uint64_t claim_token;
+  uint64_t module_id;
+  uint64_t request_seq;
+  size_t headers_len;
+  size_t content_length;
+  size_t body_offset;
+  size_t body_len;
+  size_t payload_len;
+  int status;
+  int compress_hint;
+  clj_packed_header_t headers[CLJ_RESPONSE_MAX_HEADERS];
+} clj_fixed_response_slot_data_t;
+
 typedef struct {
   const uint8_t *authority;
   const uint8_t *method;
@@ -272,7 +295,8 @@ void clj_h2o_proceed_req(h2o_req_t *req);
 int clj_h2o_cancel_request(clj_req_ctx_t *ctx);
 
 clj_mt_receiver_t *clj_h2o_mt_create_wakeup_receiver(h2o_context_t *ctx);
-clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(h2o_context_t *ctx);
+clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(
+    h2o_context_t *ctx, size_t ring_capacity, size_t slot_payload_capacity);
 void clj_h2o_mt_destroy_wakeup_receiver(clj_mt_receiver_t *receiver);
 void clj_h2o_mt_destroy_response_receiver(clj_mt_receiver_t *receiver);
 void clj_h2o_mt_wakeup(clj_mt_receiver_t *receiver);
@@ -283,6 +307,21 @@ int clj_h2o_mt_submit_fixed_final(
     int status, const clj_header_t *headers, size_t headers_len,
     size_t content_length, int compress_hint, const char *body,
     size_t body_len);
+
+size_t clj_h2o_response_slot_data_size(void);
+size_t clj_h2o_response_ring_capacity(clj_mt_receiver_t *receiver);
+size_t clj_h2o_response_slot_payload_capacity(clj_mt_receiver_t *receiver);
+size_t clj_h2o_response_ring_claimed(clj_mt_receiver_t *receiver);
+size_t clj_h2o_response_ring_ready(clj_mt_receiver_t *receiver);
+clj_fixed_response_slot_data_t *
+clj_h2o_response_try_claim(clj_mt_receiver_t *receiver);
+int clj_h2o_response_publish(clj_mt_receiver_t *receiver,
+                             clj_fixed_response_slot_data_t *data,
+                             uint64_t claim_token);
+int clj_h2o_response_abort(clj_mt_receiver_t *receiver,
+                           clj_fixed_response_slot_data_t *data,
+                           uint64_t claim_token);
+size_t clj_h2o_response_ring_drain(clj_mt_receiver_t *receiver);
 
 /* Open a nonblocking CLOEXEC TCP listener for IPv4 or IPv6.
    `host` may be NULL or empty only when the caller intentionally wants the

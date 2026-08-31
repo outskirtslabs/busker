@@ -75,6 +75,28 @@
       [:value ::mem/pointer]
       [:value_len ::mem/int]]]))
 
+(mem/defalias ::clj-packed-header-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:name-offset ::mem/int]
+      [:name-len ::mem/int]
+      [:value-offset ::mem/int]
+      [:value-len ::mem/int]]]))
+
+(mem/defalias ::clj-fixed-response-slot-data-t
+  (layout/with-c-layout
+    [::mem/struct
+     [[:claim-token ::mem/long]
+      [:module-id ::mem/long]
+      [:request-seq ::mem/long]
+      [:headers-len ::mem/long]
+      [:content-length ::mem/long]
+      [:body-offset ::mem/long]
+      [:body-len ::mem/long]
+      [:payload-len ::mem/long]
+      [:status ::mem/int]
+      [:compress-hint ::mem/int]
+      [:headers [::mem/array ::clj-packed-header-t 64]]]]))
 ;; h2o_iovec_t is:
 ;;   typedef struct { char *base; size_t len; } h2o_iovec_t;
 (mem/defalias ::h2o-iovec-t
@@ -598,7 +620,7 @@
 (defcfn mt-create-response-receiver
   "Registers a fixed-response receiver on the H2O context queue."
   clj_h2o_mt_create_response_receiver
-  [::mem/pointer] ::mem/pointer)
+  [::mem/pointer ::mem/long ::mem/long] ::mem/pointer)
 
 (defcfn mt-destroy-response-receiver
   "Unregisters a drained fixed-response receiver."
@@ -609,6 +631,95 @@
   "Returns the number of submitted fixed responses not yet consumed by H2O."
   clj_h2o_mt_response_pending
   [::mem/pointer] ::mem/long)
+
+(defcfn mt-response-slot-data-size*
+  clj_h2o_response_slot_data_size
+  [] ::mem/long)
+
+(defn mt-response-slot-data-size
+  "Returns the fixed metadata size before slot payload bytes."
+  []
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (long (mt-response-slot-data-size*)))
+
+(defcfn mt-response-ring-capacity*
+  clj_h2o_response_ring_capacity
+  [::mem/pointer] ::mem/long)
+
+(defn mt-response-ring-capacity
+  "Returns the fixed number of response slots."
+  [receiver]
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (long (mt-response-ring-capacity* receiver)))
+
+(defcfn mt-response-slot-payload-capacity*
+  clj_h2o_response_slot_payload_capacity
+  [::mem/pointer] ::mem/long)
+
+(defn mt-response-slot-payload-capacity
+  "Returns the byte capacity after each slot metadata area."
+  [receiver]
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (long (mt-response-slot-payload-capacity* receiver)))
+
+(defcfn mt-response-claimed*
+  clj_h2o_response_ring_claimed
+  [::mem/pointer] ::mem/long)
+
+(defn mt-response-claimed
+  "Returns the current number of claimed response slots."
+  [receiver]
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (long (mt-response-claimed* receiver)))
+
+(defcfn mt-response-ring-ready*
+  clj_h2o_response_ring_ready
+  [::mem/pointer] ::mem/long)
+
+(defn mt-response-ring-ready
+  "Returns the current number of ready response slots."
+  [receiver]
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (long (mt-response-ring-ready* receiver)))
+
+(defcfn mt-response-try-claim*
+  clj_h2o_response_try_claim
+  [::mem/pointer] ::mem/pointer)
+
+(defn mt-response-try-claim
+  "Claims a response slot immediately or returns a null pointer."
+  [receiver]
+  (mt-response-try-claim* receiver))
+
+(defcfn mt-response-publish*
+  clj_h2o_response_publish
+  [::mem/pointer ::mem/pointer ::mem/long] ::mem/int)
+
+(defn mt-response-publish
+  "Publishes valid slot data immediately."
+  [receiver slot claim-token]
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (long (mt-response-publish* receiver slot claim-token)))
+
+(defcfn mt-response-abort*
+  clj_h2o_response_abort
+  [::mem/pointer ::mem/pointer ::mem/long] ::mem/int)
+
+(defn mt-response-abort
+  "Releases an unpublished response slot immediately."
+  [receiver slot claim-token]
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (long (mt-response-abort* receiver slot claim-token)))
+
+(defcfn mt-response-ring-drain*
+  clj_h2o_response_ring_drain
+  [::mem/pointer] ::mem/long)
+
+(defn mt-response-ring-drain
+  "Applies ready responses on the H2O event-loop thread."
+  [receiver]
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (long (mt-response-ring-drain* receiver)))
 
 (defcfn mt-submit-fixed-final
   "Copies one fixed response into the H2O receiver queue."

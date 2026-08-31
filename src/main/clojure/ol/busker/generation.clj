@@ -370,12 +370,19 @@
                        (update-receiver-destruction worker)
                        (dispose-context-if-ready worker state))
         disposed? (true? (:context-disposed? loop-state))
+        receiver_ (:response-receiver_ worker)
+        receiver (when receiver_ (.get ^AtomicReference receiver_))
+        ring-work? (and (not disposed?)
+                        receiver
+                        (not (mem/null? receiver))
+                        (pos? (h2o/mt-response-ring-drain receiver)))
         shutting? (true? (:shutdown-initiated? loop-state))]
     (if disposed?
       (h2o/evloop-run loop-ptr 0)
       (let [now (h2o/evloop-now loop-ptr)
             base-wait (h2o/cleanup-thread now ctx-ptr)
             wait-ms (cond
+                      ring-work? 0
                       mailbox-work? 0
                       (callback-dispatch/pending-response-work?
                        (:callback-dispatch worker)) 5
@@ -796,7 +803,13 @@
         loops (h2o/create-loops n-workers)
         contexts (h2o/create-contexts arena loops config-ptr)
         wakeup-receivers (mapv h2o/mt-create-wakeup-receiver contexts)
-        response-receivers (mapv h2o/mt-create-response-receiver contexts)
+        response-receivers
+        (mapv #(h2o/mt-create-response-receiver
+                %
+                fixed-final/response-ring-capacity
+                (+ fixed-final/max-header-staging-bytes
+                   (:output-buffer-size config)))
+              contexts)
         _ (when (some #(or (nil? %) (mem/null? %)) response-receivers)
             (doseq [receiver wakeup-receivers]
               (when (and receiver (not (mem/null? receiver)))
