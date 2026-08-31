@@ -357,6 +357,14 @@
               (Thread/sleep (long 10))
               (recur (dec remaining))))
           (is (zero? (h2o/mt-response-ring-ready receiver)))
+          (dotimes [_ 255]
+            (let [intermediate (h2o/mt-response-try-claim receiver)]
+              (h2o/mt-response-abort receiver intermediate)))
+          (let [unwritten-reuse (h2o/mt-response-try-claim receiver)]
+            (is (= (response-claim-index claim-handle)
+                   (response-claim-index unwritten-reuse)))
+            (is (zero? (h2o/mt-response-publish receiver unwritten-reuse)))
+            (is (= 1 (h2o/mt-response-abort receiver unwritten-reuse))))
           (is (zero? (h2o/mt-response-claimed receiver)))))
       (finally
         (generation/stop! instance)))))

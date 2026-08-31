@@ -1008,7 +1008,7 @@ uint64_t clj_h2o_response_try_claim(clj_mt_receiver_t *receiver) {
     if (atomic_compare_exchange_strong_explicit(
             &slot->state, &expected, CLJ_RESPONSE_SLOT_CLAIMED,
             memory_order_acq_rel, memory_order_relaxed)) {
-      memset(&slot->data, 0, sizeof(slot->data));
+      slot->data.module_id = 0;
       uint64_t sequence =
           (atomic_fetch_add_explicit(&receiver->claim_sequence, 1,
                                      memory_order_relaxed) +
