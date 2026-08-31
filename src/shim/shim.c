@@ -48,23 +48,6 @@
 static _Atomic uint32_t clj_conn_count = 0;
 static _Atomic uint32_t clj_conn_max = 0;
 
-typedef enum {
-  CLJ_MT_MESSAGE_FIXED_FINAL = 1
-} clj_mt_message_kind_t;
-
-typedef struct {
-  h2o_multithread_message_t super;
-  clj_mt_message_kind_t kind;
-  uint64_t module_id;
-  uint64_t request_seq;
-  int status;
-  size_t headers_len;
-  size_t content_length;
-  int compress_hint;
-  size_t body_offset;
-  size_t body_len;
-  unsigned char storage[];
-} clj_mt_fixed_final_msg_t;
 
 typedef enum {
   CLJ_RESPONSE_SLOT_FREE = 0,
@@ -85,7 +68,6 @@ struct clj_mt_receiver_t {
   clj_req_ctx_t **request_buckets;
   size_t request_capacity;
   size_t request_size;
-  _Atomic size_t pending;
   _Atomic size_t ring_claimed;
   _Atomic size_t ring_ready;
   _Atomic size_t claim_cursor;
@@ -1144,30 +1126,8 @@ static void clj_mt_response_on_recv(h2o_multithread_receiver_t *h2o_receiver,
                                     h2o_linklist_t *messages) {
   clj_mt_receiver_t *receiver = H2O_STRUCT_FROM_MEMBER(
       clj_mt_receiver_t, receiver, h2o_receiver);
-
-  while (!h2o_linklist_is_empty(messages)) {
-    clj_mt_fixed_final_msg_t *message = H2O_STRUCT_FROM_MEMBER(
-        clj_mt_fixed_final_msg_t, super.link, messages->next);
-    h2o_linklist_unlink(&message->super.link);
-
-    if (message->kind == CLJ_MT_MESSAGE_FIXED_FINAL) {
-      clj_req_ctx_t *ctx = response_request(
-          receiver, message->module_id, message->request_seq);
-      if (ctx != NULL) {
-        const clj_header_t *headers =
-            (const clj_header_t *)message->storage;
-        const char *body =
-            (const char *)message->storage + message->body_offset;
-        clj_h2o_send_fixed_final(
-            ctx, message->status, headers, message->headers_len,
-            message->content_length, message->compress_hint, body,
-            message->body_len);
-      }
-    }
-
-    atomic_fetch_sub_explicit(&receiver->pending, 1, memory_order_release);
-    free(message);
-  }
+  assert(h2o_linklist_is_empty(messages));
+  clj_h2o_response_ring_drain(receiver);
 }
 
 clj_mt_receiver_t *clj_h2o_mt_create_wakeup_receiver(h2o_context_t *ctx) {
@@ -1227,7 +1187,6 @@ clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(
 
   receiver->queue = ctx->queue;
   atomic_init(&receiver->accepts_responses, true);
-  atomic_init(&receiver->pending, 0);
   atomic_init(&receiver->ring_claimed, 0);
   atomic_init(&receiver->ring_ready, 0);
   atomic_init(&receiver->claim_cursor, 0);
@@ -1261,7 +1220,6 @@ void clj_h2o_mt_destroy_response_receiver(clj_mt_receiver_t *receiver) {
     return;
   atomic_store_explicit(&receiver->accepts_responses, false,
                         memory_order_release);
-  assert(atomic_load_explicit(&receiver->pending, memory_order_acquire) == 0);
   assert(atomic_load_explicit(&receiver->ring_claimed,
                               memory_order_acquire) == 0);
   assert(atomic_load_explicit(&receiver->ring_ready, memory_order_acquire) ==
@@ -1282,86 +1240,10 @@ void clj_h2o_mt_wakeup(clj_mt_receiver_t *receiver) {
 size_t clj_h2o_mt_response_pending(clj_mt_receiver_t *receiver) {
   if (receiver == NULL)
     return 0;
-  return atomic_load_explicit(&receiver->pending, memory_order_acquire) +
-         atomic_load_explicit(&receiver->ring_claimed, memory_order_acquire) +
+  return atomic_load_explicit(&receiver->ring_claimed, memory_order_acquire) +
          atomic_load_explicit(&receiver->ring_ready, memory_order_acquire);
 }
 
-static bool checked_size_add(size_t *total, size_t value) {
-  if (*total > SIZE_MAX - value)
-    return false;
-  *total += value;
-  return true;
-}
-
-int clj_h2o_mt_submit_fixed_final(
-    clj_mt_receiver_t *receiver, uint64_t module_id, uint64_t request_seq,
-    int status, const clj_header_t *headers, size_t headers_len,
-    size_t content_length, int compress_hint, const char *body,
-    size_t body_len) {
-  if (receiver == NULL ||
-      !atomic_load_explicit(&receiver->accepts_responses,
-                            memory_order_acquire) ||
-      module_id == 0 || request_seq == 0 ||
-      status < 200 || (headers_len != 0 && headers == NULL) ||
-      (body_len != 0 && body == NULL) ||
-      headers_len > SIZE_MAX / sizeof(*headers))
-    return 0;
-
-  size_t storage_size = headers_len * sizeof(*headers);
-  for (size_t index = 0; index < headers_len; ++index) {
-    if ((headers[index].name_len != 0 && headers[index].name == NULL) ||
-        (headers[index].value_len != 0 && headers[index].value == NULL) ||
-        !checked_size_add(&storage_size, headers[index].name_len) ||
-        !checked_size_add(&storage_size, headers[index].value_len))
-      return 0;
-  }
-  if (!checked_size_add(&storage_size, body_len))
-    return 0;
-
-  size_t allocation_size = sizeof(clj_mt_fixed_final_msg_t);
-  if (!checked_size_add(&allocation_size, storage_size))
-    return 0;
-
-  clj_mt_fixed_final_msg_t *message = calloc(1, allocation_size);
-  if (message == NULL)
-    return 0;
-
-  message->kind = CLJ_MT_MESSAGE_FIXED_FINAL;
-  message->module_id = module_id;
-  message->request_seq = request_seq;
-  message->status = status;
-  message->headers_len = headers_len;
-  message->content_length = content_length;
-  message->compress_hint = compress_hint;
-  message->body_len = body_len;
-
-  clj_header_t *copied_headers = (clj_header_t *)message->storage;
-  char *cursor = (char *)(copied_headers + headers_len);
-  for (size_t index = 0; index < headers_len; ++index) {
-    copied_headers[index].name = cursor;
-    copied_headers[index].name_len = headers[index].name_len;
-    if (headers[index].name_len != 0) {
-      memcpy(cursor, headers[index].name, headers[index].name_len);
-      cursor += headers[index].name_len;
-    }
-
-    copied_headers[index].value = cursor;
-    copied_headers[index].value_len = headers[index].value_len;
-    if (headers[index].value_len != 0) {
-      memcpy(cursor, headers[index].value, headers[index].value_len);
-      cursor += headers[index].value_len;
-    }
-  }
-
-  message->body_offset = (size_t)(cursor - (char *)message->storage);
-  if (body_len != 0)
-    memcpy(cursor, body, body_len);
-
-  atomic_fetch_add_explicit(&receiver->pending, 1, memory_order_release);
-  h2o_multithread_send_message(&receiver->receiver, &message->super);
-  return 1;
-}
 
 static h2o_globalconf_t *
 clj_h2o_apply_flat_config(h2o_globalconf_t *conf,

@@ -294,15 +294,12 @@
 
 (defn- response-exchange-drained?
   [worker]
-  (let [dispatcher (:fixed-final-dispatcher worker)
-        receiver_ (:response-receiver_ worker)
+  (let [receiver_ (:response-receiver_ worker)
         receiver (when receiver_ (.get ^AtomicReference receiver_))]
-    (and (or (nil? dispatcher)
-             (fixed-final/dispatcher-stopped? dispatcher))
-         (or (nil? receiver)
-             (mem/null? receiver)
-             #_{:clj-kondo/ignore [:type-mismatch]}
-             (zero? (h2o/mt-response-pending receiver))))))
+    (or (nil? receiver)
+        (mem/null? receiver)
+        #_{:clj-kondo/ignore [:type-mismatch]}
+        (zero? (h2o/mt-response-pending receiver)))))
 
 (defn- destroy-response-receiver!
   [worker]
@@ -808,7 +805,8 @@
                 %
                 fixed-final/response-ring-capacity
                 (+ fixed-final/max-header-staging-bytes
-                   (:output-buffer-size config)))
+                   (min (:output-buffer-size config)
+                        fixed-final/response-ring-max-body-bytes)))
               contexts)
         _ (when (some #(or (nil? %) (mem/null? %)) response-receivers)
             (doseq [receiver wakeup-receivers]
@@ -956,7 +954,7 @@
 (defn- init-worker-state
   [{::keys [n-workers loops contexts listener-runtimes http3-worker-contexts
             max-connections shutting-down? message-handler wakeup-receivers response-receivers
-            wake-notifier arena config stop-accepting-remaining_ stopped-accepting_
+            wake-notifier arena stop-accepting-remaining_ stopped-accepting_
             active-connection-count_]
     :as state}]
   (let [workers
@@ -987,7 +985,6 @@
               message-handler
               (nth wakeup-receivers thread-idx)
               :response-receiver (nth response-receivers thread-idx)
-              :fixed-final-body-limit (:output-buffer-size config)
               :callback-dispatch callback-dispatch
               :wake-notifier wake-notifier))))]
     (assoc state ::workers workers)))
@@ -1057,9 +1054,6 @@
                  (.shutdownNow executor)
                  (when-not (.awaitTermination executor timeout timeunit)
                    (println "Virtual thread request executor pool did not shutdown cleanly"))))
-             (doseq [worker (::workers generation)]
-               (when-let [dispatcher (:fixed-final-dispatcher worker)]
-                 (fixed-final/stop-dispatcher! dispatcher)))
              (when (seq (::workers generation))
                (evloop/broadcast-wake! (::workers generation)))
              (if (seq (::workers generation))

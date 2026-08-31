@@ -240,11 +240,14 @@
                (or (not (string? body))
                    (nil? charset)
                    (utf8-charset? charset)))
-      (let [header-staging-bytes (fixed-final/header-staging-bytes headers)]
+      (let [[encoded-headers header-staging-bytes]
+            (fixed-final/encode-headers headers)]
         (when (and (<= (count headers) fixed-final/max-header-pairs)
                    (<= header-staging-bytes fixed-final/max-header-staging-bytes))
           (let [body-bytes (fixed-final-body-bytes body)]
-            (when (<= (alength ^bytes body-bytes) output-buffer-size)
+            (when (<= (alength ^bytes body-bytes)
+                      (min output-buffer-size
+                           fixed-final/response-ring-max-body-bytes))
               (let [content-length (if (identical? missing-content-length content-length-value)
                                      (alength ^bytes body-bytes)
                                      (coerce-content-length content-length-value))
@@ -257,7 +260,7 @@
                 (fixed-final/prepared-command (:dispatch-module-id req)
                                               (:dispatch-request-seq req)
                                               status
-                                              headers
+                                              encoded-headers
                                               header-staging-bytes
                                               content-length
                                               compress-hint
@@ -265,9 +268,7 @@
 
 (defn- schedule-fixed-final!
   [^Request req command]
-  (if-let [dispatcher (:fixed-final-dispatcher (:worker req))]
-    (fixed-final/submit-dispatcher! dispatcher command)
-    :closed))
+  (fixed-final/try-publish-response! (:worker req) command))
 
 (defn- schedule-fixed-final-mailbox!
   [^Request req command]

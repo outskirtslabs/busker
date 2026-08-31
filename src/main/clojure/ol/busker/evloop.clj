@@ -40,7 +40,6 @@
             message-handler
             ^AtomicReference wakeup-receiver_
             ^AtomicReference response-receiver_
-            fixed-final-dispatcher
             ^AtomicReference fixed-final-scratch_
             callback-dispatch
             ^HashMap requests
@@ -289,8 +288,6 @@
       (try
         (.set ^AtomicBoolean (:accepting?_ worker) false)
         (signal-mailbox-space! worker)
-        (when-let [dispatcher (:fixed-final-dispatcher worker)]
-          (fixed-final/stop-dispatcher! dispatcher))
         (finally
           (try
             (fixed-final/close-worker-scratch! worker)
@@ -314,13 +311,11 @@
    - :callback-dispatch - worker-local native callback dispatcher
    - :wake-notifier - shared runtime notifier for native event-loop wakes
    - :response-receiver - native complete-response receiver
-   - :fixed-final-body-limit - maximum complete-response body bytes
 
    Returns: worker"
 
   [loop-fn message-handler wakeup-receiver
-   & {:keys [callback-dispatch wake-notifier response-receiver fixed-final-body-limit
-             thread-name-prefix]
+   & {:keys [callback-dispatch wake-notifier response-receiver thread-name-prefix]
       :or {thread-name-prefix "h2o-evloop"}}]
   (when-not callback-dispatch
     (throw (ex-info "Worker requires a callback dispatcher" {})))
@@ -354,22 +349,13 @@
                              :wakeup-receiver_ receiver_
                              :response-receiver_ response-receiver_
                              :fixed-final-scratch_ (AtomicReference.)})
-        dispatcher (fixed-final/start-dispatcher!
-                    response-receiver fixed-final-body-limit
-                    #(required-message! worker [:h2o/send-fixed-final %])
-                    (format "h2o-fixed-final-%d" id))
-        worker (assoc worker :fixed-final-dispatcher dispatcher)
         thread (Thread. #(run-evloop-on-thread!
                           (assoc worker :thread (Thread/currentThread)))
                         (format "%s-%d" thread-name-prefix id))
         worker (assoc worker :thread thread)]
-    (try
-      (callback-dispatch/bind-thread! callback-dispatch thread)
-      (.start thread)
-      worker
-      (catch Throwable error
-        (fixed-final/stop-dispatcher! dispatcher)
-        (throw error)))))
+    (callback-dispatch/bind-thread! callback-dispatch thread)
+    (.start thread)
+    worker))
 
 (defn join-worker!
   "Join a worker thread without sending stop messages. Assumes the worker will

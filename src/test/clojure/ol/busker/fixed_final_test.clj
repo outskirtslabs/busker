@@ -16,7 +16,6 @@
    [java.lang.foreign MemorySegment]
    [java.net InetSocketAddress Socket]
    [java.nio.charset StandardCharsets]
-   [java.util.concurrent CountDownLatch TimeUnit]
    [java.util.concurrent.atomic AtomicReference]))
 
 (defn- command
@@ -38,6 +37,13 @@
           (h2o/->string value value_len)]))
      (range headers-len))))
 
+(defn- decoded-command-headers
+  [command]
+  (mapv (fn [[^bytes name ^bytes value]]
+          [(String. name StandardCharsets/UTF_8)
+           (String. value StandardCharsets/UTF_8)])
+        (:headers command)))
+
 (deftest command-contains-only-copied-jvm-data
   (let [body (byte-array [1 2 3])
         command (command body)]
@@ -49,7 +55,9 @@
             :header-staging-bytes (fixed-final/header-staging-bytes [["content-type" "text/plain"]])
             :content-length 3
             :compress-hint 2}
-           (dissoc command :body)))
+           (-> command
+               (assoc :headers (decoded-command-headers command))
+               (dissoc :body))))
     (is (= (:module-id command) (fixed-final/command-module-id command)))
     (is (= (:request-seq command) (fixed-final/command-request-seq command)))
     (is (= (:content-length command) (fixed-final/command-content-length command)))
@@ -115,115 +123,6 @@
                                worker (command (byte-array [1])))))
         (is (= [[receiver slot 0]] @aborted_))
         (is (zero? @published_))))))
-(deftest dispatcher-stages-on-a-platform-thread
-  (let [receiver (mem/alloc 1 (mem/global-arena))
-        seen_ (promise)
-        admission_ (promise)
-        command (command (.getBytes "cat" StandardCharsets/UTF_8))]
-    (with-redefs [h2o/mt-submit-fixed-final
-                  (fn [_ module-id request-seq status headers headers-len
-                       content-length compress-hint body body-len]
-                    (deliver seen_
-                             {:module-id module-id
-                              :request-seq request-seq
-                              :status status
-                              :headers (serialized-headers headers headers-len)
-                              :content-length content-length
-                              :compress-hint compress-hint
-                              :body (vec (mem/read-bytes body (long body-len)))
-                              :thread-name (.getName (Thread/currentThread))
-                              :virtual? (.isVirtual (Thread/currentThread))})
-                    1)]
-      (let [dispatcher (fixed-final/start-dispatcher! receiver 3 (constantly :accepted)
-                                                      "fixed-final-test")]
-        (try
-          (let [caller (Thread/startVirtualThread
-                        #(deliver admission_
-                                  {:result (fixed-final/submit-dispatcher! dispatcher command)
-                                   :virtual? (.isVirtual (Thread/currentThread))}))]
-            (.join caller 2000)
-            (is (= {:admission {:result :accepted :virtual? true}
-                    :submission {:module-id 1
-                                 :request-seq 1
-                                 :status 200
-                                 :headers [["content-type" "text/plain"]]
-                                 :content-length 3
-                                 :compress-hint 2
-                                 :body [99 97 116]
-                                 :thread-name "fixed-final-test"
-                                 :virtual? false}}
-                   {:admission (deref admission_ 2000 :timeout)
-                    :submission (deref seen_ 2000 :timeout)})))
-          (finally
-            (fixed-final/stop-dispatcher! dispatcher)))
-        (is (fixed-final/dispatcher-stopped? dispatcher))))))
-
-(deftest dispatcher-drains-accepted-commands-in-fifo-order
-  (let [receiver (mem/alloc 1 (mem/global-arena))
-        request-seqs_ (atom [])]
-    (with-redefs [h2o/mt-submit-fixed-final
-                  (fn [_ _ request-seq _ _ _ _ _ _ _]
-                    (swap! request-seqs_ conj request-seq)
-                    1)]
-      (let [dispatcher (fixed-final/start-dispatcher! receiver 1 (constantly :accepted)
-                                                      "fixed-final-fifo")
-            commands (mapv #(assoc (command (byte-array [65])) :request-seq %)
-                           (range 1 33))]
-        (is (= (repeat 32 :accepted)
-               (mapv #(fixed-final/submit-dispatcher! dispatcher %) commands)))
-        (fixed-final/stop-dispatcher! dispatcher)
-        (is (= {:request-seqs (vec (range 1 33))
-                :stopped? true}
-               {:request-seqs @request-seqs_
-                :stopped? (fixed-final/dispatcher-stopped? dispatcher)}))))))
-
-(deftest dispatcher-reports-overload-at-its-bounded-capacity
-  (let [receiver (mem/alloc 1 (mem/global-arena))
-        entered (CountDownLatch. 1)
-        release (CountDownLatch. 1)
-        command (command (byte-array [65]))]
-    (with-redefs [h2o/mt-submit-fixed-final
-                  (fn [& _]
-                    (.countDown entered)
-                    (.await release 2 TimeUnit/SECONDS)
-                    1)]
-      (let [dispatcher (fixed-final/start-dispatcher! receiver 1 (constantly :accepted)
-                                                      "fixed-final-bounded")]
-        (try
-          (is (= :accepted (fixed-final/submit-dispatcher! dispatcher command)))
-          (is (.await entered 2 TimeUnit/SECONDS))
-          (is (= {:queued (vec (repeat 256 :accepted))
-                  :overflow :overloaded}
-                 {:queued (mapv (fn [_]
-                                  (fixed-final/submit-dispatcher! dispatcher command))
-                                (range 256))
-                  :overflow (fixed-final/submit-dispatcher! dispatcher command)}))
-          (finally
-            (.countDown release)
-            (fixed-final/stop-dispatcher! dispatcher)))))))
-
-(deftest dispatcher-falls-back-after-native-submission-failure
-  (let [receiver (mem/alloc 1 (mem/global-arena))
-        command (command (byte-array [65]))
-        fallback_ (promise)]
-    (with-redefs [h2o/mt-submit-fixed-final (constantly 0)
-                  h2o/report-almost-fatal-error (fn [& _])]
-      (let [dispatcher (fixed-final/start-dispatcher!
-                        receiver 1
-                        #(deliver fallback_
-                                  {:command %
-                                   :thread-name (.getName (Thread/currentThread))
-                                   :virtual? (.isVirtual (Thread/currentThread))})
-                        "fixed-final-fallback")]
-        (try
-          (is (= :accepted (fixed-final/submit-dispatcher! dispatcher command)))
-          (is (= {:command command
-                  :thread-name "fixed-final-fallback"
-                  :virtual? false}
-                 (deref fallback_ 2000 :timeout)))
-          (finally
-            (fixed-final/stop-dispatcher! dispatcher)))))))
-
 (deftest worker-reuses-and-explicitly-releases-fixed-final-scratch
   (let [scratch_ (AtomicReference.)
         worker {:fixed-final-scratch_ scratch_}
@@ -374,7 +273,6 @@
         claim-threads_ (atom [])
         wake-threads_ (atom [])
         drain-threads_ (atom [])
-        old-submissions_ (atom 0)
         try-claim h2o/mt-response-try-claim
         wake h2o/mt-wakeup
         drain h2o/mt-response-ring-drain
@@ -411,11 +309,7 @@
          #'h2o/mt-response-ring-drain
          (fn [receiver]
            (swap! drain-threads_ conj (Thread/currentThread))
-           (drain receiver))
-         #'h2o/mt-submit-fixed-final
-         (fn [& _]
-           (swap! old-submissions_ inc)
-           0)}
+           (drain receiver))}
         #(let [http-response (request-text port "GET")]
            (is (.contains ^String http-response "ring-inline"))))
       (is (seq @claim-threads_))
@@ -426,7 +320,6 @@
       (is (seq @drain-threads_))
       (is (every? (fn [^Thread thread] (not (.isVirtual thread)))
                   @drain-threads_))
-      (is (zero? @old-submissions_))
       (finally
         (busker/stop! server)))))
 (deftest native-helper-sends-final-body-and-suppresses-head-body

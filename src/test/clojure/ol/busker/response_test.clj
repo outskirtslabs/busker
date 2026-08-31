@@ -343,6 +343,14 @@
     (is (= "cat" (String. ^bytes (:body (fixed-command 3 {:status 200 :body "cat"} true)) StandardCharsets/UTF_8)))
     (is (nil? (fixed-command 3 {:status 200 :body "cats"} true)))
     (is (some? (fixed-command 3 {:status 200 :body (byte-array 3)} true)))
+    (is (some? (fixed-command fixed-final/response-ring-max-body-bytes
+                              {:status 200
+                               :body (byte-array fixed-final/response-ring-max-body-bytes)}
+                              true)))
+    (is (nil? (fixed-command (inc fixed-final/response-ring-max-body-bytes)
+                             {:status 200
+                              :body (byte-array (inc fixed-final/response-ring-max-body-bytes))}
+                             true)))
     (is (= 0 (alength ^bytes (:body (fixed-command 3 {:status 200 :body ""} true)))))
     (is (= 3 (:content-length (fixed-command 3 {:status 200 :body "cat"} true))))
     (is (= 99 (:content-length (fixed-command 3 {:status 200
@@ -363,13 +371,13 @@
     (is (some? (fixed-command 1 {:status 200 :headers {"x" staged-value} :body "x"} true)))
     (is (nil? (fixed-command 1 {:status 200 :headers {"x" (str staged-value "a")} :body "x"} true)))))
 
-(deftest fixed-final-command-sizes-headers-once-test
+(deftest fixed-final-command-encodes-headers-once
   (let [call-count_ (atom 0)
-        header-staging-bytes fixed-final/header-staging-bytes]
-    (with-redefs [fixed-final/header-staging-bytes
+        encode-headers fixed-final/encode-headers]
+    (with-redefs [fixed-final/encode-headers
                   (fn [headers]
                     (swap! call-count_ inc)
-                    (header-staging-bytes headers))]
+                    (encode-headers headers))]
       (is (some? (fixed-command 3 {:status 200
                                    :headers {"content-type" "text/plain"}
                                    :body "cat"}
@@ -387,7 +395,10 @@
     (is (= 3 (:content-length command)))
     (is (vector? (:headers command)))
     (is (= [["X-Repeat" "1"] ["X-Repeat" "two"]]
-           (:headers command)))))
+           (mapv (fn [[^bytes name ^bytes value]]
+                   [(String. name StandardCharsets/UTF_8)
+                    (String. value StandardCharsets/UTF_8)])
+                 (:headers command))))))
 
 (deftest fixed-final-falls-back-for-ineligible-final-responses
   (doseq [response [{:status 204 :body "x"}

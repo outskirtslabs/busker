@@ -221,6 +221,25 @@
       (finally
         (generation/stop! instance)))))
 
+(deftest response-ring-storage-does-not-scale-past-the-eligible-body-limit
+  (let [port (util/free-port)
+        instance
+        (generation/start!
+         (config/load!
+          {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                :tls false}}
+           :output-buffer-size (* 4 fixed-final/response-ring-max-body-bytes)
+           :dispatch [{:handler (constantly {:status 200 :body "ring-ready"})}]})
+         nil)]
+    (try
+      (let [worker (first (::generation/workers instance))
+            receiver (.get ^AtomicReference (:response-receiver_ worker))]
+        (is (= (+ fixed-final/max-header-staging-bytes
+                  fixed-final/response-ring-max-body-bytes)
+               (h2o/mt-response-slot-payload-capacity receiver))))
+      (finally
+        (generation/stop! instance)))))
+
 (deftest stale-ring-response-is-drained-after-a-platform-notifier-wake
   (let [port (util/free-port)
         instance (generation/start!
@@ -341,7 +360,7 @@
       (finally
         (generation/stop! instance)))))
 
-(deftest generation-stop-drains-a-ready-response-slot
+(deftest generation-stop-completes-after-response-slot-publication
   (let [port (util/free-port)
         instance (generation/start!
                   (config/load!
@@ -360,7 +379,6 @@
         (fixed-final/write-response-slot!
          slot (h2o/mt-response-slot-payload-capacity receiver) command)
         (is (= 1 (h2o/mt-response-publish receiver slot claim-token)))
-        (is (= 1 (h2o/mt-response-ring-ready receiver)))
         (generation/stop! instance)
         (reset! stopped?_ true)
         (is (= :stopped @(::generation/phase instance))))
@@ -386,14 +404,14 @@
       (finally
         (generation/stop! instance)))))
 
-(deftest ordinary-fixed-response-native-submission-runs-on-platform-thread-test
+(deftest ordinary-fixed-response-uses-ring-without-the-platform-dispatcher
   (let [port 18594
-        submission-threads_ (atom [])
-        submit-fixed-final h2o/mt-submit-fixed-final]
-    (with-redefs [h2o/mt-submit-fixed-final
-                  (fn [& args]
-                    (swap! submission-threads_ conj (Thread/currentThread))
-                    (apply submit-fixed-final args))]
+        claim-threads_ (atom [])
+        try-claim h2o/mt-response-try-claim]
+    (with-redefs [h2o/mt-response-try-claim
+                  (fn [receiver]
+                    (swap! claim-threads_ conj (Thread/currentThread))
+                    (try-claim receiver))]
       (let [instance
             (generation/start!
              (config/load!
@@ -401,19 +419,50 @@
                                     :tls false}}
                :dispatch [{:handler (fn [_]
                                       {:status 200
-                                       :body "platform-submit"})}]})
+                                       :body "ring-submit"})}]})
              nil)]
         (try
-          (let [result (util/curl :http nil port "/" :max-time 5)]
-            (is (= {:response {:exit 0 :out "platform-submit"}
-                    :submission? true
-                    :all-platform? true}
+          (let [result (util/curl :http nil port "/" :max-time 5)
+                workers (::generation/workers instance)]
+            (is (= {:response {:exit 0 :out "ring-submit"}
+                    :claim? true
+                    :all-claims-virtual? true
+                    :old-submit-binding? false
+                    :dispatcher-fields 0}
                    {:response (select-keys result [:exit :out])
-                    :submission? (boolean (seq @submission-threads_))
-                    :all-platform? (every? #(not (.isVirtual ^Thread %))
-                                           @submission-threads_)})))
+                    :claim? (boolean (seq @claim-threads_))
+                    :all-claims-virtual?
+                    (every? (fn [^Thread thread] (.isVirtual thread))
+                            @claim-threads_)
+                    :old-submit-binding?
+                    (boolean (ns-resolve 'ol.busker.native 'mt-submit-fixed-final))
+                    :dispatcher-fields
+                    (count (filter #(contains? % :fixed-final-dispatcher) workers))})))
           (finally
             (generation/stop! instance)))))))
+
+(deftest ordinary-fixed-response-falls-back-when-the-ring-is-full
+  (let [port (util/free-port)
+        instance
+        (generation/start!
+         (config/load!
+          {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                :tls false}}
+           :dispatch [{:handler (constantly {:status 200 :body "ring-fallback"})}]})
+         nil)
+        worker (first (::generation/workers instance))
+        receiver (.get ^AtomicReference (:response-receiver_ worker))
+        slots (mapv (fn [_] (h2o/mt-response-try-claim receiver))
+                    (range (h2o/mt-response-ring-capacity receiver)))]
+    (try
+      (is (every? (fn [slot] (not (mem/null? slot))) slots))
+      (let [result (util/curl :http nil port "/" :max-time 5)]
+        (is (= {:exit 0 :out "ring-fallback"}
+               (select-keys result [:exit :out]))))
+      (finally
+        (doseq [slot slots]
+          (h2o/mt-response-abort receiver slot (response-slot-token slot)))
+        (generation/stop! instance)))))
 
 (deftest worker-receiver-retirement-precedes-notifier-stop-test
   (with-open [arena (mem/shared-arena)]

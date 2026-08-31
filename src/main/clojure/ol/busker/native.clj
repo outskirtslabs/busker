@@ -721,13 +721,6 @@
   #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-ring-drain* receiver)))
 
-(defcfn mt-submit-fixed-final
-  "Copies one fixed response into the H2O receiver queue."
-  clj_h2o_mt_submit_fixed_final
-  [::mem/pointer ::mem/long ::mem/long ::mem/int ::mem/pointer ::mem/long
-   ::mem/long ::mem/int ::mem/pointer ::mem/long]
-  ::mem/int)
-
 (defcfn mt-destroy-wakeup-receiver
   "Unregister and free the wakeup receiver"
   clj_h2o_mt_destroy_wakeup_receiver

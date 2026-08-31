@@ -302,11 +302,6 @@ void clj_h2o_mt_destroy_response_receiver(clj_mt_receiver_t *receiver);
 void clj_h2o_mt_wakeup(clj_mt_receiver_t *receiver);
 size_t clj_h2o_mt_response_pending(clj_mt_receiver_t *receiver);
 
-int clj_h2o_mt_submit_fixed_final(
-    clj_mt_receiver_t *receiver, uint64_t module_id, uint64_t request_seq,
-    int status, const clj_header_t *headers, size_t headers_len,
-    size_t content_length, int compress_hint, const char *body,
-    size_t body_len);
 
 size_t clj_h2o_response_slot_data_size(void);
 size_t clj_h2o_response_ring_capacity(clj_mt_receiver_t *receiver);
