@@ -14,6 +14,7 @@
 (def ^:const max-header-staging-bytes 16384)
 (def ^:const response-ring-capacity 256)
 (def ^:const response-ring-max-body-bytes 32768)
+(def ^:private response-claim-index-mask 0xffff)
 
 (def ^:private get-current-worker
   (delay (requiring-resolve 'ol.busker.evloop/get-current-worker)))
@@ -26,8 +27,6 @@
 
 (def ^:private response-slot-data-size
   (mem/size-of ::h2o/clj-fixed-response-slot-data-t))
-(def ^:private response-slot-claim-token-offset
-  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :claim-token))
 (def ^:private response-slot-module-id-offset
   (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :module-id))
 (def ^:private response-slot-request-seq-offset
@@ -154,7 +153,7 @@
                       {:header-count (count encoded-headers)
                        :payload-bytes payload-length
                        :payload-capacity payload-capacity})))
-    (let [data (mem/reinterpret slot (+ response-slot-data-size payload-capacity))
+    (let [data slot
           payload (mem/slice data response-slot-data-size payload-capacity)
           body-offset
           (loop [index (long 0)
@@ -194,17 +193,16 @@
         receiver (when receiver_ (.get ^AtomicReference receiver_))]
     (if (or (nil? receiver) (mem/null? receiver))
       :closed
-      (let [slot (h2o/mt-response-try-claim receiver)]
-        (if (mem/null? slot)
+      (let [claim-handle (h2o/mt-response-try-claim receiver)]
+        (if (zero? claim-handle)
           :overloaded
-          (let [data (mem/reinterpret slot response-slot-data-size)
-                claim-token (mem/read-long data (long response-slot-claim-token-offset))
+          (let [slot-index (dec (bit-and claim-handle response-claim-index-mask))
+                slot (nth (:response-slots worker) slot-index)
+                payload-capacity (long (:response-slot-payload-capacity worker))
                 published?_ (volatile! false)]
             (try
-              (write-response-slot! slot
-                                    (h2o/mt-response-slot-payload-capacity receiver)
-                                    command)
-              (if (= 1 (h2o/mt-response-publish receiver slot claim-token))
+              (write-response-slot! slot payload-capacity command)
+              (if (= 1 (h2o/mt-response-publish receiver claim-handle))
                 (do
                   (vreset! published?_ true)
                   (pi/wake worker)
@@ -212,7 +210,7 @@
                 :overloaded)
               (finally
                 (when-not @published?_
-                  (h2o/mt-response-abort receiver slot claim-token))))))))))
+                  (h2o/mt-response-abort receiver claim-handle))))))))))
 
 (defn- worker-scratch-segment
   [worker ^long body-limit]

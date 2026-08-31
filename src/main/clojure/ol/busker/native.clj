@@ -682,34 +682,44 @@
   #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-ring-ready* receiver)))
 
+(defcfn mt-response-slot-data*
+  clj_h2o_response_slot_data
+  [::mem/pointer ::mem/long] ::mem/pointer)
+
+(defn mt-response-slot-data
+  "Returns one slot data pointer for generation-time binding."
+  [receiver index]
+  (mt-response-slot-data* receiver index))
+
 (defcfn mt-response-try-claim*
   clj_h2o_response_try_claim
-  [::mem/pointer] ::mem/pointer)
+  [::mem/pointer] ::mem/long)
 
 (defn mt-response-try-claim
-  "Claims a response slot immediately or returns a null pointer."
+  "Claims a response slot immediately and returns its scalar handle, or zero."
   [receiver]
-  (mt-response-try-claim* receiver))
+  #_{:clj-kondo/ignore [:type-mismatch]}
+  (long (mt-response-try-claim* receiver)))
 
 (defcfn mt-response-publish*
   clj_h2o_response_publish
-  [::mem/pointer ::mem/pointer ::mem/long] ::mem/int)
+  [::mem/pointer ::mem/long] ::mem/int)
 
 (defn mt-response-publish
-  "Publishes valid slot data immediately."
-  [receiver slot claim-token]
+  "Publishes the slot identified by `claim-handle` immediately."
+  [receiver claim-handle]
   #_{:clj-kondo/ignore [:type-mismatch]}
-  (long (mt-response-publish* receiver slot claim-token)))
+  (long (mt-response-publish* receiver claim-handle)))
 
 (defcfn mt-response-abort*
   clj_h2o_response_abort
-  [::mem/pointer ::mem/pointer ::mem/long] ::mem/int)
+  [::mem/pointer ::mem/long] ::mem/int)
 
 (defn mt-response-abort
-  "Releases an unpublished response slot immediately."
-  [receiver slot claim-token]
+  "Releases the unpublished slot identified by `claim-handle` immediately."
+  [receiver claim-handle]
   #_{:clj-kondo/ignore [:type-mismatch]}
-  (long (mt-response-abort* receiver slot claim-token)))
+  (long (mt-response-abort* receiver claim-handle)))
 
 (defcfn mt-response-ring-drain*
   clj_h2o_response_ring_drain

@@ -40,6 +40,8 @@
             message-handler
             ^AtomicReference wakeup-receiver_
             ^AtomicReference response-receiver_
+            response-slots
+            ^long response-slot-payload-capacity
             ^AtomicReference fixed-final-scratch_
             callback-dispatch
             ^HashMap requests
@@ -311,11 +313,14 @@
    - :callback-dispatch - worker-local native callback dispatcher
    - :wake-notifier - shared runtime notifier for native event-loop wakes
    - :response-receiver - native complete-response receiver
+   - :response-slots - generation-scoped native slot views
+   - :response-slot-payload-capacity - writable bytes in one slot
 
    Returns: worker"
 
   [loop-fn message-handler wakeup-receiver
-   & {:keys [callback-dispatch wake-notifier response-receiver thread-name-prefix]
+   & {:keys [callback-dispatch wake-notifier response-receiver response-slots
+             response-slot-payload-capacity thread-name-prefix]
       :or {thread-name-prefix "h2o-evloop"}}]
   (when-not callback-dispatch
     (throw (ex-info "Worker requires a callback dispatcher" {})))
@@ -348,6 +353,8 @@
                              :message-handler message-handler
                              :wakeup-receiver_ receiver_
                              :response-receiver_ response-receiver_
+                             :response-slots response-slots
+                             :response-slot-payload-capacity response-slot-payload-capacity
                              :fixed-final-scratch_ (AtomicReference.)})
         thread (Thread. #(run-evloop-on-thread!
                           (assoc worker :thread (Thread/currentThread)))

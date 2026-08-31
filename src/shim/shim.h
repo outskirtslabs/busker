@@ -309,13 +309,12 @@ size_t clj_h2o_response_slot_payload_capacity(clj_mt_receiver_t *receiver);
 size_t clj_h2o_response_ring_claimed(clj_mt_receiver_t *receiver);
 size_t clj_h2o_response_ring_ready(clj_mt_receiver_t *receiver);
 clj_fixed_response_slot_data_t *
-clj_h2o_response_try_claim(clj_mt_receiver_t *receiver);
+clj_h2o_response_slot_data(clj_mt_receiver_t *receiver, size_t index);
+uint64_t clj_h2o_response_try_claim(clj_mt_receiver_t *receiver);
 int clj_h2o_response_publish(clj_mt_receiver_t *receiver,
-                             clj_fixed_response_slot_data_t *data,
-                             uint64_t claim_token);
+                             uint64_t claim_handle);
 int clj_h2o_response_abort(clj_mt_receiver_t *receiver,
-                           clj_fixed_response_slot_data_t *data,
-                           uint64_t claim_token);
+                           uint64_t claim_handle);
 size_t clj_h2o_response_ring_drain(clj_mt_receiver_t *receiver);
 
 /* Open a nonblocking CLOEXEC TCP listener for IPv4 or IPv6.

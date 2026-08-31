@@ -800,13 +800,15 @@
         loops (h2o/create-loops n-workers)
         contexts (h2o/create-contexts arena loops config-ptr)
         wakeup-receivers (mapv h2o/mt-create-wakeup-receiver contexts)
+        response-slot-payload-capacity
+        (+ fixed-final/max-header-staging-bytes
+           (min (:output-buffer-size config)
+                fixed-final/response-ring-max-body-bytes))
         response-receivers
         (mapv #(h2o/mt-create-response-receiver
                 %
                 fixed-final/response-ring-capacity
-                (+ fixed-final/max-header-staging-bytes
-                   (min (:output-buffer-size config)
-                        fixed-final/response-ring-max-body-bytes)))
+                response-slot-payload-capacity)
               contexts)
         _ (when (some #(or (nil? %) (mem/null? %)) response-receivers)
             (doseq [receiver wakeup-receivers]
@@ -816,6 +818,17 @@
               (when (and receiver (not (mem/null? receiver)))
                 (h2o/mt-destroy-response-receiver receiver)))
             (throw (ex-info "Could not create native response receiver" {})))
+        response-slot-size (+ (h2o/mt-response-slot-data-size)
+                              response-slot-payload-capacity)
+        response-slots
+        (mapv (fn [receiver]
+                (mapv (fn [index]
+                        (mem/reinterpret
+                         (h2o/mt-response-slot-data receiver index)
+                         response-slot-size
+                         arena))
+                      (range fixed-final/response-ring-capacity)))
+              response-receivers)
         on-close-callback (create-connection-close-callback active-connection-count_)]
     (assoc state
            ::arena arena
@@ -826,6 +839,8 @@
            ::contexts contexts
            ::wakeup-receivers wakeup-receivers
            ::response-receivers response-receivers
+           ::response-slots response-slots
+           ::response-slot-payload-capacity response-slot-payload-capacity
            ::on-close-callback on-close-callback)))
 
 (defn- init-tls-http3-state
@@ -954,6 +969,7 @@
 (defn- init-worker-state
   [{::keys [n-workers loops contexts listener-runtimes http3-worker-contexts
             max-connections shutting-down? message-handler wakeup-receivers response-receivers
+            response-slots response-slot-payload-capacity
             wake-notifier arena stop-accepting-remaining_ stopped-accepting_
             active-connection-count_]
     :as state}]
@@ -985,6 +1001,8 @@
               message-handler
               (nth wakeup-receivers thread-idx)
               :response-receiver (nth response-receivers thread-idx)
+              :response-slots (nth response-slots thread-idx)
+              :response-slot-payload-capacity response-slot-payload-capacity
               :callback-dispatch callback-dispatch
               :wake-notifier wake-notifier))))]
     (assoc state ::workers workers)))

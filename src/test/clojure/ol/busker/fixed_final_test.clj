@@ -107,21 +107,23 @@
   (with-open [arena (mem/confined-arena)]
     (let [receiver (mem/alloc 1 arena)
           slot (mem/alloc (mem/size-of ::h2o/clj-fixed-response-slot-data-t) arena)
-          worker {:response-receiver_ (AtomicReference. receiver)}
+          claim-handle 65537
+          worker {:response-receiver_ (AtomicReference. receiver)
+                  :response-slots [slot]
+                  :response-slot-payload-capacity 0}
           aborted_ (atom [])
           published_ (atom 0)]
-      (with-redefs [h2o/mt-response-try-claim (constantly slot)
-                    h2o/mt-response-slot-payload-capacity (constantly 0)
+      (with-redefs [h2o/mt-response-try-claim (constantly claim-handle)
                     h2o/mt-response-publish (fn [& _] (swap! published_ inc))
                     h2o/mt-response-abort
-                    (fn [actual-receiver actual-slot claim-token]
-                      (swap! aborted_ conj [actual-receiver actual-slot claim-token])
+                    (fn [actual-receiver actual-handle]
+                      (swap! aborted_ conj [actual-receiver actual-handle])
                       1)]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo
                               #"does not fit"
                               (fixed-final/try-publish-response!
                                worker (command (byte-array [1])))))
-        (is (= [[receiver slot 0]] @aborted_))
+        (is (= [[receiver claim-handle]] @aborted_))
         (is (zero? @published_))))))
 (deftest worker-reuses-and-explicitly-releases-fixed-final-scratch
   (let [scratch_ (AtomicReference.)

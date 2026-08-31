@@ -31,6 +31,8 @@
       :mailbox (ArrayBlockingQueue. capacity)
       :message-handler handler
       :wakeup-receiver_ (AtomicReference. receiver)
+      :response-slots []
+      :response-slot-payload-capacity 0
       :fixed-final-scratch_ (AtomicReference.)
       :requests (HashMap.)})))
 
