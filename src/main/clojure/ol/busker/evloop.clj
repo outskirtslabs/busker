@@ -39,6 +39,8 @@
             loop-fn
             message-handler
             ^AtomicReference wakeup-receiver_
+            ^AtomicReference response-receiver_
+            fixed-final-dispatcher
             ^AtomicReference fixed-final-scratch_
             callback-dispatch
             ^HashMap requests
@@ -285,9 +287,15 @@
       (println error))
     (finally
       (try
-        (fixed-final/close-worker-scratch! worker)
+        (.set ^AtomicBoolean (:accepting?_ worker) false)
+        (signal-mailbox-space! worker)
+        (when-let [dispatcher (:fixed-final-dispatcher worker)]
+          (fixed-final/stop-dispatcher! dispatcher))
         (finally
-          (.remove worker-context))))))
+          (try
+            (fixed-final/close-worker-scratch! worker)
+            (finally
+              (.remove worker-context))))))))
 
 ;; ------------------------------
 ;; Public API
@@ -305,47 +313,63 @@
    - :thread-name-prefix - prefix for thread name (default 'h2o-evloop')
    - :callback-dispatch - worker-local native callback dispatcher
    - :wake-notifier - shared runtime notifier for native event-loop wakes
+   - :response-receiver - native complete-response receiver
+   - :fixed-final-body-limit - maximum complete-response body bytes
 
    Returns: worker"
 
-  [loop-fn message-handler wakeup-receiver & {:keys [callback-dispatch wake-notifier thread-name-prefix]
-                                              :or {thread-name-prefix "h2o-evloop"}}]
+  [loop-fn message-handler wakeup-receiver
+   & {:keys [callback-dispatch wake-notifier response-receiver fixed-final-body-limit
+             thread-name-prefix]
+      :or {thread-name-prefix "h2o-evloop"}}]
   (when-not callback-dispatch
     (throw (ex-info "Worker requires a callback dispatcher" {})))
   (when-not wake-notifier
     (throw (ex-info "Worker requires a wake notifier" {})))
   (let [id (swap! next-id_ inc)
         receiver_ (AtomicReference. wakeup-receiver)
+        response-receiver_ (AtomicReference. response-receiver)
         wake-endpoint (notifier/endpoint receiver_)
         mailbox-lock (ReentrantLock.)
-        w (map->Worker {:id id
-                        :thread nil
-                        :callback-dispatch callback-dispatch
-                        :requests (:entries callback-dispatch)
-                        :running?_ (AtomicBoolean. true)
-                        :accepting?_ (AtomicBoolean. true)
-                        :stop-requested?_ (AtomicBoolean. false)
-                        :admissions_ (AtomicInteger.)
-                        :mailbox-waiters_ (AtomicInteger.)
-                        :mailbox-lock mailbox-lock
-                        :mailbox-space (.newCondition mailbox-lock)
-                        :mailbox-signal_ (AtomicLong.)
-                        :wake-generation_ (AtomicLong.)
-                        :sleep-armed?_ (AtomicBoolean. false)
-                        :wake-notifier wake-notifier
-                        :wake-endpoint wake-endpoint
-                        :mailbox (ArrayBlockingQueue. 256)
-                        :evloop nil
-                        :loop-fn loop-fn
-                        :message-handler message-handler
-                        :wakeup-receiver_ receiver_
-                        :fixed-final-scratch_ (AtomicReference.)})
-        t (Thread. #(run-evloop-on-thread! (assoc w :thread (Thread/currentThread)))
-                   (format "%s-%d" thread-name-prefix id))
-        w (assoc w :thread t)]
-    (callback-dispatch/bind-thread! callback-dispatch t)
-    (.start t)
-    w))
+        worker (map->Worker {:id id
+                             :thread nil
+                             :callback-dispatch callback-dispatch
+                             :requests (:entries callback-dispatch)
+                             :running?_ (AtomicBoolean. true)
+                             :accepting?_ (AtomicBoolean. true)
+                             :stop-requested?_ (AtomicBoolean. false)
+                             :admissions_ (AtomicInteger.)
+                             :mailbox-waiters_ (AtomicInteger.)
+                             :mailbox-lock mailbox-lock
+                             :mailbox-space (.newCondition mailbox-lock)
+                             :mailbox-signal_ (AtomicLong.)
+                             :wake-generation_ (AtomicLong.)
+                             :sleep-armed?_ (AtomicBoolean. false)
+                             :wake-notifier wake-notifier
+                             :wake-endpoint wake-endpoint
+                             :mailbox (ArrayBlockingQueue. 256)
+                             :evloop nil
+                             :loop-fn loop-fn
+                             :message-handler message-handler
+                             :wakeup-receiver_ receiver_
+                             :response-receiver_ response-receiver_
+                             :fixed-final-scratch_ (AtomicReference.)})
+        dispatcher (fixed-final/start-dispatcher!
+                    response-receiver fixed-final-body-limit
+                    #(required-message! worker [:h2o/send-fixed-final %])
+                    (format "h2o-fixed-final-%d" id))
+        worker (assoc worker :fixed-final-dispatcher dispatcher)
+        thread (Thread. #(run-evloop-on-thread!
+                          (assoc worker :thread (Thread/currentThread)))
+                        (format "%s-%d" thread-name-prefix id))
+        worker (assoc worker :thread thread)]
+    (try
+      (callback-dispatch/bind-thread! callback-dispatch thread)
+      (.start thread)
+      worker
+      (catch Throwable error
+        (fixed-final/stop-dispatcher! dispatcher)
+        (throw error)))))
 
 (defn join-worker!
   "Join a worker thread without sending stop messages. Assumes the worker will

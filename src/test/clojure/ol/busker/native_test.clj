@@ -24,6 +24,8 @@
                                      :is_early_data   0}
      :on-cleanup                    (pointer)
      :on-request-body-chunk         (pointer)
+     :response-receiver             (pointer)
+     :response-hash-next            (pointer)
      :generator                     {:proceed (pointer)
                                      :stop    (pointer)}
      :on-response-generator-proceed (pointer)
@@ -52,15 +54,17 @@
    :meta                         8
    :on-cleanup                   112
    :on-request-body-chunk        120
-   :generator                    128
-   :on-response-generator-proceed 144
-   :on-response-generator-stop   152
-   :preferred-chunk-size         160
-   :dispatch-module-id           168
-   :dispatch-request-seq         176
-   :cleanup                      184
-   :closing                      188
-   :response_started             192})
+   :response-receiver             128
+   :response-hash-next            136
+   :generator                     144
+   :on-response-generator-proceed 160
+   :on-response-generator-stop    168
+   :preferred-chunk-size          176
+   :dispatch-module-id            184
+   :dispatch-request-seq          192
+   :cleanup                       200
+   :closing                       204
+   :response_started              208})
 
 (def ^:private request-metadata-reader-offsets
   {:authority       0
@@ -84,7 +88,7 @@
    :stop    8})
 
 (deftest request-context-reader-layout-test
-  (is (= 200 (mem/size-of :ol.busker.native/clj-req-ctx-t)))
+  (is (= 216 (mem/size-of :ol.busker.native/clj-req-ctx-t)))
   (doseq [[field expected-offset] request-context-reader-offsets]
     (is (= expected-offset
            (native/offset-of :ol.busker.native/clj-req-ctx-t field))))

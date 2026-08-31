@@ -16,6 +16,7 @@
    [java.lang.foreign MemorySegment]
    [java.net InetSocketAddress Socket]
    [java.nio.charset StandardCharsets]
+   [java.util.concurrent CountDownLatch TimeUnit]
    [java.util.concurrent.atomic AtomicReference]))
 
 (defn- command
@@ -62,6 +63,116 @@
   (is (some? (command (byte-array 3) 3)))
   (is (thrown? clojure.lang.ExceptionInfo
                (command (byte-array 4) 3))))
+
+(deftest dispatcher-stages-on-a-platform-thread
+  (let [receiver (mem/alloc 1 (mem/global-arena))
+        seen_ (promise)
+        admission_ (promise)
+        command (command (.getBytes "cat" StandardCharsets/UTF_8))]
+    (with-redefs [h2o/mt-submit-fixed-final
+                  (fn [_ module-id request-seq status headers headers-len
+                       content-length compress-hint body body-len]
+                    (deliver seen_
+                             {:module-id module-id
+                              :request-seq request-seq
+                              :status status
+                              :headers (serialized-headers headers headers-len)
+                              :content-length content-length
+                              :compress-hint compress-hint
+                              :body (vec (mem/read-bytes body (long body-len)))
+                              :thread-name (.getName (Thread/currentThread))
+                              :virtual? (.isVirtual (Thread/currentThread))})
+                    1)]
+      (let [dispatcher (fixed-final/start-dispatcher! receiver 3 (constantly :accepted)
+                                                      "fixed-final-test")]
+        (try
+          (let [caller (Thread/startVirtualThread
+                        #(deliver admission_
+                                  {:result (fixed-final/submit-dispatcher! dispatcher command)
+                                   :virtual? (.isVirtual (Thread/currentThread))}))]
+            (.join caller 2000)
+            (is (= {:admission {:result :accepted :virtual? true}
+                    :submission {:module-id 1
+                                 :request-seq 1
+                                 :status 200
+                                 :headers [["content-type" "text/plain"]]
+                                 :content-length 3
+                                 :compress-hint 2
+                                 :body [99 97 116]
+                                 :thread-name "fixed-final-test"
+                                 :virtual? false}}
+                   {:admission (deref admission_ 2000 :timeout)
+                    :submission (deref seen_ 2000 :timeout)})))
+          (finally
+            (fixed-final/stop-dispatcher! dispatcher)))
+        (is (fixed-final/dispatcher-stopped? dispatcher))))))
+
+(deftest dispatcher-drains-accepted-commands-in-fifo-order
+  (let [receiver (mem/alloc 1 (mem/global-arena))
+        request-seqs_ (atom [])]
+    (with-redefs [h2o/mt-submit-fixed-final
+                  (fn [_ _ request-seq _ _ _ _ _ _ _]
+                    (swap! request-seqs_ conj request-seq)
+                    1)]
+      (let [dispatcher (fixed-final/start-dispatcher! receiver 1 (constantly :accepted)
+                                                      "fixed-final-fifo")
+            commands (mapv #(assoc (command (byte-array [65])) :request-seq %)
+                           (range 1 33))]
+        (is (= (repeat 32 :accepted)
+               (mapv #(fixed-final/submit-dispatcher! dispatcher %) commands)))
+        (fixed-final/stop-dispatcher! dispatcher)
+        (is (= {:request-seqs (vec (range 1 33))
+                :stopped? true}
+               {:request-seqs @request-seqs_
+                :stopped? (fixed-final/dispatcher-stopped? dispatcher)}))))))
+
+(deftest dispatcher-reports-overload-at-its-bounded-capacity
+  (let [receiver (mem/alloc 1 (mem/global-arena))
+        entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        command (command (byte-array [65]))]
+    (with-redefs [h2o/mt-submit-fixed-final
+                  (fn [& _]
+                    (.countDown entered)
+                    (.await release 2 TimeUnit/SECONDS)
+                    1)]
+      (let [dispatcher (fixed-final/start-dispatcher! receiver 1 (constantly :accepted)
+                                                      "fixed-final-bounded")]
+        (try
+          (is (= :accepted (fixed-final/submit-dispatcher! dispatcher command)))
+          (is (.await entered 2 TimeUnit/SECONDS))
+          (is (= {:queued (vec (repeat 256 :accepted))
+                  :overflow :overloaded}
+                 {:queued (mapv (fn [_]
+                                  (fixed-final/submit-dispatcher! dispatcher command))
+                                (range 256))
+                  :overflow (fixed-final/submit-dispatcher! dispatcher command)}))
+          (finally
+            (.countDown release)
+            (fixed-final/stop-dispatcher! dispatcher)))))))
+
+(deftest dispatcher-falls-back-after-native-submission-failure
+  (let [receiver (mem/alloc 1 (mem/global-arena))
+        command (command (byte-array [65]))
+        fallback_ (promise)]
+    (with-redefs [h2o/mt-submit-fixed-final (constantly 0)
+                  h2o/report-almost-fatal-error (fn [& _])]
+      (let [dispatcher (fixed-final/start-dispatcher!
+                        receiver 1
+                        #(deliver fallback_
+                                  {:command %
+                                   :thread-name (.getName (Thread/currentThread))
+                                   :virtual? (.isVirtual (Thread/currentThread))})
+                        "fixed-final-fallback")]
+        (try
+          (is (= :accepted (fixed-final/submit-dispatcher! dispatcher command)))
+          (is (= {:command command
+                  :thread-name "fixed-final-fallback"
+                  :virtual? false}
+                 (deref fallback_ 2000 :timeout)))
+          (finally
+            (fixed-final/stop-dispatcher! dispatcher)))))))
+
 (deftest worker-reuses-and-explicitly-releases-fixed-final-scratch
   (let [scratch_ (AtomicReference.)
         worker {:fixed-final-scratch_ scratch_}
@@ -192,6 +303,20 @@
       (.flush out)
       (slurp (.getInputStream socket)))))
 
+(deftest fixed-final-response-skips-clojure-message-dispatch-test
+  (let [ops_ (atom [])
+        process-message generation/evloop-msg-processor]
+    (with-redefs-fn
+      {#'generation/evloop-msg-processor
+       (fn [op args]
+         (swap! ops_ conj op)
+         (process-message op args))}
+      #(let [[server port] (fixed-final-server)]
+         (try
+           (is (.contains ^String (request-text port "GET") "generic"))
+           (finally
+             (busker/stop! server)))))
+    (is (zero? (count (filter #{:h2o/send-fixed-final} @ops_))))))
 (deftest native-helper-sends-final-body-and-suppresses-head-body
   (let [[server port] (fixed-final-server)
         commit-final! (fn [req write-resp committed_ response _]

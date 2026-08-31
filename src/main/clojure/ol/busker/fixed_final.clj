@@ -5,7 +5,8 @@
   (:import
    [java.lang.foreign Arena MemorySegment]
    [java.nio.charset StandardCharsets]
-   [java.util.concurrent.atomic AtomicReference]))
+   [java.util.concurrent ArrayBlockingQueue]
+   [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicReference]))
 
 (set! *warn-on-reflection* true)
 
@@ -31,6 +32,15 @@
                               ^bytes body])
 
 (deftype FixedFinalScratch [^Arena arena ^MemorySegment segment ^long capacity])
+
+(def ^:private dispatcher-stop (Object.))
+
+(defrecord FixedFinalDispatcher [^ArrayBlockingQueue queue
+                                 ^AtomicBoolean accepting?_
+                                 ^AtomicInteger admissions_
+                                 ^AtomicReference scratch_
+                                 ^Thread thread])
+
 (defn command-module-id
   ^long [^FixedFinalCommand command]
   (.-module-id command))
@@ -153,6 +163,142 @@
         (mem/write-bytes body-segment body-length body))
       [headers-segment body-segment])))
 
+(defn- dispatcher-scratch-segment
+  [^FixedFinalDispatcher dispatcher ^long required-capacity]
+  (let [^AtomicReference scratch_ (:scratch_ dispatcher)]
+    (if-let [^FixedFinalScratch scratch (.get scratch_)]
+      (if (>= (.-capacity scratch) required-capacity)
+        (.-segment scratch)
+        (let [arena (Arena/ofConfined)]
+          (try
+            (let [segment (mem/alloc required-capacity arena)
+                  replacement (FixedFinalScratch. arena segment required-capacity)]
+              (.set scratch_ replacement)
+              (.close ^Arena (.-arena scratch))
+              segment)
+            (catch Throwable error
+              (.close arena)
+              (throw error)))))
+      (let [arena (Arena/ofConfined)]
+        (try
+          (let [segment (mem/alloc required-capacity arena)
+                scratch (FixedFinalScratch. arena segment required-capacity)]
+            (.set scratch_ scratch)
+            segment)
+          (catch Throwable error
+            (.close arena)
+            (throw error)))))))
+
+(defn- close-dispatcher-scratch!
+  [^FixedFinalDispatcher dispatcher]
+  (when-let [^FixedFinalScratch scratch (.getAndSet ^AtomicReference (:scratch_ dispatcher) nil)]
+    (.close ^Arena (.-arena scratch))))
+
+(defn- submit-native!
+  [^FixedFinalDispatcher dispatcher receiver ^long body-limit ^FixedFinalCommand command]
+  (let [headers (.-headers command)
+        ^bytes body (.-body command)
+        body-length (long (alength body))
+        header-count (long (count headers))
+        header-bytes (.-header-staging-bytes command)]
+    (when (or (> body-length body-limit)
+              (> header-count max-header-pairs)
+              (> header-bytes max-header-staging-bytes))
+      (throw (ex-info "Fixed final command exceeded its dispatcher staging budget" {})))
+    (let [segment (dispatcher-scratch-segment dispatcher
+                                              (+ header-bytes (max 1 body-length)))
+          [headers-segment body-segment]
+          (stage-segments segment headers header-bytes body)]
+      (when-not (= 1 (h2o/mt-submit-fixed-final receiver
+                                                (.-module-id command)
+                                                (.-request-seq command)
+                                                (.-status command)
+                                                headers-segment
+                                                header-count
+                                                (.-content-length command)
+                                                (.-compress-hint command)
+                                                body-segment
+                                                body-length))
+        (throw (ex-info "Native fixed-response submission failed"
+                        {:module-id (.-module-id command)
+                         :request-seq (.-request-seq command)}))))))
+
+(defn- run-fallback!
+  [fallback ^FixedFinalCommand command error]
+  (h2o/report-almost-fatal-error "The native fixed-response submission failed" error)
+  (try
+    (fallback command)
+    (catch Throwable fallback-error
+      (h2o/report-almost-fatal-error "The fixed-response fallback failed" fallback-error))))
+
+(defn- run-dispatcher!
+  [^FixedFinalDispatcher dispatcher receiver ^long body-limit fallback]
+  (try
+    (loop []
+      (let [message (.take ^ArrayBlockingQueue (:queue dispatcher))]
+        (when-not (identical? dispatcher-stop message)
+          (try
+            (submit-native! dispatcher receiver body-limit message)
+            (catch Throwable error
+              (run-fallback! fallback message error)))
+          (recur))))
+    (catch InterruptedException _
+      (.interrupt (Thread/currentThread)))
+    (finally
+      (close-dispatcher-scratch! dispatcher))))
+
+(defn start-dispatcher!
+  "Starts a bounded platform dispatcher for complete fixed responses."
+  [receiver body-limit fallback thread-name]
+  (when (or (nil? receiver)
+            (mem/null? receiver)
+            (not (nat-int? body-limit))
+            (not (ifn? fallback)))
+    (throw (ex-info "Invalid fixed-response dispatcher configuration" {})))
+  (let [dispatcher (map->FixedFinalDispatcher
+                    {:queue (ArrayBlockingQueue. 256)
+                     :accepting?_ (AtomicBoolean. true)
+                     :admissions_ (AtomicInteger.)
+                     :scratch_ (AtomicReference.)})
+        thread (Thread. #(run-dispatcher! dispatcher receiver (long body-limit) fallback)
+                        ^String thread-name)
+        dispatcher (assoc dispatcher :thread thread)]
+    (.setDaemon thread true)
+    (.start thread)
+    dispatcher))
+
+(defn submit-dispatcher!
+  "Offers `command` without making a native call on the caller thread."
+  [^FixedFinalDispatcher dispatcher command]
+  (let [^AtomicBoolean accepting?_ (:accepting?_ dispatcher)]
+    (if (.get accepting?_)
+      (do
+        (.incrementAndGet ^AtomicInteger (:admissions_ dispatcher))
+        (let [accepted?
+              (try
+                (and (.get accepting?_)
+                     (.offer ^ArrayBlockingQueue (:queue dispatcher) command))
+                (finally
+                  (.decrementAndGet ^AtomicInteger (:admissions_ dispatcher))))]
+          (if accepted?
+            :accepted
+            (if (.get accepting?_) :overloaded :closed))))
+      :closed)))
+
+(defn stop-dispatcher!
+  "Stops admission, drains accepted commands, and joins the platform thread."
+  [^FixedFinalDispatcher dispatcher]
+  (when (.compareAndSet ^AtomicBoolean (:accepting?_ dispatcher) true false)
+    (while (pos? (.get ^AtomicInteger (:admissions_ dispatcher)))
+      (Thread/onSpinWait))
+    (.put ^ArrayBlockingQueue (:queue dispatcher) dispatcher-stop))
+  (.join ^Thread (:thread dispatcher))
+  nil)
+
+(defn dispatcher-stopped?
+  "Returns true when the dispatcher platform thread has exited."
+  [^FixedFinalDispatcher dispatcher]
+  (not (.isAlive ^Thread (:thread dispatcher))))
 (defn execute!
   "Stages `command` on its event-loop worker and sends it synchronously."
   [req ^FixedFinalCommand command]

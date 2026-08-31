@@ -10,6 +10,7 @@
    [java.nio ByteBuffer]
    [java.nio.channels Channels ReadableByteChannel]
    [java.util.concurrent ExecutorService LinkedBlockingQueue RejectedExecutionException]
+   [java.util.concurrent.atomic AtomicReference]
    [ol.busker.internal.protocols Request]))
 
 (set! *warn-on-reflection* true)
@@ -129,8 +130,13 @@
             ring-request-data (:ring-data req-ctx)]
         (callback-dispatch/register! dispatch module-id request-seq req emitter)
         (try
-          (h2o/install-request-dispatch req-ctx-ptr module-id request-seq
-                                        (if has-body? (:body callback-pointers) mem/null))
+          (let [receiver (.get ^AtomicReference (:response-receiver_ worker))]
+            (when-not (= 1 (h2o/install-request-dispatch
+                            req-ctx-ptr receiver module-id request-seq
+                            (if has-body? (:body callback-pointers) mem/null)))
+              (throw (ex-info "Could not install native request dispatch"
+                              {:module-id module-id
+                               :request-seq request-seq}))))
           (letfn [(request-task []
                     (let [ring-req (assoc (h2o/assemble-ring-request
                                            ring-request-data

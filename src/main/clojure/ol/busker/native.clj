@@ -185,6 +185,8 @@
       [:meta ::clj-req-meta-t]
       [:on-cleanup ::mem/pointer]
       [:on-request-body-chunk ::mem/pointer]
+      [:response-receiver ::mem/pointer]
+      [:response-hash-next ::mem/pointer]
       [:generator ::h2o-generator-t]
       [:on-response-generator-proceed ::mem/pointer]
       [:on-response-generator-stop ::mem/pointer]
@@ -556,7 +558,7 @@
 (defcfn install-request-dispatch
   "Installs scalar request identity and its stable body callback."
   clj_h2o_install_request_dispatch
-  [::mem/pointer ::mem/long ::mem/long ::mem/pointer] ::mem/void)
+  [::mem/pointer ::mem/pointer ::mem/long ::mem/long ::mem/pointer] ::mem/int)
 
 (defcfn evloop-now
   "Get current time in milliseconds from event loop"
@@ -592,6 +594,28 @@
   "Register a wakeup receiver on ctx->queue (returns opaque pointer)"
   clj_h2o_mt_create_wakeup_receiver
   [::mem/pointer] ::mem/pointer)
+
+(defcfn mt-create-response-receiver
+  "Registers a fixed-response receiver on the H2O context queue."
+  clj_h2o_mt_create_response_receiver
+  [::mem/pointer] ::mem/pointer)
+
+(defcfn mt-destroy-response-receiver
+  "Unregisters a drained fixed-response receiver."
+  clj_h2o_mt_destroy_response_receiver
+  [::mem/pointer] ::mem/void)
+
+(defcfn mt-response-pending
+  "Returns the number of submitted fixed responses not yet consumed by H2O."
+  clj_h2o_mt_response_pending
+  [::mem/pointer] ::mem/long)
+
+(defcfn mt-submit-fixed-final
+  "Copies one fixed response into the H2O receiver queue."
+  clj_h2o_mt_submit_fixed_final
+  [::mem/pointer ::mem/long ::mem/long ::mem/int ::mem/pointer ::mem/long
+   ::mem/long ::mem/int ::mem/pointer ::mem/long]
+  ::mem/int)
 
 (defcfn mt-destroy-wakeup-receiver
   "Unregister and free the wakeup receiver"

@@ -68,7 +68,7 @@ typedef struct {
 } clj_req_meta_t;
 
 typedef struct clj_req_ctx_t clj_req_ctx_t;
-
+typedef struct clj_mt_receiver_t clj_mt_receiver_t;
 typedef void (*clj_request_cleanup_cb)(uint64_t module_id,
                                        uint64_t request_seq);
 typedef void (*clj_request_body_chunk_cb)(uint64_t module_id,
@@ -85,6 +85,8 @@ struct clj_req_ctx_t {
   clj_req_meta_t meta;
   clj_request_cleanup_cb on_request_cleanup;
   clj_request_body_chunk_cb on_request_body_chunk;
+  clj_mt_receiver_t *response_receiver;
+  clj_req_ctx_t *response_hash_next;
   h2o_generator_t generator;
   clj_response_generator_proceed_cb on_response_generator_proceed;
   clj_response_generator_stop_cb on_response_generator_stop;
@@ -102,8 +104,6 @@ typedef struct {
   clj_request_cleanup_cb on_request_cleanup;
   int shutting_down;
 } clj_h2o_handler_t;
-
-typedef struct clj_mt_receiver_t clj_mt_receiver_t;
 
 void clj_h2o_handler_set_shutting_down(clj_h2o_handler_t *handler,
                                        int shutting_down);
@@ -262,22 +262,27 @@ clj_h2o_create_handler(h2o_hostconf_t *hostconf,
                        clj_request_cleanup_cb on_request_cleanup,
                        const clj_h2o_flat_globalconf_t *flat);
 
-void clj_h2o_install_request_dispatch(
-    clj_req_ctx_t *ctx, uint64_t module_id, uint64_t request_seq,
+int clj_h2o_install_request_dispatch(
+    clj_req_ctx_t *ctx, clj_mt_receiver_t *response_receiver,
+    uint64_t module_id, uint64_t request_seq,
     clj_request_body_chunk_cb on_request_body_chunk);
 
 void clj_h2o_proceed_req(h2o_req_t *req);
 
 int clj_h2o_cancel_request(clj_req_ctx_t *ctx);
 
-/* Register a wakeup receiver on ctx->queue (one per h2o_context_t / worker) */
 clj_mt_receiver_t *clj_h2o_mt_create_wakeup_receiver(h2o_context_t *ctx);
+clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(h2o_context_t *ctx);
+void clj_h2o_mt_destroy_wakeup_receiver(clj_mt_receiver_t *receiver);
+void clj_h2o_mt_destroy_response_receiver(clj_mt_receiver_t *receiver);
+void clj_h2o_mt_wakeup(clj_mt_receiver_t *receiver);
+size_t clj_h2o_mt_response_pending(clj_mt_receiver_t *receiver);
 
-/* Unregister and free the wakeup receiver */
-void clj_h2o_mt_destroy_wakeup_receiver(clj_mt_receiver_t *wr);
-
-/* Send a wakeup message to the loop owning this receiver */
-void clj_h2o_mt_wakeup(clj_mt_receiver_t *wr);
+int clj_h2o_mt_submit_fixed_final(
+    clj_mt_receiver_t *receiver, uint64_t module_id, uint64_t request_seq,
+    int status, const clj_header_t *headers, size_t headers_len,
+    size_t content_length, int compress_hint, const char *body,
+    size_t body_len);
 
 /* Open a nonblocking CLOEXEC TCP listener for IPv4 or IPv6.
    `host` may be NULL or empty only when the caller intentionally wants the

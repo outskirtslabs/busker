@@ -292,6 +292,26 @@
        (zero? (.get ^AtomicLong active-connection-count_))
        (not-any? has-active-http3-connections? http3-ctxs)))
 
+(defn- response-exchange-drained?
+  [worker]
+  (let [dispatcher (:fixed-final-dispatcher worker)
+        receiver_ (:response-receiver_ worker)
+        receiver (when receiver_ (.get ^AtomicReference receiver_))]
+    (and (or (nil? dispatcher)
+             (fixed-final/dispatcher-stopped? dispatcher))
+         (or (nil? receiver)
+             (mem/null? receiver)
+             #_{:clj-kondo/ignore [:type-mismatch]}
+             (zero? (h2o/mt-response-pending receiver))))))
+
+(defn- destroy-response-receiver!
+  [worker]
+  (when-let [^AtomicReference receiver_ (:response-receiver_ worker)]
+    (let [receiver (.get receiver_)]
+      (when (and receiver (not (mem/null? receiver)))
+        (h2o/mt-destroy-response-receiver receiver)
+        (.set receiver_ nil)))))
+
 (defn- ready-to-dispose?
   [{:keys [context-disposed? shutdown-initiated? receiver-destroyed?]}
    {:keys [ctx-ptr http3-ctxs active-connection-count_]} worker]
@@ -299,6 +319,7 @@
        shutdown-initiated?
        receiver-destroyed?
        (all-connections-drained? ctx-ptr http3-ctxs active-connection-count_)
+       (response-exchange-drained? worker)
        (callback-dispatch/no-live-entries? (:callback-dispatch worker))))
 
 (defn- check-and-initiate-shutdown!
@@ -331,6 +352,7 @@
       (doseq [http3-ctx http3-ctxs]
         (when (and http3-ctx (not (mem/null? http3-ctx)))
           (h2o/http3-free-worker-ctx http3-ctx)))
+      (destroy-response-receiver! worker)
       (h2o/context-dispose ctx-ptr)
       (case (p/send-msg worker evloop/stop-msg)
         :accepted nil
@@ -773,8 +795,16 @@
         config-ptr (::config-ptr server-config)
         loops (h2o/create-loops n-workers)
         contexts (h2o/create-contexts arena loops config-ptr)
-        wakeup-receivers (vec (for [ctx-ptr contexts]
-                                (h2o/mt-create-wakeup-receiver ctx-ptr)))
+        wakeup-receivers (mapv h2o/mt-create-wakeup-receiver contexts)
+        response-receivers (mapv h2o/mt-create-response-receiver contexts)
+        _ (when (some #(or (nil? %) (mem/null? %)) response-receivers)
+            (doseq [receiver wakeup-receivers]
+              (when (and receiver (not (mem/null? receiver)))
+                (h2o/mt-destroy-wakeup-receiver receiver)))
+            (doseq [receiver response-receivers]
+              (when (and receiver (not (mem/null? receiver)))
+                (h2o/mt-destroy-response-receiver receiver)))
+            (throw (ex-info "Could not create native response receiver" {})))
         on-close-callback (create-connection-close-callback active-connection-count_)]
     (assoc state
            ::arena arena
@@ -784,6 +814,7 @@
            ::loops loops
            ::contexts contexts
            ::wakeup-receivers wakeup-receivers
+           ::response-receivers response-receivers
            ::on-close-callback on-close-callback)))
 
 (defn- init-tls-http3-state
@@ -911,8 +942,9 @@
 
 (defn- init-worker-state
   [{::keys [n-workers loops contexts listener-runtimes http3-worker-contexts
-            max-connections shutting-down? message-handler wakeup-receivers wake-notifier arena
-            stop-accepting-remaining_ stopped-accepting_ active-connection-count_]
+            max-connections shutting-down? message-handler wakeup-receivers response-receivers
+            wake-notifier arena config stop-accepting-remaining_ stopped-accepting_
+            active-connection-count_]
     :as state}]
   (let [workers
         (vec
@@ -941,6 +973,8 @@
                               ::stopped-accepting_ stopped-accepting_}))
               message-handler
               (nth wakeup-receivers thread-idx)
+              :response-receiver (nth response-receivers thread-idx)
+              :fixed-final-body-limit (:output-buffer-size config)
               :callback-dispatch callback-dispatch
               :wake-notifier wake-notifier))))]
     (assoc state ::workers workers)))
@@ -1010,14 +1044,21 @@
                  (.shutdownNow executor)
                  (when-not (.awaitTermination executor timeout timeunit)
                    (println "Virtual thread request executor pool did not shutdown cleanly"))))
+             (doseq [worker (::workers generation)]
+               (when-let [dispatcher (:fixed-final-dispatcher worker)]
+                 (fixed-final/stop-dispatcher! dispatcher)))
              (when (seq (::workers generation))
                (evloop/broadcast-wake! (::workers generation)))
              (if (seq (::workers generation))
                (doseq [worker (::workers generation)]
                  (request-wakeup-receiver-retirement! worker))
-               (doseq [receiver (::wakeup-receivers generation)]
-                 (when (and receiver (not (mem/null? receiver)))
-                   (h2o/mt-destroy-wakeup-receiver receiver))))
+               (do
+                 (doseq [receiver (::wakeup-receivers generation)]
+                   (when (and receiver (not (mem/null? receiver)))
+                     (h2o/mt-destroy-wakeup-receiver receiver)))
+                 (doseq [receiver (::response-receivers generation)]
+                   (when (and receiver (not (mem/null? receiver)))
+                     (h2o/mt-destroy-response-receiver receiver)))))
              (reset! phase-atom :retiring))
            (let [{:keys [joined? error]}
                  (try

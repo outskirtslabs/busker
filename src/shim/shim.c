@@ -48,13 +48,32 @@
 static _Atomic uint32_t clj_conn_count = 0;
 static _Atomic uint32_t clj_conn_max = 0;
 
+typedef enum {
+  CLJ_MT_MESSAGE_FIXED_FINAL = 1
+} clj_mt_message_kind_t;
+
 typedef struct {
-  h2o_multithread_message_t super; /* must be first */
-} clj_mt_msg_t;
+  h2o_multithread_message_t super;
+  clj_mt_message_kind_t kind;
+  uint64_t module_id;
+  uint64_t request_seq;
+  int status;
+  size_t headers_len;
+  size_t content_length;
+  int compress_hint;
+  size_t body_offset;
+  size_t body_len;
+  unsigned char storage[];
+} clj_mt_fixed_final_msg_t;
 
 struct clj_mt_receiver_t {
   h2o_multithread_receiver_t receiver;
-  h2o_multithread_queue_t *queue; /* store queue for unregister */
+  h2o_multithread_queue_t *queue;
+  clj_req_ctx_t **request_buckets;
+  size_t request_capacity;
+  size_t request_size;
+  _Atomic size_t pending;
+  bool accepts_responses;
 };
 
 typedef enum {
@@ -573,6 +592,98 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
   }
 }
 
+static size_t response_request_bucket(size_t capacity, uint64_t request_seq) {
+  uint64_t hash = request_seq;
+  hash ^= hash >> 33;
+  hash *= UINT64_C(0xff51afd7ed558ccd);
+  hash ^= hash >> 33;
+  hash *= UINT64_C(0xc4ceb9fe1a85ec53);
+  hash ^= hash >> 33;
+  return (size_t)hash & (capacity - 1);
+}
+
+static clj_req_ctx_t *find_response_request(clj_mt_receiver_t *receiver,
+                                            uint64_t request_seq) {
+  if (receiver->request_buckets == NULL || request_seq == 0)
+    return NULL;
+
+  size_t bucket =
+      response_request_bucket(receiver->request_capacity, request_seq);
+  for (clj_req_ctx_t *ctx = receiver->request_buckets[bucket]; ctx != NULL;
+       ctx = ctx->response_hash_next) {
+    if (ctx->dispatch_request_seq == request_seq)
+      return ctx;
+  }
+  return NULL;
+}
+
+static bool resize_response_requests(clj_mt_receiver_t *receiver,
+                                     size_t capacity) {
+  if (capacity == 0 || capacity > SIZE_MAX / sizeof(*receiver->request_buckets))
+    return false;
+
+  clj_req_ctx_t **buckets = calloc(capacity, sizeof(*buckets));
+  if (buckets == NULL)
+    return false;
+
+  for (size_t index = 0; index < receiver->request_capacity; ++index) {
+    clj_req_ctx_t *ctx = receiver->request_buckets[index];
+    while (ctx != NULL) {
+      clj_req_ctx_t *next = ctx->response_hash_next;
+      size_t bucket =
+          response_request_bucket(capacity, ctx->dispatch_request_seq);
+      ctx->response_hash_next = buckets[bucket];
+      buckets[bucket] = ctx;
+      ctx = next;
+    }
+  }
+
+  free(receiver->request_buckets);
+  receiver->request_buckets = buckets;
+  receiver->request_capacity = capacity;
+  return true;
+}
+
+static bool register_response_request(clj_mt_receiver_t *receiver,
+                                      clj_req_ctx_t *ctx,
+                                      uint64_t request_seq) {
+  if (find_response_request(receiver, request_seq) != NULL)
+    return false;
+
+  if (receiver->request_size + 1 >
+      receiver->request_capacity - receiver->request_capacity / 4) {
+    if (receiver->request_capacity > SIZE_MAX / 2 ||
+        !resize_response_requests(receiver, receiver->request_capacity * 2))
+      return false;
+  }
+
+  size_t bucket =
+      response_request_bucket(receiver->request_capacity, request_seq);
+  ctx->response_hash_next = receiver->request_buckets[bucket];
+  receiver->request_buckets[bucket] = ctx;
+  ++receiver->request_size;
+  return true;
+}
+
+static void unregister_response_request(clj_req_ctx_t *ctx, uint64_t request_seq) {
+  clj_mt_receiver_t *receiver = ctx->response_receiver;
+  if (receiver == NULL || receiver->request_buckets == NULL || request_seq == 0)
+    return;
+
+  size_t bucket =
+      response_request_bucket(receiver->request_capacity, request_seq);
+  clj_req_ctx_t **entry = &receiver->request_buckets[bucket];
+  while (*entry != NULL) {
+    if (*entry == ctx) {
+      *entry = ctx->response_hash_next;
+      ctx->response_hash_next = NULL;
+      --receiver->request_size;
+      return;
+    }
+    entry = &(*entry)->response_hash_next;
+  }
+}
+
 static void cleanup_request(void *ptr) {
   if (ptr == NULL)
     return;
@@ -582,6 +693,8 @@ static void cleanup_request(void *ptr) {
   uint64_t module_id = ctx->dispatch_module_id;
   uint64_t request_seq = ctx->dispatch_request_seq;
 
+  unregister_response_request(ctx, request_seq);
+  ctx->response_receiver = NULL;
   ctx->cleanup = 1;
   ctx->on_request_body_chunk = NULL;
   ctx->on_response_generator_proceed = NULL;
@@ -736,22 +849,23 @@ void clj_h2o_handler_set_shutting_down(clj_h2o_handler_t *handler,
   handler->shutting_down = shutting_down ? 1 : 0;
 }
 
-void clj_h2o_install_request_dispatch(
-    clj_req_ctx_t *ctx, uint64_t module_id, uint64_t request_seq,
+int clj_h2o_install_request_dispatch(
+    clj_req_ctx_t *ctx, clj_mt_receiver_t *response_receiver,
+    uint64_t module_id, uint64_t request_seq,
     clj_request_body_chunk_cb on_request_body_chunk) {
-  if (ctx == NULL)
-    return;
+  if (ctx == NULL || response_receiver == NULL ||
+      !response_receiver->accepts_responses ||
+      response_receiver->request_buckets == NULL || module_id == 0 ||
+      request_seq == 0)
+    return 0;
 
-  if (module_id == 0 || request_seq == 0) {
-    ctx->dispatch_module_id = 0;
-    ctx->dispatch_request_seq = 0;
-    ctx->on_request_body_chunk = NULL;
-    return;
-  }
-
+  if (!register_response_request(response_receiver, ctx, request_seq))
+    return 0;
+  ctx->response_receiver = response_receiver;
   ctx->dispatch_module_id = module_id;
   ctx->dispatch_request_seq = request_seq;
   ctx->on_request_body_chunk = on_request_body_chunk;
+  return 1;
 }
 
 void clj_h2o_proceed_req(h2o_req_t *req) {
@@ -768,44 +882,186 @@ int clj_h2o_cancel_request(clj_req_ctx_t *ctx) {
   return 1;
 }
 
-static void clj_mt_dispose(void *unused, h2o_linklist_t *messages) {
-  (void)unused;
+static void clj_mt_wakeup_on_recv(h2o_multithread_receiver_t *receiver,
+                                  h2o_linklist_t *messages) {
+  (void)receiver;
+  assert(h2o_linklist_is_empty(messages));
+}
+
+static clj_req_ctx_t *response_request(clj_mt_receiver_t *receiver,
+                                       uint64_t module_id,
+                                       uint64_t request_seq) {
+  clj_req_ctx_t *ctx = find_response_request(receiver, request_seq);
+  if (ctx == NULL || ctx->cleanup || ctx->response_receiver != receiver ||
+      ctx->dispatch_module_id != module_id ||
+      ctx->dispatch_request_seq != request_seq)
+    return NULL;
+  return ctx;
+}
+
+static void clj_mt_response_on_recv(h2o_multithread_receiver_t *h2o_receiver,
+                                    h2o_linklist_t *messages) {
+  clj_mt_receiver_t *receiver = H2O_STRUCT_FROM_MEMBER(
+      clj_mt_receiver_t, receiver, h2o_receiver);
+
   while (!h2o_linklist_is_empty(messages)) {
-    clj_mt_msg_t *m =
-        H2O_STRUCT_FROM_MEMBER(clj_mt_msg_t, super.link, messages->next);
-    h2o_linklist_unlink(&m->super.link);
-    free(m);
+    clj_mt_fixed_final_msg_t *message = H2O_STRUCT_FROM_MEMBER(
+        clj_mt_fixed_final_msg_t, super.link, messages->next);
+    h2o_linklist_unlink(&message->super.link);
+
+    if (message->kind == CLJ_MT_MESSAGE_FIXED_FINAL) {
+      clj_req_ctx_t *ctx = response_request(
+          receiver, message->module_id, message->request_seq);
+      if (ctx != NULL) {
+        const clj_header_t *headers =
+            (const clj_header_t *)message->storage;
+        const char *body =
+            (const char *)message->storage + message->body_offset;
+        clj_h2o_send_fixed_final(
+            ctx, message->status, headers, message->headers_len,
+            message->content_length, message->compress_hint, body,
+            message->body_len);
+      }
+    }
+
+    atomic_fetch_sub_explicit(&receiver->pending, 1, memory_order_release);
+    free(message);
   }
 }
 
-static void clj_mt_on_recv(h2o_multithread_receiver_t *receiver,
-                           h2o_linklist_t *messages) {
-  (void)receiver;
-  /* We only use this receiver to wake the loop; just drain and free messages */
-  clj_mt_dispose(NULL, messages);
-}
-
 clj_mt_receiver_t *clj_h2o_mt_create_wakeup_receiver(h2o_context_t *ctx) {
-  clj_mt_receiver_t *wr = calloc(1, sizeof(*wr));
-  if (wr == NULL)
+  clj_mt_receiver_t *receiver = calloc(1, sizeof(*receiver));
+  if (receiver == NULL)
     return NULL;
-  wr->queue = ctx->queue;
-  h2o_multithread_register_receiver(wr->queue, &wr->receiver, clj_mt_on_recv);
-  return wr;
+  receiver->queue = ctx->queue;
+  h2o_multithread_register_receiver(receiver->queue, &receiver->receiver,
+                                    clj_mt_wakeup_on_recv);
+  return receiver;
 }
 
-void clj_h2o_mt_destroy_wakeup_receiver(clj_mt_receiver_t *wr) {
-  if (wr == NULL)
-    return;
-  h2o_multithread_unregister_receiver(wr->queue, &wr->receiver);
-  free(wr);
+clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(h2o_context_t *ctx) {
+  clj_mt_receiver_t *receiver = calloc(1, sizeof(*receiver));
+  if (receiver == NULL)
+    return NULL;
+
+  receiver->request_capacity = 256;
+  receiver->request_buckets =
+      calloc(receiver->request_capacity, sizeof(*receiver->request_buckets));
+  if (receiver->request_buckets == NULL) {
+    free(receiver);
+    return NULL;
+  }
+
+  receiver->queue = ctx->queue;
+  receiver->accepts_responses = true;
+  atomic_init(&receiver->pending, 0);
+  h2o_multithread_register_receiver(receiver->queue, &receiver->receiver,
+                                    clj_mt_response_on_recv);
+  return receiver;
 }
 
-void clj_h2o_mt_wakeup(clj_mt_receiver_t *wr) {
-  if (wr == NULL)
+void clj_h2o_mt_destroy_wakeup_receiver(clj_mt_receiver_t *receiver) {
+  if (receiver == NULL)
     return;
-  /* just wake the loop; no message allocation necessary */
-  h2o_multithread_send_message(&wr->receiver, NULL);
+  h2o_multithread_unregister_receiver(receiver->queue, &receiver->receiver);
+  free(receiver);
+}
+
+void clj_h2o_mt_destroy_response_receiver(clj_mt_receiver_t *receiver) {
+  if (receiver == NULL)
+    return;
+  assert(atomic_load_explicit(&receiver->pending, memory_order_acquire) == 0);
+  assert(receiver->request_size == 0);
+  receiver->accepts_responses = false;
+  h2o_multithread_unregister_receiver(receiver->queue, &receiver->receiver);
+  free(receiver->request_buckets);
+  free(receiver);
+}
+
+void clj_h2o_mt_wakeup(clj_mt_receiver_t *receiver) {
+  if (receiver == NULL)
+    return;
+  h2o_multithread_send_message(&receiver->receiver, NULL);
+}
+
+size_t clj_h2o_mt_response_pending(clj_mt_receiver_t *receiver) {
+  if (receiver == NULL)
+    return 0;
+  return atomic_load_explicit(&receiver->pending, memory_order_acquire);
+}
+
+static bool checked_size_add(size_t *total, size_t value) {
+  if (*total > SIZE_MAX - value)
+    return false;
+  *total += value;
+  return true;
+}
+
+int clj_h2o_mt_submit_fixed_final(
+    clj_mt_receiver_t *receiver, uint64_t module_id, uint64_t request_seq,
+    int status, const clj_header_t *headers, size_t headers_len,
+    size_t content_length, int compress_hint, const char *body,
+    size_t body_len) {
+  if (receiver == NULL || !receiver->accepts_responses ||
+      module_id == 0 || request_seq == 0 ||
+      status < 200 || (headers_len != 0 && headers == NULL) ||
+      (body_len != 0 && body == NULL) ||
+      headers_len > SIZE_MAX / sizeof(*headers))
+    return 0;
+
+  size_t storage_size = headers_len * sizeof(*headers);
+  for (size_t index = 0; index < headers_len; ++index) {
+    if ((headers[index].name_len != 0 && headers[index].name == NULL) ||
+        (headers[index].value_len != 0 && headers[index].value == NULL) ||
+        !checked_size_add(&storage_size, headers[index].name_len) ||
+        !checked_size_add(&storage_size, headers[index].value_len))
+      return 0;
+  }
+  if (!checked_size_add(&storage_size, body_len))
+    return 0;
+
+  size_t allocation_size = sizeof(clj_mt_fixed_final_msg_t);
+  if (!checked_size_add(&allocation_size, storage_size))
+    return 0;
+
+  clj_mt_fixed_final_msg_t *message = calloc(1, allocation_size);
+  if (message == NULL)
+    return 0;
+
+  message->kind = CLJ_MT_MESSAGE_FIXED_FINAL;
+  message->module_id = module_id;
+  message->request_seq = request_seq;
+  message->status = status;
+  message->headers_len = headers_len;
+  message->content_length = content_length;
+  message->compress_hint = compress_hint;
+  message->body_len = body_len;
+
+  clj_header_t *copied_headers = (clj_header_t *)message->storage;
+  char *cursor = (char *)(copied_headers + headers_len);
+  for (size_t index = 0; index < headers_len; ++index) {
+    copied_headers[index].name = cursor;
+    copied_headers[index].name_len = headers[index].name_len;
+    if (headers[index].name_len != 0) {
+      memcpy(cursor, headers[index].name, headers[index].name_len);
+      cursor += headers[index].name_len;
+    }
+
+    copied_headers[index].value = cursor;
+    copied_headers[index].value_len = headers[index].value_len;
+    if (headers[index].value_len != 0) {
+      memcpy(cursor, headers[index].value, headers[index].value_len);
+      cursor += headers[index].value_len;
+    }
+  }
+
+  message->body_offset = (size_t)(cursor - (char *)message->storage);
+  if (body_len != 0)
+    memcpy(cursor, body, body_len);
+
+  atomic_fetch_add_explicit(&receiver->pending, 1, memory_order_release);
+  h2o_multithread_send_message(&receiver->receiver, &message->super);
+  return 1;
 }
 
 static h2o_globalconf_t *

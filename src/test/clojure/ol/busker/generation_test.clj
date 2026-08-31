@@ -108,21 +108,28 @@
       (finally
         (.remove evloop/worker-context)))))
 (deftest startup-receiver-without-worker-retires-on-lifecycle-platform-test
-  (let [receiver (Object.)
-        destroyed_ (atom [])
+  (let [wakeup-receiver (Object.)
+        response-receiver (Object.)
+        destroyed_ (atom {:wakeup [] :response []})
         phase (atom :running)
         generation-state {::generation/phase phase
                           ::generation/stop-lock (Object.)
                           ::generation/workers []
-                          ::generation/wakeup-receivers [receiver]
+                          ::generation/wakeup-receivers [wakeup-receiver]
+                          ::generation/response-receivers [response-receiver]
                           ::generation/listener-runtimes []
                           ::generation/listener-claims {}
                           ::generation/config {}}]
     (with-redefs [h2o/mt-destroy-wakeup-receiver
-                  (fn [actual-receiver]
-                    (swap! destroyed_ conj actual-receiver))]
+                  (fn [receiver]
+                    (swap! destroyed_ update :wakeup conj receiver))
+                  h2o/mt-destroy-response-receiver
+                  (fn [receiver]
+                    (swap! destroyed_ update :response conj receiver))]
       (generation/stop! generation-state))
-    (is (= [receiver] @destroyed_))
+    (is (= {:wakeup [wakeup-receiver]
+            :response [response-receiver]}
+           @destroyed_))
     (is (= :stopped @phase))))
 
 (deftest generation-starts-and-stops-without-runtime-bridge-test
@@ -144,14 +151,14 @@
       (finally
         (generation/stop! instance)))))
 
-(deftest ordinary-response-native-wakes-run-on-platform-thread-test
+(deftest ordinary-fixed-response-native-submission-runs-on-platform-thread-test
   (let [port 18594
-        wake-threads_ (atom [])
-        mt-wakeup h2o/mt-wakeup]
-    (with-redefs [h2o/mt-wakeup
-                  (fn [receiver]
-                    (swap! wake-threads_ conj (Thread/currentThread))
-                    (mt-wakeup receiver))]
+        submission-threads_ (atom [])
+        submit-fixed-final h2o/mt-submit-fixed-final]
+    (with-redefs [h2o/mt-submit-fixed-final
+                  (fn [& args]
+                    (swap! submission-threads_ conj (Thread/currentThread))
+                    (apply submit-fixed-final args))]
       (let [instance
             (generation/start!
              (config/load!
@@ -159,17 +166,17 @@
                                     :tls false}}
                :dispatch [{:handler (fn [_]
                                       {:status 200
-                                       :body "platform-wake"})}]})
+                                       :body "platform-submit"})}]})
              nil)]
         (try
           (let [result (util/curl :http nil port "/" :max-time 5)]
-            (is (= {:response {:exit 0 :out "platform-wake"}
-                    :wake? true
+            (is (= {:response {:exit 0 :out "platform-submit"}
+                    :submission? true
                     :all-platform? true}
                    {:response (select-keys result [:exit :out])
-                    :wake? (boolean (seq @wake-threads_))
+                    :submission? (boolean (seq @submission-threads_))
                     :all-platform? (every? #(not (.isVirtual ^Thread %))
-                                           @wake-threads_)})))
+                                           @submission-threads_)})))
           (finally
             (generation/stop! instance)))))))
 

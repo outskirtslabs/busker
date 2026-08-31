@@ -460,6 +460,38 @@
                     (fn [^Runnable task] (.run task)))]
        (is (false? (protocols/emit! emitter {:status 103}))))))
 
+(deftest informational-response-keeps-the-final-response-on-the-worker-mailbox
+  (let [routes_ (atom [])
+        emitter (response/new-response-emitter
+                 (fixed-final-request 3)
+                 (fn [^Runnable task] (.run task)))]
+    (with-redefs-fn {#'response/schedule-informational!
+                     (fn [& _]
+                       (swap! routes_ conj :informational)
+                       :accepted)
+                     #'response/schedule-fixed-final!
+                     (fn [& _]
+                       (swap! routes_ conj :native-exchange)
+                       :accepted)
+                     #'response/schedule-fixed-final-mailbox!
+                     (fn [& _]
+                       (swap! routes_ conj :worker-mailbox)
+                       :accepted)}
+      #(let [informational? (protocols/emit! emitter {:status 103})
+             committed-after-informational? (protocols/committed? emitter)
+             final? (protocols/emit! emitter {:status 200 :body "cat"}
+                                     {:close-after? true})]
+         (is (= {:informational? true
+                 :committed-after-informational? false
+                 :final? true
+                 :committed-after-final? true
+                 :routes [:informational :worker-mailbox]}
+                {:informational? informational?
+                 :committed-after-informational? committed-after-informational?
+                 :final? final?
+                 :committed-after-final? (protocols/committed? emitter)
+                 :routes @routes_}))))))
+
 (deftest fixed-final-admission-stops-generic-writer
   (let [writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))
         req (fixed-final-request 3)

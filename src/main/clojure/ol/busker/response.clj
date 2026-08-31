@@ -117,6 +117,18 @@
                                          status
                                          headers)]))
 
+(def ^:private informational-sent (Object.))
+
+(defn- mark-informational!
+  [committed_]
+  (loop []
+    (let [state @committed_]
+      (cond
+        (map? state) false
+        (identical? informational-sent state) true
+        (compare-and-set! committed_ nil informational-sent) true
+        :else (recur)))))
+
 (defn- send-informational!
   [^Request req resp]
   (when (:body resp)
@@ -253,6 +265,12 @@
 
 (defn- schedule-fixed-final!
   [^Request req command]
+  (if-let [dispatcher (:fixed-final-dispatcher (:worker req))]
+    (fixed-final/submit-dispatcher! dispatcher command)
+    :closed))
+
+(defn- schedule-fixed-final-mailbox!
+  [^Request req command]
   (pi/send-msg (:worker req) [:h2o/send-fixed-final command]))
 
 (defn- response-writer
@@ -279,9 +297,14 @@
                                          (fixed-final/command-content-length command)))
                       (cond-> response'
                         final? with-content-length))
-          head (dissoc response' :body)]
-      (when (compare-and-set! committed_ nil head)
-        (let [fixed-result (when command (schedule-fixed-final! req command))]
+          head (dissoc response' :body)
+          state @committed_]
+      (when (and (not (map? state))
+                 (compare-and-set! committed_ state head))
+        (let [fixed-result (when command
+                             (if (identical? informational-sent state)
+                               (schedule-fixed-final-mailbox! req command)
+                               (schedule-fixed-final! req command)))]
           (cond
             (= :accepted fixed-result)
             (do
@@ -417,7 +440,7 @@
            (or (nil? writer)
                (not (.get ^AtomicBoolean (:stopped?_ writer)))))))
   (committed? [_]
-    (boolean @committed_))
+    (map? @committed_))
   (emit! [this data]
     (p/emit! this data {}))
   (emit! [this data {:keys [close-after?]
@@ -430,9 +453,9 @@
       (let [status   (:status data)
             resp-map (assoc data :status status)]
         (if (informational-status? status)
-          (when (nil? @committed_)
+          (when (mark-informational! committed_)
             (= :accepted (send-informational! req resp-map)))
-          (when (nil? @committed_)
+          (when-not (map? @committed_)
             (when-let [{:keys [head body]} (commit-final! req write-resp committed_ resp-map close-after?)]
               (reset! committed_ head)
               (when body
@@ -442,9 +465,12 @@
               true))))
         ;; body data
       :else
-      (let [head (if-let [c @committed_]
-                   c
-                   (when-let [{:keys [head]} (commit-final! req write-resp committed_ {:status 200 :headers {}} close-after?)]
+      (let [state @committed_
+            head (if (map? state)
+                   state
+                   (when-let [{:keys [head]}
+                              (commit-final! req write-resp committed_
+                                             {:status 200 :headers {}} close-after?)]
                      (reset! committed_ head)))]
         (when head
           (write-body-chunk! data (:out-stream (response-writer write-resp)) head close-after?)
@@ -454,7 +480,7 @@
     (.flush ^OutputStream (:out-stream (response-writer write-resp))))
   (close [_]
     (let [writer (or (created-response-writer write-resp)
-                     (when (nil? @committed_)
+                     (when-not (map? @committed_)
                        (response-writer write-resp)))]
       (if (and (or (nil? writer)
                    (not (.get ^AtomicBoolean (:stopped?_ writer))))
