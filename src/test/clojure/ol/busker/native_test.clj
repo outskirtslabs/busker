@@ -99,6 +99,32 @@
     (is (= expected-offset
            (native/offset-of :ol.busker.native/h2o-generator-t field)))))
 
+(deftest overlay-lazy-ring-request-defers-base-map
+  (let [realizations_ (atom 0)
+        request (native/overlay-lazy-ring-request
+                 #(do (swap! realizations_ inc) {:a 1 :remove-me 2})
+                 {:emitter :emitter})
+        overlaid (-> request
+                     (assoc :ol.busker/entrypoint :http)
+                     (dissoc :remove-me)
+                     (with-meta {:source :test}))]
+    (is (= {:before 0
+            :overlay :emitter
+            :entrypoint :http
+            :after-overlay 0
+            :base 1
+            :after-base 1
+            :map {:a 1 :emitter :emitter :ol.busker/entrypoint :http}
+            :metadata {:source :test}}
+           {:before 0
+            :overlay (:emitter overlaid)
+            :entrypoint (:ol.busker/entrypoint overlaid)
+            :after-overlay @realizations_
+            :base (:a overlaid)
+            :after-base @realizations_
+            :map (into {} overlaid)
+            :metadata (meta overlaid)}))))
+
 (deftest response-slot-layout-matches-native
   (is (= 1096
          (mem/size-of :ol.busker.native/clj-fixed-response-slot-data-t)

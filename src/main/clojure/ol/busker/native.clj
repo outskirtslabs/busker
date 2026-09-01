@@ -1022,6 +1022,96 @@
        :has-body has-body
        :early-data (mem/read-short ctx 110)}})))
 
+(defn- force-overlay-request
+  ^clojure.lang.IPersistentMap [^clojure.lang.Delay request_ overlay removed]
+  (reduce dissoc (merge @request_ overlay) removed))
+
+(deftype OverlayLazyRingRequest [^clojure.lang.Delay request_ overlay removed metadata]
+  clojure.lang.IPersistentMap
+  (assoc [_ key value]
+    (OverlayLazyRingRequest. request_ (assoc overlay key value) (disj removed key) metadata))
+  (assocEx [this key value]
+    (if (.containsKey ^clojure.lang.Associative this key)
+      (throw (RuntimeException. "Key already present"))
+      (.assoc ^clojure.lang.Associative this key value)))
+  (without [_ key]
+    (OverlayLazyRingRequest. request_ (dissoc overlay key) (conj removed key) metadata))
+
+  clojure.lang.Associative
+  (containsKey [_ key]
+    (and (not (contains? removed key))
+         (or (contains? overlay key) (contains? @request_ key))))
+  (entryAt [this key]
+    (when (.containsKey ^clojure.lang.Associative this key)
+      (clojure.lang.MapEntry/create key (.valAt ^clojure.lang.ILookup this key))))
+
+  clojure.lang.ILookup
+  (valAt [_ key]
+    (cond
+      (contains? removed key) nil
+      (contains? overlay key) (get overlay key)
+      :else (get @request_ key)))
+  (valAt [_ key not-found]
+    (cond
+      (contains? removed key) not-found
+      (contains? overlay key) (get overlay key)
+      :else (get @request_ key not-found)))
+
+  clojure.lang.IPersistentCollection
+  (count [_] (count (force-overlay-request request_ overlay removed)))
+  (cons [_ value] (conj (force-overlay-request request_ overlay removed) value))
+  (empty [_] (with-meta {} metadata))
+  (equiv [_ other] (= (force-overlay-request request_ overlay removed) other))
+
+  clojure.lang.Seqable
+  (seq [_] (seq (force-overlay-request request_ overlay removed)))
+
+  java.lang.Iterable
+  (iterator [_] (.iterator ^java.lang.Iterable (force-overlay-request request_ overlay removed)))
+
+  clojure.lang.IFn
+  (invoke [this key] (.valAt ^clojure.lang.ILookup this key))
+  (invoke [this key not-found] (.valAt ^clojure.lang.ILookup this key not-found))
+  (applyTo [this args]
+    (case (count args)
+      1 (.invoke ^clojure.lang.IFn this (first args))
+      2 (.invoke ^clojure.lang.IFn this (first args) (second args))
+      (throw (clojure.lang.ArityException. (count args) "OverlayLazyRingRequest"))))
+
+  clojure.lang.MapEquivalence
+
+  clojure.lang.IHashEq
+  (hasheq [_] (hash (force-overlay-request request_ overlay removed)))
+
+  java.util.Map
+  (size [_] (count (force-overlay-request request_ overlay removed)))
+  (isEmpty [_] (empty? (force-overlay-request request_ overlay removed)))
+  (containsValue [_ value] (.containsValue ^java.util.Map (force-overlay-request request_ overlay removed) value))
+  (get [this key] (.valAt ^clojure.lang.ILookup this key))
+  (put [_ key value] (.put ^java.util.Map (force-overlay-request request_ overlay removed) key value))
+  (remove [_ key] (.remove ^java.util.Map (force-overlay-request request_ overlay removed) key))
+  (putAll [_ values] (.putAll ^java.util.Map (force-overlay-request request_ overlay removed) values))
+  (clear [_] (.clear ^java.util.Map (force-overlay-request request_ overlay removed)))
+  (keySet [_] (.keySet ^java.util.Map (force-overlay-request request_ overlay removed)))
+  (values [_] (.values ^java.util.Map (force-overlay-request request_ overlay removed)))
+  (entrySet [_] (.entrySet ^java.util.Map (force-overlay-request request_ overlay removed)))
+
+  clojure.lang.IMeta
+  (meta [_] metadata)
+
+  clojure.lang.IObj
+  (withMeta [_ new-metadata]
+    (OverlayLazyRingRequest. request_ overlay removed new-metadata))
+
+  Object
+  (equals [_ other] (.equals ^Object (force-overlay-request request_ overlay removed) other))
+  (hashCode [_] (.hashCode ^Object (force-overlay-request request_ overlay removed)))
+  (toString [_] (.toString ^Object (force-overlay-request request_ overlay removed))))
+
+(defn ^:no-doc overlay-lazy-ring-request
+  [request-fn overlay]
+  (OverlayLazyRingRequest. (delay (request-fn)) overlay #{} nil))
+
 (defn ^:no-doc assemble-ring-request
   [{:keys [method path authority scheme remote-addr headers
            http-version has-body early-data]}

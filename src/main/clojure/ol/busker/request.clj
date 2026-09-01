@@ -138,10 +138,11 @@
                               {:module-id module-id
                                :request-seq request-seq}))))
           (letfn [(request-task []
-                    (let [ring-req (assoc (h2o/assemble-ring-request
-                                           ring-request-data
-                                           (:input-stream write-req))
-                                          ::emitter emitter)
+                    (let [ring-req (h2o/overlay-lazy-ring-request
+                                    #(h2o/assemble-ring-request
+                                      ring-request-data
+                                      (:input-stream write-req))
+                                    {::emitter emitter})
                           ring-resp (run-handler ring-handler ring-req)]
                       (response/send-ring-response! emitter ring-resp)))]
             (execute-request! executor request-task))

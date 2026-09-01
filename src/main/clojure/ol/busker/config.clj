@@ -635,11 +635,13 @@
                                    [scheme (first ids)])))
                          by-scheme)
         fallback (ffirst entrypoints)]
-    (fn [req]
-      (or (:ol.busker/entrypoint req)
-          (get by-port (:server-port req))
-          (get singletons (:scheme req))
-          fallback))))
+    (if (= 1 (count entrypoints))
+      (constantly fallback)
+      (fn [req]
+        (or (:ol.busker/entrypoint req)
+            (get by-port (:server-port req))
+            (get singletons (:scheme req))
+            fallback)))))
 
 (defn- build-dispatch-handler
   [config]
