@@ -420,7 +420,7 @@
 (def n-workers
   {:key ::n-workers
    :doc "Event loop worker thread count."
-   :default 1})
+   :default 2})
 (s/def ::n-workers pos-int?)
 
 (def max-connections

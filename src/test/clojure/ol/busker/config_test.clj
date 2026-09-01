@@ -91,7 +91,7 @@
       (is (= false (get-in config [:entrypoints :http :http3?])))))
 
   (testing "exposes config defaults used by the loader"
-    (is (= 1 (:n-workers specs/default-config)))
+    (is (= 2 (:n-workers specs/default-config)))
     (is (= 1024 (:max-connections specs/default-config)))
     (is (= 4
            (get-in specs/default-config

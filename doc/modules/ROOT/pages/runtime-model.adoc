@@ -38,7 +38,7 @@ If validation, listener binding, TLS setup, or another startup stage fails, `sta
 
 Each event loop runs on a dedicated platform thread, an ordinary OS-backed JVM thread, and passes network events to libh2o.
 When a client connects, one of the generation's event loops notices it.
-The xref:configuration.adoc[`:n-workers` setting] controls how many event loops a generation has and defaults to one.
+The xref:configuration.adoc[`:n-workers` setting] controls how many event loops a generation has and defaults to two.
 
 The event loops accept connections, negotiate TLS and HTTP versions, read available request data, and send response data when a socket is ready.
 They also enforce connection limits and track how many bytes each HTTP stream or connection may have in flight.
