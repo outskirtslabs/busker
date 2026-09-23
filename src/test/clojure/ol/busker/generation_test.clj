@@ -251,6 +251,131 @@
     (invokePrim [receiver claim-handle] (long (f receiver claim-handle)))
     (invoke [receiver claim-handle] (f receiver claim-handle))))
 
+(defn- receiver-capacities->object-fn
+  [f]
+  (proxy [clojure.lang.AFn clojure.lang.IFn$OLLO] []
+    (invokePrim [receiver capacity payload-capacity]
+      (f receiver capacity payload-capacity))
+    (invoke [receiver capacity payload-capacity]
+      (f receiver capacity payload-capacity))))
+
+(deftest failed-response-receiver-allocation-unwinds-core-startup
+  (let [events_ (atom [])
+        response-receivers_ (atom [:response-1 nil])
+        arena (reify java.lang.AutoCloseable
+                (close [_] (swap! events_ conj :close-arena)))
+        create-wakeup (fn [context]
+                        (keyword "wakeup" (name context)))
+        create-response (receiver-capacities->object-fn
+                         (fn [context _ _]
+                           (swap! events_ conj [:create-response context])
+                           (let [receiver (first @response-receivers_)]
+                             (swap! response-receivers_ rest)
+                             receiver)))]
+    (with-redefs [mem/shared-arena (constantly arena)
+                  mem/null? (constantly false)
+                  generation/create-server-config
+                  (constantly {::generation/config-ptr :config})
+                  h2o/create-loops (constantly [:loop-1 :loop-2])
+                  h2o/create-contexts (constantly [:context-1 :context-2])
+                  h2o/mt-create-wakeup-receiver create-wakeup
+                  h2o/mt-create-response-receiver create-response
+                  h2o/mt-destroy-response-receiver
+                  (fn [receiver]
+                    (swap! events_ conj [:destroy-response receiver]))
+                  h2o/mt-destroy-wakeup-receiver
+                  (fn [receiver]
+                    (swap! events_ conj [:destroy-wakeup receiver]))
+                  h2o/context-dispose
+                  (fn [context]
+                    (swap! events_ conj [:dispose-context context]))
+                  h2o/evloop-destroy
+                  (fn [loop]
+                    (swap! events_ conj [:destroy-loop loop]))
+                  h2o/config-dispose
+                  (fn [config]
+                    (swap! events_ conj [:dispose-config config]))]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                            #"Could not create native response receiver"
+                            (#'generation/init-core-state
+                             {::generation/config {:output-buffer-size 0}
+                              ::generation/n-workers 2
+                              ::generation/max-connections 10})))
+      (is (= [[:create-response :context-1]
+              [:create-response :context-2]]
+             (take 2 @events_)))
+      (is (= [[:destroy-response :response-1]
+              [:destroy-wakeup :wakeup/context-2]
+              [:destroy-wakeup :wakeup/context-1]
+              [:dispose-context :context-2]
+              [:dispose-context :context-1]
+              [:destroy-loop :loop-2]
+              [:destroy-loop :loop-1]
+              [:dispose-config :config]
+              :close-arena]
+             (drop 2 @events_))))))
+
+(deftest failed-response-receiver-allocation-completes-cleanup-after-a-destructor-error
+  (let [events_ (atom [])
+        response-receivers_ (atom [:response-1 nil])
+        arena (reify java.lang.AutoCloseable
+                (close [_] (swap! events_ conj :close-arena)))
+        create-wakeup (fn [context]
+                        (keyword "wakeup" (name context)))
+        create-response (receiver-capacities->object-fn
+                         (fn [context _ _]
+                           (swap! events_ conj [:create-response context])
+                           (let [receiver (first @response-receivers_)]
+                             (swap! response-receivers_ rest)
+                             receiver)))]
+    (with-redefs [mem/shared-arena (constantly arena)
+                  mem/null? (constantly false)
+                  generation/create-server-config
+                  (constantly {::generation/config-ptr :config})
+                  h2o/create-loops (constantly [:loop-1 :loop-2])
+                  h2o/create-contexts (constantly [:context-1 :context-2])
+                  h2o/mt-create-wakeup-receiver create-wakeup
+                  h2o/mt-create-response-receiver create-response
+                  h2o/mt-destroy-response-receiver
+                  (fn [receiver]
+                    (swap! events_ conj [:destroy-response receiver])
+                    (throw (ex-info "simulated response receiver cleanup failure" {})))
+                  h2o/mt-destroy-wakeup-receiver
+                  (fn [receiver]
+                    (swap! events_ conj [:destroy-wakeup receiver]))
+                  h2o/context-dispose
+                  (fn [context]
+                    (swap! events_ conj [:dispose-context context]))
+                  h2o/evloop-destroy
+                  (fn [loop]
+                    (swap! events_ conj [:destroy-loop loop]))
+                  h2o/config-dispose
+                  (fn [config]
+                    (swap! events_ conj [:dispose-config config]))]
+      (let [^Throwable failure (try
+                                 (#'generation/init-core-state
+                                  {::generation/config {:output-buffer-size 0}
+                                   ::generation/n-workers 2
+                                   ::generation/max-connections 10})
+                                 (catch clojure.lang.ExceptionInfo error
+                                   error))]
+        (is (= "Could not create native response receiver"
+               (ex-message failure)))
+        (is (= ["simulated response receiver cleanup failure"]
+               (mapv ex-message (.getSuppressed failure))))
+        (is (= [[:create-response :context-1]
+                [:create-response :context-2]
+                [:destroy-response :response-1]
+                [:destroy-wakeup :wakeup/context-2]
+                [:destroy-wakeup :wakeup/context-1]
+                [:dispose-context :context-2]
+                [:dispose-context :context-1]
+                [:destroy-loop :loop-2]
+                [:destroy-loop :loop-1]
+                [:dispose-config :config]
+                :close-arena]
+               @events_))))))
+
 (deftest response-receiver-destruction-waits-for-producer-before-claim
   (with-open [arena (mem/confined-arena)]
     (let [receiver (mem/alloc 1 arena)

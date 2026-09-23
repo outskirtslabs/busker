@@ -811,6 +811,30 @@
      ::n-workers n-workers
      ::max-connections max-connections}))
 
+(defn- attempt-core-unwind!
+  [^Throwable failure f]
+  (try
+    (f)
+    (catch Throwable error
+      (.addSuppressed failure error))))
+
+(defn- unwind-core-state!
+  [^Throwable failure arena config-ptr loops contexts wakeup-receivers response-receivers]
+  (doseq [receiver (rseq response-receivers)]
+    (attempt-core-unwind! failure
+                          #(when (and receiver (not (mem/null? receiver)))
+                             (h2o/mt-destroy-response-receiver receiver))))
+  (doseq [receiver (rseq wakeup-receivers)]
+    (attempt-core-unwind! failure
+                          #(when (and receiver (not (mem/null? receiver)))
+                             (h2o/mt-destroy-wakeup-receiver receiver))))
+  (doseq [context (rseq contexts)]
+    (attempt-core-unwind! failure #(h2o/context-dispose context)))
+  (doseq [loop (rseq loops)]
+    (attempt-core-unwind! failure #(h2o/evloop-destroy loop)))
+  (attempt-core-unwind! failure #(h2o/config-dispose config-ptr))
+  (attempt-core-unwind! failure #(.close ^java.lang.AutoCloseable arena)))
+
 (defn- init-core-state
   [{::keys [ring-handler config executor close-callback-executor n-workers max-connections
             active-connection-count_]
@@ -835,13 +859,15 @@
                 response-slot-storage-capacity)
               contexts)
         _ (when (some #(or (nil? %) (mem/null? %)) response-receivers)
-            (doseq [receiver wakeup-receivers]
-              (when (and receiver (not (mem/null? receiver)))
-                (h2o/mt-destroy-wakeup-receiver receiver)))
-            (doseq [receiver response-receivers]
-              (when (and receiver (not (mem/null? receiver)))
-                (h2o/mt-destroy-response-receiver receiver)))
-            (throw (ex-info "Could not create native response receiver" {})))
+            (let [failure (ex-info "Could not create native response receiver" {})]
+              (unwind-core-state! failure
+                                  arena
+                                  config-ptr
+                                  loops
+                                  contexts
+                                  wakeup-receivers
+                                  response-receivers)
+              (throw failure)))
         response-slot-size (+ (h2o/mt-response-slot-data-size)
                               response-slot-storage-capacity)
         response-slots
