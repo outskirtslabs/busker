@@ -104,14 +104,6 @@
        :headers {"content-type" "text/plain; charset=utf-8"}
        :body "Page Not Found"}))
 
-(defn- request-has-body?
-  [req-ctx]
-  (= 1 (:has-body req-ctx)))
-
-(defn- execute-request!
-  [^ExecutorService executor ^Runnable task]
-  (.execute executor task))
-
 (defn on-request
   [^ExecutorService executor close-callback-dispatch config ring-handler req-ctx-ptr req-ctx]
   (if-not (pi/running? (evloop/get-current-worker))
@@ -121,7 +113,7 @@
             dispatch (:callback-dispatch worker)
             [module-id request-seq] (callback-dispatch/allocate-identity! dispatch)
             callback-pointers (callback-dispatch/callback-pointers dispatch)
-            has-body? (request-has-body? req-ctx)
+            has-body? (= 1 (:has-body req-ctx))
             write-req (when has-body?
                         (set-req-body-channel worker module-id request-seq))
             req (Request. worker config req-ctx-ptr req-ctx write-req
@@ -145,7 +137,7 @@
                                     {::emitter emitter})
                           ring-resp (run-handler ring-handler ring-req)]
                       (response/send-ring-response! emitter ring-resp)))]
-            (execute-request! executor request-task))
+            (.execute executor request-task))
           h2o/CLJ_HANDLER_OK
           (catch RejectedExecutionException _
             (callback-dispatch/retire! dispatch module-id request-seq)
