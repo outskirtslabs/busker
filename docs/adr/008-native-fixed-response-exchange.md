@@ -1,8 +1,10 @@
 ---
-status: proposed
+status: superseded
 ---
 
 # Apply complete fixed responses through H2O's event loop
+
+**Superseded by [ADR-009: Publish complete responses through preallocated native slots](009-preallocated-response-completion-ring.md).**
 
 Trillium's measured gains came from coarse response outcomes and transport-side request state, but its platform-thread handlers do not satisfy Busker's virtual-thread contract. Busker will instead keep Ring handlers on virtual threads, admit complete fixed responses to a bounded Java queue, stage them on a dedicated platform thread, and send deep-copied messages to an H2O multithread receiver. H2O validates the scalar request identity and applies each live response on its event-loop thread.
 

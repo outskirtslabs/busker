@@ -1,11 +1,11 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Publish complete responses through preallocated native slots
 
-The native fixed-response exchange improved throughput but added a platform dispatcher, Java queue, repeated header encoding, native allocation, copying, and an H2O queue mutex. A matched profile assigned approximately 1.83 CPU microseconds/request to the dispatcher role while confirming that transport-side completion reduced H2O event-loop work per request.
+Eligible complete final responses use a fixed-capacity response ring allocated with each H2O response receiver. The handler virtual thread claims a slot, packs bounded headers and a string or byte-array body into its preallocated native storage, and publishes the result. Claim, publish, and abort are short native operations with fixed retry limits; they do not wait. A packing or publication failure aborts the claim. Publishing wakes the event-loop worker, which drains ready slots, validates each scalar request identity, applies the response, and releases the slot.
 
-Busker will test a fixed-capacity completion ring allocated with each H2O response receiver. An application virtual thread may claim one slot, write a bounded complete response directly into it, and publish or abort it through short native operations. Those operations use lock-free atomics, perform no allocation or response I/O, have fixed retry limits, and cannot wait. A claim token rejects stale publish or abort calls after slot reuse. The established platform notifier wakes H2O, and the H2O event-loop thread validates request identity, applies ready responses, and releases slots.
+The direct path applies only to eligible complete final responses. A final response that is ineligible or finds the ring overloaded uses the generic start-response and response-writer path through the request worker's FIFO mailbox. Informational responses use that mailbox, and a fixed final response sent after an informational response uses it too, preserving response order. Streaming responses use the existing start-response command, body writer, `sendvec` operations, and H2O `proceed` callbacks; their byte limits, cancellation, buffer lifetime, and emitter close callbacks remain unchanged.
 
-The feasibility checkpoint kept ordinary response routing on the dispatcher. The payoff cutover routes eligible complete responses through the ring and deletes the dispatcher thread, Java queue, duplicate header encoding, per-response native message allocation and copy, and H2O response-message mutex operation. Informational and streaming responses retain their existing FIFO, `proceed`, byte-limit, cancellation, buffer-lifetime, and emitter-callback behavior. Production promotion still requires overload fallback, shutdown, reload, exact-response, profile, and throughput evidence under the controlled campaign method.
+This replaces the platform dispatcher and Java completion queue proposed in ADR-008 for eligible complete final responses. The direct path does not require per-response native allocation or the H2O response-message mutex. It does not replace the generic, informational, or streaming paths.
