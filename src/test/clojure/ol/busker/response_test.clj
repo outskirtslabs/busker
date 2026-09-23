@@ -76,15 +76,6 @@
      (.connect socket (InetSocketAddress. "127.0.0.1" (int port)) 2000)
      socket)))
 
-(defn- request-text
-  [port method path]
-  (with-open [^Socket socket (connect port)]
-    (let [out (.getOutputStream socket)
-          request (str method " " path " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")]
-      (.write out (.getBytes request StandardCharsets/US_ASCII))
-      (.flush out)
-      (slurp (.getInputStream socket)))))
-
 (defn- request-bytes
   [port method path]
   (with-open [^Socket socket (connect port)]
@@ -93,6 +84,10 @@
       (.write out (.getBytes request StandardCharsets/US_ASCII))
       (.flush out)
       (.readAllBytes (.getInputStream socket)))))
+
+(defn- request-text
+  [port method path]
+  (String. ^bytes (request-bytes port method path) StandardCharsets/UTF_8))
 
 (defn- request-stream!
   [^Socket socket]
