@@ -20,7 +20,8 @@
    [java.nio.charset StandardCharsets]
    [ol.busker.fixed_final DirectResponsePlan]
    [java.util.concurrent AbstractExecutorService]
-   [java.util.concurrent.atomic AtomicBoolean AtomicReference]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicReference]
+   [java.util.concurrent.locks ReentrantReadWriteLock]))
 
 (defrecord RetirementWorker
            [callback-dispatch wakeup-receiver_ thread send-fn]
@@ -89,7 +90,7 @@
                       :accept-callbacks []
                       :max-connections 0}]
     (with-redefs-fn
-      {#'generation/check-and-initiate-shutdown! (fn [state _] state)
+      {#'generation/check-and-initiate-shutdown! (fn [state _ _] state)
        #'generation/update-receiver-destruction (fn [state _] state)
        #'generation/dispose-context-if-ready (fn [state _ _] state)
        #'callback-dispatch/pending-response-work? (constantly false)
@@ -118,7 +119,7 @@
                       :accept-callbacks []
                       :max-connections 0}]
     (with-redefs-fn
-      {#'generation/check-and-initiate-shutdown! (fn [state _] state)
+      {#'generation/check-and-initiate-shutdown! (fn [state _ _] state)
        #'generation/update-receiver-destruction (fn [state _] state)
        #'generation/dispose-context-if-ready (fn [state _ _] state)
        #'callback-dispatch/pending-response-work? (constantly false)
@@ -229,6 +230,305 @@
         (is (zero? (h2o/mt-response-ring-ready receiver))))
       (finally
         (generation/stop! instance)))))
+
+(defn- response-receiver-worker
+  [receiver slot]
+  {:response-receiver_             (AtomicReference. receiver)
+   :response-receiver-open?_       (AtomicBoolean. true)
+   :response-receiver-lock         (ReentrantReadWriteLock.)
+   :response-slots                 [slot]
+   :response-slot-payload-capacity 0})
+
+(defn- unary-long-fn
+  [f]
+  (proxy [clojure.lang.AFn clojure.lang.IFn$OL] []
+    (invokePrim [value] (long (f value)))
+    (invoke [value] (f value))))
+
+(defn- receiver-handle->long-fn
+  [f]
+  (proxy [clojure.lang.AFn clojure.lang.IFn$OLL] []
+    (invokePrim [receiver claim-handle] (long (f receiver claim-handle)))
+    (invoke [receiver claim-handle] (f receiver claim-handle))))
+
+(deftest response-receiver-destruction-waits-for-producer-before-claim
+  (with-open [arena (mem/confined-arena)]
+    (let [receiver (mem/alloc 1 arena)
+          slot (mem/alloc (mem/size-of ::h2o/clj-fixed-response-slot-data-t) arena)
+          worker (response-receiver-worker receiver slot)
+          claim-entered_ (promise)
+          release-claim_ (promise)
+          result_ (promise)
+          destroyed_ (atom [])
+          claim-attempts_ (atom 0)
+          claim-fn (unary-long-fn
+                    (fn [_]
+                      (swap! claim-attempts_ inc)
+                      (deliver claim-entered_ true)
+                      @release-claim_
+                      0))
+          pending-fn (unary-long-fn (constantly 0))]
+      (with-redefs [h2o/mt-response-try-claim claim-fn
+                    h2o/mt-response-pending pending-fn
+                    h2o/mt-destroy-response-receiver
+                    (fn [actual-receiver]
+                      (swap! destroyed_ conj actual-receiver))
+                    p/wake (constantly nil)]
+        (let [producer
+              (Thread/startVirtualThread
+               #(try
+                  (deliver result_
+                           {:result (fixed-final/try-publish-direct-response!
+                                     worker (direct-plan 1 1 (byte-array 0)))})
+                  (catch Throwable error
+                    (deliver result_ {:error error}))))]
+          (try
+            (is (true? (deref claim-entered_ 5000 false)))
+            (let [destroyed? (#'generation/destroy-response-receiver! worker)]
+              (is (= {:receiver-present? true
+                      :admission-open?  false
+                      :destroyed?        false
+                      :destroyed         []}
+                     {:receiver-present? (some? (.get ^AtomicReference (:response-receiver_ worker)))
+                      :admission-open?  (.get ^AtomicBoolean (:response-receiver-open?_ worker))
+                      :destroyed?        destroyed?
+                      :destroyed         @destroyed_})
+                  (str "Receiver destruction must defer while a producer has read it before claim.")))
+            (is (= {:response :closed
+                    :claim-attempts 1}
+                   {:response (fixed-final/try-publish-direct-response!
+                               worker (direct-plan 1 1 (byte-array 0)))
+                    :claim-attempts @claim-attempts_})
+                "Closing admission rejects another producer before it claims a slot.")
+            (deliver release-claim_ true)
+            (is (= {:result :overloaded
+                    :error  nil}
+                   (let [{:keys [result error]} (deref result_ 5000 ::timeout)]
+                     {:result result
+                      :error  (some-> error class .getName)})))
+            (is (true? (#'generation/destroy-response-receiver! worker)))
+            (is (= [receiver] @destroyed_))
+            (is (nil? (.get ^AtomicReference (:response-receiver_ worker))))
+            (finally
+              (deliver release-claim_ true)
+              (.join producer 5000)
+              (is (false? (.isAlive producer))))))))))
+
+(deftest response-receiver-destruction-waits-for-modeled-claim-accounting-interval
+  (with-open [arena (mem/confined-arena)]
+    (let [receiver (mem/alloc 1 arena)
+          slot (mem/alloc (mem/size-of ::h2o/clj-fixed-response-slot-data-t) arena)
+          worker (response-receiver-worker receiver slot)
+          claim-state-changed_ (promise)
+          release-claim_ (promise)
+          result_ (promise)
+          destroyed_ (atom [])
+          claim-fn (unary-long-fn
+                    (fn [_]
+                      (deliver claim-state-changed_ true)
+                      @release-claim_
+                      1))
+          pending-fn (unary-long-fn (constantly 0))
+          publish-fn (receiver-handle->long-fn (constantly 0))
+          abort-fn (receiver-handle->long-fn (constantly 1))
+          slot-writer (proxy [clojure.lang.AFn clojure.lang.IFn$OLOO] []
+                        (invokePrim [_ _ _] nil)
+                        (invoke [_ _ _] nil))]
+      (with-redefs [h2o/mt-response-try-claim claim-fn
+                    h2o/mt-response-pending pending-fn
+                    h2o/mt-response-publish publish-fn
+                    h2o/mt-response-abort abort-fn
+                    fixed-final/write-direct-response-slot! slot-writer
+                    h2o/mt-destroy-response-receiver
+                    (fn [actual-receiver]
+                      (swap! destroyed_ conj actual-receiver))
+                    p/wake (constantly nil)]
+        (let [producer
+              (Thread/startVirtualThread
+               #(try
+                  (deliver result_
+                           {:result (fixed-final/try-publish-direct-response!
+                                     worker (direct-plan 1 1 (byte-array 0)))})
+                  (catch Throwable error
+                    (deliver result_ {:error error}))))]
+          (try
+            (is (true? (deref claim-state-changed_ 5000 false)))
+            #_{:clj-kondo/ignore [:type-mismatch]}
+            (is (zero? (h2o/mt-response-pending receiver)))
+            (is (= {:destroyed?        false
+                    :receiver-present? true}
+                   {:destroyed?        (boolean (#'generation/destroy-response-receiver! worker))
+                    :receiver-present? (some? (.get ^AtomicReference (:response-receiver_ worker)))})
+                (str "A zero pending count cannot permit destruction during native claim accounting."))
+            (deliver release-claim_ true)
+            (is (= {:result :overloaded
+                    :error  nil}
+                   (let [{:keys [result error]} (deref result_ 5000 ::timeout)]
+                     {:result result
+                      :error  (some-> error class .getName)})))
+            (is (true? (#'generation/destroy-response-receiver! worker)))
+            (is (= [receiver] @destroyed_))
+            (finally
+              (deliver release-claim_ true)
+              (.join producer 5000)
+              (is (false? (.isAlive producer))))))))))
+
+(deftest response-receiver-destruction-waits-for-producer-exception
+  (with-open [arena (mem/confined-arena)]
+    (let [receiver (mem/alloc 1 arena)
+          slot (mem/alloc (mem/size-of ::h2o/clj-fixed-response-slot-data-t) arena)
+          worker (response-receiver-worker receiver slot)
+          writer-entered_ (promise)
+          release-writer_ (promise)
+          result_ (promise)
+          destroyed_ (atom [])
+          aborts_ (atom 0)
+          claim-fn (unary-long-fn (constantly 1))
+          pending-fn (unary-long-fn (constantly 0))
+          abort-fn (receiver-handle->long-fn
+                    (fn [_ _]
+                      (swap! aborts_ inc)
+                      1))
+          writer (fn [_ _ _]
+                   (deliver writer-entered_ true)
+                   @release-writer_
+                   (throw (ex-info "simulated slot-writing failure" {})))
+          slot-writer (proxy [clojure.lang.AFn clojure.lang.IFn$OLOO] []
+                        (invokePrim [slot payload-capacity plan]
+                          (writer slot payload-capacity plan))
+                        (invoke [slot payload-capacity plan]
+                          (writer slot payload-capacity plan)))]
+      (with-redefs [h2o/mt-response-try-claim claim-fn
+                    h2o/mt-response-abort abort-fn
+                    h2o/mt-response-pending pending-fn
+                    fixed-final/write-direct-response-slot! slot-writer
+                    h2o/mt-destroy-response-receiver
+                    (fn [actual-receiver]
+                      (swap! destroyed_ conj actual-receiver))
+                    p/wake (constantly nil)]
+        (let [producer
+              (Thread/startVirtualThread
+               #(try
+                  (deliver result_
+                           {:result (fixed-final/try-publish-direct-response!
+                                     worker (direct-plan 1 1 (byte-array 0)))})
+                  (catch Throwable error
+                    (deliver result_ {:error error}))))]
+          (try
+            (is (true? (deref writer-entered_ 5000 false)))
+            (is (false? (#'generation/destroy-response-receiver! worker)))
+            (is (= [] @destroyed_))
+            (deliver release-writer_ true)
+            (is (= {:result nil
+                    :error  "clojure.lang.ExceptionInfo"}
+                   (let [{:keys [result error]} (deref result_ 5000 ::timeout)]
+                     {:result result
+                      :error  (some-> error class .getName)})))
+            (is (= 1 @aborts_))
+            (is (true? (#'generation/destroy-response-receiver! worker)))
+            (is (= [receiver] @destroyed_))
+            (is (nil? (.get ^AtomicReference (:response-receiver_ worker))))
+            (finally
+              (deliver release-writer_ true)
+              (.join producer 5000)
+              (is (false? (.isAlive producer))))))))))
+
+(deftest receiver-destruction-rechecks-pending-after-an-admitted-producer-publishes
+  (with-open [arena (mem/shared-arena)]
+    (let [receiver (mem/alloc 1 arena)
+          slot (mem/alloc (mem/size-of ::h2o/clj-fixed-response-slot-data-t) arena)
+          worker (response-receiver-worker receiver slot)
+          first-zero-observed_ (promise)
+          release-disposal_ (promise)
+          claim-entered_ (promise)
+          release-claim_ (promise)
+          producer-result_ (promise)
+          disposal-result_ (promise)
+          destroyed_ (atom [])
+          disposed_ (atom [])
+          pending_ (atom 0)
+          pending-checks_ (atom 0)
+          claim-fn (unary-long-fn
+                    (fn [_]
+                      (deliver claim-entered_ true)
+                      @release-claim_
+                      1))
+          pending-fn (unary-long-fn
+                      (fn [_]
+                        (if (= 1 (swap! pending-checks_ inc))
+                          (do
+                            (deliver first-zero-observed_ true)
+                            @release-disposal_
+                            0)
+                          @pending_)))
+          publish-fn (receiver-handle->long-fn
+                      (fn [_ _]
+                        (reset! pending_ 1)
+                        1))
+          slot-writer (proxy [clojure.lang.AFn clojure.lang.IFn$OLOO] []
+                        (invokePrim [_ _ _] nil)
+                        (invoke [_ _ _] nil))
+          disposer (Thread.
+                    #(try
+                       (deliver disposal-result_
+                                {:result (#'generation/dispose-context-if-ready
+                                          {:context-disposed? false
+                                           :shutdown-initiated? true
+                                           :receiver-destroyed? true}
+                                          worker
+                                          {:ctx-ptr :context
+                                           :http3-ctxs []})})
+                       (catch Throwable error
+                         (deliver disposal-result_ {:error error}))))]
+      (with-redefs [generation/all-connections-drained? (constantly true)
+                    callback-dispatch/no-live-entries? (constantly true)
+                    h2o/mt-response-try-claim claim-fn
+                    h2o/mt-response-pending pending-fn
+                    h2o/mt-response-publish publish-fn
+                    fixed-final/write-direct-response-slot! slot-writer
+                    h2o/mt-destroy-response-receiver
+                    (fn [actual-receiver]
+                      (swap! destroyed_ conj actual-receiver))
+                    h2o/context-dispose (fn [context] (swap! disposed_ conj context))
+                    p/wake (constantly nil)]
+        (let [producer
+              (Thread/startVirtualThread
+               #(try
+                  (deliver producer-result_
+                           {:result (fixed-final/try-publish-direct-response!
+                                     worker (direct-plan 1 1 (byte-array 0)))})
+                  (catch Throwable error
+                    (deliver producer-result_ {:error error}))))]
+          (try
+            (is (true? (deref claim-entered_ 5000 false)))
+            (.start disposer)
+            (is (true? (deref first-zero-observed_ 5000 false)))
+            (deliver release-claim_ true)
+            (is (= {:result :accepted
+                    :error  nil}
+                   (let [{:keys [result error]} (deref producer-result_ 5000 ::timeout)]
+                     {:result result
+                      :error  (some-> error class .getName)})))
+            (deliver release-disposal_ true)
+            (is (= {:context-disposed? false
+                    :error             nil}
+                   (let [{:keys [result error]} (deref disposal-result_ 5000 ::timeout)]
+                     {:context-disposed? (:context-disposed? result)
+                      :error             (some-> error class .getName)})))
+            (is (= 2 @pending-checks_))
+            (is (= [] @destroyed_))
+            (is (= [] @disposed_))
+            (is (some? (.get ^AtomicReference (:response-receiver_ worker))))
+            (reset! pending_ 0)
+            (is (true? (#'generation/destroy-response-receiver! worker)))
+            (is (= [receiver] @destroyed_))
+            (finally
+              (deliver release-claim_ true)
+              (deliver release-disposal_ true)
+              (.join producer 5000)
+              (.join disposer 5000)
+              (is (false? (.isAlive producer)))
+              (is (false? (.isAlive disposer))))))))))
 
 (deftest response-ring-storage-does-not-scale-past-the-eligible-body-limit
   (let [port (util/free-port)

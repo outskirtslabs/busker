@@ -25,7 +25,8 @@
    [java.security.cert CertificateFactory X509Certificate]
    [java.util Base64]
    [java.util.concurrent ExecutorService Executors TimeUnit]
-   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]
+   [java.util.concurrent.locks Lock ReentrantReadWriteLock]))
 
 (set! *warn-on-reflection* true)
 
@@ -301,13 +302,32 @@
         #_{:clj-kondo/ignore [:type-mismatch]}
         (zero? (h2o/mt-response-pending receiver)))))
 
+(defn- close-response-receiver-admission!
+  [worker]
+  (when-let [^AtomicBoolean receiver-open?_ (:response-receiver-open?_ worker)]
+    (.set receiver-open?_ false)))
+
 (defn- destroy-response-receiver!
   [worker]
-  (when-let [^AtomicReference receiver_ (:response-receiver_ worker)]
-    (let [receiver (.get receiver_)]
-      (when (and receiver (not (mem/null? receiver)))
-        (h2o/mt-destroy-response-receiver receiver)
-        (.set receiver_ nil)))))
+  (close-response-receiver-admission! worker)
+  (let [^AtomicReference receiver_ (:response-receiver_ worker)
+        ^ReentrantReadWriteLock receiver-lock (:response-receiver-lock worker)
+        ^Lock write-lock (when receiver-lock (.writeLock receiver-lock))]
+    (if (or (nil? receiver_) (nil? write-lock) (not (.tryLock write-lock)))
+      false
+      (try
+        (let [receiver (.get receiver_)]
+          (if (or (nil? receiver) (mem/null? receiver))
+            true
+            #_{:clj-kondo/ignore [:type-mismatch]}
+            (if (zero? (h2o/mt-response-pending receiver))
+              (do
+                (h2o/mt-destroy-response-receiver receiver)
+                (.set receiver_ nil)
+                true)
+              false)))
+        (finally
+          (.unlock write-lock))))))
 
 (defn- ready-to-dispose?
   [{:keys [context-disposed? shutdown-initiated? receiver-destroyed?]}
@@ -320,14 +340,16 @@
        (callback-dispatch/no-live-entries? (:callback-dispatch worker))))
 
 (defn- check-and-initiate-shutdown!
-  [loop-state {:keys [shutting-down?] :as state}]
+  [loop-state {:keys [shutting-down?] :as state} worker]
   (let [should-shutdown? (.get ^AtomicBoolean shutting-down?)
         already? (true? (:shutdown-initiated? loop-state))]
-    (when (and should-shutdown? (not already?))
-      (initiate-worker-shutdown! (assoc state :shutdown-initiated? true))
-      (when-let [remaining (::stop-accepting-remaining_ state)]
-        (when (zero? (.decrementAndGet ^AtomicLong remaining))
-          (deliver (::stopped-accepting_ state) true))))
+    (when should-shutdown?
+      (close-response-receiver-admission! worker)
+      (when-not already?
+        (initiate-worker-shutdown! (assoc state :shutdown-initiated? true))
+        (when-let [remaining (::stop-accepting-remaining_ state)]
+          (when (zero? (.decrementAndGet ^AtomicLong remaining))
+            (deliver (::stopped-accepting_ state) true)))))
     (assoc loop-state :shutdown-initiated? (or already? should-shutdown?))))
 
 (defn- update-receiver-destruction
@@ -344,12 +366,12 @@
 
 (defn- dispose-context-if-ready
   [loop-state worker {:keys [ctx-ptr http3-ctxs] :as state}]
-  (if (ready-to-dispose? loop-state state worker)
+  (if (and (ready-to-dispose? loop-state state worker)
+           (destroy-response-receiver! worker))
     (do
       (doseq [http3-ctx http3-ctxs]
         (when (and http3-ctx (not (mem/null? http3-ctx)))
           (h2o/http3-free-worker-ctx http3-ctx)))
-      (destroy-response-receiver! worker)
       (h2o/context-dispose ctx-ptr)
       (case (p/send-msg worker evloop/stop-msg)
         :accepted nil
@@ -363,7 +385,7 @@
    {:keys [loop-ptr ctx-ptr listener-socks accept-callbacks max-connections] :as state}]
   (let [mailbox-work? (true? (::evloop/mailbox-work? loop-state))
         loop-state (-> (dissoc loop-state ::evloop/mailbox-work?)
-                       (check-and-initiate-shutdown! state)
+                       (check-and-initiate-shutdown! state worker)
                        (update-receiver-destruction worker)
                        (dispose-context-if-ready worker state))
         disposed? (true? (:context-disposed? loop-state))

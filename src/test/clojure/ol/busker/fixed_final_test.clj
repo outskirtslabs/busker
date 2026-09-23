@@ -17,7 +17,8 @@
    [java.net InetSocketAddress Socket]
    [java.nio.charset StandardCharsets]
    [ol.busker.fixed_final DirectResponsePlan]
-   [java.util.concurrent.atomic AtomicReference]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicReference]
+   [java.util.concurrent.locks ReentrantReadWriteLock]))
 
 (defn- prepared-command
   ([^bytes body]
@@ -39,6 +40,27 @@
                        (long body-length)
                        (long content-length)
                        (long compress-hint)))
+
+(defn- direct-response-worker
+  [receiver response-slots response-slot-payload-capacity]
+  {:response-receiver_             (AtomicReference. receiver)
+   :response-receiver-open?_       (AtomicBoolean. true)
+   :response-receiver-lock         (ReentrantReadWriteLock.)
+   :response-slots                 response-slots
+   :response-slot-payload-capacity response-slot-payload-capacity})
+
+(defn- unary-long-fn
+  [f]
+  (proxy [clojure.lang.AFn clojure.lang.IFn$OL] []
+    (invokePrim [value] (long (f value)))
+    (invoke [value] (f value))))
+
+(defn- receiver-handle->long-fn
+  [f]
+  (proxy [clojure.lang.AFn clojure.lang.IFn$OLL] []
+    (invokePrim [receiver claim-handle] (long (f receiver claim-handle)))
+    (invoke [receiver claim-handle] (f receiver claim-handle))))
+
 (defn- serialized-headers
   [headers headers-len]
   (let [header-size (mem/size-of ::h2o/clj-header-t)]
@@ -124,11 +146,9 @@
 (deftest full-response-ring-does-not-pack-direct-response
   (with-open [arena (mem/confined-arena)]
     (let [receiver (mem/alloc 1 arena)
-          worker {:response-receiver_ (AtomicReference. receiver)
-                  :response-slots []
-                  :response-slot-payload-capacity 64}
+          worker (direct-response-worker receiver [] 64)
           writes_ (atom 0)]
-      (with-redefs [h2o/mt-response-try-claim (constantly 0)
+      (with-redefs [h2o/mt-response-try-claim (unary-long-fn (constantly 0))
                     fixed-final/write-direct-response-slot!
                     (fn [& _] (swap! writes_ inc))]
         (is (= :overloaded
@@ -141,16 +161,15 @@
     (let [receiver (mem/alloc 1 arena)
           slot (mem/alloc (mem/size-of ::h2o/clj-fixed-response-slot-data-t) arena)
           claim-handle 65537
-          worker {:response-receiver_ (AtomicReference. receiver)
-                  :response-slots [slot]
-                  :response-slot-payload-capacity 0}
+          worker (direct-response-worker receiver [slot] 0)
           aborted_ (atom [])]
-      (with-redefs [h2o/mt-response-try-claim (constantly claim-handle)
-                    h2o/mt-response-publish (fn [& _] 1)
+      (with-redefs [h2o/mt-response-try-claim (unary-long-fn (constantly claim-handle))
+                    h2o/mt-response-publish (receiver-handle->long-fn (constantly 1))
                     h2o/mt-response-abort
-                    (fn [actual-receiver actual-handle]
-                      (swap! aborted_ conj [actual-receiver actual-handle])
-                      1)]
+                    (receiver-handle->long-fn
+                     (fn [actual-receiver actual-handle]
+                       (swap! aborted_ conj [actual-receiver actual-handle])
+                       1))]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo
                               #"does not fit"
                               (fixed-final/try-publish-direct-response!

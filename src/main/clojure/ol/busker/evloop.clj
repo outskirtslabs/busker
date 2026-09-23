@@ -8,7 +8,7 @@
   (:import
    [java.util HashMap]
    [java.util.concurrent ArrayBlockingQueue]
-   [java.util.concurrent.locks Condition ReentrantLock]
+   [java.util.concurrent.locks Condition ReentrantLock ReentrantReadWriteLock]
    [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicLong AtomicReference]))
 
 (set! *warn-on-reflection* true)
@@ -40,6 +40,8 @@
             message-handler
             ^AtomicReference wakeup-receiver_
             ^AtomicReference response-receiver_
+            ^AtomicBoolean response-receiver-open?_
+            ^ReentrantReadWriteLock response-receiver-lock
             response-slots
             ^long response-slot-payload-capacity
             ^AtomicReference fixed-final-scratch_
@@ -353,6 +355,8 @@
                              :message-handler message-handler
                              :wakeup-receiver_ receiver_
                              :response-receiver_ response-receiver_
+                             :response-receiver-open?_ (AtomicBoolean. true)
+                             :response-receiver-lock (ReentrantReadWriteLock.)
                              :response-slots response-slots
                              :response-slot-payload-capacity response-slot-payload-capacity
                              :fixed-final-scratch_ (AtomicReference.)})

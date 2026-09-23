@@ -6,7 +6,8 @@
   (:import
    [java.lang.foreign Arena MemorySegment]
    [java.nio.charset StandardCharsets]
-   [java.util.concurrent.atomic AtomicReference]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicReference]
+   [java.util.concurrent.locks Lock ReentrantReadWriteLock]))
 
 (set! *warn-on-reflection* true)
 
@@ -233,28 +234,43 @@
 (defn ^:no-doc try-publish-direct-response!
   "Packs and publishes an eligible response without waiting, or returns a fallback status."
   [worker ^DirectResponsePlan plan]
-  (let [receiver_ (:response-receiver_ worker)
-        receiver (when receiver_ (.get ^AtomicReference receiver_))]
-    (if (or (nil? receiver) (mem/null? receiver))
+  (let [^AtomicBoolean receiver-open?_ (:response-receiver-open?_ worker)
+        ^ReentrantReadWriteLock receiver-lock (:response-receiver-lock worker)
+        ^Lock read-lock (when receiver-lock (.readLock receiver-lock))]
+    (if (or (nil? receiver-open?_)
+            (nil? read-lock)
+            (not (.get receiver-open?_))
+            (not (.tryLock read-lock)))
       :closed
-      (let [claim-handle (h2o/mt-response-try-claim receiver)]
-        (if (zero? claim-handle)
-          :overloaded
-          (let [slot-index (dec (bit-and claim-handle response-claim-index-mask))
-                slot (nth (:response-slots worker) slot-index)
-                payload-capacity (long (:response-slot-payload-capacity worker))
-                published?_ (volatile! false)]
-            (try
-              (write-direct-response-slot! slot payload-capacity plan)
-              (if (= 1 (h2o/mt-response-publish receiver claim-handle))
-                (do
-                  (vreset! published?_ true)
-                  (pi/wake worker)
-                  :accepted)
-                :overloaded)
-              (finally
-                (when-not @published?_
-                  (h2o/mt-response-abort receiver claim-handle))))))))))
+      (try
+        (let [receiver_ (:response-receiver_ worker)
+              receiver (when receiver_ (.get ^AtomicReference receiver_))]
+          (if (or (not (.get receiver-open?_))
+                  (nil? receiver)
+                  (mem/null? receiver))
+            :closed
+            (let [claim-handle (h2o/mt-response-try-claim receiver)]
+              (if (zero? claim-handle)
+                :overloaded
+                (let [slot-index (dec (bit-and claim-handle response-claim-index-mask))
+                      slot (nth (:response-slots worker) slot-index)
+                      payload-capacity (long (:response-slot-payload-capacity worker))
+                      published?_ (volatile! false)]
+                  (try
+                    (write-direct-response-slot! slot payload-capacity plan)
+                    (if (= 1 (h2o/mt-response-publish receiver claim-handle))
+                      (do
+                        (vreset! published?_ true)
+                        (pi/wake worker)
+                        :accepted)
+                      :overloaded)
+                    (finally
+                      (when-not @published?_
+                        (h2o/mt-response-abort receiver claim-handle)))))))))
+        (finally
+          (.unlock read-lock)
+          (when-not (.get receiver-open?_)
+            (pi/wake worker)))))))
 
 (defn- worker-scratch-segment
   [worker ^long body-limit]
