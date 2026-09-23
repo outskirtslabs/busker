@@ -1,4 +1,15 @@
 (ns ^:no-doc ol.busker.wake-notifier
+  "Delivers coalesced native event-loop wake notifications from a platform thread.
+
+  Work remains in each worker mailbox or response ring. This namespace sends only wake
+  signals, so it does not transfer application data. [[request!]] coalesces requests,
+  [[quiesce-endpoint!]] prevents later native wake calls, and [[stop-and-join!]] ends
+  notifier delivery.
+
+  ## Related Namespaces
+
+  - [[ol.busker.evloop]] requests worker wakes.
+  - [[ol.busker.native]] invokes the native wakeup function."
   (:require
    [ol.busker.native :as h2o]
    [taoensso.trove :as trove])
@@ -14,13 +25,20 @@
             ^AtomicReference state_
             ^AtomicInteger in-flight_])
 
+(alter-meta! #'->WakeEndpoint assoc :doc
+             "Creates a wake endpoint. `pending?_` coalesces queued notifications; `receiver_` holds the native receiver; `state_` moves from `:open` to `:closed`; `in-flight_` counts native wake calls in progress.")
 (defrecord WakeNotifier
            [^LinkedBlockingQueue queue
             ^AtomicBoolean accepting?_
             ^AtomicInteger admissions_
             ^AtomicReference thread_])
 
+(alter-meta! #'->WakeNotifier assoc :doc
+             "Creates a wake notifier. `queue` contains pending endpoints; `accepting?_` controls new requests; `admissions_` counts requests in progress; `thread_` refers to the notifier platform thread.")
 (defn endpoint
+  "Creates an open endpoint for native `receiver_`. The notifier may later wake it.
+
+  `receiver_` is an AtomicReference so lifecycle code can retire the receiver safely."
   [receiver_]
   (->WakeEndpoint (AtomicBoolean. false)
                   receiver_
@@ -68,6 +86,9 @@
         (recur)))))
 
 (defn start!
+  "Starts a daemon platform thread that delivers coalesced endpoint wake notifications.
+
+  Returns a [[WakeNotifier]]. Call [[stop-and-join!]] during shutdown."
   []
   (let [notifier (->WakeNotifier (LinkedBlockingQueue.)
                                  (AtomicBoolean. true)
@@ -81,6 +102,10 @@
     notifier))
 
 (defn request!
+  "Requests a coalesced wake for `endpoint`.
+
+  Returns `true` when the endpoint is already queued or is queued now, and `false`
+  after notifier or endpoint shutdown. It does not carry worker work."
   [^WakeNotifier notifier ^WakeEndpoint endpoint]
   (let [^AtomicBoolean accepting?_ (.-accepting?_ notifier)
         ^AtomicInteger admissions_ (.-admissions_ notifier)
@@ -105,6 +130,10 @@
       false)))
 
 (defn quiesce-endpoint!
+  "Stops future wakes for `endpoint` and waits for active native wake calls.
+
+  Returns `true` after the endpoint reaches `:closed`. Call from lifecycle code, not
+  from the notifier callback itself."
   [^WakeEndpoint endpoint]
   (let [^AtomicReference state_ (.-state_ endpoint)
         ^AtomicInteger in-flight_ (.-in-flight_ endpoint)]
@@ -115,6 +144,10 @@
     true))
 
 (defn stop-and-join!
+  "Stops notifier admission, interrupts its platform thread, and waits up to ten seconds.
+
+  Returns `true` when the thread has stopped. Pending queue entries are processed before
+  the notifier loop exits unless interruption ends its wait."
   [^WakeNotifier notifier]
   (let [^AtomicBoolean accepting?_ (.-accepting?_ notifier)
         ^AtomicInteger admissions_ (.-admissions_ notifier)

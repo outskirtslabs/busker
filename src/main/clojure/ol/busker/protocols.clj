@@ -1,4 +1,12 @@
 (ns ol.busker.protocols
+  "Public response-body and response-emitter protocols for Ring-compatible applications.
+
+  [[SizableResponseBody]] supplies known byte sizes for complete responses. [[ResponseEmitter]]
+  controls asynchronous response output and lifecycle callbacks.
+
+  ## Related Namespaces
+
+  - [[ol.busker.response]] implements response emission."
   (:refer-clojure :exclude [flush]))
 
 ;; This protocol is from https://github.com/ring-clojure/ring/blob/content-length/ring-core/src/ring/middleware/content_length.clj

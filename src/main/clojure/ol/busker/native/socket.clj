@@ -1,10 +1,13 @@
 (ns ^:no-doc ol.busker.native.socket
-  "low-level socket helpers via coffi/FFM.
+  "FFM socket helpers for TCP and Unix listener setup.
 
-   - open/bind/listen family-aware TCP listeners
-   - open/bind/listen Unix domain socket listeners
-   - duplicate the listener per worker thread (ownership: native side after handoff)
-   - small utilities for flags and options"
+  Key functions open, bind, listen, duplicate, and close listener descriptors for worker
+  event loops.
+
+  ## Related Namespaces
+
+  - [[ol.busker.listen]] manages listener resources.
+  - [[ol.busker.native]] supplies other shim calls."
   (:require
    [coffi.ffi :as ffi :refer [defcfn]]
    [coffi.mem :as mem]

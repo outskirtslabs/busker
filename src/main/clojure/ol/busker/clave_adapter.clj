@@ -1,4 +1,13 @@
 (ns ^:no-doc ol.busker.clave-adapter
+  "Adapts Clave certificate automation to Busker lifecycle operations.
+
+  Key functions start certificate automation, poll its events, and provide HTTP ACME solver
+  integration for configured listeners.
+
+  ## Related Namespaces
+
+  - [[ol.busker.runtime]] starts and stops certificate automation.
+  - [[ol.busker.tickets]] manages TLS resumption state."
   (:require
    [clojure.spec.alpha :as s]
    [ol.busker.specs :as specs]

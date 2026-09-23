@@ -1,4 +1,13 @@
 (ns ^:no-doc ol.busker.native
+  "Defines FFM layouts and native calls for the Busker shim.
+
+  This namespace maps C structures, callbacks, and libh2o operations. Key functions copy
+  request data, create handlers, and manage multithread receivers.
+
+  ## Related Namespaces
+
+  - [[ol.busker.native.loader]] loads the shim.
+  - [[ol.busker.generation]] manages native lifecycle."
   (:require
    [clojure.string :as str]
    [coffi.ffi :as ffi :refer [defcfn]]
@@ -71,17 +80,9 @@
   (layout/with-c-layout
     [::mem/struct
      [[:name ::mem/pointer]
-      [:name_len ::mem/int]
+      [:name_len ::mem/long]
       [:value ::mem/pointer]
-      [:value_len ::mem/int]]]))
-
-(mem/defalias ::clj-packed-header-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:name-offset ::mem/int]
-      [:name-len ::mem/int]
-      [:value-offset ::mem/int]
-      [:value-len ::mem/int]]]))
+      [:value_len ::mem/long]]]))
 
 (mem/defalias ::clj-fixed-response-slot-data-t
   (layout/with-c-layout
@@ -96,7 +97,7 @@
       [:payload-len ::mem/long]
       [:status ::mem/int]
       [:compress-hint ::mem/int]
-      [:headers [::mem/array ::clj-packed-header-t 64]]]]))
+      [:headers [::mem/array ::clj-header-t 64]]]]))
 ;; h2o_iovec_t is:
 ;;   typedef struct { char *base; size_t len; } h2o_iovec_t;
 (mem/defalias ::h2o-iovec-t
@@ -221,8 +222,6 @@
 
 (def ^:private size-of-clj-req-ctx-t
   (mem/size-of ::clj-req-ctx-t))
-
-(declare copy-request-context)
 
 #_(print-offsets-for (layout/with-c-layout
                        [::mem/struct
@@ -512,37 +511,6 @@
   "FFI binding for handler construction."
   "clj_h2o_create_handler"
   [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer] ::mem/pointer)
-
-(defn create-handler
-  "Create and configure h2o handler with optional callbacks.
-   Registers path '/', creates handler, and configures callbacks.
-
-   Returns map containing handler pointer and pinned callback references."
-  [hostconf-ptr on-req-callback on-cleanup-callback flat-config-ptr arena]
-  {:pre [(some? hostconf-ptr) (not (mem/null? hostconf-ptr))
-         (fn? on-req-callback)
-         (fn? on-cleanup-callback)
-         (some? flat-config-ptr) (not (mem/null? flat-config-ptr))
-         (some? arena)]}
-  (let [on-request-cb (fn on-request-cb [ctx-ptr]
-                        (int (on-req-callback ctx-ptr
-                                              (copy-request-context ctx-ptr arena))))
-        on-request-cb-ptr (mem/serialize on-request-cb
-                                         [::ffi/fn [::mem/pointer] ::mem/int :raw-fn? true]
-                                         arena)
-
-        on-request-cleanup-cb (fn on-request-cleanup-cb [module-id request-seq]
-                                (on-cleanup-callback module-id request-seq))
-        on-request-cleanup-cb-ptr
-        (mem/serialize on-request-cleanup-cb
-                       [::ffi/fn [::mem/long ::mem/long] ::mem/void :raw-fn? true]
-                       arena)]
-
-    {::on-request-cb on-request-cb
-     ::on-request-cleanup-cb on-request-cleanup-cb
-     ::on-request-cb-ptr on-request-cb-ptr
-     ::on-request-cleanup-cb-ptr on-request-cleanup-cb-ptr
-     ::handler-ptr (create-handler* hostconf-ptr on-request-cb-ptr on-request-cleanup-cb-ptr flat-config-ptr)}))
 
 (defcfn handler-set-shutting-down
   "Update the handler shutting_down flag (1 means shutdown in progress)."
@@ -1001,6 +969,37 @@
        :has-body has-body
        :early-data (mem/read-short ctx 110)}})))
 
+(defn create-handler
+  "Creates and configures an H2O handler with its request and cleanup callbacks.
+
+  `hostconf-ptr` and `flat-config-ptr` are native configuration pointers; callback
+  functions receive decoded request data and request identity respectively; `arena`
+  retains the native callback trampolines. Returns the handler pointer and references
+  that keep both trampolines reachable."
+  [hostconf-ptr on-req-callback on-cleanup-callback flat-config-ptr arena]
+  {:pre [(some? hostconf-ptr) (not (mem/null? hostconf-ptr))
+         (fn? on-req-callback)
+         (fn? on-cleanup-callback)
+         (some? flat-config-ptr) (not (mem/null? flat-config-ptr))
+         (some? arena)]}
+  (let [on-request-cb (fn on-request-cb [ctx-ptr]
+                        (int (on-req-callback ctx-ptr
+                                              (copy-request-context ctx-ptr arena))))
+        on-request-cb-ptr (mem/serialize on-request-cb
+                                         [::ffi/fn [::mem/pointer] ::mem/int :raw-fn? true]
+                                         arena)
+        on-request-cleanup-cb (fn on-request-cleanup-cb [module-id request-seq]
+                                (on-cleanup-callback module-id request-seq))
+        on-request-cleanup-cb-ptr
+        (mem/serialize on-request-cleanup-cb
+                       [::ffi/fn [::mem/long ::mem/long] ::mem/void :raw-fn? true]
+                       arena)]
+    {::on-request-cb on-request-cb
+     ::on-request-cleanup-cb on-request-cleanup-cb
+     ::on-request-cb-ptr on-request-cb-ptr
+     ::on-request-cleanup-cb-ptr on-request-cleanup-cb-ptr
+     ::handler-ptr (create-handler* hostconf-ptr on-request-cb-ptr
+                                    on-request-cleanup-cb-ptr flat-config-ptr)}))
 (defn- force-overlay-request
   ^clojure.lang.IPersistentMap [^clojure.lang.Delay request_ overlay removed]
   (reduce dissoc (merge @request_ overlay) removed))

@@ -4,6 +4,7 @@
    [clojure.java.io :as io]
    [clojure.string :as str]
    [ol.busker.fixed-final :as fixed-final]
+   [ol.busker.response-serialization :as serialization]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as p]
@@ -241,12 +242,14 @@
                (or (not (string? body))
                    (nil? charset)
                    (utf8-charset? charset)))
-      (let [[header-staging-bytes header-payload-bytes]
-            (fixed-final/header-sizes headers)]
+      (let [header-payload-bytes (fixed-final/header-utf8-bytes headers)
+            header-staging-bytes (+ (serialization/descriptor-bytes headers)
+                                    header-payload-bytes
+                                    (* 2 (count headers)))]
         (when (and (<= (count headers) fixed-final/max-header-pairs)
                    (<= header-staging-bytes fixed-final/max-header-staging-bytes))
           (let [body-length (if (string? body)
-                              (fixed-final/utf8-length body)
+                              (serialization/utf8-length body)
                               (alength ^bytes body))]
             (when (<= body-length
                       (min output-buffer-size
@@ -260,15 +263,11 @@
                                               (or (get-in req [:config :compress-min-size]) 0)))
                                     h2o/H2O_COMPRESS_HINT_DISABLE
                                     compress-hint)]
-                (DirectResponsePlan. (long (:dispatch-module-id req))
-                                     (long (:dispatch-request-seq req))
-                                     (long status)
-                                     headers
-                                     (long header-payload-bytes)
-                                     body
-                                     (long body-length)
-                                     (long content-length)
-                                     (long compress-hint))))))))))
+                (fixed-final/direct-response-plan
+                 (long (:dispatch-module-id req))
+                 (long (:dispatch-request-seq req))
+                 (long status) headers (long header-payload-bytes) body
+                 (long body-length) (long content-length) (long compress-hint))))))))))
 
 (defn- fixed-final-command-from-data
   [^Request req ^DirectResponsePlan plan]
@@ -277,15 +276,11 @@
         body (.-body plan)
         content-length (.-content-length plan)
         compress-hint (.-compress-hint plan)
-        [encoded-headers header-staging-bytes] (fixed-final/encode-headers headers)
+        header-staging-bytes (fixed-final/header-staging-bytes headers)
         body-bytes (fixed-final-body-bytes body)]
     (fixed-final/prepared-command (:dispatch-module-id req)
-                                  (:dispatch-request-seq req)
-                                  status
-                                  encoded-headers
-                                  header-staging-bytes
-                                  content-length
-                                  compress-hint
+                                  (:dispatch-request-seq req) status headers
+                                  header-staging-bytes content-length compress-hint
                                   body-bytes)))
 
 (defn- schedule-fixed-final!
@@ -374,10 +369,6 @@
       (streamable-response-body? chunk)  (throw (ex-info "StreamableResponseBody chunk requires close-after? true" {:type (class chunk)}))
       :else                              (throw (ex-info "Unsupported response chunk" {:type (class chunk)})))))
 
-(defn- start-virtual-thread!
-  [^Runnable task]
-  (Thread/startVirtualThread task))
-
 (defn- run-close-callbacks!
   [callbacks]
   (doseq [callback callbacks]
@@ -415,7 +406,7 @@
     (try
       (callback-dispatch task)
       (catch Throwable _
-        (start-virtual-thread! task)))))
+        (Thread/startVirtualThread task)))))
 
 (defn- terminal!
   [lifecycle-lock lifecycle_ callback-tail_ callback-dispatch]
@@ -532,7 +523,7 @@
 
 (defn new-response-emitter
   ([req]
-   (new-response-emitter req start-virtual-thread!))
+   (new-response-emitter req Thread/startVirtualThread))
   ([req callback-dispatch]
    (let [write-resp (delay (response-queue/create-response-writer req))
          committed_ (atom nil)

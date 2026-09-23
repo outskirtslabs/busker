@@ -1,4 +1,12 @@
 (ns ^:no-doc ol.busker.response-queue
+  "Queues and drains streaming response output with byte-based backpressure.
+
+  Key functions create writers, accept body chunks, and coordinate native writable callbacks.
+
+  ## Related Namespaces
+
+  - [[ol.busker.byte-bounded-queue]] accounts queued bytes.
+  - [[ol.busker.response-channel]] exposes writable response channels."
   (:require
    [coffi.mem :as mem]
    [ol.busker.buffer-pool :as bp]

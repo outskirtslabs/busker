@@ -1,8 +1,12 @@
 (ns ^:no-doc ol.busker.request
+  "Adapts native request callbacks to Ring-compatible request processing.
+
+  Key functions create streaming request-body channels, dispatch handlers on virtual threads,
+  and coordinate callback completion with [[ol.busker.evloop]]."
   (:require
    [coffi.mem :as mem]
    [ol.busker.callback-dispatch :as callback-dispatch]
-   [ol.busker.evloop :as evloop]
+   [ol.busker.worker-context :as worker-context]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.response :as response])
@@ -106,10 +110,10 @@
 
 (defn on-request
   [^ExecutorService executor close-callback-dispatch config ring-handler req-ctx-ptr req-ctx]
-  (if-not (pi/running? (evloop/get-current-worker))
+  (if-not (pi/running? (worker-context/get-current-worker))
     h2o/CLJ_HANDLER_SHUTTING_DOWN
     (try
-      (let [worker (evloop/get-current-worker)
+      (let [worker (worker-context/get-current-worker)
             dispatch (:callback-dispatch worker)
             [module-id request-seq] (callback-dispatch/allocate-identity! dispatch)
             callback-pointers (callback-dispatch/callback-pointers dispatch)
@@ -159,7 +163,7 @@
   "Retires request state using the scalar dispatch identity from native cleanup."
   [module-id request-seq]
   (try
-    (when-let [worker (evloop/get-current-worker)]
+    (when-let [worker (worker-context/get-current-worker)]
       (callback-dispatch/retire! (:callback-dispatch worker) module-id request-seq))
     (catch Exception e
       (h2o/report-almost-fatal-error "The request cleanup callback errored" e))))

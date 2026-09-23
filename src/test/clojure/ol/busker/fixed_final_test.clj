@@ -5,8 +5,8 @@
    [coffi.mem :as mem]
    [ol.busker :as busker]
    [ol.busker.callback-dispatch :as callback-dispatch]
-   [ol.busker.evloop :as evloop]
    [ol.busker.fixed-final :as fixed-final]
+   [ol.busker.worker-context :as worker-context]
    [ol.busker.generation :as generation]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
@@ -16,7 +16,6 @@
    [java.lang.foreign MemorySegment]
    [java.net InetSocketAddress Socket]
    [java.nio.charset StandardCharsets]
-   [ol.busker.fixed_final DirectResponsePlan]
    [java.util.concurrent.atomic AtomicBoolean AtomicReference]
    [java.util.concurrent.locks ReentrantReadWriteLock]))
 
@@ -24,22 +23,18 @@
   ([^bytes body]
    (prepared-command 1 1 200 [["content-type" "text/plain"]] 2 body))
   ([module-id request-seq status headers compress-hint ^bytes body]
-   (let [[encoded-headers header-staging-bytes] (fixed-final/encode-headers headers)
+   (let [header-staging-bytes (fixed-final/header-staging-bytes headers)
          body-length (alength body)]
-     (fixed-final/prepared-command module-id request-seq status encoded-headers
+     (fixed-final/prepared-command module-id request-seq status headers
                                    header-staging-bytes body-length compress-hint body))))
 
 (defn- direct-plan
   [module-id request-seq status headers content-length compress-hint body body-length]
-  (DirectResponsePlan. (long module-id)
-                       (long request-seq)
-                       (long status)
-                       headers
-                       (fixed-final/header-utf8-bytes headers)
-                       body
-                       (long body-length)
-                       (long content-length)
-                       (long compress-hint)))
+  (fixed-final/direct-response-plan (long module-id) (long request-seq)
+                                    (long status) headers
+                                    (fixed-final/header-utf8-bytes headers) body
+                                    (long body-length) (long content-length)
+                                    (long compress-hint)))
 
 (defn- direct-response-worker
   [receiver response-slots response-slot-payload-capacity]
@@ -83,7 +78,10 @@
              slot 64 (direct-plan 1 1 200 headers 3 2 body 3))
           data (mem/deserialize (mem/slice slot 0 data-size)
                                 ::h2o/clj-fixed-response-slot-data-t)
-          header (first (:headers data))
+          staged-headers (mapv (fn [{:keys [name name_len value value_len]}]
+                                 [(h2o/->string name name_len)
+                                  (h2o/->string value value_len)])
+                               (take (:headers-len data) (:headers data)))
           payload (mem/read-bytes (mem/slice slot data-size 64)
                                   (long (:payload-len data)))]
       (is (= {:module-id 1
@@ -96,15 +94,41 @@
               :payload-len 25
               :status 200
               :compress-hint 2
-              :header {:name-offset 0
-                       :name-len 12
-                       :value-offset 12
-                       :value-len 10}
+              :headers [["content-type" "text/plain"]]
               :payload "content-typetext/plaincat"}
              (assoc (dissoc data :headers)
-                    :header header
+                    :headers staged-headers
                     :payload (String. payload StandardCharsets/UTF_8)))))))
 
+(deftest direct-response-slot-enforces-exact-header-and-payload-limits
+  (with-open [arena (mem/confined-arena)]
+    (let [headers (mapv (fn [index] [(str "x" index) "v"]) (range fixed-final/max-header-pairs))
+          body (byte-array [1 2 3])
+          header-bytes (fixed-final/header-utf8-bytes headers)
+          payload-capacity (+ header-bytes (alength body))
+          data-size (mem/size-of ::h2o/clj-fixed-response-slot-data-t)
+          slot (mem/alloc (+ data-size (inc payload-capacity)) arena)
+          plan (direct-plan 1 1 200 headers (alength body) 0 body (alength body))]
+      (fixed-final/write-direct-response-slot! slot payload-capacity plan)
+      (let [data (mem/deserialize (mem/slice slot 0 data-size)
+                                  ::h2o/clj-fixed-response-slot-data-t)
+            payload-start (.address ^MemorySegment (mem/slice slot data-size (inc payload-capacity)))
+            payload-end (+ payload-start payload-capacity)
+            descriptors (take (:headers-len data) (:headers data))]
+        (is (= fixed-final/max-header-pairs (:headers-len data)))
+        (is (= payload-capacity (:payload-len data)))
+        (is (every? (fn [{:keys [name name_len value value_len]}]
+                      (and (<= payload-start (.address ^MemorySegment name) payload-end)
+                           (<= name_len (- payload-end (.address ^MemorySegment name)))
+                           (<= payload-start (.address ^MemorySegment value) payload-end)
+                           (<= value_len (- payload-end (.address ^MemorySegment value)))))
+                    descriptors)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                            #"does not fit"
+                            (fixed-final/write-direct-response-slot!
+                             slot payload-capacity
+                             (direct-plan 1 1 200 (conj headers ["overflow" "v"])
+                                          (alength body) 0 body (alength body))))))))
 (deftest direct-response-slot-utf8-matches-java-encoding
   (doseq [body ["ascii" "λ" "🐈" (str (char 0xd800) "x") (str "x" (char 0xdc00))]]
     (with-open [arena (mem/confined-arena)]
@@ -118,6 +142,10 @@
                                (alength expected)))
         (let [data (mem/deserialize (mem/slice slot 0 data-size)
                                     ::h2o/clj-fixed-response-slot-data-t)
+              staged-headers (mapv (fn [{:keys [name name_len value value_len]}]
+                                     [(h2o/->string name name_len)
+                                      (h2o/->string value value_len)])
+                                   (take (:headers-len data) (:headers data)))
               payload (mem/read-bytes (mem/slice slot data-size 128)
                                       (long (:payload-len data)))]
           (is (= {:module-id 7
@@ -131,6 +159,7 @@
                  (select-keys data [:module-id :request-seq :headers-len
                                     :content-length :body-offset :payload-len
                                     :status :compress-hint])))
+          (is (= headers staged-headers))
           (is (= (alength expected) (:body-len data)))
           (is (= (vec expected)
                  (vec (drop header-bytes payload)))))))))
@@ -207,7 +236,7 @@
         staging-calls_ (atom 0)
         first-command (prepared-command (byte-array [65 66 67]))
         second-command (prepared-command (byte-array [88 89]))]
-    (.set evloop/worker-context worker)
+    (.set worker-context/worker-context worker)
     (try
       (is (nil? (.get scratch_)))
       (with-redefs [fixed-final/header-staging-bytes (fn [_]
@@ -247,7 +276,7 @@
                    (mem/read-bytes (:body-segment (first @sent_)) 2)))
       (finally
         (fixed-final/close-worker-scratch! worker)
-        (.remove evloop/worker-context)))))
+        (.remove worker-context/worker-context)))))
 
 (deftest workers-use-separate-fixed-final-scratch
   (let [first-worker {:fixed-final-scratch_ (AtomicReference.)}
@@ -267,14 +296,14 @@
              :req-ctx-ptr :request-context
              :config {:output-buffer-size 3}}
         sent?_ (atom false)]
-    (.set evloop/worker-context worker)
+    (.set worker-context/worker-context worker)
     (try
       (with-redefs [h2o/send-fixed-final (fn [& _] (reset! sent?_ true))]
         (is (thrown? clojure.lang.ExceptionInfo
                      (fixed-final/execute! req (prepared-command (byte-array 4)))))
         (is (false? @sent?_)))
       (finally
-        (.remove evloop/worker-context)))))
+        (.remove worker-context/worker-context)))))
 
 (deftest stale-command-skips-native-work-and-live-command-runs-on-the-worker
   (with-open [arena (mem/shared-arena)]
@@ -286,7 +315,7 @@
           executed_ (AtomicReference.)]
       (callback-dispatch/bind-thread! dispatch (Thread/currentThread))
       (callback-dispatch/register! dispatch module-id 1 req nil)
-      (.set evloop/worker-context worker)
+      (.set worker-context/worker-context worker)
       (try
         (with-redefs [fixed-final/execute!
                       (fn [actual-req actual-command]
@@ -303,7 +332,7 @@
                   :thread (Thread/currentThread)}
                  (.get executed_))))
         (finally
-          (.remove evloop/worker-context))))))
+          (.remove worker-context/worker-context))))))
 
 (defn- fixed-final-server
   []

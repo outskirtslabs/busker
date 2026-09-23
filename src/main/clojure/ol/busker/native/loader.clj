@@ -1,4 +1,12 @@
 (ns ^:no-doc ol.busker.native.loader
+  "Finds and loads the platform-specific Busker native library.
+
+  Key functions select the operating-system architecture and copy packaged resources before
+  FFM resolves shim symbols.
+
+  ## Related Namespaces
+
+  - [[ol.busker.native]] declares the loaded functions."
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]

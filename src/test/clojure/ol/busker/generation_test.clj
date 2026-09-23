@@ -6,6 +6,7 @@
    [ol.busker.config :as config]
    [ol.busker.evloop :as evloop]
    [ol.busker.fixed-final :as fixed-final]
+   [ol.busker.worker-context :as worker-context]
    [ol.busker.generation :as generation]
    [ol.busker.internal.protocols :as p]
    [ol.busker.native :as h2o]
@@ -18,7 +19,6 @@
    [java.lang.foreign Arena]
    [java.net InetSocketAddress Socket]
    [java.nio.charset StandardCharsets]
-   [ol.busker.fixed_final DirectResponsePlan]
    [java.util.concurrent AbstractExecutorService]
    [java.util.concurrent.atomic AtomicBoolean AtomicReference]
    [java.util.concurrent.locks ReentrantReadWriteLock]))
@@ -36,8 +36,8 @@
 
 (defn- direct-plan
   [module-id request-seq ^bytes body]
-  (DirectResponsePlan. (long module-id) (long request-seq) 200 [] 0 body
-                       (alength body) (alength body) 0))
+  (fixed-final/direct-response-plan (long module-id) (long request-seq) 200 [] 0 body
+                                    (alength body) (alength body) 0))
 (defn- connect
   [port]
   (doto (Socket.)
@@ -53,6 +53,18 @@
   [worker claim-handle]
   (nth (:response-slots worker) (response-claim-index claim-handle)))
 
+(deftest fixed-final-constructor-docs-describe-record-fields
+  (doseq [constructor [#'fixed-final/->FixedFinalCommand
+                       #'fixed-final/->DirectResponsePlan
+                       #'fixed-final/->FixedFinalScratch]]
+    (is (string? (:doc (meta constructor)))))
+  (is (.contains ^String (:doc (meta #'fixed-final/->DirectResponsePlan))
+                 "header-bytes")))
+
+(def ^:private response-slot-data-size (mem/size-of ::h2o/clj-fixed-response-slot-data-t))
+(def ^:private response-slot-headers-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :headers))
+(def ^:private clj-header-name-offset (mem/struct-field-offset ::h2o/clj-header-t :name))
+(def ^:private clj-header-name-len-offset (mem/struct-field-offset ::h2o/clj-header-t :name_len))
 (defn- request-stream!
   [^Socket socket path]
   (let [request (.getBytes (str "GET " path " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n")
@@ -142,7 +154,7 @@
         receiver_ (AtomicReference. receiver)
         worker {:wake-endpoint ::endpoint
                 :wakeup-receiver_ receiver_}]
-    (.set evloop/worker-context worker)
+    (.set worker-context/worker-context worker)
     (try
       (with-redefs [wake-notifier/quiesce-endpoint!
                     (fn [endpoint]
@@ -157,7 +169,7 @@
       (is (= [:quiesce :destroy] @events_))
       (is (nil? (.get receiver_)))
       (finally
-        (.remove evloop/worker-context)))))
+        (.remove worker-context/worker-context)))))
 (deftest startup-receiver-without-worker-retires-on-lifecycle-platform-test
   (let [wakeup-receiver (Object.)
         response-receiver (Object.)
@@ -797,6 +809,79 @@
       (finally
         (generation/stop! instance)))))
 
+(deftest response-ring-rejects-malformed-header-descriptors-before-dereference
+  (let [port (util/free-port)
+        instance (generation/start!
+                  (config/load!
+                   {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                         :tls false}}
+                    :dispatch [{:handler (constantly {:status 200 :body "ring-ready"})}]})
+                  nil)]
+    (try
+      (let [worker (first (::generation/workers instance))
+            receiver (.get ^AtomicReference (:response-receiver_ worker))
+            headers [["name" "value"]]
+            body (.getBytes "body" StandardCharsets/UTF_8)
+            plan (fixed-final/direct-response-plan 999 999 200 headers
+                                                   (fixed-final/header-utf8-bytes headers)
+                                                   body (alength body) (alength body) 0)
+            corrupt-and-reject!
+            (fn [corrupt!]
+              (let [claim-handle (h2o/mt-response-try-claim receiver)
+                    slot (response-claim-slot worker claim-handle)
+                    payload (mem/slice slot response-slot-data-size
+                                       (inc (:response-slot-payload-capacity worker)))]
+                (fixed-final/write-direct-response-slot!
+                 slot (:response-slot-payload-capacity worker) plan)
+                (let [target (corrupt! slot payload)
+                      descriptor (mem/deserialize
+                                  (mem/slice slot response-slot-headers-offset
+                                             (mem/size-of ::h2o/clj-header-t))
+                                  ::h2o/clj-header-t)]
+                  (is (= (.address ^java.lang.foreign.MemorySegment target)
+                         (.address ^java.lang.foreign.MemorySegment (:name descriptor)))))
+                (is (zero? (h2o/mt-response-publish receiver claim-handle)))
+                (is (= 1 (h2o/mt-response-abort receiver claim-handle)))
+                (let [reused-handle (h2o/mt-response-try-claim receiver)]
+                  (is (pos? reused-handle))
+                  (is (= 1 (h2o/mt-response-abort receiver reused-handle))))))]
+        (corrupt-and-reject!
+         (fn [slot _]
+           (let [target (mem/as-segment 1)]
+             (mem/write-address slot (+ response-slot-headers-offset clj-header-name-offset) target)
+             target)))
+        (corrupt-and-reject!
+         (fn [slot payload]
+           (let [target (mem/slice payload
+                                   (:response-slot-payload-capacity worker) 1)]
+             (mem/write-address slot (+ response-slot-headers-offset clj-header-name-offset) target)
+             target)))
+        (corrupt-and-reject!
+         (fn [slot payload]
+           (mem/write-address slot (+ response-slot-headers-offset clj-header-name-offset) payload)
+           (mem/write-long slot (+ response-slot-headers-offset clj-header-name-len-offset)
+                           Long/MAX_VALUE)
+           payload))
+        (let [claim-handle (h2o/mt-response-try-claim receiver)
+              slot (response-claim-slot worker claim-handle)
+              payload (mem/slice slot response-slot-data-size
+                                 (inc (:response-slot-payload-capacity worker)))]
+          (fixed-final/write-direct-response-slot!
+           slot (:response-slot-payload-capacity worker) plan)
+          (mem/write-address slot (+ response-slot-headers-offset clj-header-name-offset)
+                             (mem/slice payload
+                                        (long (fixed-final/header-utf8-bytes headers)) 1))
+          (mem/write-long slot (+ response-slot-headers-offset clj-header-name-len-offset) 0)
+          (is (= 1 (h2o/mt-response-publish receiver claim-handle)))
+          (p/wake worker)
+          (loop [remaining 200]
+            (when (and (pos? remaining) (pos? (h2o/mt-response-ring-ready receiver)))
+              (Thread/sleep (long 10))
+              (recur (dec remaining))))
+          (is (zero? (h2o/mt-response-ring-ready receiver)))
+          (is (zero? (h2o/mt-response-claimed receiver)))))
+      (finally
+        (generation/stop! instance)))))
 (deftest response-ring-claim-and-abort-remain-bounded-under-contention
   (let [port (util/free-port)
         instance (generation/start!
@@ -1081,7 +1166,7 @@
                              {:arena arena
                               :active? (boolean (some-> ^Arena arena .scope .isAlive))
                               :virtual? (.isVirtual (Thread/currentThread))
-                              :worker? (some? (evloop/get-current-worker))})
+                              :worker? (some? (worker-context/get-current-worker))})
                     (if arena
                       (copy-request-context ctx-ptr arena)
                       (copy-request-context ctx-ptr)))]
@@ -1132,7 +1217,7 @@
                   (let [entry {:case   @case_
                                :event  event
                                :thread (Thread/currentThread)
-                               :worker (evloop/get-current-worker)}]
+                               :worker (worker-context/get-current-worker)}]
                     (swap! events_ conj entry)
                     (when (= :proceed event)
                       (case @case_

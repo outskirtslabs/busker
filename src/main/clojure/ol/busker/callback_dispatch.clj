@@ -1,4 +1,13 @@
 (ns ^:no-doc ol.busker.callback-dispatch
+  "Maps native callback identities to live requests and response emitters.
+
+  Key functions register and retire request entries, allocate callback identities, and dispatch
+  native body, proceed, and stop callbacks.
+
+  ## Related Namespaces
+
+  - [[ol.busker.generation]] creates dispatch tables.
+  - [[ol.busker.response]] handles response callbacks."
   (:require
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]

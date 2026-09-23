@@ -1,5 +1,13 @@
 (ns ^:no-doc ol.busker.runtime
-  "Multi-generation runtime lifecycle for Busker."
+  "Coordinates the active Busker generation and process lifecycle.
+
+  Key functions start a runtime, publish a new generation, drain the prior generation, and
+  stop lifecycle services such as listeners, certificates, and wake notification.
+
+  ## Related Namespaces
+
+  - [[ol.busker.generation]] manages one native generation.
+  - [[ol.busker.listen]] manages listener resources."
   (:require
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.config :as config]

@@ -36,6 +36,9 @@
       :fixed-final-scratch_ (AtomicReference.)
       :requests (HashMap.)})))
 
+(deftest worker-directly-implements-worker-thread
+  (is (instance? ol.busker.internal.protocols.WorkerThread
+                 (worker (fn [_ _]) 1 nil))))
 (defn- drain! [worker]
   (@#'evloop/drain-mailbox! worker))
 

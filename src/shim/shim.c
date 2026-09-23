@@ -945,6 +945,24 @@ response_slot_payload(clj_fixed_response_slot_data_t *data) {
   return (unsigned char *)data + sizeof(*data);
 }
 
+static bool response_pointer_range_valid(const char *value, size_t value_len,
+                                         const unsigned char *payload,
+                                         size_t payload_len) {
+  if (value == NULL)
+    return false;
+
+  uintptr_t payload_start = (uintptr_t)payload;
+  if (payload_len > UINTPTR_MAX - payload_start)
+    return false;
+
+  uintptr_t payload_end = payload_start + payload_len;
+  uintptr_t value_start = (uintptr_t)value;
+  if (value_start < payload_start || value_start > payload_end)
+    return false;
+
+  return value_len <= payload_end - value_start;
+}
+
 static bool response_slot_data_valid(clj_mt_receiver_t *receiver,
                                      clj_fixed_response_slot_data_t *data) {
   if (receiver == NULL || data == NULL || data->module_id == 0 ||
@@ -955,12 +973,13 @@ static bool response_slot_data_valid(clj_mt_receiver_t *receiver,
                             data->payload_len))
     return false;
 
+  const unsigned char *payload = response_slot_payload(data);
   for (size_t index = 0; index < data->headers_len; ++index) {
-    const clj_packed_header_t *header = data->headers + index;
-    if (!response_range_valid(header->name_offset, header->name_len,
-                              data->payload_len) ||
-        !response_range_valid(header->value_offset, header->value_len,
-                              data->payload_len))
+    const clj_header_t *header = data->headers + index;
+    if (!response_pointer_range_valid(header->name, header->name_len, payload,
+                                      data->payload_len) ||
+        !response_pointer_range_valid(header->value, header->value_len, payload,
+                                      data->payload_len))
       return false;
   }
   return true;
@@ -1087,20 +1106,8 @@ size_t clj_h2o_response_ring_drain(clj_mt_receiver_t *receiver) {
           response_request(receiver, data->module_id, data->request_seq);
       if (ctx != NULL) {
         unsigned char *payload = response_slot_payload(data);
-        clj_header_t headers[CLJ_RESPONSE_MAX_HEADERS];
-        for (size_t header_index = 0; header_index < data->headers_len;
-             ++header_index) {
-          const clj_packed_header_t *packed = data->headers + header_index;
-          headers[header_index].name =
-              (const char *)payload + packed->name_offset;
-          headers[header_index].name_len = packed->name_len;
-          headers[header_index].value =
-              (const char *)payload + packed->value_offset;
-          headers[header_index].value_len = packed->value_len;
-        }
-
         clj_h2o_send_fixed_final(
-            ctx, data->status, headers, data->headers_len,
+            ctx, data->status, data->headers, data->headers_len,
             data->content_length, data->compress_hint,
             (const char *)payload + data->body_offset, data->body_len);
       }

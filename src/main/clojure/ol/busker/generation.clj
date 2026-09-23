@@ -1,4 +1,13 @@
 (ns ^:no-doc ol.busker.generation
+  "Starts, drains, reloads, and stops one native server generation.
+
+  Key functions create workers and native contexts, coordinate graceful draining, and release
+  receivers and arenas after active work ends.
+
+  ## Related Namespaces
+
+  - [[ol.busker.runtime]] selects active generations.
+  - [[ol.busker.evloop]] runs worker threads."
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]
@@ -10,6 +19,7 @@
    [ol.busker.config :as config]
    [ol.busker.fixed-final :as fixed-final]
    [ol.busker.evloop :as evloop]
+   [ol.busker.worker-context :as worker-context]
    [ol.busker.internal.protocols :as p]
    [ol.busker.listen :as listen]
    [ol.busker.native :as h2o]
@@ -72,14 +82,14 @@
 
 (defn- with-live-request
   [module-id request-seq f]
-  (when-let [worker (evloop/get-current-worker)]
+  (when-let [worker (worker-context/get-current-worker)]
     (when-let [[req _] (callback-dispatch/entry (:callback-dispatch worker)
                                                 module-id request-seq)]
       (f req))))
 
 (defn- retire-current-wakeup-receiver!
   []
-  (when-let [worker (evloop/get-current-worker)]
+  (when-let [worker (worker-context/get-current-worker)]
     (when-let [endpoint (:wake-endpoint worker)]
       (wake-notifier/quiesce-endpoint! endpoint))
     (let [^AtomicReference receiver_ (:wakeup-receiver_ worker)

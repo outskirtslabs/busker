@@ -49,12 +49,6 @@ typedef struct {
 
 #define CLJ_RESPONSE_MAX_HEADERS 64
 
-typedef struct {
-  uint32_t name_offset;
-  uint32_t name_len;
-  uint32_t value_offset;
-  uint32_t value_len;
-} clj_packed_header_t;
 
 typedef struct {
   uint64_t claim_token;
@@ -67,7 +61,7 @@ typedef struct {
   size_t payload_len;
   int status;
   int compress_hint;
-  clj_packed_header_t headers[CLJ_RESPONSE_MAX_HEADERS];
+  clj_header_t headers[CLJ_RESPONSE_MAX_HEADERS];
 } clj_fixed_response_slot_data_t;
 
 typedef struct {

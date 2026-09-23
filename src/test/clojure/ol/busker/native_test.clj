@@ -114,7 +114,7 @@
             :metadata (meta overlaid)}))))
 
 (deftest response-slot-layout-matches-native
-  (is (= 1096
+  (is (= 2120
          (mem/size-of :ol.busker.native/clj-fixed-response-slot-data-t)
          (native/mt-response-slot-data-size)))
   (doseq [[field expected] {:claim-token 0
@@ -130,13 +130,13 @@
                             :headers 72}]
     (is (= expected
            (native/offset-of :ol.busker.native/clj-fixed-response-slot-data-t field))))
-  (is (= 16 (mem/size-of :ol.busker.native/clj-packed-header-t)))
-  (doseq [[field expected] {:name-offset 0
-                            :name-len 4
-                            :value-offset 8
-                            :value-len 12}]
+  (is (= 32 (mem/size-of :ol.busker.native/clj-header-t)))
+  (doseq [[field expected] {:name 0
+                            :name_len 8
+                            :value 16
+                            :value_len 24}]
     (is (= expected
-           (native/offset-of :ol.busker.native/clj-packed-header-t field)))))
+           (native/offset-of :ol.busker.native/clj-header-t field)))))
 (defn- copied-request-context [arena]
   (let [request (mem/alloc 1 arena)
         string-pointer #(mem/serialize % ::mem/c-string arena)

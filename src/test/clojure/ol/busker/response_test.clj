@@ -378,9 +378,7 @@
   (let [body (byte-array [1 2 3])
         admitted_ (atom nil)
         writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))]
-    (with-redefs-fn {#'fixed-final/encode-headers
-                     (fn [& _] (throw (ex-info "Unexpected header encoding" {})))
-                     #'response/schedule-fixed-final!
+    (with-redefs-fn {#'response/schedule-fixed-final!
                      (fn [_ data]
                        (reset! admitted_ data)
                        :accepted)}

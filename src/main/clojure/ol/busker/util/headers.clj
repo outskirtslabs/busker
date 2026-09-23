@@ -22,6 +22,10 @@
 ;; FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 ;; OTHER DEALINGS IN THE SOFTWARE.
 (ns ^:no-doc ol.busker.util.headers
+  "Imported Ring-compatible HTTP header helpers.
+
+  This adapted helper provides case-insensitive lookup, charset extraction, and response
+  header updates. See the preserved upstream copyright notice."
   (:require
    [ol.busker.util.parsing :as parsing]
    [taoensso.trove :as trove]))

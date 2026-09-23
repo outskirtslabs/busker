@@ -1,4 +1,13 @@
 (ns ^:no-doc ol.busker.response-channel
+  "Provides native-backed writable channels for streaming response bodies.
+
+  Key functions create response channels, aggregate small writes, and signal native response
+  progress without blocking application virtual threads.
+
+  ## Related Namespaces
+
+  - [[ol.busker.response-queue]] schedules output.
+  - [[ol.busker.response]] selects response delivery."
   (:require
    [coffi.ffi :as ffi]
    [coffi.mem :as mem]

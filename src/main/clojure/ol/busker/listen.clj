@@ -1,4 +1,12 @@
 (ns ^:no-doc ol.busker.listen
+  "Creates, validates, and releases configured TCP and Unix listener resources.
+
+  Key functions derive listener keys, bind native listeners, and report setup errors.
+
+  ## Related Namespaces
+
+  - [[ol.busker.native.socket]] opens listener file descriptors.
+  - [[ol.busker.generation]] installs listeners into workers."
   (:require
    [coffi.mem :as mem]
    [ol.busker.native :as h2o]

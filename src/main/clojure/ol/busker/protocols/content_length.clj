@@ -26,6 +26,10 @@
 ;; one day it may make it into the ring spec.
 
 (ns ^:no-doc ol.busker.protocols.content-length
+  "Imported Ring content-length protocol extensions.
+
+  This adapted Ring helper implements [[ol.busker.protocols/SizableResponseBody]] for byte
+  arrays, strings, files, and unknown objects. See the preserved upstream source notice."
   (:require
    [ol.busker.protocols :as p]
    [ol.busker.util.headers :as hdr.util]))

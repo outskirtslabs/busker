@@ -1,8 +1,22 @@
 (ns ^:no-doc ol.busker.fixed-final
+  "Prepares and delivers complete final responses on the worker response paths.
+
+  Direct plans write retained `clj_header_t` descriptors and payload bytes into a claimed
+  response-ring slot. FIFO commands stage the same descriptor representation in worker
+  scratch storage. [[try-publish-direct-response!]] never waits; [[execute!]] runs on
+  the event-loop thread when response ordering requires the mailbox path.
+
+  ## Related Namespaces
+
+  - [[ol.busker.response]] chooses direct or FIFO final delivery.
+  - [[ol.busker.response-serialization]] stages shared header descriptors.
+  - [[ol.busker.response-head]] sends streaming response heads."
   (:require
    [coffi.mem :as mem]
    [ol.busker.internal.protocols :as pi]
-   [ol.busker.native :as h2o])
+   [ol.busker.native :as h2o]
+   [ol.busker.response-serialization :as serialization]
+   [ol.busker.worker-context :as worker-context])
   (:import
    [java.lang.foreign Arena MemorySegment]
    [java.nio.charset StandardCharsets]
@@ -17,46 +31,21 @@
 (def ^:const response-ring-max-body-bytes 32768)
 (def ^:private response-claim-index-mask 0xffff)
 
-(def ^:private get-current-worker
-  (delay (requiring-resolve 'ol.busker.evloop/get-current-worker)))
+;; On supported 64-bit targets `clj_header_t` is 32 bytes. The 64 retained descriptors
+;; add 1024 bytes to each response slot (2120 bytes of metadata total), or 256 KiB per
+;; 256-slot worker compared with the former 16-byte packed-descriptor representation.
 
-(def ^:private clj-header-size (mem/size-of ::h2o/clj-header-t))
-(def ^:private clj-header-name-offset (mem/struct-field-offset ::h2o/clj-header-t :name))
-(def ^:private clj-header-name-len-offset (mem/struct-field-offset ::h2o/clj-header-t :name_len))
-(def ^:private clj-header-value-offset (mem/struct-field-offset ::h2o/clj-header-t :value))
-(def ^:private clj-header-value-len-offset (mem/struct-field-offset ::h2o/clj-header-t :value_len))
-
-(def ^:private response-slot-data-size
-  (mem/size-of ::h2o/clj-fixed-response-slot-data-t))
-(def ^:private response-slot-module-id-offset
-  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :module-id))
-(def ^:private response-slot-request-seq-offset
-  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :request-seq))
-(def ^:private response-slot-headers-len-offset
-  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :headers-len))
-(def ^:private response-slot-content-length-offset
-  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :content-length))
-(def ^:private response-slot-body-offset-offset
-  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :body-offset))
-(def ^:private response-slot-body-len-offset
-  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :body-len))
-(def ^:private response-slot-payload-len-offset
-  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :payload-len))
-(def ^:private response-slot-status-offset
-  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :status))
-(def ^:private response-slot-compress-hint-offset
-  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :compress-hint))
-(def ^:private response-slot-headers-offset
-  (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :headers))
-(def ^:private packed-header-size (mem/size-of ::h2o/clj-packed-header-t))
-(def ^:private packed-name-offset
-  (mem/struct-field-offset ::h2o/clj-packed-header-t :name-offset))
-(def ^:private packed-name-len-offset
-  (mem/struct-field-offset ::h2o/clj-packed-header-t :name-len))
-(def ^:private packed-value-offset
-  (mem/struct-field-offset ::h2o/clj-packed-header-t :value-offset))
-(def ^:private packed-value-len-offset
-  (mem/struct-field-offset ::h2o/clj-packed-header-t :value-len))
+(def ^:private response-slot-data-size (mem/size-of ::h2o/clj-fixed-response-slot-data-t))
+(def ^:private response-slot-module-id-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :module-id))
+(def ^:private response-slot-request-seq-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :request-seq))
+(def ^:private response-slot-headers-len-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :headers-len))
+(def ^:private response-slot-content-length-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :content-length))
+(def ^:private response-slot-body-offset-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :body-offset))
+(def ^:private response-slot-body-len-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :body-len))
+(def ^:private response-slot-payload-len-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :payload-len))
+(def ^:private response-slot-status-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :status))
+(def ^:private response-slot-compress-hint-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :compress-hint))
+(def ^:private response-slot-headers-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :headers))
 
 (defrecord FixedFinalCommand [^long module-id
                               ^long request-seq
@@ -78,6 +67,13 @@
                              ^long compress-hint])
 (deftype FixedFinalScratch [^Arena arena ^MemorySegment segment ^long capacity])
 
+(alter-meta! #'->FixedFinalCommand assoc :doc
+             "Creates a FIFO fixed-final command. `module-id` and `request-seq` select the request; `status`, `headers`, `content-length`, and `compress-hint` describe the final response; `header-staging-bytes` is the native staging requirement; `body` is the byte payload.")
+(alter-meta! #'->DirectResponsePlan assoc :doc
+             "Creates a direct response-ring plan. `module-id` and `request-seq` select the request; `status`, `headers`, and `header-bytes` describe the response head; `body`, `body-length`, and `content-length` describe the final payload; `compress-hint` selects native compression handling.")
+(alter-meta! #'->FixedFinalScratch assoc :doc
+             "Creates worker-local FIFO staging storage. `arena` retains native storage, `segment` holds serialized headers and body bytes, and `capacity` is its byte capacity.")
+
 (defn command-module-id
   ^long [^FixedFinalCommand command]
   (.-module-id command))
@@ -86,79 +82,27 @@
   ^long [^FixedFinalCommand command]
   (.-request-seq command))
 
-(declare header-sizes utf8-length)
-(defn encode-headers
-  "Returns encoded header pairs and their native staging size."
-  [headers]
-  (reduce
-   (fn [[result ^long total] [^String name ^String value]]
-     (let [name-bytes (.getBytes name StandardCharsets/UTF_8)
-           value-bytes (.getBytes value StandardCharsets/UTF_8)]
-       [(conj result [name-bytes value-bytes])
-        (+ total
-           (long clj-header-size)
-           (inc (alength name-bytes))
-           (inc (alength value-bytes)))]))
-   [[] 0]
-   headers))
-
 (defn header-staging-bytes
-  "Returns the native descriptor and UTF-8 string space for `headers`."
+  "Returns the established descriptor and C-string budget for `headers`."
   ^long [headers]
-  (long (first (header-sizes headers))))
-
-(defn ^:no-doc prepared-command
-  [module-id request-seq status headers header-bytes content-length compress-hint body]
-  (->FixedFinalCommand module-id request-seq status headers header-bytes
-                       content-length compress-hint body))
-
-(def ^:private byte-array-class (Class/forName "[B"))
-
-(defn ^:no-doc utf8-length
-  ^long [^String value]
-  (loop [index (long 0)
-         length (long 0)]
-    (if (< index (.length value))
-      (let [character (int (.charAt value index))]
-        (cond
-          (< character 0x80)
-          (recur (unchecked-inc index) (unchecked-inc length))
-
-          (< character 0x800)
-          (recur (unchecked-inc index) (+ length 2))
-
-          (Character/isHighSurrogate (char character))
-          (if (and (< (unchecked-inc index) (.length value))
-                   (Character/isLowSurrogate (.charAt value (unchecked-inc index))))
-            (recur (+ index 2) (+ length 4))
-            (recur (unchecked-inc index) (unchecked-inc length)))
-
-          (Character/isLowSurrogate (char character))
-          (recur (unchecked-inc index) (unchecked-inc length))
-
-          :else
-          (recur (unchecked-inc index) (+ length 3))))
-      length)))
-
-(defn ^:no-doc header-sizes
-  "Returns `[native-staging-bytes packed-utf8-bytes]` for string header pairs."
-  [headers]
-  (loop [index (long 0)
-         staging-bytes (long 0)
-         packed-bytes (long 0)]
-    (if (< index (count headers))
-      (let [[^String name ^String value] (nth headers index)
-            name-length (utf8-length name)
-            value-length (utf8-length value)]
-        (recur (unchecked-inc index)
-               (long (+ staging-bytes (long clj-header-size)
-                        name-length value-length 2))
-               (long (+ packed-bytes name-length value-length))))
-      [staging-bytes packed-bytes])))
+  (serialization/header-staging-bytes headers))
 
 (defn ^:no-doc header-utf8-bytes
   ^long [headers]
-  (long (second (header-sizes headers))))
+  (serialization/header-bytes headers))
+
+(defn ^:no-doc prepared-command
+  [module-id request-seq status headers header-staging-bytes content-length compress-hint body]
+  (->FixedFinalCommand module-id request-seq status headers header-staging-bytes
+                       content-length compress-hint body))
+
+(defn direct-response-plan
+  "Creates an eligible fixed-final plan without exposing its representation."
+  [module-id request-seq status headers header-bytes body body-length content-length compress-hint]
+  (DirectResponsePlan. module-id request-seq status headers header-bytes body body-length
+                       content-length compress-hint))
+
+(def ^:private byte-array-class (Class/forName "[B"))
 
 (defn- write-utf8!
   ^long [^MemorySegment segment ^long offset ^String value ^long length]
@@ -186,26 +130,9 @@
                        :payload-capacity payload-capacity})))
     (let [data slot
           payload (mem/slice data response-slot-data-size (inc payload-capacity))
-          body-offset
-          (loop [index (long 0)
-                 cursor (long 0)]
-            (if (< index (count headers))
-              (let [[^String name ^String value] (nth headers index)
-                    name-offset cursor
-                    name-length (utf8-length name)
-                    value-offset (write-utf8! payload name-offset name name-length)
-                    value-length (utf8-length value)
-                    next-cursor (write-utf8! payload value-offset value value-length)
-                    descriptor (+ response-slot-headers-offset
-                                  (* index packed-header-size))]
-                (mem/write-int data (+ descriptor packed-name-offset) name-offset)
-                (mem/write-int data (+ descriptor packed-name-len-offset)
-                               (- value-offset name-offset))
-                (mem/write-int data (+ descriptor packed-value-offset) value-offset)
-                (mem/write-int data (+ descriptor packed-value-len-offset)
-                               (- next-cursor value-offset))
-                (recur (unchecked-inc index) next-cursor))
-              cursor))]
+          descriptors (mem/slice data response-slot-headers-offset
+                                 (serialization/descriptor-bytes headers))
+          body-offset (serialization/stage-headers! descriptors payload headers)]
       (when-not (= header-bytes body-offset)
         (throw (ex-info "Fixed response header size changed while packing"
                         {:expected header-bytes :actual body-offset})))
@@ -303,41 +230,24 @@
         (.close arena)))))
 
 (defn- stage-segments
-  [^MemorySegment segment headers ^long header-bytes ^bytes body]
+  [^MemorySegment segment headers ^bytes body]
   (let [header-count (long (count headers))
-        descriptors-size (* header-count (long clj-header-size))
+        descriptor-bytes (serialization/descriptor-bytes headers)
         body-length (long (alength body))
         headers-segment (if (zero? header-count)
                           (mem/as-segment 0)
-                          (mem/slice segment 0 descriptors-size))]
-    (loop [idx (long 0)
-           cursor descriptors-size]
-      (when (< idx header-count)
-        (let [[^bytes name-bytes ^bytes value-bytes] (nth headers idx)
-              name-length (long (alength name-bytes))
-              name-segment (mem/slice segment cursor (inc name-length))
-              value-offset (+ cursor name-length 1)
-              value-length (long (alength value-bytes))
-              value-segment (mem/slice segment value-offset (inc value-length))
-              descriptor-offset (* idx (long clj-header-size))]
-          (mem/write-bytes name-segment name-length name-bytes)
-          (mem/write-byte name-segment name-length (byte 0))
-          (mem/write-bytes value-segment value-length value-bytes)
-          (mem/write-byte value-segment value-length (byte 0))
-          (mem/write-address headers-segment (+ descriptor-offset (long clj-header-name-offset)) name-segment)
-          (mem/write-int headers-segment (+ descriptor-offset (long clj-header-name-len-offset)) name-length)
-          (mem/write-address headers-segment (+ descriptor-offset (long clj-header-value-offset)) value-segment)
-          (mem/write-int headers-segment (+ descriptor-offset (long clj-header-value-len-offset)) value-length)
-          (recur (unchecked-inc idx) (+ value-offset value-length 1)))))
-    (let [body-segment (mem/slice segment header-bytes (max 1 body-length))]
-      (when (pos? body-length)
-        (mem/write-bytes body-segment body-length body))
-      [headers-segment body-segment])))
-
+                          (mem/slice segment 0 descriptor-bytes))
+        payload (mem/slice segment descriptor-bytes
+                           (inc (+ (serialization/header-bytes headers) body-length)))
+        body-offset (serialization/stage-headers! headers-segment payload headers)
+        body-segment (mem/slice payload body-offset (max 1 body-length))]
+    (when (pos? body-length)
+      (mem/write-bytes body-segment body-length 0 body))
+    [headers-segment body-segment]))
 (defn execute!
   "Stages `command` on its event-loop worker and sends it synchronously."
   [req ^FixedFinalCommand command]
-  (when-not (identical? (:worker req) (@get-current-worker))
+  (when-not (identical? (:worker req) (worker-context/get-current-worker))
     (throw (ex-info "Fixed final command ran outside its event-loop worker" {})))
   (let [headers (.-headers command)
         ^bytes body (.-body command)
@@ -354,7 +264,7 @@
         (throw (ex-info "Fixed final command exceeded its staging budget" {})))
       (let [scratch-segment (worker-scratch-segment (:worker req) body-limit)
             [headers-segment body-segment]
-            (stage-segments scratch-segment headers header-bytes body)]
+            (stage-segments scratch-segment headers body)]
         (h2o/send-fixed-final (:req-ctx-ptr req)
                               (.-status command)
                               headers-segment

@@ -1,4 +1,12 @@
 (ns ^:no-doc ol.busker.util
+  "Internal parsing and compile-time utility functions.
+
+  Key functions parse listener ports and addresses, normalize values, and provide
+  [[compile-if]] for optional compile-time forms.
+
+  ## Related Namespaces
+
+  - [[ol.busker.config]] compiles server configuration."
   (:require
    [clojure.string :as str]
    [ol.clave.crypto.impl.parse-ip :as parse-ip]))
