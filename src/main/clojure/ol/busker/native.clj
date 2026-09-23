@@ -673,7 +673,13 @@
   [::mem/pointer] ::mem/long)
 
 (defn mt-response-try-claim
-  "Claims a response slot immediately and returns its scalar handle, or zero."
+  "Claims a response slot immediately and returns its scalar handle, or zero.
+
+   A nonzero handle permits a sequential publication attempt or an abort.
+   When packing succeeds, call [[mt-response-publish]] at most once; if it
+   returns zero, call [[mt-response-abort]] once. When packing fails, skip
+   publication and call [[mt-response-abort]] once. Do not share a handle,
+   reuse it, or make concurrent stale calls; those uses have no supported contract."
   [receiver]
   #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-try-claim* receiver)))
@@ -683,7 +689,12 @@
   [::mem/pointer ::mem/long] ::mem/int)
 
 (defn mt-response-publish
-  "Publishes the slot identified by `claim-handle` immediately."
+  "Attempts publication for a claimed response slot.
+
+   Returns `1` when publication consumes `claim-handle`. On `0`, call
+   [[mt-response-abort]] once to release the unpublished claim. This function
+   requires the claimant's sequential, single-use handle; concurrent stale
+   calls have no supported contract."
   [receiver claim-handle]
   #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-publish* receiver claim-handle)))
@@ -693,7 +704,12 @@
   [::mem/pointer ::mem/long] ::mem/int)
 
 (defn mt-response-abort
-  "Releases the unpublished slot identified by `claim-handle` immediately."
+  "Releases an unpublished claimed response slot.
+
+   Call this once after a failed [[mt-response-publish]], or instead of
+   publication. Returns `1` when it releases `claim-handle`. This function
+   requires the claimant's sequential, single-use handle; concurrent stale
+   calls have no supported contract."
   [receiver claim-handle]
   #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-abort* receiver claim-handle)))

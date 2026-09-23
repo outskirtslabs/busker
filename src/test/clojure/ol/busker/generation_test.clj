@@ -745,7 +745,7 @@
       (finally
         (generation/stop! instance)))))
 
-(deftest response-ring-rejects-invalid-and-duplicate-slot-transitions
+(deftest response-ring-rejects-invalid-and-duplicate-sequential-slot-transitions
   (let [port (util/free-port)
         instance (generation/start!
                   (config/load!

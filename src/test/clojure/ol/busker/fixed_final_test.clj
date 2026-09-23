@@ -176,6 +176,27 @@
                                worker (direct-plan 1 1 200 [] 1 0
                                                    (byte-array [1]) 1))))
         (is (= [[receiver claim-handle]] @aborted_))))))
+(deftest direct-response-slot-is-aborted-when-publication-fails
+  (with-open [arena (mem/confined-arena)]
+    (let [receiver (mem/alloc 1 arena)
+          slot (mem/alloc (inc (mem/size-of ::h2o/clj-fixed-response-slot-data-t)) arena)
+          claim-handle 65537
+          worker (direct-response-worker receiver [slot] 0)
+          aborted_ (atom [])]
+      (with-redefs [h2o/mt-response-try-claim
+                    (unary-long-fn (constantly claim-handle))
+                    h2o/mt-response-publish
+                    (receiver-handle->long-fn (constantly 0))
+                    h2o/mt-response-abort
+                    (receiver-handle->long-fn
+                     (fn [actual-receiver actual-handle]
+                       (swap! aborted_ conj [actual-receiver actual-handle])
+                       1))]
+        (is (= :overloaded
+               (fixed-final/try-publish-direct-response!
+                worker (direct-plan 1 1 200 [] 0 0 (byte-array 0) 0))))
+        (is (= [[receiver claim-handle]] @aborted_))))))
+
 (deftest worker-reuses-and-explicitly-releases-fixed-final-scratch
   (let [scratch_ (AtomicReference.)
         worker {:fixed-final-scratch_ scratch_}

@@ -310,6 +310,10 @@ size_t clj_h2o_response_ring_claimed(clj_mt_receiver_t *receiver);
 size_t clj_h2o_response_ring_ready(clj_mt_receiver_t *receiver);
 clj_fixed_response_slot_data_t *
 clj_h2o_response_slot_data(clj_mt_receiver_t *receiver, size_t index);
+/* A nonzero claim handle permits one sequential publish attempt or an abort.
+ * If publish returns 0, call abort once. If packing fails, skip publish and
+ * call abort once. Do not share, reuse, or concurrently call a stale handle;
+ * those uses have no supported contract. */
 uint64_t clj_h2o_response_try_claim(clj_mt_receiver_t *receiver);
 int clj_h2o_response_publish(clj_mt_receiver_t *receiver,
                              uint64_t claim_handle);
