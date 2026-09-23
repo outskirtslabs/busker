@@ -224,29 +224,6 @@
 
 (declare copy-request-context)
 
-(defn read-request-context
-  "Returns the `:req` and `:meta` projection from `ctx-ptr`.
-
-  `ctx-ptr` must remain valid while native values are read."
-  [ctx-ptr]
-  (let [ctx (mem/reinterpret ctx-ptr size-of-clj-req-ctx-t)]
-    {:req    (mem/read-address ctx 0)
-     :meta   {:authority       (mem/read-address ctx 8)
-              :method          (mem/read-address ctx 16)
-              :path            (mem/read-address ctx 24)
-              :remote_addr     (mem/read-address ctx 32)
-              :scheme          (mem/read-address ctx 40)
-              :headers         (mem/read-address ctx 48)
-              :authority_len   (mem/read-long ctx 56)
-              :method_len      (mem/read-long ctx 64)
-              :path_len        (mem/read-long ctx 72)
-              :remote_addr_len (mem/read-long ctx 80)
-              :scheme_len      (mem/read-long ctx 88)
-              :headers_len     (mem/read-long ctx 96)
-              :http_version    (mem/read-int ctx 104)
-              :has_body        (mem/read-short ctx 108)
-              :is_early_data   (mem/read-short ctx 110)}}))
-
 #_(print-offsets-for (layout/with-c-layout
                        [::mem/struct
                         [[:req ::mem/pointer]
@@ -989,20 +966,6 @@
     443
     80))
 
-(defn ^:no-doc copy-ring-request-data
-  [{:keys [method method_len path path_len authority authority_len
-           http_version headers headers_len has_body is_early_data
-           scheme scheme_len remote_addr remote_addr_len]}]
-  {:method (->string method method_len)
-   :path (->string path path_len)
-   :authority (->string authority authority_len)
-   :scheme (->string scheme scheme_len)
-   :remote-addr (->string remote_addr remote_addr_len)
-   :headers (build-ring-headers-map headers headers_len)
-   :http-version http_version
-   :has-body has_body
-   :early-data is_early_data})
-
 (defn ^:no-doc copy-request-context
   ([ctx-ptr]
    (copy-request-context ctx-ptr (mem/auto-arena)))
@@ -1142,22 +1105,6 @@
      :body (when (= 1 has-body)
              input-stream)
      :ol.busker/early-data? (= 1 early-data)}))
-
-(defn build-ring-request
-  "Build Ring-compliant request map from h2o request metadata.
-
-   Maps h2o request structure to Ring spec with:
-   - `:server-port`, `:server-name` from authority field (host:port)
-   - `:remote-addr` from client address
-   - `:uri`, `:query-string` from request line path (split on ?)
-   - `:request-method` as keyword (lowercase)
-   - `:headers` as lowercase string keys
-   - `:body` as InputStream when `has_body` is true
-   - `:ol.busker/early-data?` true when request arrived via 0-RTT
-
-   Protocol version (HTTP/1.1, HTTP/2, HTTP/3) determined from `http_version` field."
-  [meta ^InputStream input-stream]
-  (assemble-ring-request (copy-ring-request-data meta) input-stream))
 
 (defcfn http3-create-ptls-ctx
   "Create picotls context for QUIC TLS 1.3.

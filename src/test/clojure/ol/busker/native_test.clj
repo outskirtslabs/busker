@@ -37,18 +37,6 @@
      :closing                       0
      :response_started              0}))
 
-(deftest request-context-reader-preserves-consumed-values-test
-  (with-open [arena (mem/confined-arena)]
-    (let [ctx-ptr (mem/serialize (request-context-value arena)
-                                 :ol.busker.native/clj-req-ctx-t
-                                 arena)
-          generic (mem/deserialize
-                   (mem/reinterpret ctx-ptr
-                                    (mem/size-of :ol.busker.native/clj-req-ctx-t))
-                   :ol.busker.native/clj-req-ctx-t)]
-      (is (= (select-keys generic [:req :meta])
-             (native/read-request-context ctx-ptr))))))
-
 (def ^:private request-context-reader-offsets
   {:req                          0
    :meta                         8
@@ -87,7 +75,7 @@
   {:proceed 0
    :stop    8})
 
-(deftest request-context-reader-layout-test
+(deftest request-context-layout-test
   (is (= 216 (mem/size-of :ol.busker.native/clj-req-ctx-t)))
   (doseq [[field expected-offset] request-context-reader-offsets]
     (is (= expected-offset
