@@ -19,12 +19,14 @@
    [ol.busker.fixed_final DirectResponsePlan]
    [java.util.concurrent.atomic AtomicReference]))
 
-(defn- command
-  ([body] (command body (alength ^bytes body)))
-  ([body body-limit]
-   (let [headers [["content-type" "text/plain"]]
-         header-bytes (fixed-final/header-staging-bytes headers)]
-     (fixed-final/command 1 1 200 headers header-bytes (alength ^bytes body) 2 body-limit body))))
+(defn- prepared-command
+  ([^bytes body]
+   (prepared-command 1 1 200 [["content-type" "text/plain"]] 2 body))
+  ([module-id request-seq status headers compress-hint ^bytes body]
+   (let [[encoded-headers header-staging-bytes] (fixed-final/encode-headers headers)
+         body-length (alength body)]
+     (fixed-final/prepared-command module-id request-seq status encoded-headers
+                                   header-staging-bytes body-length compress-hint body))))
 
 (defn- direct-plan
   [module-id request-seq status headers content-length compress-hint body body-length]
@@ -48,41 +50,6 @@
          [(h2o/->string name name_len)
           (h2o/->string value value_len)]))
      (range headers-len))))
-
-(defn- decoded-command-headers
-  [command]
-  (mapv (fn [[^bytes name ^bytes value]]
-          [(String. name StandardCharsets/UTF_8)
-           (String. value StandardCharsets/UTF_8)])
-        (:headers command)))
-
-(deftest command-contains-only-copied-jvm-data
-  (let [body (byte-array [1 2 3])
-        command (command body)]
-    (aset-byte body 0 (byte 9))
-    (is (= {:module-id 1
-            :request-seq 1
-            :status 200
-            :headers [["content-type" "text/plain"]]
-            :header-staging-bytes (fixed-final/header-staging-bytes [["content-type" "text/plain"]])
-            :content-length 3
-            :compress-hint 2}
-           (-> command
-               (assoc :headers (decoded-command-headers command))
-               (dissoc :body))))
-    (is (= (:module-id command) (fixed-final/command-module-id command)))
-    (is (= (:request-seq command) (fixed-final/command-request-seq command)))
-    (is (= (:content-length command) (fixed-final/command-content-length command)))
-    (is (= (:status command)
-           (.-status ^ol.busker.fixed_final.FixedFinalCommand command)))
-    (is (= [1 2 3] (vec ^bytes (:body command))))
-    (is (not-any? #(instance? MemorySegment %)
-                  (concat (:headers command) [(:body command)])))))
-
-(deftest command-admits-body-at-output-buffer-size
-  (is (some? (command (byte-array 3) 3)))
-  (is (thrown? clojure.lang.ExceptionInfo
-               (command (byte-array 4) 3))))
 
 (deftest response-slot-contains-packed-metadata-headers-and-body
   (with-open [arena (mem/confined-arena)]
@@ -198,8 +165,8 @@
              :config {:output-buffer-size 3}}
         sent_ (atom [])
         staging-calls_ (atom 0)
-        first-command (command (byte-array [65 66 67]))
-        second-command (command (byte-array [88 89]))]
+        first-command (prepared-command (byte-array [65 66 67]))
+        second-command (prepared-command (byte-array [88 89]))]
     (.set evloop/worker-context worker)
     (try
       (is (nil? (.get scratch_)))
@@ -264,7 +231,7 @@
     (try
       (with-redefs [h2o/send-fixed-final (fn [& _] (reset! sent?_ true))]
         (is (thrown? clojure.lang.ExceptionInfo
-                     (fixed-final/execute! req (command (byte-array 4) 4))))
+                     (fixed-final/execute! req (prepared-command (byte-array 4)))))
         (is (false? @sent?_)))
       (finally
         (.remove evloop/worker-context)))))
@@ -275,7 +242,7 @@
           worker {:callback-dispatch dispatch}
           req {:worker worker :req-ctx-ptr :request-context}
           module-id (:module-id dispatch)
-          command (assoc (command (byte-array [65])) :module-id module-id)
+          command (assoc (prepared-command (byte-array [65])) :module-id module-id)
           executed_ (AtomicReference.)]
       (callback-dispatch/bind-thread! dispatch (Thread/currentThread))
       (callback-dispatch/register! dispatch module-id 1 req nil)
@@ -374,15 +341,12 @@
         commit-final! (fn [req write-resp committed_ response _]
                         (let [body (.getBytes "inline" StandardCharsets/UTF_8)
                               headers [["content-type" "text/plain"]]
-                              command (fixed-final/command (:dispatch-module-id req)
-                                                           (:dispatch-request-seq req)
-                                                           (:status response)
-                                                           headers
-                                                           (fixed-final/header-staging-bytes headers)
-                                                           (alength body)
-                                                           h2o/H2O_COMPRESS_HINT_ENABLE
-                                                           (get-in req [:config :output-buffer-size])
-                                                           body)
+                              command (prepared-command (:dispatch-module-id req)
+                                                        (:dispatch-request-seq req)
+                                                        (:status response)
+                                                        headers
+                                                        h2o/H2O_COMPRESS_HINT_ENABLE
+                                                        body)
                               head (dissoc response :body)]
                           (when (compare-and-set! committed_ nil head)
                             (when-let [writer (response/writer-if-created write-resp)]

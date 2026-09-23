@@ -85,10 +85,6 @@
   ^long [^FixedFinalCommand command]
   (.-request-seq command))
 
-(defn command-content-length
-  ^long [^FixedFinalCommand command]
-  (.-content-length command))
-
 (declare header-sizes utf8-length)
 (defn encode-headers
   "Returns encoded header pairs and their native staging size."
@@ -110,40 +106,10 @@
   ^long [headers]
   (long (first (header-sizes headers))))
 
-(defn- command-data
-  [module-id request-seq status headers header-bytes content-length compress-hint body-limit body]
-  (let [string-headers (mapv (fn [[name value]] [(str name) (str value)]) headers)
-        [headers calculated-header-bytes] (encode-headers string-headers)]
-    (when (or (not (pos? module-id))
-              (not (pos? request-seq))
-              (not (>= status 200))
-              (> (count headers) max-header-pairs)
-              (> header-bytes max-header-staging-bytes)
-              (not= header-bytes calculated-header-bytes)
-              (not (nat-int? body-limit))
-              (> (alength ^bytes body) body-limit)
-              (some (fn [[name _]] (.equalsIgnoreCase ^String name "content-length"))
-                    string-headers))
-      (throw (ex-info "Invalid fixed final command"
-                      {:module-id module-id
-                       :request-seq request-seq
-                       :status status
-                       :header-count (count headers)
-                       :header-staging-bytes header-bytes
-                       :body-bytes (alength ^bytes body)
-                       :body-limit body-limit})))
-    (->FixedFinalCommand module-id request-seq status headers header-bytes
-                         content-length compress-hint (aclone ^bytes body))))
-
 (defn ^:no-doc prepared-command
   [module-id request-seq status headers header-bytes content-length compress-hint body]
   (->FixedFinalCommand module-id request-seq status headers header-bytes
                        content-length compress-hint body))
-
-(defn command
-  "Creates a fixed final command with copied JVM body bytes."
-  [module-id request-seq status headers header-bytes content-length compress-hint body-limit body]
-  (command-data module-id request-seq status headers header-bytes content-length compress-hint body-limit body))
 
 (def ^:private byte-array-class (Class/forName "[B"))
 

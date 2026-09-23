@@ -482,8 +482,10 @@
                     (fn [^Runnable task] (.run task)))]
        (is (false? (protocols/emit! emitter {:status 103}))))))
 
-(deftest informational-response-keeps-the-final-response-on-the-worker-mailbox
-  (let [routes_ (atom [])
+(deftest informational-response-keeps-a-copied-final-response-on-the-worker-mailbox
+  (let [body (byte-array [99 97 116])
+        routes_ (atom [])
+        command_ (AtomicReference.)
         emitter (response/new-response-emitter
                  (fixed-final-request 3)
                  (fn [^Runnable task] (.run task)))]
@@ -496,23 +498,28 @@
                        (swap! routes_ conj :native-exchange)
                        :accepted)
                      #'response/schedule-fixed-final-mailbox!
-                     (fn [& _]
+                     (fn [_ command]
                        (swap! routes_ conj :worker-mailbox)
+                       (.set command_ command)
                        :accepted)}
       #(let [informational? (protocols/emit! emitter {:status 103})
              committed-after-informational? (protocols/committed? emitter)
-             final? (protocols/emit! emitter {:status 200 :body "cat"}
-                                     {:close-after? true})]
+             final? (protocols/emit! emitter {:status 200 :body body}
+                                     {:close-after? true})
+             _ (aset-byte body 0 (byte 120))
+             command (.get command_)]
          (is (= {:informational? true
                  :committed-after-informational? false
                  :final? true
                  :committed-after-final? true
-                 :routes [:informational :worker-mailbox]}
+                 :routes [:informational :worker-mailbox]
+                 :command-body [99 97 116]}
                 {:informational? informational?
                  :committed-after-informational? committed-after-informational?
                  :final? final?
                  :committed-after-final? (protocols/committed? emitter)
-                 :routes @routes_}))))))
+                 :routes @routes_
+                 :command-body (vec ^bytes (:body command))}))))))
 
 (deftest fixed-final-admission-stops-generic-writer
   (let [writer (->TestWriter (AtomicBoolean. false) (ByteArrayOutputStream.))
