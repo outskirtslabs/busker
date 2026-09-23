@@ -61,7 +61,6 @@ typedef enum {
 
 typedef struct {
   _Atomic uint32_t state;
-  uint32_t index;
   clj_fixed_response_slot_data_t data;
 } clj_response_slot_t;
 
@@ -1176,7 +1175,6 @@ clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(
   for (size_t index = 0; index < ring_capacity; ++index) {
     clj_response_slot_t *slot = response_slot_at(receiver, index);
     atomic_init(&slot->state, CLJ_RESPONSE_SLOT_FREE);
-    slot->index = (uint32_t)index;
   }
 
   receiver->queue = ctx->queue;
