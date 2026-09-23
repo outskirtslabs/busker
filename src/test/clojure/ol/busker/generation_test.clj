@@ -90,7 +90,7 @@
                       :accept-callbacks []
                       :max-connections 0}]
     (with-redefs-fn
-      {#'generation/check-and-initiate-shutdown! (fn [state _ _] state)
+      {#'generation/check-and-initiate-shutdown! (fn [state _] state)
        #'generation/update-receiver-destruction (fn [state _] state)
        #'generation/dispose-context-if-ready (fn [state _ _] state)
        #'callback-dispatch/pending-response-work? (constantly false)
@@ -119,7 +119,7 @@
                       :accept-callbacks []
                       :max-connections 0}]
     (with-redefs-fn
-      {#'generation/check-and-initiate-shutdown! (fn [state _ _] state)
+      {#'generation/check-and-initiate-shutdown! (fn [state _] state)
        #'generation/update-receiver-destruction (fn [state _] state)
        #'generation/dispose-context-if-ready (fn [state _ _] state)
        #'callback-dispatch/pending-response-work? (constantly false)

@@ -340,16 +340,14 @@
        (callback-dispatch/no-live-entries? (:callback-dispatch worker))))
 
 (defn- check-and-initiate-shutdown!
-  [loop-state {:keys [shutting-down?] :as state} worker]
+  [loop-state {:keys [shutting-down?] :as state}]
   (let [should-shutdown? (.get ^AtomicBoolean shutting-down?)
         already? (true? (:shutdown-initiated? loop-state))]
-    (when should-shutdown?
-      (close-response-receiver-admission! worker)
-      (when-not already?
-        (initiate-worker-shutdown! (assoc state :shutdown-initiated? true))
-        (when-let [remaining (::stop-accepting-remaining_ state)]
-          (when (zero? (.decrementAndGet ^AtomicLong remaining))
-            (deliver (::stopped-accepting_ state) true)))))
+    (when (and should-shutdown? (not already?))
+      (initiate-worker-shutdown! (assoc state :shutdown-initiated? true))
+      (when-let [remaining (::stop-accepting-remaining_ state)]
+        (when (zero? (.decrementAndGet ^AtomicLong remaining))
+          (deliver (::stopped-accepting_ state) true))))
     (assoc loop-state :shutdown-initiated? (or already? should-shutdown?))))
 
 (defn- update-receiver-destruction
@@ -385,7 +383,7 @@
    {:keys [loop-ptr ctx-ptr listener-socks accept-callbacks max-connections] :as state}]
   (let [mailbox-work? (true? (::evloop/mailbox-work? loop-state))
         loop-state (-> (dissoc loop-state ::evloop/mailbox-work?)
-                       (check-and-initiate-shutdown! state worker)
+                       (check-and-initiate-shutdown! state)
                        (update-receiver-destruction worker)
                        (dispose-context-if-ready worker state))
         disposed? (true? (:context-disposed? loop-state))

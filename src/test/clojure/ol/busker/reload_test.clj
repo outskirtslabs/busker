@@ -196,7 +196,7 @@
                 (response-config port
                                  (fn [_]
                                    (deliver old-entered true)
-                                   (deref old-release 5000 true)
+                                   @old-release
                                    {:status 200
                                     :body "old-generation"})))]
     (try
@@ -230,6 +230,7 @@
             (is (= 0 (:exit result)))
             (is (= "old-generation" (:out result))))))
       (finally
+        (deliver old-release true)
         (runtime/stop! server)))))
 
 (deftest memory-session-tickets-survive-reload-test
