@@ -11,8 +11,7 @@
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]
-   [coffi.ffi :as ffi]
-   [coffi.mem :as mem]
+   [babashka.ffi :as mem]
    [ol.busker.buffer-pool :as bp]
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.clave-adapter :as clave-adapter]
@@ -144,27 +143,22 @@
              (.decrementAndGet ^AtomicLong active-connection-count_)
              (h2o/conn-limit-release))]
     {::connection-close-cb cb
-     ::connection-close-cb-ptr
-     (mem/serialize cb [::ffi/fn [::mem/pointer] ::mem/void])}))
+     ::connection-close-cb-ptr (mem/callback (mem/auto-arena) cb [:pointer] :void)}))
 
 (defn- create-accept-callback
   [accept-ctx-ptr on-close-callback active-connection-count_]
-  (let [accept-cb (fn [listener-ptr err-ptr]
-                    (when-not (mem/null? err-ptr)
-                      nil)
+  (let [accept-cb (fn [listener-ptr _err-ptr]
                     (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
                       (when-not (mem/null? sock-ptr)
                         #_{:clj-kondo/ignore [:type-mismatch]}
                         (if (pos? (h2o/conn-limit-try-acquire))
                           (do
                             (.incrementAndGet ^AtomicLong active-connection-count_)
-                            (h2o/socket-set-on-close sock-ptr on-close-callback (mem/as-segment 0))
+                            (h2o/socket-set-on-close sock-ptr on-close-callback mem/null)
                             (h2o/h2o-accept accept-ctx-ptr sock-ptr))
                           (h2o/socket-close sock-ptr)))))]
     {::accept-cb accept-cb
-     ::accept-cb-ptr
-     (mem/serialize accept-cb
-                    [::ffi/fn [::mem/pointer ::mem/c-string] ::mem/void])}))
+     ::accept-cb-ptr (mem/callback (mem/auto-arena) accept-cb [:pointer :pointer] :void)}))
 
 (defn- config->flat-globalconf-t
   [config]
@@ -223,10 +217,12 @@
 
 (defn- create-server-config
   [arena executor close-callback-executor ring-handler config]
-  (let [config-ptr (mem/alloc (h2o/globalconf-size) arena)
-        flat-config-ptr (mem/serialize (config->flat-globalconf-t config)
-                                       ::h2o/clj-h2o-flat-globalconf-t
-                                       arena)
+  (let [config-ptr (mem/alloc arena (h2o/globalconf-size))
+        flat-config-ptr (mem/alloc arena h2o/ffi-clj-h2o-flat-globalconf-t)
+        flat-config (-> (config->flat-globalconf-t config)
+                        (update :server_name #(mem/string->ptr arena %))
+                        (update :proxy_status_identity #(mem/string->ptr arena %)))
+        _ (mem/write flat-config-ptr h2o/ffi-clj-h2o-flat-globalconf-t flat-config)
         config-ptr (do
                      (h2o/create-global-conf config-ptr flat-config-ptr)
                      config-ptr)

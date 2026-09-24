@@ -12,7 +12,7 @@
   - [[ol.busker.fixed-final]] sends eligible complete final responses.
   - [[ol.busker.worker-context]] checks event-loop affinity."
   (:require
-   [coffi.mem :as mem]
+   [babashka.ffi :as mem]
    [ol.busker.native :as h2o]
    [ol.busker.response-serialization :as serialization]
    [ol.busker.worker-context :as worker-context]))
@@ -59,10 +59,10 @@
 (defn- headers-segment
   [headers arena]
   (if (zero? (count headers))
-    (mem/as-segment 0)
+    mem/null
     (let [descriptor-bytes (serialization/descriptor-bytes headers)
           header-bytes (serialization/header-bytes headers)
-          segment (mem/alloc (inc (+ descriptor-bytes header-bytes)) arena)
+          segment (mem/alloc arena (inc (+ descriptor-bytes header-bytes)))
           descriptors (mem/slice segment 0 descriptor-bytes)
           payload (mem/slice segment descriptor-bytes (inc header-bytes))]
       (serialization/stage-headers! descriptors payload headers)

@@ -74,7 +74,7 @@ A worker that sends fixed responses retains one bounded native segment until tha
 
 The callback function pointer directly selects one worker module. Scalar identity avoids request-ID conversion, native-address routing, Java native-context reads, and concurrent global lookup.
 
-The shim and Coffi layouts change together to carry two 64-bit values. A mismatch is a release blocker and requires size and offset checks on every supported target.
+The shim and babashka/ffi layouts change together to carry two 64-bit values. A mismatch is a release blocker and requires size and offset checks on every supported target.
 
 The design depends explicitly on pinned libh2o callback serialization and request-pool disposal order. A future native-library change that violates those premises requires a new design review rather than replacing the worker-local table with speculative concurrency.
 

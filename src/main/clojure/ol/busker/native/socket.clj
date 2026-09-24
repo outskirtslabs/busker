@@ -9,8 +9,7 @@
   - [[ol.busker.listen]] manages listener resources.
   - [[ol.busker.native]] supplies other shim calls."
   (:require
-   [coffi.ffi :as ffi :refer [defcfn]]
-   [coffi.mem :as mem]
+   [babashka.ffi :as ffi :refer [defcfn]]
    [ol.busker.native.loader]))
 
 (set! *warn-on-reflection* true)
@@ -20,17 +19,16 @@
 
 ;; libc bindings (thin)
 
-(defcfn fcntl "fcntl" [::mem/int ::mem/int ::mem/int] ::mem/int)
-(defcfn dup "dup" [::mem/int] ::mem/int)
-(defcfn close "close" [::mem/int] ::mem/int)
-(defcfn strerror "strerror" [::mem/int] ::mem/c-string)
+(defcfn fcntl "fcntl" [:int :int :int] :int)
+(defcfn dup "dup" [:int] :int)
+(defcfn close "close" [:int] :int)
+(defcfn strerror "strerror" [:int] :string)
 (defcfn open-tcp-listener* "clj_h2o_open_tcp_listener"
-  [::mem/c-string ::mem/int ::mem/int ::mem/int ::mem/int ::mem/int ::mem/int] ::mem/int)
+  [:string :int :int :int :int :int :int] :int)
 (defcfn open-unix-listener* "clj_h2o_open_unix_listener"
-  [::mem/c-string ::mem/int ::mem/int ::mem/int] ::mem/int)
+  [:string :int :int :int] :int)
 (defcfn unlink-unix-socket-if-still-socket* "clj_h2o_unlink_unix_socket_if_still_socket"
-  [::mem/c-string] ::mem/int)
-
+  [:string] :int)
 ;; helpers
 
 (def ^:private errno-location-symbols
@@ -40,7 +38,7 @@
   (delay
     (some (fn [sym]
             (when-let [addr (ffi/find-symbol sym)]
-              (ffi/make-downcall addr [] ::mem/pointer)))
+              (ffi/cfn addr [] :pointer)))
           errno-location-symbols)))
 
 (def ^:private errno->keyword
@@ -60,10 +58,8 @@
   []
   (if-let [get-errno* @errno-location-fn]
     (let [errno-ptr (get-errno*)
-          errno-int (if errno-ptr
-                      (-> errno-ptr
-                          (mem/reinterpret 4)
-                          (mem/read-int 0))
+          errno-int (if (and errno-ptr (not (ffi/null? errno-ptr)))
+                      (ffi/read (ffi/reinterpret errno-ptr 4) :int)
                       -1)
           errno-key (get errno->keyword errno-int :unknown-errno)
           errno-msg (try
@@ -89,7 +85,6 @@
                      :errno-int errno-int
                      :errno-message errno-message}))))
 
-#_{:clj-kondo/ignore [:type-mismatch]}
 (defn- set-cloexec! [fd]
   (when (neg? (fcntl fd F_SETFD FD_CLOEXEC))
     (throw (ex-info-with-errno "fcntl(F_SETFD,FD_CLOEXEC) failed" {:fd fd}))))
@@ -116,7 +111,6 @@
                                (if reuseport? 1 0)
                                (if nonblock? 1 0)
                                (if cloexec? 1 0))]
-    #_{:clj-kondo/ignore [:type-mismatch]}
     (when (neg? fd)
       (throw (ex-info-with-errno
               (str "failed to open TCP listener for " host ":" port)
@@ -137,7 +131,6 @@
                                 (int backlog)
                                 (if nonblock? 1 0)
                                 (if cloexec? 1 0))]
-    #_{:clj-kondo/ignore [:type-mismatch]}
     (when (neg? fd)
       (throw (ex-info-with-errno
               (str "failed to open unix listener for " path)
@@ -148,7 +141,6 @@
 (defn dup-fd
   "Duplicate `fd` and set FD_CLOEXEC on the duplicate."
   [fd]
-  #_{:clj-kondo/ignore [:type-mismatch]}
   (let [d (dup fd)]
     (when (neg? d)
       (throw (ex-info-with-errno "dup() failed" {:fd fd})))
@@ -178,12 +170,10 @@
   (when-not (string? path)
     (throw (ex-info "path must be string" {:path path})))
   (let [rc (unlink-unix-socket-if-still-socket* path)]
-    #_{:clj-kondo/ignore [:type-mismatch]}
     (when (neg? rc)
       (throw (ex-info-with-errno
               (str "failed to safely unlink unix socket path " path)
               {:path path})))
-    #_{:clj-kondo/ignore [:type-mismatch]}
     (pos? rc)))
 
 ;; how this integrates with h2o

@@ -12,7 +12,7 @@
   - [[ol.busker.response-serialization]] stages shared header descriptors.
   - [[ol.busker.response-head]] sends streaming response heads."
   (:require
-   [coffi.mem :as mem]
+   [babashka.ffi :as mem]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.response-serialization :as serialization]
@@ -35,17 +35,19 @@
 ;; add 1024 bytes to each response slot (2120 bytes of metadata total), or 256 KiB per
 ;; 256-slot worker compared with the former 16-byte packed-descriptor representation.
 
-(def ^:private response-slot-data-size (mem/size-of ::h2o/clj-fixed-response-slot-data-t))
-(def ^:private response-slot-module-id-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :module-id))
-(def ^:private response-slot-request-seq-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :request-seq))
-(def ^:private response-slot-headers-len-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :headers-len))
-(def ^:private response-slot-content-length-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :content-length))
-(def ^:private response-slot-body-offset-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :body-offset))
-(def ^:private response-slot-body-len-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :body-len))
-(def ^:private response-slot-payload-len-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :payload-len))
-(def ^:private response-slot-status-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :status))
-(def ^:private response-slot-compress-hint-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :compress-hint))
-(def ^:private response-slot-headers-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :headers))
+(def ^:private response-slot-data-size (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t))
+(def ^:private response-slot-module-id (mem/place h2o/ffi-clj-fixed-response-slot-data-t :module-id))
+(def ^:private response-slot-request-seq (mem/place h2o/ffi-clj-fixed-response-slot-data-t :request-seq))
+(def ^:private response-slot-headers-len (mem/place h2o/ffi-clj-fixed-response-slot-data-t :headers-len))
+(def ^:private response-slot-content-length (mem/place h2o/ffi-clj-fixed-response-slot-data-t :content-length))
+(def ^:private response-slot-body-offset (mem/place h2o/ffi-clj-fixed-response-slot-data-t :body-offset))
+(def ^:private response-slot-body-len (mem/place h2o/ffi-clj-fixed-response-slot-data-t :body-len))
+(def ^:private response-slot-payload-len (mem/place h2o/ffi-clj-fixed-response-slot-data-t :payload-len))
+(def ^:private response-slot-status (mem/place h2o/ffi-clj-fixed-response-slot-data-t :status))
+(def ^:private response-slot-compress-hint (mem/place h2o/ffi-clj-fixed-response-slot-data-t :compress-hint))
+;; The final field is the header array; its alignment equals the enclosing struct's.
+(def ^:private response-slot-headers-offset
+  (- response-slot-data-size (mem/sizeof [:array h2o/ffi-clj-header-t max-header-pairs])))
 
 (defrecord FixedFinalCommand [^long module-id
                               ^long request-seq
@@ -144,18 +146,18 @@
                                            {:expected body-length
                                             :actual (- end body-offset)}))))
         (instance? byte-array-class body)
-        (mem/write-bytes payload body-length body-offset ^bytes body)
+        (MemorySegment/copy (MemorySegment/ofArray ^bytes body) 0 ^MemorySegment payload body-offset body-length)
         :else
         (throw (ex-info "Unsupported direct fixed response body" {:type (class body)})))
-      (mem/write-long data response-slot-module-id-offset module-id)
-      (mem/write-long data response-slot-request-seq-offset request-seq)
-      (mem/write-long data response-slot-headers-len-offset (count headers))
-      (mem/write-long data response-slot-content-length-offset content-length)
-      (mem/write-long data response-slot-body-offset-offset body-offset)
-      (mem/write-long data response-slot-body-len-offset body-length)
-      (mem/write-long data response-slot-payload-len-offset payload-length)
-      (mem/write-int data response-slot-status-offset status)
-      (mem/write-int data response-slot-compress-hint-offset compress-hint)
+      (mem/write data response-slot-module-id module-id)
+      (mem/write data response-slot-request-seq request-seq)
+      (mem/write data response-slot-headers-len (count headers))
+      (mem/write data response-slot-content-length content-length)
+      (mem/write data response-slot-body-offset body-offset)
+      (mem/write data response-slot-body-len body-length)
+      (mem/write data response-slot-payload-len payload-length)
+      (mem/write data response-slot-status status)
+      (mem/write data response-slot-compress-hint compress-hint)
       data)))
 
 (defn ^:no-doc try-publish-direct-response!
@@ -213,7 +215,7 @@
           (.-segment scratch))
         (let [arena (Arena/ofConfined)]
           (try
-            (let [segment (mem/alloc capacity arena)
+            (let [segment (mem/alloc arena capacity)
                   scratch (FixedFinalScratch. arena segment capacity)]
               (.set scratch_ scratch)
               segment)
@@ -235,14 +237,14 @@
         descriptor-bytes (serialization/descriptor-bytes headers)
         body-length (long (alength body))
         headers-segment (if (zero? header-count)
-                          (mem/as-segment 0)
+                          mem/null
                           (mem/slice segment 0 descriptor-bytes))
         payload (mem/slice segment descriptor-bytes
                            (inc (+ (serialization/header-bytes headers) body-length)))
         body-offset (serialization/stage-headers! headers-segment payload headers)
         body-segment (mem/slice payload body-offset (max 1 body-length))]
     (when (pos? body-length)
-      (mem/write-bytes body-segment body-length 0 body))
+      (MemorySegment/copy (MemorySegment/ofArray body) 0 ^MemorySegment body-segment 0 body-length))
     [headers-segment body-segment]))
 (defn execute!
   "Stages `command` on its event-loop worker and sends it synchronously."

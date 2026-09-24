@@ -1,7 +1,7 @@
 (ns ol.busker.listen-test
   (:require
    [clojure.test :refer [deftest is testing]]
-   [coffi.mem :as mem]
+   [babashka.ffi :as mem]
    [ol.busker.listen :as listen]
    [ol.busker.native.socket :as socket]
    [ol.busker.test-utils :as util])

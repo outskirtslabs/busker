@@ -13,7 +13,7 @@
   - [[ol.busker.native]] defines `clj_header_t`."
 
   (:require
-   [coffi.mem :as mem]
+   [babashka.ffi :as ffi]
    [ol.busker.native :as h2o])
   (:import
    [java.lang.foreign MemorySegment]
@@ -21,11 +21,11 @@
 
 (set! *warn-on-reflection* true)
 
-(def ^:private clj-header-size (mem/size-of ::h2o/clj-header-t))
-(def ^:private clj-header-name-offset (mem/struct-field-offset ::h2o/clj-header-t :name))
-(def ^:private clj-header-name-len-offset (mem/struct-field-offset ::h2o/clj-header-t :name_len))
-(def ^:private clj-header-value-offset (mem/struct-field-offset ::h2o/clj-header-t :value))
-(def ^:private clj-header-value-len-offset (mem/struct-field-offset ::h2o/clj-header-t :value_len))
+(def ^:private clj-header-size (ffi/sizeof h2o/ffi-clj-header-t))
+(def ^:private clj-header-name (ffi/place h2o/ffi-clj-header-t :name))
+(def ^:private clj-header-name-len (ffi/place h2o/ffi-clj-header-t :name_len))
+(def ^:private clj-header-value (ffi/place h2o/ffi-clj-header-t :value))
+(def ^:private clj-header-value-len (ffi/place h2o/ffi-clj-header-t :value_len))
 
 (defn utf8-length
   "Returns the number of UTF-8 bytes required for `value`."
@@ -93,12 +93,12 @@
             value-offset (write-utf8! payload name-offset name name-length)
             value-length (utf8-length value)
             next-cursor (write-utf8! payload value-offset value value-length)
-            descriptor-offset (* index clj-header-size)
-            name-segment (mem/slice payload name-offset (max 1 name-length))
-            value-segment (mem/slice payload value-offset (max 1 value-length))]
-        (mem/write-address descriptors (+ descriptor-offset clj-header-name-offset) name-segment)
-        (mem/write-long descriptors (+ descriptor-offset clj-header-name-len-offset) name-length)
-        (mem/write-address descriptors (+ descriptor-offset clj-header-value-offset) value-segment)
-        (mem/write-long descriptors (+ descriptor-offset clj-header-value-len-offset) value-length)
+            descriptor (ffi/slice descriptors (* index clj-header-size) clj-header-size)
+            name-segment (ffi/slice payload name-offset (max 1 name-length))
+            value-segment (ffi/slice payload value-offset (max 1 value-length))]
+        (ffi/write descriptor clj-header-name name-segment)
+        (ffi/write descriptor clj-header-name-len name-length)
+        (ffi/write descriptor clj-header-value value-segment)
+        (ffi/write descriptor clj-header-value-len value-length)
         (recur (unchecked-inc index) next-cursor))
       cursor)))

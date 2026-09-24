@@ -10,7 +10,7 @@
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]
-   [coffi.ffi :as ffi])
+   [babashka.ffi :as ffi])
   (:import
    [java.nio.file Files]))
 

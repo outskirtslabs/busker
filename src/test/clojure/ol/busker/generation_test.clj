@@ -1,7 +1,7 @@
 (ns ol.busker.generation-test
   (:require
+   [babashka.ffi :as mem]
    [clojure.test :refer [deftest is]]
-   [coffi.mem :as mem]
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.config :as config]
    [ol.busker.evloop :as evloop]
@@ -61,10 +61,9 @@
   (is (.contains ^String (:doc (meta #'fixed-final/->DirectResponsePlan))
                  "header-bytes")))
 
-(def ^:private response-slot-data-size (mem/size-of ::h2o/clj-fixed-response-slot-data-t))
-(def ^:private response-slot-headers-offset (mem/struct-field-offset ::h2o/clj-fixed-response-slot-data-t :headers))
-(def ^:private clj-header-name-offset (mem/struct-field-offset ::h2o/clj-header-t :name))
-(def ^:private clj-header-name-len-offset (mem/struct-field-offset ::h2o/clj-header-t :name_len))
+(def ^:private response-slot-data-size (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t))
+(def ^:private response-slot-header-name (mem/place h2o/ffi-clj-fixed-response-slot-data-t [:headers 0 :name]))
+(def ^:private response-slot-header-name-len (mem/place h2o/ffi-clj-fixed-response-slot-data-t [:headers 0 :name_len]))
 (defn- request-stream!
   [^Socket socket path]
   (let [request (.getBytes (str "GET " path " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n")
@@ -118,7 +117,7 @@
 
 (deftest response-ring-work-forces-a-nonblocking-native-iteration
   (let [wait-ms_ (atom nil)
-        receiver (Object.)
+        receiver (mem/segment 1)
         worker (evloop/map->Worker
                 {:mailbox (java.util.concurrent.ArrayBlockingQueue. 1)
                  :callback-dispatch nil
@@ -150,7 +149,7 @@
          (is (= {} result))))))
 (deftest wake-receiver-retires-on-event-loop-worker-test
   (let [events_ (atom [])
-        receiver (Object.)
+        receiver (mem/segment 1)
         receiver_ (AtomicReference. receiver)
         worker {:wake-endpoint ::endpoint
                 :wakeup-receiver_ receiver_}]
@@ -171,8 +170,8 @@
       (finally
         (.remove worker-context/worker-context)))))
 (deftest startup-receiver-without-worker-retires-on-lifecycle-platform-test
-  (let [wakeup-receiver (Object.)
-        response-receiver (Object.)
+  (let [wakeup-receiver (mem/segment 1)
+        response-receiver (mem/segment 2)
         destroyed_ (atom {:wakeup [] :response []})
         phase (atom :running)
         generation-state {::generation/phase phase
@@ -389,9 +388,9 @@
                @events_))))))
 
 (deftest response-receiver-destruction-waits-for-producer-before-claim
-  (with-open [arena (mem/confined-arena)]
-    (let [receiver (mem/alloc 1 arena)
-          slot (mem/alloc (mem/size-of ::h2o/clj-fixed-response-slot-data-t) arena)
+  (with-open [arena (mem/shared-arena)]
+    (let [receiver (mem/alloc arena 1)
+          slot (mem/alloc arena h2o/ffi-clj-fixed-response-slot-data-t)
           worker (response-receiver-worker receiver slot)
           claim-entered_ (promise)
           release-claim_ (promise)
@@ -452,9 +451,9 @@
               (is (false? (.isAlive producer))))))))))
 
 (deftest response-receiver-destruction-waits-for-modeled-claim-accounting-interval
-  (with-open [arena (mem/confined-arena)]
-    (let [receiver (mem/alloc 1 arena)
-          slot (mem/alloc (mem/size-of ::h2o/clj-fixed-response-slot-data-t) arena)
+  (with-open [arena (mem/shared-arena)]
+    (let [receiver (mem/alloc arena 1)
+          slot (mem/alloc arena h2o/ffi-clj-fixed-response-slot-data-t)
           worker (response-receiver-worker receiver slot)
           claim-state-changed_ (promise)
           release-claim_ (promise)
@@ -511,9 +510,9 @@
               (is (false? (.isAlive producer))))))))))
 
 (deftest response-receiver-destruction-waits-for-producer-exception
-  (with-open [arena (mem/confined-arena)]
-    (let [receiver (mem/alloc 1 arena)
-          slot (mem/alloc (mem/size-of ::h2o/clj-fixed-response-slot-data-t) arena)
+  (with-open [arena (mem/shared-arena)]
+    (let [receiver (mem/alloc arena 1)
+          slot (mem/alloc arena h2o/ffi-clj-fixed-response-slot-data-t)
           worker (response-receiver-worker receiver slot)
           writer-entered_ (promise)
           release-writer_ (promise)
@@ -572,8 +571,8 @@
 
 (deftest receiver-destruction-rechecks-pending-after-an-admitted-producer-publishes
   (with-open [arena (mem/shared-arena)]
-    (let [receiver (mem/alloc 1 arena)
-          slot (mem/alloc (mem/size-of ::h2o/clj-fixed-response-slot-data-t) arena)
+    (let [receiver (mem/alloc arena 1)
+          slot (mem/alloc arena h2o/ffi-clj-fixed-response-slot-data-t)
           worker (response-receiver-worker receiver slot)
           first-zero-observed_ (promise)
           release-disposal_ (promise)
@@ -724,7 +723,7 @@
         worker (first (::generation/workers instance))
         slot (first (:response-slots worker))]
     (generation/stop! instance)
-    (is (thrown? IllegalStateException (mem/read-long slot)))))
+    (is (thrown? IllegalStateException (mem/read slot :long)))))
 
 (deftest stale-ring-response-is-drained-after-a-platform-notifier-wake
   (let [port (util/free-port)
@@ -834,10 +833,7 @@
                 (fixed-final/write-direct-response-slot!
                  slot (:response-slot-payload-capacity worker) plan)
                 (let [target (corrupt! slot payload)
-                      descriptor (mem/deserialize
-                                  (mem/slice slot response-slot-headers-offset
-                                             (mem/size-of ::h2o/clj-header-t))
-                                  ::h2o/clj-header-t)]
+                      descriptor (mem/read slot (mem/place h2o/ffi-clj-fixed-response-slot-data-t [:headers 0]))]
                   (is (= (.address ^java.lang.foreign.MemorySegment target)
                          (.address ^java.lang.foreign.MemorySegment (:name descriptor)))))
                 (is (zero? (h2o/mt-response-publish receiver claim-handle)))
@@ -847,20 +843,19 @@
                   (is (= 1 (h2o/mt-response-abort receiver reused-handle))))))]
         (corrupt-and-reject!
          (fn [slot _]
-           (let [target (mem/as-segment 1)]
-             (mem/write-address slot (+ response-slot-headers-offset clj-header-name-offset) target)
+           (let [target (mem/segment 1)]
+             (mem/write slot response-slot-header-name target)
              target)))
         (corrupt-and-reject!
          (fn [slot payload]
            (let [target (mem/slice payload
                                    (:response-slot-payload-capacity worker) 1)]
-             (mem/write-address slot (+ response-slot-headers-offset clj-header-name-offset) target)
+             (mem/write slot response-slot-header-name target)
              target)))
         (corrupt-and-reject!
          (fn [slot payload]
-           (mem/write-address slot (+ response-slot-headers-offset clj-header-name-offset) payload)
-           (mem/write-long slot (+ response-slot-headers-offset clj-header-name-len-offset)
-                           Long/MAX_VALUE)
+           (mem/write slot response-slot-header-name payload)
+           (mem/write slot response-slot-header-name-len Long/MAX_VALUE)
            payload))
         (let [claim-handle (h2o/mt-response-try-claim receiver)
               slot (response-claim-slot worker claim-handle)
@@ -868,10 +863,10 @@
                                  (inc (:response-slot-payload-capacity worker)))]
           (fixed-final/write-direct-response-slot!
            slot (:response-slot-payload-capacity worker) plan)
-          (mem/write-address slot (+ response-slot-headers-offset clj-header-name-offset)
-                             (mem/slice payload
-                                        (long (fixed-final/header-utf8-bytes headers)) 1))
-          (mem/write-long slot (+ response-slot-headers-offset clj-header-name-len-offset) 0)
+          (mem/write slot response-slot-header-name
+                     (mem/slice payload
+                                (long (fixed-final/header-utf8-bytes headers)) 1))
+          (mem/write slot response-slot-header-name-len 0)
           (is (= 1 (h2o/mt-response-publish receiver claim-handle)))
           (p/wake worker)
           (loop [remaining 200]
@@ -1091,7 +1086,7 @@
                                          (throw (InterruptedException. "simulated")))]
           (generation/stop! generation-state))
         (is (= :retirement-failed @phase))
-        (is (= 1 (.byteSize (mem/alloc 1 arena))))
+        (is (= 1 (.byteSize (mem/alloc arena 1))))
         (finally
           (Thread/interrupted)
           (swap! @#'generation/failed-retirements_

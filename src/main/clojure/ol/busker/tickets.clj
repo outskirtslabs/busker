@@ -2,7 +2,7 @@
   "Session ticket key management for TLS 1.3 resumption and 0-RTT."
   (:require
    [clojure.edn :as edn]
-   [coffi.mem :as mem]
+   [babashka.ffi :as mem]
    [ol.busker.native :as h2o]
    [ol.clave.storage :as storage])
   (:import

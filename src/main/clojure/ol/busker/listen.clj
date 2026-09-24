@@ -8,7 +8,7 @@
   - [[ol.busker.native.socket]] opens listener file descriptors.
   - [[ol.busker.generation]] installs listeners into workers."
   (:require
-   [coffi.mem :as mem]
+   [babashka.ffi :as mem]
    [ol.busker.native :as h2o]
    [ol.busker.native.socket :as socket]))
 

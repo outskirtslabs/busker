@@ -5,16 +5,6 @@
       "rev": "04f7bf854bcbe379df14e3f9d7221af9d0c030d6",
       "sha256": "14g41q33ydi61n1clzyqa93g1fk6n0r6xkizjlbq851vyh56zfic",
       "url": "https://github.com/outskirtslabs/clave.git"
-    },
-    "org.suskalo/coffi/9b05e268b915b1992bfd4175cb7c8c7c45d8973a": {
-      "common_dir": "https/github.com/Ramblurr/coffi",
-      "prep": {
-        "alias": "build",
-        "fn": "build/compile-java"
-      },
-      "rev": "9b05e268b915b1992bfd4175cb7c8c7c45d8973a",
-      "sha256": "1a5n07mfcghwg0mwhqqayg207ww2pl8rhk7yj5z92kz20m50dc9b",
-      "url": "https://github.com/Ramblurr/coffi.git"
     }
   },
   "maven": {
@@ -492,12 +482,6 @@
     "com/taoensso/trove/1.1.0/trove-1.1.0.pom": {
       "sha256": "e2cca045744447a8b589f83bba8cdfdfab8bf9517464708082dff9e586f0b691"
     },
-    "commons-codec/commons-codec/1.11/commons-codec-1.11.jar": {
-      "sha256": "e599d5318e97aa48f42136a2927e6dfa4e8881dff0e6c8e3109ddbbff51d7b7d"
-    },
-    "commons-codec/commons-codec/1.11/commons-codec-1.11.pom": {
-      "sha256": "c1e7140d1dea8fdf3528bc1e3c5444ac0b541297311f45f9806c213ec3ee9a10"
-    },
     "commons-codec/commons-codec/1.15/commons-codec-1.15.jar": {
       "sha256": "b3e9f6d63a790109bf0d056611fbed1cf69055826defeb9894a71369d246ed63"
     },
@@ -635,18 +619,6 @@
     },
     "http-kit/http-kit/2.9.0-beta4/http-kit-2.9.0-beta4.pom": {
       "sha256": "d40e6298c22763b1c97a4498bcc8abec40ceb01d893276a0c7dff6300bdfddff"
-    },
-    "insn/insn/0.5.4/insn-0.5.4.jar": {
-      "sha256": "dac8061f18d55c4b58840fa34e4e152e4c819c58331a7790be17b55297fa0018"
-    },
-    "insn/insn/0.5.4/insn-0.5.4.pom": {
-      "sha256": "aa4115c29a089e1410ae01ca323dcc653f7f7558a21059436c0ae32ae80b1538"
-    },
-    "io/github/clojure/tools.build/0.10.13/tools.build-0.10.13.jar": {
-      "sha256": "b2befc25f144d9cb0cfcfedba0163809a36d2c94728ac867c39cf1a5bba33d44"
-    },
-    "io/github/clojure/tools.build/0.10.13/tools.build-0.10.13.pom": {
-      "sha256": "0c59e3cb8dc69049e4878b6dc26b0acec87770bc3e0aff320ea435d90c9574a8"
     },
     "io/github/clojure/tools.build/0.10.14/tools.build-0.10.14.jar": {
       "sha256": "e95329eee72a2f2ff22c1ac41ac699709ecf860b8aa0709fadb2331751a9d74c"
@@ -1347,9 +1319,6 @@
     "net/java/jvnet-parent/3/jvnet-parent-3.pom": {
       "sha256": "30f5789efa39ddbf96095aada3fc1260c4561faf2f714686717cb2dc5049475a"
     },
-    "org/apache/apache/18/apache-18.pom": {
-      "sha256": "7831307285fd475bbc36b20ae38e7882f11c3153b1d5930f852d44eda8f33c17"
-    },
     "org/apache/apache/21/apache-21.pom": {
       "sha256": "af10c108da014f17cafac7b52b2b4b5a3a1c18265fa2af97a325d9143537b380"
     },
@@ -1388,9 +1357,6 @@
     },
     "org/apache/commons/commons-lang3/3.18.0/commons-lang3-3.18.0.pom": {
       "sha256": "aa254b373b6f6d46bc9dca86331b072a8ab86eb25ea9921fd439618392e98a16"
-    },
-    "org/apache/commons/commons-parent/42/commons-parent-42.pom": {
-      "sha256": "cd313494c670b483ec256972af1698b330e598f807002354eb765479f604b09c"
     },
     "org/apache/commons/commons-parent/52/commons-parent-52.pom": {
       "sha256": "75dbe8f34e98e4c3ff42daae4a2f9eb4cbcd3b5f1047d54460ace906dbb4502e"
@@ -1761,6 +1727,12 @@
     "org/apache/maven/wagon/wagon/3.5.3/wagon-3.5.3.pom": {
       "sha256": "7c10b8bac59268fe7957f2ab2b50965d90069ebf850c756bb55ea807ce440f0b"
     },
+    "org/babashka/ffi/0.1.2/ffi-0.1.2.jar": {
+      "sha256": "6fd03b7872773520db6d3e7924f3007e016f69232f7149a83de36aa53a9bdeab"
+    },
+    "org/babashka/ffi/0.1.2/ffi-0.1.2.pom": {
+      "sha256": "4ba1a5c3244322841c99c63d5a5ac6e042f152a57de8195061ee4230929d7056"
+    },
     "org/babashka/http-client/0.4.23/http-client-0.4.23.jar": {
       "sha256": "471872b2989b74e38088dad080f6e68e94e4eb9ce42ebeb3da01e95c7f9ec95f"
     },
@@ -1803,12 +1775,6 @@
     "org/clojars/jj/ring-http-exchange/1.4.8/ring-http-exchange-1.4.8.pom": {
       "sha256": "fd178c31712a55930fdc4239c2331d559aa5acc3212974748c010aaca00ecea8"
     },
-    "org/clojure/clojure/1.11.1/clojure-1.11.1.jar": {
-      "sha256": "2381b6e9423ab465151455944903d13a56243d6006b9194afc1bf4f8710cb4de"
-    },
-    "org/clojure/clojure/1.11.1/clojure-1.11.1.pom": {
-      "sha256": "20c45a1abedbd8be20aef936050ae31a08c16740b32f8740b8838cde96ffcb8a"
-    },
     "org/clojure/clojure/1.12.4/clojure-1.12.4.jar": {
       "sha256": "4b81e9ba6da38c45d9cc58023c674062b8c9f0714f33ff00ded22e6a949da177"
     },
@@ -1845,12 +1811,6 @@
     "org/clojure/core.rrb-vector/0.2.0/core.rrb-vector-0.2.0.pom": {
       "sha256": "b7ed3ff197f1add64e1ef252db3458f309613dc65775e8d8e0e913971e02458e"
     },
-    "org/clojure/core.specs.alpha/0.2.62/core.specs.alpha-0.2.62.jar": {
-      "sha256": "06eea8c070bbe45c158567e443439681bc8c46e9123414f81bfa32ba42d6cbc8"
-    },
-    "org/clojure/core.specs.alpha/0.2.62/core.specs.alpha-0.2.62.pom": {
-      "sha256": "1778bbd138bd18590b8054be9d919d1beb6809f85b76e5c6285b67d4077d300e"
-    },
     "org/clojure/core.specs.alpha/0.4.74/core.specs.alpha-0.4.74.jar": {
       "sha256": "eb73ac08cf49ba840c88ba67beef11336ca554333d9408808d78946e0feb9ddb"
     },
@@ -1880,12 +1840,6 @@
     },
     "org/clojure/data.priority-map/1.2.0/data.priority-map-1.2.0.pom": {
       "sha256": "e40154ef1860d51b0b0bb92cbb35492b126c9227bc2d158f0768da4b2093b13a"
-    },
-    "org/clojure/data.xml/0.2.0-alpha10/data.xml-0.2.0-alpha10.jar": {
-      "sha256": "6879ef41f3901c7ce69703b928c531b4569cc85d6cbd0e97b07b26facd1255bc"
-    },
-    "org/clojure/data.xml/0.2.0-alpha10/data.xml-0.2.0-alpha10.pom": {
-      "sha256": "5330ef824f6dc49deaee4d1d40fac2ec44497f4dfba72ce63460117496486851"
     },
     "org/clojure/data.xml/0.2.0-alpha11/data.xml-0.2.0-alpha11.jar": {
       "sha256": "618f9b972254f759ea6d65636b5d06e81a0ca0392836ca7a3872125df4c2e143"
@@ -1926,12 +1880,6 @@
     "org/clojure/pom.contrib/1.4.0/pom.contrib-1.4.0.pom": {
       "sha256": "0993676876081f491ba5af82fa6b5a037a3bee3a125a02d6d5e27aa29f356787"
     },
-    "org/clojure/spec.alpha/0.3.218/spec.alpha-0.3.218.jar": {
-      "sha256": "67ec898eb55c66a957a55279dd85d1376bb994bd87668b2b0de1eb3b97e8aae0"
-    },
-    "org/clojure/spec.alpha/0.3.218/spec.alpha-0.3.218.pom": {
-      "sha256": "6d8de14c3ac875760c5ff909562ff9873077031c6ab939f1cb139e169fe90758"
-    },
     "org/clojure/spec.alpha/0.5.238/spec.alpha-0.5.238.jar": {
       "sha256": "94cd99b6ea639641f37af4860a643b6ed399ee5a8be5d717cff0b663c8d75077"
     },
@@ -1962,12 +1910,6 @@
     "org/clojure/tools.cli/1.1.230/tools.cli-1.1.230.pom": {
       "sha256": "bfb621e4b01a5b8bce116a6070840dcdd5949e899c78468d811b6e8aaa9fd1c7"
     },
-    "org/clojure/tools.cli/1.3.250/tools.cli-1.3.250.jar": {
-      "sha256": "9c2f6c4ab0bc1ec81e6eed00f430b325c02f0c613aecacf6831feeadb479e729"
-    },
-    "org/clojure/tools.cli/1.3.250/tools.cli-1.3.250.pom": {
-      "sha256": "c82f2eda41f7affddaac231de58e2d058504d3bf3e2f699234005a5f39c2886a"
-    },
     "org/clojure/tools.cli/1.4.256/tools.cli-1.4.256.jar": {
       "sha256": "2a2d1769aa5ced5aa40e92c8ff568ea2751398b0ea45520308774ec2317abcee"
     },
@@ -1985,12 +1927,6 @@
     },
     "org/clojure/tools.deps.cli/0.31.158/tools.deps.cli-0.31.158.pom": {
       "sha256": "40454637cc788957d3d8bcb02ac796b38d8d8f00435521f341373639d328a988"
-    },
-    "org/clojure/tools.deps.edn/0.9.22/tools.deps.edn-0.9.22.jar": {
-      "sha256": "bd24dabde0610580edb0e46ecb0f76e54087348ae5d3346c10e3c5ed0bd69ce9"
-    },
-    "org/clojure/tools.deps.edn/0.9.22/tools.deps.edn-0.9.22.pom": {
-      "sha256": "57483ec6448de1e925ebd272fb14b4bfafbb348d8800b46ce2ea81befc3d6a7d"
     },
     "org/clojure/tools.deps.edn/0.9.27/tools.deps.edn-0.9.27.jar": {
       "sha256": "d1e40c612a60f3afb025f60ebbbffac7f926c0aaf046c204755f207376ed509f"
@@ -2010,12 +1946,6 @@
     "org/clojure/tools.deps/0.26.1553/tools.deps-0.26.1553.pom": {
       "sha256": "f2029c62fb81a85c43a0d23f684bb2f0758d51f282c312c5638cf4a4ec7675bb"
     },
-    "org/clojure/tools.deps/0.29.1598/tools.deps-0.29.1598.jar": {
-      "sha256": "bf0262a1374bc84ca4776fd32ad8a2c62c678dbac6bb56fa9f82530e50ceb43d"
-    },
-    "org/clojure/tools.deps/0.29.1598/tools.deps-0.29.1598.pom": {
-      "sha256": "1aa3d3e0454f86b2433a67311e2ce51f0bf4e06fb20bf620d41d78279a5d0b5f"
-    },
     "org/clojure/tools.deps/0.31.1629/tools.deps-0.31.1629.jar": {
       "sha256": "414ad23046949c398c03326e289836b4f499246d08861c3ec600eae342b01129"
     },
@@ -2027,12 +1957,6 @@
     },
     "org/clojure/tools.gitlibs/2.6.206/tools.gitlibs-2.6.206.pom": {
       "sha256": "05876f36e831193ed9575f4d11ab1dfdf63fe61cc810df5ec0737629f15e1ef8"
-    },
-    "org/clojure/tools.gitlibs/2.6.212/tools.gitlibs-2.6.212.jar": {
-      "sha256": "0f7448196d0b49f13f5c651e01723066f3ef4b562c2964d3ae5d7ac8007301ec"
-    },
-    "org/clojure/tools.gitlibs/2.6.212/tools.gitlibs-2.6.212.pom": {
-      "sha256": "76ee26c91be5bab2cba512284ce9ef25db7d1f1e2a682f7ead8400518c366886"
     },
     "org/clojure/tools.gitlibs/2.6.217/tools.gitlibs-2.6.217.jar": {
       "sha256": "508b27e12f0609e61046496f7ecfee2b364698763c5754e33b3e78781b69a286"
@@ -2489,12 +2413,6 @@
     },
     "org/ow2/asm/asm/9.2/asm-9.2.pom": {
       "sha256": "dfb12a1b224bf01be1fd604020466f894241bcb645dcce395edd8cd6f8a50df4"
-    },
-    "org/ow2/asm/asm/9.3/asm-9.3.jar": {
-      "sha256": "1263369b59e29c943918de11d6d6152e2ec6085ce63e5710516f8c67d368e4bc"
-    },
-    "org/ow2/asm/asm/9.3/asm-9.3.pom": {
-      "sha256": "8eac07e29f8aea83a8156d7b29fa368f6ebf3becfb209c9a1ac36abd906123e0"
     },
     "org/ow2/asm/asm/9.9.1/asm-9.9.1.jar": {
       "sha256": "6f3828a215c920059a5efa2fb55c233d6c54ec5cadca99ce1b1bdd10077c7ddd"

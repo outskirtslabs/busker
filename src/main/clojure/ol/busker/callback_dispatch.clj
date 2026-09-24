@@ -9,8 +9,7 @@
   - [[ol.busker.generation]] creates dispatch tables.
   - [[ol.busker.response]] handles response callbacks."
   (:require
-   [coffi.ffi :as ffi]
-   [coffi.mem :as mem]
+   [babashka.ffi :as ffi]
    [ol.busker.response :as response]
    [ol.busker.response-queue :as response-queue]
    [taoensso.trove :as trove])
@@ -112,8 +111,11 @@
     (when-let [[req _] (live-entry dispatch module-id request-seq)]
       (if-let [write-chunk (-> req :write-req :write-chunk)]
         (write-chunk
-         (when-not (mem/null? chunk-seg)
-           (mem/read-bytes (mem/reinterpret chunk-seg (long chunk-len)) (long chunk-len)))
+         (when-not (ffi/null? chunk-seg)
+           (if (zero? chunk-len)
+             (byte-array 0)
+             (ffi/read-array (ffi/reinterpret chunk-seg (long chunk-len))
+                             :byte (long chunk-len))))
          (= 1 is-last))
         (increment! dispatch :malformed)))
     (catch Throwable t
@@ -171,18 +173,12 @@
         proceed-callback (partial proceed-callback! dispatch)
         stop-callback (partial stop-callback! dispatch)
         body-callback-ptr
-        (mem/serialize body-callback
-                       [::ffi/fn [::mem/long ::mem/long ::mem/pointer ::mem/long ::mem/int]
-                        ::mem/void :raw-fn? true]
-                       arena)
+        (ffi/callback arena body-callback
+                      [:long :long :pointer :long :int] :void)
         proceed-callback-ptr
-        (mem/serialize proceed-callback
-                       [::ffi/fn [::mem/long ::mem/long] ::mem/void :raw-fn? true]
-                       arena)
+        (ffi/callback arena proceed-callback [:long :long] :void)
         stop-callback-ptr
-        (mem/serialize stop-callback
-                       [::ffi/fn [::mem/long ::mem/long ::mem/int] ::mem/void :raw-fn? true]
-                       arena)
+        (ffi/callback arena stop-callback [:long :long :int] :void)
         callback-pointers {:body body-callback-ptr
                            :proceed proceed-callback-ptr
                            :stop stop-callback-ptr}]

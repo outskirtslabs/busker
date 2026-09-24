@@ -9,8 +9,7 @@
   - [[ol.busker.response-queue]] schedules output.
   - [[ol.busker.response]] selects response delivery."
   (:require
-   [coffi.ffi :as ffi]
-   [coffi.mem :as mem]
+   [babashka.ffi :as mem]
    [ol.busker.internal.protocols :as p]
    [ol.busker.native :as h2o])
   (:import
@@ -42,12 +41,12 @@
         n-bytes-sent (atom 0)
         arena (Arena/ofAuto)
         ;; Array of sendvec structs for vectorized sends (max 2: buffer + large write)
-        send-vec-array-seg (mem/alloc (* 2 (mem/size-of ::h2o/h2o-sendvec-t)) arena)
+        send-vec-array-seg (mem/alloc arena (* 2 (mem/sizeof h2o/ffi-h2o-sendvec-t)))
         aggregation-buffer (ByteBuffer/allocateDirect output-buffer-size)
         ;; keep reference to native segments that are in flight so they
         ;; aren't GCed until libh2o is finished with them (signaled by on-proceed)
         in-flight-segments (atom [])
-        empty-seg (mem/alloc 0 arena)
+        empty-seg (mem/alloc arena 0)
 
         signal-close-complete!
         (fn []
@@ -78,7 +77,7 @@
                               (if (pos? agg-pos)
                                 (do
                                   (.flip aggregation-buffer)
-                                  (let [stable-seg (mem/alloc agg-pos arena)]
+                                  (let [stable-seg (mem/alloc arena agg-pos)]
                                     (MemorySegment/copy (MemorySegment/ofBuffer aggregation-buffer) 0
                                                         stable-seg 0 agg-pos)
                                     (swap! in-flight-segments conj [{:seg stable-seg :len agg-pos}])
@@ -95,7 +94,7 @@
                             (signal-close-complete!))
                           (catch Exception e
                             (handle-error! e :message "Error in on-proceed callback"))))
-        on-proceed-cb-ptr (mem/serialize on-proceed-cb [::ffi/fn [::mem/pointer] ::mem/void])
+        on-proceed-cb-ptr (mem/callback (mem/auto-arena) on-proceed-cb [:pointer] :void)
 
         on-stop-cb (fn [_ctx-ptr reason]
                      (try
@@ -105,7 +104,7 @@
                        (when @final-chunk-pending? (.release close-complete-sem))
                        (catch Exception e
                          (handle-error! e :message "on-stop callback error" :release-proceed? false))))
-        on-stop-cb-ptr (mem/serialize on-stop-cb [::ffi/fn [::mem/pointer ::mem/int] ::mem/void])
+        on-stop-cb-ptr (mem/callback (mem/auto-arena) on-stop-cb [:pointer :int] :void)
 
         send-vecs-internal!
         (fn [vecs vec-count is-final]
@@ -117,8 +116,8 @@
                  [:h2o/sendvec
                   (fn []
                     (doseq [[idx {:keys [seg len]}] (map-indexed vector vecs)]
-                      (let [offset (* idx (mem/size-of ::h2o/h2o-sendvec-t))
-                            vec-seg (mem/slice send-vec-array-seg offset (mem/size-of ::h2o/h2o-sendvec-t))]
+                      (let [offset (* idx (mem/sizeof h2o/ffi-h2o-sendvec-t))
+                            vec-seg (mem/slice send-vec-array-seg offset (mem/sizeof h2o/ffi-h2o-sendvec-t))]
                         (h2o/sendvec-init-raw vec-seg seg len)))
                     (try
                       (h2o/sendvec (-> req :req-ctx :req) send-vec-array-seg vec-count
@@ -139,7 +138,7 @@
               ;; Buffer has data: copy to stable segment and send
               (do
                 (.flip aggregation-buffer)
-                (let [stable-seg (mem/alloc pos arena)]
+                (let [stable-seg (mem/alloc arena pos)]
                   (MemorySegment/copy (MemorySegment/ofBuffer aggregation-buffer) 0
                                       stable-seg 0 pos)
                   (send-vecs-internal! [{:seg stable-seg :len pos}] 1 is-final))
@@ -166,14 +165,14 @@
                     (acquire-with-wake)
                     (let [agg-buffer-pos (.position aggregation-buffer)
                           chunk (byte-array chunk-size)
-                          chunk-seg (mem/alloc chunk-size arena)]
+                          chunk-seg (mem/alloc arena chunk-size)]
                       (.get src chunk)
                       (MemorySegment/copy chunk 0 chunk-seg ValueLayout/JAVA_BYTE 0 chunk-size)
                       (if (pos? agg-buffer-pos)
                         ;; Send both buffer and large write as 2-vec array using stable copy
                         (do
                           (.flip aggregation-buffer)
-                          (let [buffer-stable-seg (mem/alloc agg-buffer-pos arena)]
+                          (let [buffer-stable-seg (mem/alloc arena agg-buffer-pos)]
                             (MemorySegment/copy (MemorySegment/ofBuffer aggregation-buffer) 0
                                                 buffer-stable-seg 0 agg-buffer-pos)
                             (send-vecs-internal! [{:seg buffer-stable-seg :len agg-buffer-pos}

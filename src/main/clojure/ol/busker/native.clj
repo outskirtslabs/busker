@@ -9,10 +9,8 @@
   - [[ol.busker.native.loader]] loads the shim.
   - [[ol.busker.generation]] manages native lifecycle."
   (:require
+   [babashka.ffi :as ffi :refer [defcfn]]
    [clojure.string :as str]
-   [coffi.ffi :as ffi :refer [defcfn]]
-   [coffi.layout :as layout]
-   [coffi.mem :as mem]
    [ol.busker.native.loader]
    [ol.busker.util :as util]
    [taoensso.trove :as trove])
@@ -54,284 +52,156 @@
    :h2o.compress/enable-br   H2O_COMPRESS_HINT_ENABLE_BR
    :h2o.compress/enable-zstd H2O_COMPRESS_HINT_ENABLE_ZSTD})
 
-(import 'java.lang.foreign.MemoryLayout)
-(import 'java.lang.foreign.MemoryLayout$PathElement)
+(def ffi-clj-header-t
+  [:struct [[:name :pointer]
+            [:name_len :long]
+            [:value :pointer]
+            [:value_len :long]]])
 
-(defn offset-of
-  "Given a `struct-def`, returns the byte offset of the `field`."
-  [struct-def field]
-  (let [layout ^MemoryLayout (mem/c-layout struct-def)
-        path-elts
-        ^"[Ljava.lang.foreign.MemoryLayout$PathElement;"
-        (into-array MemoryLayout$PathElement
-                    [(MemoryLayout$PathElement/groupElement (name field))])]
-    (.byteOffset layout path-elts)))
+(def ffi-h2o-iovec-t
+  [:struct [[:base :pointer]
+            [:len :long]]])
 
-(defn print-offsets-for [struct-def-vec]
-  (let [layout (layout/with-c-layout struct-def-vec)
-        [_struct-type fields] struct-def-vec
-        struct-name (or (some-> struct-def-vec meta :name str) "struct")]
-    (println (str "COFFI: " struct-name " field offsets:"))
-    (println (str "  sizeof(" struct-name ") = " (mem/size-of layout)))
-    (doseq [[field-name _field-type] fields]
-      (println (str "  " (name field-name) " = " (offset-of layout field-name))))))
+(def ffi-clj-fixed-response-slot-data-t
+  [:struct [[:claim-token :long]
+            [:module-id :long]
+            [:request-seq :long]
+            [:headers-len :long]
+            [:content-length :long]
+            [:body-offset :long]
+            [:body-len :long]
+            [:payload-len :long]
+            [:status :int]
+            [:compress-hint :int]
+            [:headers [:array ffi-clj-header-t 64]]]])
 
-(mem/defalias ::clj-header-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:name ::mem/pointer]
-      [:name_len ::mem/long]
-      [:value ::mem/pointer]
-      [:value_len ::mem/long]]]))
+(def ffi-h2o-accept-ctx-t
+  [:struct [[:ctx :pointer]
+            [:hosts :pointer]
+            [:ssl_ctx :pointer]
+            [:http2_origin_frame :pointer]
+            [:expect_proxy_line :int]
+            [:libmemcached_receiver :pointer]]])
 
-(mem/defalias ::clj-fixed-response-slot-data-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:claim-token ::mem/long]
-      [:module-id ::mem/long]
-      [:request-seq ::mem/long]
-      [:headers-len ::mem/long]
-      [:content-length ::mem/long]
-      [:body-offset ::mem/long]
-      [:body-len ::mem/long]
-      [:payload-len ::mem/long]
-      [:status ::mem/int]
-      [:compress-hint ::mem/int]
-      [:headers [::mem/array ::clj-header-t 64]]]]))
-;; h2o_iovec_t is:
-;;   typedef struct { char *base; size_t len; } h2o_iovec_t;
-(mem/defalias ::h2o-iovec-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:base ::mem/pointer]
-      [:len ::mem/long]]]))
+(def ffi-h2o-sendvec-t
+  [:struct [[:callbacks :pointer]
+            [:len :long]
+            [:raw :pointer]
+            [:cb_arg_padding :long]]])
 
-;; h2o_accept_ctx_t structure
-;; typedef struct st_h2o_accept_ctx_t {
-;;     h2o_context_t *ctx;
-;;     h2o_hostconf_t **hosts;
-;;     SSL_CTX *ssl_ctx;
-;;     h2o_iovec_t *http2_origin_frame;
-;;     int expect_proxy_line;
-;;     h2o_multithread_receiver_t *libmemcached_receiver;
-;; } h2o_accept_ctx_t;
-(mem/defalias ::h2o-accept-ctx-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:ctx ::mem/pointer]
-      [:hosts ::mem/pointer]
-      [:ssl_ctx ::mem/pointer]
-      [:http2_origin_frame ::mem/pointer]
-      [:expect_proxy_line ::mem/int]
-      [:libmemcached_receiver ::mem/pointer]]]))
+(def size-of-h2o-sendvec-t (ffi/sizeof ffi-h2o-sendvec-t))
 
-(mem/defalias ::h2o-sendvec-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:callbacks ::mem/pointer]
-      [:len ::mem/long]
-      ;; Union of raw pointer OR cb_arg[2], takes 16 bytes (size of larger member)
-      [:raw ::mem/pointer]
-      [:cb_arg_padding ::mem/long]]]))
+(def ffi-h2o-header-t
+  [:struct [[:name :pointer]
+            [:orig_name :pointer]
+            [:value ffi-h2o-iovec-t]
+            [:flags :char]]])
 
-(def size-of-h2o-sendvec-t (mem/size-of ::h2o-sendvec-t))
+(def ffi-h2o-generator-t
+  [:struct [[:proceed :pointer]
+            [:stop :pointer]]])
 
-;; h2o_header_t structure
-;; typedef struct {
-;;     h2o_iovec_t *name;
-;;     const char *orig_name;
-;;     h2o_iovec_t value;
-;;     h2o_header_flags_t flags;
-;; } h2o_header_t;
-(mem/defalias ::h2o-header-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:name ::mem/pointer]
-      [:orig_name ::mem/pointer]
-      [:value ::h2o-iovec-t]
-      [:flags ::mem/char]]]))
+(def ffi-clj-req-meta-t
+  [:struct [[:authority :pointer]
+            [:method :pointer]
+            [:path :pointer]
+            [:remote_addr :pointer]
+            [:scheme :pointer]
+            [:headers :pointer]
+            [:authority_len :long]
+            [:method_len :long]
+            [:path_len :long]
+            [:remote_addr_len :long]
+            [:scheme_len :long]
+            [:headers_len :long]
+            [:http_version :int]
+            [:has_body :int16]
+            [:is_early_data :int16]]])
 
-;; h2o_generator_t structure
-;; typedef struct st_h2o_generator_t {
-;;     void (*proceed)(struct st_h2o_generator_t *self, h2o_req_t *req);
-;;     void (*stop)(struct st_h2o_generator_t *self, h2o_req_t *req);
-;; } h2o_generator_t;
-(mem/defalias ::h2o-generator-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:proceed ::mem/pointer]
-      [:stop ::mem/pointer]]]))
+(def ffi-clj-req-ctx-t
+  [:struct [[:req :pointer]
+            [:meta ffi-clj-req-meta-t]
+            [:on-cleanup :pointer]
+            [:on-request-body-chunk :pointer]
+            [:response-receiver :pointer]
+            [:response-hash-next :pointer]
+            [:generator ffi-h2o-generator-t]
+            [:on-response-generator-proceed :pointer]
+            [:on-response-generator-stop :pointer]
+            [:preferred-chunk-size :long]
+            [:dispatch-module-id :long]
+            [:dispatch-request-seq :long]
+            [:cleanup :int]
+            [:closing :int]
+            [:response_started :int]]])
 
-(mem/defalias ::clj-req-meta-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:authority ::mem/pointer]
-      [:method ::mem/pointer]
-      [:path ::mem/pointer]
-      [:remote_addr ::mem/pointer]
-      [:scheme ::mem/pointer]
-      [:headers ::mem/pointer]
+(def ffi-clj-h2o-flat-globalconf-t
+  [:struct [[:has_server_name :int]
+            [:server_name :string]
+            [:has_proxy_status_identity :int]
+            [:proxy_status_identity :string]
+            [:has_max_request_entity_size :int]
+            [:max_request_entity_size :long]
+            [:has_max_delegations :int]
+            [:max_delegations :uint]
+            [:has_max_reprocesses :int]
+            [:max_reprocesses :uint]
+            [:has_handshake_timeout :int]
+            [:handshake_timeout :long]
+            [:has_max_spare_pipes :int]
+            [:max_spare_pipes :long]
+            [:has_http1__req_timeout :int]
+            [:http1__req_timeout :long]
+            [:has_http1__req_io_timeout :int]
+            [:http1__req_io_timeout :long]
+            [:has_http1__upgrade_to_http2 :int]
+            [:http1__upgrade_to_http2 :int]
+            [:has_http2__idle_timeout :int]
+            [:http2__idle_timeout :long]
+            [:has_http2__graceful_shutdown_timeout :int]
+            [:http2__graceful_shutdown_timeout :long]
+            [:has_http2__max_streams :int]
+            [:http2__max_streams :uint32]
+            [:has_http2__max_concurrent_requests_per_connection :int]
+            [:http2__max_concurrent_requests_per_connection :long]
+            [:has_http2__max_concurrent_streaming_requests_per_connection :int]
+            [:http2__max_concurrent_streaming_requests_per_connection :long]
+            [:has_http2__max_streams_for_priority :int]
+            [:http2__max_streams_for_priority :long]
+            [:has_http2__active_stream_window_size :int]
+            [:http2__active_stream_window_size :uint32]
+            [:has_http2__dos_delay :int]
+            [:http2__dos_delay :long]
+            [:has_http3__idle_timeout :int]
+            [:http3__idle_timeout :long]
+            [:has_http3__graceful_shutdown_timeout :int]
+            [:http3__graceful_shutdown_timeout :long]
+            [:has_http3__active_stream_window_size :int]
+            [:http3__active_stream_window_size :uint32]
+            [:has_http3__ack_frequency :int]
+            [:http3__ack_frequency :uint16]
+            [:has_compress_args :int]
+            [:compress_args_mine_size :long]
+            [:compress_args_gzip_quality :int]
+            [:compress_args_brotli_quality :int]
+            [:compress_args_zstd_quality :int]]])
 
-      [:authority_len ::mem/long]
-      [:method_len ::mem/long]
-      [:path_len ::mem/long]
-      [:remote_addr_len ::mem/long]
-      [:scheme_len ::mem/long]
-      [:headers_len ::mem/long]
-
-      [:http_version ::mem/int]
-      [:has_body ::mem/short]
-      [:is_early_data ::mem/short]]]))
-#_(print-offsets-for (layout/with-c-layout
-                       [::mem/struct
-                        [[:authority ::mem/pointer]
-                         [:method ::mem/pointer]
-                         [:path ::mem/pointer]
-                         [:remote_addr ::mem/pointer]
-                         [:scheme ::mem/pointer]
-                         [:headers ::mem/pointer]
-
-                         [:authority_len ::mem/long]
-                         [:method_len ::mem/long]
-                         [:path_len ::mem/long]
-                         [:remote_addr_len ::mem/long]
-                         [:scheme_len ::mem/long]
-                         [:headers_len ::mem/long]
-
-                         [:http_version ::mem/int]
-                         [:has_body ::mem/int]]]))
-
-(mem/defalias ::clj-req-ctx-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:req ::mem/pointer]
-      [:meta ::clj-req-meta-t]
-      [:on-cleanup ::mem/pointer]
-      [:on-request-body-chunk ::mem/pointer]
-      [:response-receiver ::mem/pointer]
-      [:response-hash-next ::mem/pointer]
-      [:generator ::h2o-generator-t]
-      [:on-response-generator-proceed ::mem/pointer]
-      [:on-response-generator-stop ::mem/pointer]
-      [:preferred-chunk-size ::mem/long]
-      [:dispatch-module-id ::mem/long]
-      [:dispatch-request-seq ::mem/long]
-      [:cleanup ::mem/int]
-      [:closing ::mem/int]
-      [:response_started ::mem/int]]]))
-
-(def ^:private size-of-clj-req-ctx-t
-  (mem/size-of ::clj-req-ctx-t))
-
-#_(print-offsets-for (layout/with-c-layout
-                       [::mem/struct
-                        [[:req ::mem/pointer]
-                         [:meta ::clj-req-meta-t]
-                         [:on-cleanup ::mem/pointer]
-                         [:on-request-body-chunk ::mem/pointer]
-                         [:generator ::h2o-generator-t]
-                         [:on-response-generator-proceed ::mem/pointer]
-                         [:on-response-generator-stop ::mem/pointer]
-                         [:preferred-chunk-size ::mem/long]
-                         [:dispatch-module-id ::mem/long]
-                         [:dispatch-request-seq ::mem/long]
-                         [:cleanup ::mem/int]
-                         [:closing ::mem/int]
-                         [:response_started ::mem/int]]]))
-
-(mem/defalias ::clj-h2o-flat-globalconf-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:has_server_name ::mem/int]
-      [:server_name ::mem/c-string]
-
-      [:has_proxy_status_identity ::mem/int]
-      [:proxy_status_identity ::mem/c-string]
-
-      [:has_max_request_entity_size ::mem/int]
-      [:max_request_entity_size ::mem/long]
-
-      [:has_max_delegations ::mem/int]
-      [:max_delegations ::mem/int]
-
-      [:has_max_reprocesses ::mem/int]
-      [:max_reprocesses ::mem/int]
-
-      [:has_handshake_timeout ::mem/int]
-      [:handshake_timeout ::mem/long]
-
-      [:has_max_spare_pipes ::mem/int]
-      [:max_spare_pipes ::mem/long]
-
-      [:has_http1__req_timeout ::mem/int]
-      [:http1__req_timeout ::mem/long]
-
-      [:has_http1__req_io_timeout ::mem/int]
-      [:http1__req_io_timeout ::mem/long]
-
-      [:has_http1__upgrade_to_http2 ::mem/int]
-      [:http1__upgrade_to_http2 ::mem/int]
-
-      [:has_http2__idle_timeout ::mem/int]
-      [:http2__idle_timeout ::mem/long]
-
-      [:has_http2__graceful_shutdown_timeout ::mem/int]
-      [:http2__graceful_shutdown_timeout ::mem/long]
-
-      [:has_http2__max_streams ::mem/int]
-      [:http2__max_streams ::mem/int]
-
-      [:has_http2__max_concurrent_requests_per_connection ::mem/int]
-      [:http2__max_concurrent_requests_per_connection ::mem/long]
-
-      [:has_http2__max_concurrent_streaming_requests_per_connection ::mem/int]
-      [:http2__max_concurrent_streaming_requests_per_connection ::mem/long]
-
-      [:has_http2__max_streams_for_priority ::mem/int]
-      [:http2__max_streams_for_priority ::mem/long]
-
-      [:has_http2__active_stream_window_size ::mem/int]
-      [:http2__active_stream_window_size ::mem/int]
-
-      [:has_http2__dos_delay ::mem/int]
-      [:http2__dos_delay ::mem/long]
-
-      [:has_http3__idle_timeout ::mem/int]
-      [:http3__idle_timeout ::mem/long]
-
-      [:has_http3__graceful_shutdown_timeout ::mem/int]
-      [:http3__graceful_shutdown_timeout ::mem/long]
-
-      [:has_http3__active_stream_window_size ::mem/int]
-      [:http3__active_stream_window_size ::mem/int]
-
-      [:has_http3__ack_frequency ::mem/int]
-      [:http3__ack_frequency ::mem/int]
-
-      [:has_compress_args ::mem/int]
-      [:compress_args_mine_size ::mem/long]
-      [:compress_args_gzip_quality ::mem/int]
-      [:compress_args_brotli_quality ::mem/int]
-      [:compress_args_zstd_quality ::mem/int]]]))
-
-#_(print-offsets-for
-   (layout/with-c-layout
-     [::mem/struct
-      [[:req ::mem/pointer]
-       [:meta ::clj-req-meta-t]
-       [:on-cleanup ::mem/pointer]
-       [:generator ::h2o-generator-t]
-       [:cleanup ::mem/int]]]))
+(def ffi-clj-session-ticket-t
+  [:struct [[:name [:array :byte 16]]
+            [:aes_key [:array :byte 32]]
+            [:hmac_key [:array :byte 64]]
+            [:not_before :long]
+            [:not_after :long]]])
 
 (defcfn evloop-create
   "Creates a new event loop. Returns a pointer to h2o_evloop_t."
-  h2o_evloop_create
-  [] ::mem/pointer)
+  "h2o_evloop_create"
+  [] :pointer)
 
 (defcfn evloop-destroy
   "Destroys an event loop and frees associated resources."
-  h2o_evloop_destroy
-  [::mem/pointer] ::mem/void)
+  "h2o_evloop_destroy"
+  [:pointer] :void)
 
 (defcfn evloop-run
   "Runs the event loop once. Returns 0 if successful, -1 on error (typically EINTR).
@@ -339,50 +209,48 @@
    Parameters:
    - loop: pointer to h2o_evloop_t
    - max-wait: maximum time to wait in milliseconds (int32)"
-  h2o_evloop_run
-  [::mem/pointer ::mem/int] ::mem/int)
+  "h2o_evloop_run"
+  [:pointer :int] :int)
 
 (defcfn globalconf-size
   "Get size of h2o_globalconf_t structure"
-  clj_h2o_globalconf_size
-  [] ::mem/long)
+  "clj_h2o_globalconf_size"
+  [] :long)
 
 (defcfn create-global-conf
   "Create, initialize, and configure a new h2o_globalconf_t with our configuration"
-  clj_h2o_create_globalconf
-  [::mem/pointer ::mem/pointer] ::mem/void)
+  "clj_h2o_create_globalconf"
+  [:pointer :pointer] :void)
 
 (defcfn config-dispose
   "Dispose h2o global configuration and free resources"
-  h2o_config_dispose
-  [::mem/pointer] ::mem/void)
+  "h2o_config_dispose"
+  [:pointer] :void)
 
 (defcfn context-size
   "Get size of h2o_context_t structure"
-  clj_h2o_context_size
-  [] ::mem/long)
+  "clj_h2o_context_size"
+  [] :long)
 
 (defcfn req-ctx-size
   "Gets the native size of `clj_req_ctx_t`."
-  clj_h2o_req_ctx_size
-  [] ::mem/long)
+  "clj_h2o_req_ctx_size"
+  [] :long)
 
 (defcfn accept-ctx-size
   "Get size of h2o_accept_ctx_t structure"
-  clj_h2o_accept_ctx_size
-  [] ::mem/long)
+  "clj_h2o_accept_ctx_size"
+  [] :long)
 
 (defcfn globalconf-get-hosts
   "Get hosts pointer (h2o_hostconf_t**) from h2o_globalconf_t"
-  clj_h2o_globalconf_get_hosts
-  [::mem/pointer] ::mem/pointer)
+  "clj_h2o_globalconf_get_hosts"
+  [:pointer] :pointer)
 
-(defcfn config-register-host
-  "Register a virtual host with the h2o configuration.
-   Returns pointer to h2o_hostconf_t"
-  h2o_config_register_host
-  [::mem/pointer ::h2o-iovec-t ::mem/int] ::mem/pointer)
-
+(ffi/defcfn config-register-host
+  "Register a virtual host with the h2o configuration. Returns its native pointer."
+  "h2o_config_register_host"
+  [:pointer ffi-h2o-iovec-t :uint16] :pointer)
 (defcfn context-init
   "Initialize h2o context for an event loop.
 
@@ -390,18 +258,18 @@
    - context: pointer to h2o_context_t
    - loop: pointer to h2o_evloop_t
    - config: pointer to h2o_globalconf_t"
-  h2o_context_init
-  [::mem/pointer ::mem/pointer ::mem/pointer] ::mem/void)
+  "h2o_context_init"
+  [:pointer :pointer :pointer] :void)
 
 (defcfn context-dispose
   "Dispose h2o context and free resources"
-  h2o_context_dispose
-  [::mem/pointer] ::mem/void)
+  "h2o_context_dispose"
+  [:pointer] :void)
 
 (defcfn context-request-shutdown
   "Request graceful shutdown of all connections in this context (sends GOAWAY)"
-  h2o_context_request_shutdown
-  [::mem/pointer] ::mem/void)
+  "h2o_context_request_shutdown"
+  [:pointer] :void)
 
 (defcfn evloop-socket-create
   "Create h2o socket wrapper for file descriptor.
@@ -412,8 +280,8 @@
    - flags: socket flags (int)
 
    Returns: pointer to h2o_socket_t"
-  h2o_evloop_socket_create
-  [::mem/pointer ::mem/int ::mem/int] ::mem/pointer)
+  "h2o_evloop_socket_create"
+  [:pointer :int :int] :pointer)
 
 (defcfn socket-read-start
   "Start reading from socket with callback.
@@ -421,21 +289,21 @@
    Parameters:
    - sock: pointer to h2o_socket_t
    - cb: callback function pointer"
-  h2o_socket_read_start
-  [::mem/pointer ::mem/pointer] ::mem/void)
+  "h2o_socket_read_start"
+  [:pointer :pointer] :void)
 
 (defcfn socket-read-stop
   "Stop reading from socket.
 
    Parameters:
    - sock: pointer to h2o_socket_t"
-  h2o_socket_read_stop
-  [::mem/pointer] ::mem/void)
+  "h2o_socket_read_stop"
+  [:pointer] :void)
 
-(defcfn socket-reading? "clj_h2o_socket_is_reading" [::mem/pointer] ::mem/int)
-(defcfn socket-writing? "clj_h2o_socket_is_writing" [::mem/pointer] ::mem/int)
-(defcfn socket-read-cb "clj_h2o_socket_get_read_cb" [::mem/pointer] ::mem/pointer)
-(defcfn socket-write-cb "clj_h2o_socket_get_write_cb" [::mem/pointer] ::mem/pointer)
+(defcfn socket-reading? "clj_h2o_socket_is_reading" [:pointer] :int)
+(defcfn socket-writing? "clj_h2o_socket_is_writing" [:pointer] :int)
+(defcfn socket-read-cb "clj_h2o_socket_get_read_cb" [:pointer] :pointer)
+(defcfn socket-write-cb "clj_h2o_socket_get_write_cb" [:pointer] :pointer)
 
 (defcfn socket-set-on-close
   "Set socket close callback for connection tracking.
@@ -444,19 +312,19 @@
    - sock: pointer to h2o_socket_t
    - callback: function pointer for on_close callback
    - data: user data pointer passed to callback"
-  clj_h2o_socket_set_on_close
-  [::mem/pointer ::mem/pointer ::mem/pointer] ::mem/void)
+  "clj_h2o_socket_set_on_close"
+  [:pointer :pointer :pointer] :void)
 
 (defcfn evloop-socket-accept
   "Accept new connection from listening socket.
    Returns pointer to h2o_socket_t or NULL"
-  h2o_evloop_socket_accept
-  [::mem/pointer] ::mem/pointer)
+  "h2o_evloop_socket_accept"
+  [:pointer] :pointer)
 
 (defcfn socket-close
   "Close h2o socket"
-  h2o_socket_close
-  [::mem/pointer] ::mem/void)
+  "h2o_socket_close"
+  [:pointer] :void)
 
 (defcfn h2o-accept
   "Pass accepted socket to h2o for HTTP handling.
@@ -464,41 +332,41 @@
    Parameters:
    - ctx: pointer to h2o_accept_ctx_t
    - sock: pointer to h2o_socket_t"
-  h2o_accept
-  [::mem/pointer ::mem/pointer] ::mem/void)
+  "h2o_accept"
+  [:pointer :pointer] :void)
 
 (defcfn sendvec-init-raw
   "Initialize a sendvec with raw bytes"
-  h2o_sendvec_init_raw
-  [::mem/pointer ::mem/pointer ::mem/long] ::mem/void)
+  "h2o_sendvec_init_raw"
+  [:pointer :pointer :long] :void)
 
 (defcfn sendvec
   "Send response data using sendvec"
-  h2o_sendvec
-  [::mem/pointer ::mem/pointer ::mem/long ::mem/int] ::mem/void)
+  "h2o_sendvec"
+  [:pointer :pointer :long :int] :void)
 
 (defcfn start-response
   "Start sending HTTP response"
-  clj_h2o_start_response
-  [::mem/pointer ::mem/int ::mem/pointer ::mem/long ::mem/long ::mem/int ::mem/pointer ::mem/pointer] ::mem/long)
+  "clj_h2o_start_response"
+  [:pointer :int :pointer :long :long :int :pointer :pointer] :long)
 
 (defcfn send-informational
   "Sends 1xx response"
-  clj_h2o_send_informational
-  [::mem/pointer ::mem/int ::mem/pointer ::mem/long]
-  ::mem/void)
+  "clj_h2o_send_informational"
+  [:pointer :int :pointer :long]
+  :void)
 
 (defcfn send-fixed-final
   "Sends a fixed final response with inline body bytes."
-  clj_h2o_send_fixed_final
-  [::mem/pointer ::mem/int ::mem/pointer ::mem/long ::mem/long ::mem/int
-   ::mem/pointer ::mem/long]
-  ::mem/void)
+  "clj_h2o_send_fixed_final"
+  [:pointer :int :pointer :long :long :int
+   :pointer :long]
+  :void)
 
 (defcfn cancel-request
   "Cancel a request after the response has started"
-  clj_h2o_cancel_request
-  [::mem/pointer] ::mem/int)
+  "clj_h2o_cancel_request"
+  [:pointer] :int)
 
 (defn report-almost-fatal-error [msg e]
   (binding [*out* *err*]
@@ -507,45 +375,45 @@
     (when e
       (.printStackTrace ^Throwable e ^java.io.PrintWriter *err*))))
 
-(defcfn create-handler*
-  "FFI binding for handler construction."
+(ffi/defcfn create-handler*
+  "Construct an H2O handler with its request and cleanup callbacks."
   "clj_h2o_create_handler"
-  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer] ::mem/pointer)
+  [:pointer :pointer :pointer :pointer] :pointer)
 
 (defcfn handler-set-shutting-down
   "Update the handler shutting_down flag (1 means shutdown in progress)."
-  clj_h2o_handler_set_shutting_down
-  [::mem/pointer ::mem/int] ::mem/void)
+  "clj_h2o_handler_set_shutting_down"
+  [:pointer :int] :void)
 
 (defcfn proceed-req
   "Call req->proceed_req to signal readiness for next request body chunk"
-  clj_h2o_proceed_req
-  [::mem/pointer] ::mem/void)
+  "clj_h2o_proceed_req"
+  [:pointer] :void)
 
 (defcfn install-request-dispatch
   "Installs scalar request identity and its stable body callback."
-  clj_h2o_install_request_dispatch
-  [::mem/pointer ::mem/pointer ::mem/long ::mem/long ::mem/pointer] ::mem/int)
+  "clj_h2o_install_request_dispatch"
+  [:pointer :pointer :long :long :pointer] :int)
 
 (defcfn evloop-now
   "Get current time in milliseconds from event loop"
-  clj_h2o_evloop_now
-  [::mem/pointer] ::mem/long)
+  "clj_h2o_evloop_now"
+  [:pointer] :long)
 
 (defcfn context-get-active-conns
   "Get count of active connections for this context"
-  clj_h2o_context_get_active_conns
-  [::mem/pointer] ::mem/long)
+  "clj_h2o_context_get_active_conns"
+  [:pointer] :long)
 
 (defcfn context-get-idle-conns
   "Get count of idle connections for this context"
-  clj_h2o_context_get_idle_conns
-  [::mem/pointer] ::mem/long)
+  "clj_h2o_context_get_idle_conns"
+  [:pointer] :long)
 
 (defcfn context-get-shutdown-conns
   "Get count of shutdown connections for this context"
-  clj_h2o_context_get_shutdown_conns
-  [::mem/pointer] ::mem/long)
+  "clj_h2o_context_get_shutdown_conns"
+  [:pointer] :long)
 
 (defcfn cleanup-thread
   "Perform periodic cleanup tasks for a context.
@@ -554,32 +422,32 @@
    Parameters:
    - now: current time in milliseconds (from evloop-now)
    - ctx: pointer to h2o_context_t"
-  h2o_cleanup_thread
-  [::mem/long ::mem/pointer] ::mem/int)
+  "h2o_cleanup_thread"
+  [:long :pointer] :int)
 
 (defcfn mt-create-wakeup-receiver
   "Register a wakeup receiver on ctx->queue (returns opaque pointer)"
-  clj_h2o_mt_create_wakeup_receiver
-  [::mem/pointer] ::mem/pointer)
+  "clj_h2o_mt_create_wakeup_receiver"
+  [:pointer] :pointer)
 
 (defcfn mt-create-response-receiver
   "Registers a fixed-response receiver on the H2O context queue."
-  clj_h2o_mt_create_response_receiver
-  [::mem/pointer ::mem/long ::mem/long] ::mem/pointer)
+  "clj_h2o_mt_create_response_receiver"
+  [:pointer :long :long] :pointer)
 
 (defcfn mt-destroy-response-receiver
   "Unregisters a drained fixed-response receiver."
-  clj_h2o_mt_destroy_response_receiver
-  [::mem/pointer] ::mem/void)
+  "clj_h2o_mt_destroy_response_receiver"
+  [:pointer] :void)
 
 (defcfn mt-response-pending
   "Returns the number of submitted fixed responses not yet consumed by H2O."
-  clj_h2o_mt_response_pending
-  [::mem/pointer] ::mem/long)
+  "clj_h2o_mt_response_pending"
+  [:pointer] :long)
 
 (defcfn mt-response-slot-data-size*
-  clj_h2o_response_slot_data_size
-  [] ::mem/long)
+  "clj_h2o_response_slot_data_size"
+  [] :long)
 
 (defn mt-response-slot-data-size
   "Returns the fixed metadata size before slot payload bytes."
@@ -588,8 +456,8 @@
   (long (mt-response-slot-data-size*)))
 
 (defcfn mt-response-ring-capacity*
-  clj_h2o_response_ring_capacity
-  [::mem/pointer] ::mem/long)
+  "clj_h2o_response_ring_capacity"
+  [:pointer] :long)
 
 (defn mt-response-ring-capacity
   "Returns the fixed number of response slots."
@@ -598,8 +466,8 @@
   (long (mt-response-ring-capacity* receiver)))
 
 (defcfn mt-response-slot-payload-capacity*
-  clj_h2o_response_slot_payload_capacity
-  [::mem/pointer] ::mem/long)
+  "clj_h2o_response_slot_payload_capacity"
+  [:pointer] :long)
 
 (defn mt-response-slot-payload-capacity
   "Returns the byte capacity after each slot metadata area."
@@ -608,8 +476,8 @@
   (long (mt-response-slot-payload-capacity* receiver)))
 
 (defcfn mt-response-claimed*
-  clj_h2o_response_ring_claimed
-  [::mem/pointer] ::mem/long)
+  "clj_h2o_response_ring_claimed"
+  [:pointer] :long)
 
 (defn mt-response-claimed
   "Returns the current number of claimed response slots."
@@ -618,8 +486,8 @@
   (long (mt-response-claimed* receiver)))
 
 (defcfn mt-response-ring-ready*
-  clj_h2o_response_ring_ready
-  [::mem/pointer] ::mem/long)
+  "clj_h2o_response_ring_ready"
+  [:pointer] :long)
 
 (defn mt-response-ring-ready
   "Returns the current number of ready response slots."
@@ -628,8 +496,8 @@
   (long (mt-response-ring-ready* receiver)))
 
 (defcfn mt-response-slot-data*
-  clj_h2o_response_slot_data
-  [::mem/pointer ::mem/long] ::mem/pointer)
+  "clj_h2o_response_slot_data"
+  [:pointer :long] :pointer)
 
 (defn mt-response-slot-data
   "Returns one slot data pointer for generation-time binding."
@@ -637,8 +505,8 @@
   (mt-response-slot-data* receiver index))
 
 (defcfn mt-response-try-claim*
-  clj_h2o_response_try_claim
-  [::mem/pointer] ::mem/long)
+  "clj_h2o_response_try_claim"
+  [:pointer] :long)
 
 (defn mt-response-try-claim
   "Claims a response slot immediately and returns its scalar handle, or zero.
@@ -653,8 +521,8 @@
   (long (mt-response-try-claim* receiver)))
 
 (defcfn mt-response-publish*
-  clj_h2o_response_publish
-  [::mem/pointer ::mem/long] ::mem/int)
+  "clj_h2o_response_publish"
+  [:pointer :long] :int)
 
 (defn mt-response-publish
   "Attempts publication for a claimed response slot.
@@ -668,8 +536,8 @@
   (long (mt-response-publish* receiver claim-handle)))
 
 (defcfn mt-response-abort*
-  clj_h2o_response_abort
-  [::mem/pointer ::mem/long] ::mem/int)
+  "clj_h2o_response_abort"
+  [:pointer :long] :int)
 
 (defn mt-response-abort
   "Releases an unpublished claimed response slot.
@@ -683,8 +551,8 @@
   (long (mt-response-abort* receiver claim-handle)))
 
 (defcfn mt-response-ring-drain*
-  clj_h2o_response_ring_drain
-  [::mem/pointer] ::mem/long)
+  "clj_h2o_response_ring_drain"
+  [:pointer] :long)
 
 (defn mt-response-ring-drain
   "Applies ready responses on the H2O event-loop thread."
@@ -694,13 +562,13 @@
 
 (defcfn mt-destroy-wakeup-receiver
   "Unregister and free the wakeup receiver"
-  clj_h2o_mt_destroy_wakeup_receiver
-  [::mem/pointer] ::mem/void)
+  "clj_h2o_mt_destroy_wakeup_receiver"
+  [:pointer] :void)
 
 (defcfn mt-wakeup
   "Send a wakeup message to the loop owning this receiver"
-  clj_h2o_mt_wakeup
-  [::mem/pointer] ::mem/void)
+  "clj_h2o_mt_wakeup"
+  [:pointer] :void)
 
 (defcfn create-ssl-ctx
   "Create and configure SSL_CTX for TLS listener.
@@ -713,31 +581,31 @@
    - tls-lookup-user-ctx: user context pointer passed to callback, or NULL
 
    Returns: SSL_CTX pointer on success, NULL on error"
-  clj_h2o_create_ssl_ctx
-  [::mem/c-string ::mem/c-string ::mem/int ::mem/pointer ::mem/pointer] ::mem/pointer)
+  "clj_h2o_create_ssl_ctx"
+  [:string :string :int :pointer :pointer] :pointer)
 
 (defcfn free-ssl-ctx
   "Free SSL_CTX created by [[create-ssl-ctx]]."
-  clj_h2o_free_ssl_ctx
-  [::mem/pointer] ::mem/void)
+  "clj_h2o_free_ssl_ctx"
+  [:pointer] :void)
 
-(defcfn tls-bytes-dup
-  "Duplicate a byte buffer onto native heap."
-  clj_h2o_tls_memdup
-  [::mem/pointer ::mem/long] ::mem/pointer)
+(ffi/defcfn tls-bytes-dup
+  "Duplicate bytes into native-heap memory used by TLS callbacks."
+  "clj_h2o_tls_memdup"
+  [:pointer :long] :pointer)
 
 (defn- string->tls-native-bytes
   [^String s]
   (let [bytes (.getBytes s "UTF-8")
         len (alength ^bytes bytes)]
     (if (pos? len)
-      (with-open [arena (mem/confined-arena)]
+      (with-open [arena (ffi/confined-arena)]
         (let [source (MemorySegment/ofArray bytes)
-              staged (mem/alloc len arena)
+              staged (ffi/alloc arena len)
               _ (MemorySegment/copy source 0 staged 0 len)
               ptr (tls-bytes-dup staged len)]
           {:ptr ptr :len len}))
-      {:ptr mem/null :len 0})))
+      {:ptr ffi/null :len 0})))
 
 (defn- write-tls-native-outputs!
   [cert-out-seg cert-len-out-seg key-out-seg key-len-out-seg
@@ -746,22 +614,22 @@
         (string->tls-native-bytes cert-chain-pem)
         {key-ptr :ptr key-len :len}
         (string->tls-native-bytes private-key-pem)
-        valid? (and (not (mem/null? cert-ptr))
-                    (not (mem/null? key-ptr))
+        valid? (and (not (ffi/null? cert-ptr))
+                    (not (ffi/null? key-ptr))
                     (pos? cert-len)
                     (pos? key-len))]
-    (mem/write-address cert-out-seg cert-ptr)
-    (mem/write-long cert-len-out-seg 0 (long cert-len))
-    (mem/write-address key-out-seg key-ptr)
-    (mem/write-long key-len-out-seg 0 (long key-len))
+    (ffi/write cert-out-seg :pointer cert-ptr)
+    (ffi/write cert-len-out-seg :long (long cert-len))
+    (ffi/write key-out-seg :pointer key-ptr)
+    (ffi/write key-len-out-seg :long (long key-len))
     (if valid? 1 -1)))
 
 (defn- reset-tls-native-outputs!
   [cert-out-seg cert-len-out-seg key-out-seg key-len-out-seg]
-  (mem/write-address cert-out-seg mem/null)
-  (mem/write-long cert-len-out-seg 0 0)
-  (mem/write-address key-out-seg mem/null)
-  (mem/write-long key-len-out-seg 0 0))
+  (ffi/write cert-out-seg :pointer ffi/null)
+  (ffi/write cert-len-out-seg :long 0)
+  (ffi/write key-out-seg :pointer ffi/null)
+  (ffi/write key-len-out-seg :long 0))
 
 (defn build-tls-lookup-callback
   "Build Clojure callback pointer for native TLS handshakes.
@@ -772,6 +640,8 @@
    Hostname is nil when client hello omits SNI.
 
    Returns pinned callback refs that must be retained while server runs.
+   The seven-argument callback requires a JVM; native-image upcalls cannot support
+   this unchanged signature.
    This function does not mutate process-global native state."
   [lookup-fn]
   {:pre [(ifn? lookup-fn)]}
@@ -779,14 +649,15 @@
                  (try
                    (let [sni-len          (long sni-len)
                          hostname         (when (pos? sni-len)
-                                            (let [sni-seg (mem/reinterpret sni sni-len)]
-                                              (when-not (mem/null? sni-seg)
-                                                (String. (mem/read-bytes sni-seg sni-len)
-                                                         "UTF-8"))))
-                         cert-out-seg     (mem/reinterpret cert-out mem/pointer-size)
-                         cert-len-out-seg (mem/reinterpret cert-len-out (mem/size-of ::mem/long))
-                         key-out-seg      (mem/reinterpret key-out mem/pointer-size)
-                         key-len-out-seg  (mem/reinterpret key-len-out (mem/size-of ::mem/long))]
+                                            (when-not (ffi/null? sni)
+                                              (String. ^bytes (ffi/read-array
+                                                               (ffi/reinterpret sni sni-len)
+                                                               :byte sni-len)
+                                                       "UTF-8")))
+                         cert-out-seg     (ffi/reinterpret cert-out (ffi/sizeof :pointer))
+                         cert-len-out-seg (ffi/reinterpret cert-len-out (ffi/sizeof :long))
+                         key-out-seg      (ffi/reinterpret key-out (ffi/sizeof :pointer))
+                         key-len-out-seg  (ffi/reinterpret key-len-out (ffi/sizeof :long))]
                      (reset-tls-native-outputs! cert-out-seg
                                                 cert-len-out-seg
                                                 key-out-seg
@@ -807,10 +678,10 @@
                                     :id    ::tls-lookup-callback-exception
                                     :ex    t
                                     :data  {:sni-len sni-len}})
-                       (let [cert-out-seg     (mem/reinterpret cert-out mem/pointer-size)
-                             cert-len-out-seg (mem/reinterpret cert-len-out (mem/size-of ::mem/long))
-                             key-out-seg      (mem/reinterpret key-out mem/pointer-size)
-                             key-len-out-seg  (mem/reinterpret key-len-out (mem/size-of ::mem/long))]
+                       (let [cert-out-seg     (ffi/reinterpret cert-out (ffi/sizeof :pointer))
+                             cert-len-out-seg (ffi/reinterpret cert-len-out (ffi/sizeof :long))
+                             key-out-seg      (ffi/reinterpret key-out (ffi/sizeof :pointer))
+                             key-len-out-seg  (ffi/reinterpret key-len-out (ffi/sizeof :long))]
                          (reset-tls-native-outputs! cert-out-seg
                                                     cert-len-out-seg
                                                     key-out-seg
@@ -818,23 +689,16 @@
                        (catch Throwable _
                          nil))
                      -1)))
-        cb-ptr (mem/serialize cb [::ffi/fn [::mem/pointer ::mem/long
-                                            ::mem/pointer ::mem/pointer
-                                            ::mem/pointer ::mem/pointer
-                                            ::mem/pointer]
-                                  ::mem/int])]
+        cb-ptr (ffi/callback (ffi/auto-arena) cb
+                             [:pointer :long :pointer :pointer
+                              :pointer :pointer :pointer] :int)]
     {:callback     cb
      :callback-ptr cb-ptr}))
 
-#_(defcfn req-print-offsets
-    "Debug helper: print h2o_req_t field offsets to stderr for struct layout verification"
-    clj_h2o_req_print_offsets
-    [] ::mem/void)
-
 (defn str->iovec
   [s arena]
-  (let [str-ptr (mem/serialize s ::mem/c-string arena)
-        len (max 0 (dec (.byteSize ^MemorySegment str-ptr)))]
+  (let [str-ptr (ffi/string->ptr arena s)
+        len (dec (.byteSize ^MemorySegment str-ptr))]
     {:base str-ptr :len len}))
 
 (defn create-context
@@ -842,10 +706,10 @@
    Returns pointer to h2o_context_t"
   [arena loop-ptr config-ptr]
   {:pre [(some? arena)
-         (some? loop-ptr) (not (mem/null? loop-ptr))
-         (some? config-ptr) (not (mem/null? config-ptr))]}
+         (some? loop-ptr) (not (ffi/null? loop-ptr))
+         (some? config-ptr) (not (ffi/null? config-ptr))]}
   (let [size (context-size)
-        ctx-ptr (mem/alloc size arena)]
+        ctx-ptr (ffi/alloc arena size)]
     (context-init ctx-ptr loop-ptr config-ptr)
     ctx-ptr))
 
@@ -861,14 +725,14 @@
   [arena loops config-ptr]
   {:pre [(some? arena)
          (seq loops)
-         (some? config-ptr) (not (mem/null? config-ptr))]}
+         (some? config-ptr) (not (ffi/null? config-ptr))]}
   (vec (for [loop loops]
          (create-context arena loop config-ptr))))
 
 (defn create-socket-for-loop
   "Create h2o socket wrapper for file descriptor in event loop"
   [loop-ptr fd flags]
-  {:pre [(some? loop-ptr) (not (mem/null? loop-ptr))
+  {:pre [(some? loop-ptr) (not (ffi/null? loop-ptr))
          (nat-int? fd) (>= fd 0)]}
   (evloop-socket-create loop-ptr fd flags))
 
@@ -896,45 +760,47 @@
    Returns: pointer to h2o_accept_ctx_t"
   [arena ctx-ptr config-ptr ssl-ctx-ptr]
   {:pre [(some? arena)
-         (some? ctx-ptr) (not (mem/null? ctx-ptr))
-         (some? config-ptr) (not (mem/null? config-ptr))]}
+         (some? ctx-ptr) (not (ffi/null? ctx-ptr))
+         (some? config-ptr) (not (ffi/null? config-ptr))]}
   (let [hosts-ptr (globalconf-get-hosts config-ptr)
-        ssl-ctx (if (and ssl-ctx-ptr (not (mem/null? ssl-ctx-ptr)))
+        ssl-ctx (if (and ssl-ctx-ptr (not (ffi/null? ssl-ctx-ptr)))
                   ssl-ctx-ptr
-                  mem/null)
+                  ffi/null)
         accept-ctx-data {:ctx ctx-ptr
                          :hosts hosts-ptr
                          :ssl_ctx ssl-ctx
-                         :http2_origin_frame mem/null
+                         :http2_origin_frame ffi/null
                          :expect_proxy_line 0
-                         :libmemcached_receiver mem/null}]
-    (mem/serialize accept-ctx-data ::h2o-accept-ctx-t arena)))
+                         :libmemcached_receiver ffi/null}
+        ptr (ffi/alloc arena ffi-h2o-accept-ctx-t)]
+    (ffi/write ptr ffi-h2o-accept-ctx-t accept-ctx-data)
+    ptr))
 
 (defn ->string
   "Reads `len` UTF-8 bytes from `ptr`. Returns nil for a null pointer.
   The optional `arena` supplies the scope for the temporary native view."
   ([ptr ^long len]
-   (when (and ptr (not (mem/null? ptr)) (pos? len))
-     (->string ptr len (mem/auto-arena))))
+   (when (and ptr (not (ffi/null? ptr)) (pos? len))
+     (->string ptr len (ffi/auto-arena))))
   ([ptr ^long len ^Arena arena]
-   (when (and ptr (not (mem/null? ptr)) (pos? len))
-     (String. (mem/read-bytes (mem/reinterpret ptr len arena) len) "UTF-8"))))
+   (when (and ptr (not (ffi/null? ptr)) (pos? len))
+     (String. ^bytes (ffi/read-array (ffi/reinterpret ptr len arena) :byte len)
+              "UTF-8"))))
 
 (defn build-ring-headers-map
   ([headers headers-len]
-   (when (and (not (mem/null? headers)) (pos? headers-len))
-     (build-ring-headers-map headers headers-len (mem/auto-arena))))
+   (when (and (not (ffi/null? headers)) (pos? headers-len))
+     (build-ring-headers-map headers headers-len (ffi/auto-arena))))
   ([headers headers-len ^Arena arena]
-   (when (and (not (mem/null? headers)) (pos? headers-len))
-     (let [header-size (mem/size-of ::clj-header-t)
+   (when (and (not (ffi/null? headers)) (pos? headers-len))
+     (let [header-size (ffi/sizeof ffi-clj-header-t)
            total-size (* headers-len header-size)
-           sized-headers (mem/reinterpret headers total-size arena)]
+           sized-headers (ffi/reinterpret headers total-size arena)]
        (reduce
         (fn [result i]
-          (let [header-seg (mem/slice sized-headers (* i header-size) header-size)
-                header (mem/deserialize header-seg ::clj-header-t)
-                {:keys [name name_len
-                        value value_len]} header
+          (let [header-seg (ffi/slice sized-headers (* i header-size) header-size)
+                {:keys [name name_len value value_len]}
+                (ffi/read header-seg ffi-clj-header-t)
                 name-str (str/lower-case (->string name name_len arena))
                 value-str (->string value value_len arena)
                 delimiter (if (= "cookie" name-str) ";" ",")]
@@ -952,22 +818,26 @@
 
 (defn ^:no-doc copy-request-context
   ([ctx-ptr]
-   (copy-request-context ctx-ptr (mem/auto-arena)))
+   (copy-request-context ctx-ptr (ffi/auto-arena)))
   ([ctx-ptr ^Arena arena]
-   (let [ctx (mem/reinterpret ctx-ptr size-of-clj-req-ctx-t arena)
-         has-body (mem/read-short ctx 108)]
-     {:req (mem/read-address ctx 0)
-      :has-body has-body
+   (let [ctx (ffi/reinterpret ctx-ptr (ffi/sizeof ffi-clj-req-ctx-t) arena)
+         req (ffi/read ctx (ffi/place ffi-clj-req-ctx-t :req))
+         {:keys [method method_len path path_len authority authority_len
+                 scheme scheme_len remote_addr remote_addr_len headers headers_len
+                 http_version has_body is_early_data]}
+         (ffi/read ctx (ffi/place ffi-clj-req-ctx-t :meta))]
+     {:req req
+      :has-body has_body
       :ring-data
-      {:method (->string (mem/read-address ctx 16) (mem/read-long ctx 64) arena)
-       :path (->string (mem/read-address ctx 24) (mem/read-long ctx 72) arena)
-       :authority (->string (mem/read-address ctx 8) (mem/read-long ctx 56) arena)
-       :scheme (->string (mem/read-address ctx 40) (mem/read-long ctx 88) arena)
-       :remote-addr (->string (mem/read-address ctx 32) (mem/read-long ctx 80) arena)
-       :headers (build-ring-headers-map (mem/read-address ctx 48) (mem/read-long ctx 96) arena)
-       :http-version (mem/read-int ctx 104)
-       :has-body has-body
-       :early-data (mem/read-short ctx 110)}})))
+      {:method (->string method method_len arena)
+       :path (->string path path_len arena)
+       :authority (->string authority authority_len arena)
+       :scheme (->string scheme scheme_len arena)
+       :remote-addr (->string remote_addr remote_addr_len arena)
+       :headers (build-ring-headers-map headers headers_len arena)
+       :http-version http_version
+       :has-body has_body
+       :early-data is_early_data}})))
 
 (defn create-handler
   "Creates and configures an H2O handler with its request and cleanup callbacks.
@@ -977,23 +847,19 @@
   retains the native callback trampolines. Returns the handler pointer and references
   that keep both trampolines reachable."
   [hostconf-ptr on-req-callback on-cleanup-callback flat-config-ptr arena]
-  {:pre [(some? hostconf-ptr) (not (mem/null? hostconf-ptr))
+  {:pre [(some? hostconf-ptr) (not (ffi/null? hostconf-ptr))
          (fn? on-req-callback)
          (fn? on-cleanup-callback)
-         (some? flat-config-ptr) (not (mem/null? flat-config-ptr))
+         (some? flat-config-ptr) (not (ffi/null? flat-config-ptr))
          (some? arena)]}
   (let [on-request-cb (fn on-request-cb [ctx-ptr]
                         (int (on-req-callback ctx-ptr
                                               (copy-request-context ctx-ptr arena))))
-        on-request-cb-ptr (mem/serialize on-request-cb
-                                         [::ffi/fn [::mem/pointer] ::mem/int :raw-fn? true]
-                                         arena)
+        on-request-cb-ptr (ffi/callback arena on-request-cb [:pointer] :int)
         on-request-cleanup-cb (fn on-request-cleanup-cb [module-id request-seq]
                                 (on-cleanup-callback module-id request-seq))
         on-request-cleanup-cb-ptr
-        (mem/serialize on-request-cleanup-cb
-                       [::ffi/fn [::mem/long ::mem/long] ::mem/void :raw-fn? true]
-                       arena)]
+        (ffi/callback arena on-request-cleanup-cb [:long :long] :void)]
     {::on-request-cb on-request-cb
      ::on-request-cleanup-cb on-request-cleanup-cb
      ::on-request-cb-ptr on-request-cb-ptr
@@ -1133,13 +999,13 @@
    - tls-lookup-user-ctx: user context pointer passed to callback, or NULL
 
    Returns: ptls_context_t pointer on success, NULL on error"
-  clj_h2o_create_ptls_ctx
-  [::mem/c-string ::mem/c-string ::mem/pointer ::mem/pointer] ::mem/pointer)
+  "clj_h2o_create_ptls_ctx"
+  [:string :string :pointer :pointer] :pointer)
 
 (defcfn http3-free-ptls-ctx
   "Free picotls context and associated resources."
-  clj_h2o_free_ptls_ctx
-  [::mem/pointer] ::mem/void)
+  "clj_h2o_free_ptls_ctx"
+  [:pointer] :void)
 
 (defcfn http3-create-quicly-ctx
   "Create quicly context configured for HTTP/3.
@@ -1151,168 +1017,158 @@
    - globalconf: h2o global configuration for HTTP/3 settings
 
    Returns: quicly_context_t pointer on success, NULL on error"
-  clj_h2o_create_quicly_ctx
-  [::mem/pointer ::mem/pointer] ::mem/pointer)
+  "clj_h2o_create_quicly_ctx"
+  [:pointer :pointer] :pointer)
 
 (defcfn http3-free-quicly-ctx
   "Free quicly context and CID encryptor."
-  clj_h2o_free_quicly_ctx
-  [::mem/pointer] ::mem/void)
+  "clj_h2o_free_quicly_ctx"
+  [:pointer] :void)
 
 (defcfn http3-open-udp-transport
   "Open a pooled UDP transport reservation for HTTP/3.
    The returned handle owns the pooled transport metadata and any reservation
    socket until [[http3-release-udp-transport]] is called."
-  clj_h2o_http3_open_udp_transport
-  [::mem/c-string ::mem/short] ::mem/pointer)
+  "clj_h2o_http3_open_udp_transport"
+  [:string :int16] :pointer)
 
 (defcfn http3-attach-udp-transport
   "Attach an HTTP/3 worker context to a pooled UDP transport.
    The worker attachment starts non-accepting until the transport activates
    the generation identified by `node-id`."
-  clj_h2o_http3_attach_udp_transport
-  [::mem/pointer ::mem/pointer ::mem/pointer ::mem/pointer
-   ::mem/pointer ::mem/long ::mem/int] ::mem/pointer)
+  "clj_h2o_http3_attach_udp_transport"
+  [:pointer :pointer :pointer :pointer
+   :pointer :long :int] :pointer)
 
 (defcfn http3-activate-udp-transport-generation
   "Mark `node-id` as the active acceptor on a pooled UDP transport.
    Existing connections for older generations continue to route by CID,
    while new Initial packets are forwarded to the active generation."
-  clj_h2o_http3_activate_udp_transport_generation
-  [::mem/pointer ::mem/long] ::mem/void)
+  "clj_h2o_http3_activate_udp_transport_generation"
+  [:pointer :long] :void)
 
 (defcfn http3-detach-udp-transport
   "Detach an HTTP/3 worker context from a pooled UDP transport.
    This closes only the worker-owned dup'd fd."
-  clj_h2o_http3_detach_udp_transport
-  [::mem/pointer] ::mem/void)
+  "clj_h2o_http3_detach_udp_transport"
+  [:pointer] :void)
 
 (defcfn http3-release-udp-transport
   "Release a pooled UDP transport and close any reservation socket it owns."
-  clj_h2o_http3_release_udp_transport
-  [::mem/pointer] ::mem/void)
+  "clj_h2o_http3_release_udp_transport"
+  [:pointer] :void)
 
 (defcfn http3-stop-accepting
   "Stop accepting new HTTP/3 connections by setting acceptor to NULL.
    Existing connections (including those in handshake) continue to completion.
    Call this before requesting shutdown to prevent new connection attempts."
-  clj_h2o_http3_stop_accepting
-  [::mem/pointer] ::mem/void)
+  "clj_h2o_http3_stop_accepting"
+  [:pointer] :void)
 
 (defcfn http3-num-connections
   "Get the number of active HTTP/3 connections on this context."
-  clj_h2o_http3_num_connections
-  [::mem/pointer] ::mem/long)
+  "clj_h2o_http3_num_connections"
+  [:pointer] :long)
 
 (defcfn http3-free-worker-ctx
   "Free HTTP/3 worker context and close UDP socket.
    Note: all connections must be closed first (num_connections == 0)."
-  clj_h2o_http3_dispose_worker_ctx
-  [::mem/pointer] ::mem/void)
+  "clj_h2o_http3_dispose_worker_ctx"
+  [:pointer] :void)
 
 (defcfn conn-limit-set-max
   "Set the maximum allowed connections. Zero means unlimited.
    Process-global counter shared across all workers and listeners."
-  clj_h2o_conn_limit_set_max
-  [::mem/int] ::mem/void)
+  "clj_h2o_conn_limit_set_max"
+  [:int] :void)
 
 (defcfn conn-limit-current
   "Get current global connection count."
-  clj_h2o_conn_limit_current
-  [] ::mem/int)
+  "clj_h2o_conn_limit_current"
+  [] :int)
 
 (defcfn conn-limit-try-acquire
   "Atomically try to acquire a connection slot.
    Returns 1 if acquired (count was < max), 0 if at limit."
-  clj_h2o_conn_limit_try_acquire
-  [] ::mem/int)
+  "clj_h2o_conn_limit_try_acquire"
+  [] :int)
 
 (defcfn conn-limit-release
   "Release a connection slot (decrement counter)."
-  clj_h2o_conn_limit_release
-  [] ::mem/void)
+  "clj_h2o_conn_limit_release"
+  [] :void)
 
-;; Session ticket key structure - matches C clj_session_ticket_t
-(mem/defalias ::clj-session-ticket-t
-  (layout/with-c-layout
-    [::mem/struct
-     [[:name [::mem/array ::mem/byte 16]]       ; 16 bytes key identifier
-      [:aes_key [::mem/array ::mem/byte 32]]    ; 32 bytes AES-256 key
-      [:hmac_key [::mem/array ::mem/byte 64]]   ; 64 bytes HMAC key
-      [:not_before ::mem/long]                  ; activation time (ms epoch)
-      [:not_after ::mem/long]]]))               ; expiration time (ms epoch)
-
-(def size-of-session-ticket-t (mem/size-of ::clj-session-ticket-t))
+(def size-of-session-ticket-t (ffi/sizeof ffi-clj-session-ticket-t))
 
 (defn session-ticket-keys->native-array
-  "Allocate and populate a contiguous native array of `::clj-session-ticket-t`.
+  "Allocate and populate a contiguous native array of `clj_session_ticket_t`.
 
   Input is a seq of maps ordered newest-first, where each map contains:
   `:name` as a 16-byte array, `:aes-key` as a 32-byte array, `:hmac-key` as a
   64-byte array, and `:not-before` / `:not-after` as epoch-millisecond longs.
 
   Returns a native memory segment allocated in `arena` containing one
-  `::clj-session-ticket-t` struct per input key in the same order."
+   `clj_session_ticket_t` struct per input key in the same order."
   [keys arena]
   (let [struct-size size-of-session-ticket-t
         n (count keys)
-        segment (mem/alloc (* n struct-size) arena)]
+        segment (ffi/alloc arena (* n struct-size))]
     (doseq [[i k] (map-indexed vector keys)]
       (let [offset (* i struct-size)
             name-bytes ^bytes (:name k)
             aes-bytes ^bytes (:aes-key k)
             hmac-bytes ^bytes (:hmac-key k)]
         (doseq [j (range 16)]
-          (mem/write-byte segment (+ offset j) (aget name-bytes j)))
+          (ffi/write segment :byte (aget name-bytes j) (+ offset j)))
         (doseq [j (range 32)]
-          (mem/write-byte segment (+ offset 16 j) (aget aes-bytes j)))
+          (ffi/write segment :byte (aget aes-bytes j) (+ offset 16 j)))
         (doseq [j (range 64)]
-          (mem/write-byte segment (+ offset 48 j) (aget hmac-bytes j)))
-        (mem/write-long segment (+ offset 112) (:not-before k))
-        (mem/write-long segment (+ offset 120) (:not-after k))))
+          (ffi/write segment :byte (aget hmac-bytes j) (+ offset 48 j)))
+        (ffi/write segment :long (:not-before k) (+ offset 112))
+        (ffi/write segment :long (:not-after k) (+ offset 120))))
     segment))
 
 (defcfn ticket-manager-create
   "Create a new ticket manager with specified ticket lifetime.
    Returns pointer to clj_ticket_manager_t, or NULL on failure."
-  clj_ticket_manager_create
-  [::mem/int] ::mem/pointer)
+  "clj_ticket_manager_create"
+  [:int] :pointer)
 
 (defcfn ticket-manager-destroy
   "Destroy ticket manager and securely erase all keys."
-  clj_ticket_manager_destroy
-  [::mem/pointer] ::mem/void)
+  "clj_ticket_manager_destroy"
+  [:pointer] :void)
 
 (defcfn ticket-manager-set-keys
   "Replace all keys atomically. Thread-safe via copy-on-write.
    Returns 0 on success, -1 on error."
-  clj_ticket_manager_set_keys
-  [::mem/pointer ::mem/pointer ::mem/long] ::mem/int)
+  "clj_ticket_manager_set_keys"
+  [:pointer :pointer :long] :int)
 
 (defcfn ticket-manager-key-count
   "Get current key count (for monitoring)."
-  clj_ticket_manager_key_count
-  [::mem/pointer] ::mem/long)
+  "clj_ticket_manager_key_count"
+  [:pointer] :long)
 
 (defcfn ticket-manager-set-quic-tag
   "Set the QUIC transport params hash for 0-RTT validation."
-  clj_ticket_manager_set_quic_tag
-  [::mem/pointer ::mem/pointer] ::mem/void)
+  "clj_ticket_manager_set_quic_tag"
+  [:pointer :pointer] :void)
 
 (defcfn ticket-manager-create-encrypt-ticket
   "Create encrypt_ticket callback wired to manager.
    is_quic: 1 for QUIC mode (appends transport params tag), 0 for TCP TLS."
-  clj_ticket_manager_create_encrypt_ticket
-  [::mem/pointer ::mem/int] ::mem/pointer)
+  "clj_ticket_manager_create_encrypt_ticket"
+  [:pointer :int] :pointer)
 
 (defcfn ptls-ctx-set-tickets
   "Configure ptls context for session tickets.
    Sets encrypt_ticket callback, ticket lifetime, and max early data size."
-  clj_ptls_ctx_set_tickets
-  [::mem/pointer ::mem/pointer ::mem/int ::mem/int] ::mem/void)
+  "clj_ptls_ctx_set_tickets"
+  [:pointer :pointer :int :int] :void)
 
 (defcfn ssl-ctx-set-tickets
   "Configure SSL_CTX for TCP TLS session tickets and 0-RTT.
    Wires the ticket manager into the OpenSSL ticket key callback."
-  clj_ssl_ctx_set_tickets
-  [::mem/pointer ::mem/pointer ::mem/int] ::mem/void)
+  "clj_ssl_ctx_set_tickets"
+  [:pointer :pointer :int] :void)

@@ -4,7 +4,7 @@
   Key functions create streaming request-body channels, dispatch handlers on virtual threads,
   and coordinate callback completion with [[ol.busker.evloop]]."
   (:require
-   [coffi.mem :as mem]
+   [babashka.ffi :as mem]
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.worker-context :as worker-context]
    [ol.busker.internal.protocols :as pi]

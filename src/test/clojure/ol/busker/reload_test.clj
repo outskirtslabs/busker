@@ -1,7 +1,7 @@
 (ns ol.busker.reload-test
   (:require
    [clojure.test :refer [deftest is]]
-   [coffi.mem :as mem]
+   [babashka.ffi :as mem]
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.native :as native]
    [ol.busker.config :as config]

@@ -1,7 +1,7 @@
 (ns ol.busker.response-head-test
   (:require
    [clojure.test :refer [deftest is]]
-   [coffi.mem :as mem]
+   [babashka.ffi :as mem]
    [ol.busker.native :as h2o]
    [ol.busker.response-head :as response-head]))
 
@@ -17,12 +17,12 @@
 
 (defn- decode-headers
   [segment header-count]
-  (let [header-size (mem/size-of ::h2o/clj-header-t)]
+  (let [header-size (mem/sizeof h2o/ffi-clj-header-t)]
     (mapv
      (fn [idx]
        (let [header-segment (mem/slice segment (* idx header-size) header-size)
              {:keys [name name_len value value_len]}
-             (mem/deserialize header-segment ::h2o/clj-header-t)]
+             (mem/read header-segment h2o/ffi-clj-header-t)]
          [(h2o/->string name name_len)
           (h2o/->string value value_len)]))
      (range header-count))))
@@ -30,8 +30,8 @@
 (deftest response-head-command-construction-does-not-allocate-ffm-memory-test
   (with-redefs [mem/alloc (fn [& _]
                             (throw (ex-info "unexpected allocation" {})))
-                mem/serialize (fn [& _]
-                                (throw (ex-info "unexpected serialization" {})))]
+                mem/write (fn [& _]
+                            (throw (ex-info "unexpected serialization" {})))]
     (let [{:keys [value error]}
           (invoke-on-virtual-thread
            #(vector

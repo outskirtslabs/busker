@@ -4,7 +4,7 @@
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
-   [coffi.mem :as mem]
+   [babashka.ffi :as mem]
    [ol.busker :as busker]
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.generation :as generation]
@@ -133,7 +133,7 @@
                                               mem/null
                                               mem/null)]
       (when (and ptls-ctx (not (mem/null? ptls-ctx)))
-        (let [globalconf-ptr (mem/alloc (h2o/globalconf-size))
+        (let [globalconf-ptr (mem/alloc (mem/auto-arena) (h2o/globalconf-size))
               _ (h2o/create-global-conf globalconf-ptr nil)
               quic-ctx (h2o/http3-create-quicly-ctx ptls-ctx globalconf-ptr)]
           (is (some? quic-ctx) "http3-create-quicly-ctx should return non-nil context")

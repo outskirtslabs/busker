@@ -91,15 +91,6 @@ clojureLib.mkCljLib {
     ${clojure}/bin/clojure -Srepro -X:deps prep :aliases '[:bench :build :dev :test]'
     ${clojure}/bin/clojure -Srepro -P -M:dev:test:kaocha || true
 
-    coffi_dir="$(find "$GITLIBS/libs" -path '*/org.suskalo/coffi/*' -type d | head -n 1)"
-    if [ -n "$coffi_dir" ]; then
-      (
-        cd "$coffi_dir"
-        ${clojure}/bin/clojure -Srepro -P || true
-        ${clojure}/bin/clojure -Srepro -P -X:build compile-java || true
-      )
-    fi
-
     ${clojure}/bin/clojure -Srepro -P -T:build jar || true
     ${warmShimJars}
   '';

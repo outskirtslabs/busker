@@ -5,7 +5,6 @@
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :as test :refer [deftest is testing]]
-   [coffi.mem :as mem]
    [ol.busker :as busker]
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.generation :as generation]
@@ -1103,14 +1102,19 @@
       (is (empty? @calls)))))
 
 (deftest tls-lookup-callback-lifecycle-test
-  (testing "server builds lookup callback at startup"
-    (let [calls (atom [])]
+  (testing "server builds the TLS lookup callback before SSL context disposal"
+    (let [events (atom [])
+          build native/build-tls-lookup-callback
+          free-ssl-ctx native/free-ssl-ctx]
       (with-redefs [native/build-tls-lookup-callback
                     (fn [lookup-fn]
-                      (swap! calls conj [:register (ifn? lookup-fn)])
-                      {:lookup-fn lookup-fn
-                       :callback-ptr (mem/as-segment 1)
-                       :callback (fn [& _] nil)})
+                      (let [ref (build lookup-fn)]
+                        (swap! events conj :built)
+                        ref))
+                    native/free-ssl-ctx
+                    (fn [ssl-ctx]
+                      (free-ssl-ctx ssl-ctx)
+                      (swap! events conj :freed))
                     clave-adapter/build-managed-plan (fn [_] nil)
                     clave-adapter/start! (fn [_] nil)
                     clave-adapter/wrap-handler (fn [handler _] handler)
@@ -1125,7 +1129,10 @@
                                                                      :modern}}}
                                            :tls util/static-tls)]
           (is (= 200 (:status (req :get "/")))))
-        (is (= 1 (count (filter #(= :register (first %)) @calls))))))))
+        (is (= :built (first @events)))
+        (is (= 1 (count (filter #{:built} @events))))
+        (is (seq (rest @events)))
+        (is (every? #{:freed} (rest @events)))))))
 
 (deftest tcp-tls-no-sni-falls-back-to-managed-subject-test
   (testing "TCP TLS handshake without SNI succeeds using the first managed subject name"

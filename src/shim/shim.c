@@ -1,5 +1,5 @@
 // Minimal exported helpers for libh2o interop
-// Intended for FFI use from Clojure (coffi/FFM).
+// Called from Clojure through babashka/ffi and the JVM FFM API.
 #ifdef __APPLE__
 #define __APPLE_USE_RFC_3542 /* to use IPV6_RECVPKTINFO / IPV6_PKTINFO */
 #endif

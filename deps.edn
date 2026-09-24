@@ -1,8 +1,6 @@
 {:paths   ["src/main/clojure" "target/classes"]
  :deps    {;; busker tries to minimize dependencies
-           org.suskalo/coffi             {:git/url    "https://github.com/Ramblurr/coffi.git"
-                                          :git/branch "feat/update-tools-build"
-                                          :git/sha    "9b05e268b915b1992bfd4175cb7c8c7c45d8973a"}
+           org.babashka/ffi             {:mvn/version "0.1.2"}
            ;; busker requires trove for its light pluggiable logging facade
            com.taoensso/trove            {:mvn/version "1.1.0"}
            ;; busker requires clave, an ACME client, to power its auto https features

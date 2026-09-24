@@ -2,7 +2,7 @@
   (:require
    [clojure.test :refer [deftest is]]
    [clojure.string :as str]
-   [coffi.mem :as mem]
+   [babashka.ffi :as mem]
    [ol.busker :as busker]
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.fixed-final :as fixed-final]
@@ -58,12 +58,12 @@
 
 (defn- serialized-headers
   [headers headers-len]
-  (let [header-size (mem/size-of ::h2o/clj-header-t)]
+  (let [header-size (mem/sizeof h2o/ffi-clj-header-t)]
     (mapv
      (fn [idx]
        (let [{:keys [name name_len value value_len]}
-             (mem/deserialize (mem/slice headers (* idx header-size) header-size)
-                              ::h2o/clj-header-t)]
+             (mem/read (mem/slice headers (* idx header-size) header-size)
+                       h2o/ffi-clj-header-t)]
          [(h2o/->string name name_len)
           (h2o/->string value value_len)]))
      (range headers-len))))
@@ -72,18 +72,18 @@
   (with-open [arena (mem/confined-arena)]
     (let [body (.getBytes "cat" StandardCharsets/UTF_8)
           headers [["content-type" "text/plain"]]
-          data-size (mem/size-of ::h2o/clj-fixed-response-slot-data-t)
-          slot (mem/alloc (+ data-size 65) arena)
+          data-size (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t)
+          slot (mem/alloc arena (+ data-size 65))
           _ (fixed-final/write-direct-response-slot!
              slot 64 (direct-plan 1 1 200 headers 3 2 body 3))
-          data (mem/deserialize (mem/slice slot 0 data-size)
-                                ::h2o/clj-fixed-response-slot-data-t)
+          data (mem/read (mem/slice slot 0 data-size)
+                         h2o/ffi-clj-fixed-response-slot-data-t)
           staged-headers (mapv (fn [{:keys [name name_len value value_len]}]
                                  [(h2o/->string name name_len)
                                   (h2o/->string value value_len)])
                                (take (:headers-len data) (:headers data)))
-          payload (mem/read-bytes (mem/slice slot data-size 64)
-                                  (long (:payload-len data)))]
+          payload (mem/read-array (mem/slice slot data-size 64)
+                                  :byte (long (:payload-len data)))]
       (is (= {:module-id 1
               :claim-token 0
               :request-seq 1
@@ -106,12 +106,12 @@
           body (byte-array [1 2 3])
           header-bytes (fixed-final/header-utf8-bytes headers)
           payload-capacity (+ header-bytes (alength body))
-          data-size (mem/size-of ::h2o/clj-fixed-response-slot-data-t)
-          slot (mem/alloc (+ data-size (inc payload-capacity)) arena)
+          data-size (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t)
+          slot (mem/alloc arena (+ data-size (inc payload-capacity)))
           plan (direct-plan 1 1 200 headers (alength body) 0 body (alength body))]
       (fixed-final/write-direct-response-slot! slot payload-capacity plan)
-      (let [data (mem/deserialize (mem/slice slot 0 data-size)
-                                  ::h2o/clj-fixed-response-slot-data-t)
+      (let [data (mem/read (mem/slice slot 0 data-size)
+                           h2o/ffi-clj-fixed-response-slot-data-t)
             payload-start (.address ^MemorySegment (mem/slice slot data-size (inc payload-capacity)))
             payload-end (+ payload-start payload-capacity)
             descriptors (take (:headers-len data) (:headers data))]
@@ -135,19 +135,19 @@
       (let [expected (.getBytes ^String body StandardCharsets/UTF_8)
             headers [["x-🐈" "välue"]]
             header-bytes (fixed-final/header-utf8-bytes headers)
-            data-size (mem/size-of ::h2o/clj-fixed-response-slot-data-t)
-            slot (mem/alloc (+ data-size 129) arena)]
+            data-size (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t)
+            slot (mem/alloc arena (+ data-size 129))]
         (fixed-final/write-direct-response-slot!
          slot 128 (direct-plan 7 9 201 headers (alength expected) 1 body
                                (alength expected)))
-        (let [data (mem/deserialize (mem/slice slot 0 data-size)
-                                    ::h2o/clj-fixed-response-slot-data-t)
+        (let [data (mem/read (mem/slice slot 0 data-size)
+                             h2o/ffi-clj-fixed-response-slot-data-t)
               staged-headers (mapv (fn [{:keys [name name_len value value_len]}]
                                      [(h2o/->string name name_len)
                                       (h2o/->string value value_len)])
                                    (take (:headers-len data) (:headers data)))
-              payload (mem/read-bytes (mem/slice slot data-size 128)
-                                      (long (:payload-len data)))]
+              payload (mem/read-array (mem/slice slot data-size 128)
+                                      :byte (long (:payload-len data)))]
           (is (= {:module-id 7
                   :request-seq 9
                   :headers-len 1
@@ -165,16 +165,16 @@
                  (vec (drop header-bytes payload)))))))))
 (deftest direct-string-body-uses-hidden-terminator-byte-at-logical-capacity
   (with-open [arena (mem/confined-arena)]
-    (let [data-size (mem/size-of ::h2o/clj-fixed-response-slot-data-t)
-          slot (mem/alloc (+ data-size 4) arena)]
+    (let [data-size (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t)
+          slot (mem/alloc arena (+ data-size 4))]
       (fixed-final/write-direct-response-slot!
        slot 3 (direct-plan 1 1 200 [] 3 0 "cat" 3))
       (is (= [99 97 116 0]
-             (vec (mem/read-bytes (mem/slice slot data-size 4) 4)))))))
+             (vec (mem/read-array (mem/slice slot data-size 4) :byte 4)))))))
 
 (deftest full-response-ring-does-not-pack-direct-response
   (with-open [arena (mem/confined-arena)]
-    (let [receiver (mem/alloc 1 arena)
+    (let [receiver (mem/alloc arena 1)
           worker (direct-response-worker receiver [] 64)
           writes_ (atom 0)]
       (with-redefs [h2o/mt-response-try-claim (unary-long-fn (constantly 0))
@@ -187,8 +187,8 @@
 
 (deftest direct-response-slot-is-aborted-when-packing-fails
   (with-open [arena (mem/confined-arena)]
-    (let [receiver (mem/alloc 1 arena)
-          slot (mem/alloc (mem/size-of ::h2o/clj-fixed-response-slot-data-t) arena)
+    (let [receiver (mem/alloc arena 1)
+          slot (mem/alloc arena h2o/ffi-clj-fixed-response-slot-data-t)
           claim-handle 65537
           worker (direct-response-worker receiver [slot] 0)
           aborted_ (atom [])]
@@ -207,8 +207,8 @@
         (is (= [[receiver claim-handle]] @aborted_))))))
 (deftest direct-response-slot-is-aborted-when-publication-fails
   (with-open [arena (mem/confined-arena)]
-    (let [receiver (mem/alloc 1 arena)
-          slot (mem/alloc (inc (mem/size-of ::h2o/clj-fixed-response-slot-data-t)) arena)
+    (let [receiver (mem/alloc arena 1)
+          slot (mem/alloc arena (inc (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t)))
           claim-handle 65537
           worker (direct-response-worker receiver [slot] 0)
           aborted_ (atom [])]
@@ -248,7 +248,7 @@
                                          :headers (serialized-headers headers headers-len)
                                          :content-length content-length
                                          :compress-hint compress-hint
-                                         :body (vec (mem/read-bytes body (long body-len)))
+                                         :body (vec (mem/read-array body :byte (long body-len)))
                                          :body-segment body}))]
         (fixed-final/execute! req first-command)
         (fixed-final/execute! req second-command))
@@ -267,13 +267,13 @@
       (is (= (mapv #(.address ^MemorySegment (:body-segment %)) @sent_)
              (repeat 2 (.address ^MemorySegment (:body-segment (first @sent_))))))
       (is (= [88 89]
-             (vec (mem/read-bytes (:body-segment (first @sent_)) 2))))
+             (vec (mem/read-array (:body-segment (first @sent_)) :byte 2))))
       (is (= (+ fixed-final/max-header-staging-bytes 3)
              (.-capacity ^ol.busker.fixed_final.FixedFinalScratch (.get scratch_))))
       (fixed-final/close-worker-scratch! worker)
       (is (nil? (.get scratch_)))
       (is (thrown? IllegalStateException
-                   (mem/read-bytes (:body-segment (first @sent_)) 2)))
+                   (mem/read-array (:body-segment (first @sent_)) :byte 2)))
       (finally
         (fixed-final/close-worker-scratch! worker)
         (.remove worker-context/worker-context)))))

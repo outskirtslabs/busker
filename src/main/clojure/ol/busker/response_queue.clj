@@ -8,7 +8,7 @@
   - [[ol.busker.byte-bounded-queue]] accounts queued bytes.
   - [[ol.busker.response-channel]] exposes writable response channels."
   (:require
-   [coffi.mem :as mem]
+   [babashka.ffi :as mem]
    [ol.busker.buffer-pool :as bp]
    [ol.busker.byte-bounded-queue :as bbq]
    [ol.busker.internal.protocols :as pi]
@@ -78,10 +78,10 @@
         bufs-flat (vec (mapcat :bufs chunks))
         veccnt (count bufs-flat)]
     (if (zero? veccnt)
-      {:seg (mem/alloc 0 arena) :veccnt 0 :final? last-final? :stable-segs []}
+      {:seg (mem/alloc arena 0) :veccnt 0 :final? last-final? :stable-segs []}
       (let [elem-size h2o/size-of-h2o-sendvec-t
             total-size (* veccnt elem-size)
-            sendvec-array (mem/alloc total-size arena)]
+            sendvec-array (mem/alloc arena total-size)]
         (loop [i 0
                stable-segs (transient [])]
           (if (< i veccnt)
@@ -90,7 +90,7 @@
                   slot (mem/slice sendvec-array slot-off elem-size)
                   len (.remaining b)
                   byte-arr (byte-array len)
-                  stable-seg (mem/alloc len arena)]
+                  ^MemorySegment stable-seg (mem/alloc arena len)]
               (.get ^ByteBuffer b byte-arr)
               (MemorySegment/copy byte-arr 0 stable-seg java.lang.foreign.ValueLayout/JAVA_BYTE 0 len)
               (h2o/sendvec-init-raw slot stable-seg len)
