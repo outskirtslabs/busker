@@ -1,44 +1,99 @@
 # Busker architecture
 
-Busker is a Clojure-first HTTP server built on libh2o through the Java Foreign Function and Memory API. This document describes the running system. ADRs record decisions and history; they do not replace this projection.
+Busker is a Clojure HTTP server built on [libh2o] through the Java Foreign Function and Memory API.
+This document can be thought of as a materialized view of the [ADRs](./adr/README.md).
+Busker has been quite a journey as I've attempted to increase performance while sticking to my goals, so many of the ADRs have been superceded or subtly changed.
+So I created this document to document the current state.
+
+This document is for Busker contributors/maintainers as it only covers implementation details.
+Familiarity with the [user-facing docs][docs] is a pre-req.
+
+[libh2o]: https://github.com/h2o/h2o
+[docs]: https://docs.outskirtslabs.com/ol.busker/next/
+
+[!NOTE]
+"Ring" (capitalized) refers to the Clojure HTTP convention, while "ring" refers to a ring buffer.
 
 ## Execution model
 
-Each generation starts one native libh2o event loop and one Clojure platform thread per worker. The event-loop thread runs native polling, mailbox handling, response-ring draining, request registration, and resource retirement. `ol.busker.worker-context` binds the current worker on that thread so response-head and fixed-final operations can reject calls from other threads without a dependency cycle.
+Each generation starts one native libh2o event loop which runs in one Clojure platform thread per worker.
+The event-loop thread runs native polling, mailbox handling, response-ring draining, request registration, and resource retirement.
+`ol.busker.worker-context` binds the current worker on that thread so response-head and fixed-final operations can reject calls from other threads without a dependency cycle.
 
-Request application code runs on virtual threads. It must not block in native calls. Native callbacks copy or signal data, then dispatch application handling through the worker and callback-dispatch table. Lifecycle work uses platform threads because it can wait for threads and native resources to finish.
+App code / Ring request handlers code run on virtual threads.
+It must not block in native calls.
+Native callbacks copy or signal data, then dispatch application handling through the worker and callback-dispatch table.
+Lifecycle work uses platform threads because it can wait for threads and native resources to finish.
 
 ## Requests
 
-The shim calls Clojure request callbacks with native request context data. `ol.busker.native` decodes it, `ol.busker.request` builds Ring-compatible request state, and a virtual-thread handler produces a Ring response. Streaming request bodies use a channel and native proceed callbacks. Callback-dispatch maps module and request sequence identifiers to live requests until cleanup.
+The shim calls Clojure request callbacks with native request context data.
+`ol.busker.native` decodes it, `ol.busker.request` builds Ring-compatible request state, and a virtual-thread handler produces a Ring response.
+Streaming request bodies use a `java.nio.channels.ReadableByteChannel` and native proceed callbacks.
+Callback-dispatch maps module and request sequence identifiers to live requests until cleanup.
 
 ## Responses
 
-Streaming response heads use `ol.busker.response-head`. A head means status and headers before body delivery; it is not the HTTP `HEAD` method. The worker stages `clj_header_t` descriptors and UTF-8 payload in a confined arena. Native code copies this data during the call.
+Internally there are two paths for responses to take: streaming responses or fixed-final.
+A Ring response is sent down the fixed-final path if it has a complete string or byte-array body that fits within some configured size limits. 
+This is a perf optimization so small requests can be sent in one clj->h2o operation.
 
-Complete eligible responses use the fixed-final path. `ol.busker.response` first prepares one direct plan. Its headers are encoded by `ol.busker.response-serialization`, which is shared with response-head and FIFO fixed-final delivery. A direct plan claims a preallocated response-ring slot, writes `clj_header_t` descriptors that point into that slot's retained payload, publishes the slot, and requests a worker wake. The worker drains the ring and sends the final response. The native validator checks descriptor address ranges as integer ranges before it reads them.
+All other responses use the streaming path, which sends body data in chunks with backpressure to prevent the application from producing data faster than the client can read it.
 
-A final response after an informational response uses the FIFO fixed-final command so its ordering is preserved. Ineligible direct candidates and direct-ring overload use the generic start-response writer; closed response admission stops delivery. FIFO delivery stages the same descriptor representation in worker-local scratch storage. Direct slot metadata is 2120 bytes on supported 64-bit targets: 64 retained 32-byte descriptors add 1024 bytes per slot, or 256 KiB for a 256-slot worker, compared with the former packed representation.
+### Fixed-final responses
 
-Streaming response bodies use response-channel, response-queue, and byte-bounded-queue. The byte-bounded queue limits queued bytes rather than item count. Native writable callbacks resume draining. The wake notifier carries only wake signals; mailboxes and response queues carry work.
+The fixed-final path avoids the queue, writer, and chunk-handling overhead for small responses whose complete body is already available.
+The term comes about from:
+
+- fixed: the complete body and its byte length are known before sending
+- final: It completes the response and no new body chunks will follow, that is, it is not an interim response such as `100 Continue`
+
+The fixed-final path uses preallocated slots to reduce per-response allocation and pass complete responses from handler threads to the event-loop worker without waiting for native I/O.
+The slots are `clj_response_slot_t` structs maintained in a ring-buffer in native memory.
+
+When a Ring handler returns a response, Busker claims a slot, copies the headers and body into it.
+It then publishes the slot and requests a worker wake.
+The slot keeps those bytes valid until the worker drains the ring and sends the response.
+
+### Streaming responses
+
+The streaming path supports bodies that arrive over time or do not fit the fixed-final limits.
+Busker sends the status and headers first, then sends the body in chunks.
+It also uses this path when no fixed-final slot is available.
+
+Application code writes body data on a virtual thread.
+Busker combines small writes into chunks and places them in a queue for that response.
+The queue limits buffered bytes, not the number of chunks, so large writes cannot bypass the memory limit.
+When the queue is full, the writing virtual thread waits without blocking the event-loop worker.
+
+The event-loop worker takes chunks from the queue and passes them to libh2o which writes them to the socket.
+libh2o requires Busker to wait for a proceed callback before submitting the next chunk for that response.
+Until that callback, libh2o may still need the previous chunk's memory.
+This allows libh2o to control the pace of delivery and keeps the data valid while it is in use.
+This links application writes to network progress and prevents a slow client from causing unlimited buffering.
 
 ## Lifecycle
 
-A runtime can publish a new generation and drain an earlier one. Draining stops listener admission, permits already admitted response work to complete, and retires receivers only after pending native response work is clear. Receiver destruction closes response admission, takes writer protection, and rechecks pending work. Startup allocation failure unwinds resources in reverse order.
+A generation is a running set of workers, listeners, and native resources.
+During reload, Busker starts a new generation to accept new connections while the previous generation finishes work on its existing connections.
+This lets configuration changes take effect without immediately interrupting active requests.
 
-Native receiver, callback, slot, and arena lifetimes are tied to the generation. Slot payload remains valid from claim through READY and drain. Generation stop waits for worker and lifecycle conditions before native disposal.
+The previous generation stops accepting new connections but must still let its handlers send responses.
+Busker keeps its response queues and native memory available until that work finishes or the shutdown timeout is reached.
+Reaching the timeout does not make memory safe to free: Busker must first stop any thread or native operation that could still use it.
+
+If startup fails partway through, Busker releases the resources it has already created.
+Cleanup continues even if one release operation fails, and the original startup error is retained along with any cleanup errors.
+
 
 ## Decision record reconciliation
 
-- [ADR 001](adr/001-response-emitter-close-callbacks.md) defines response-emitter close callbacks.
-- [ADR 002](adr/002-worker-affine-ffm-callback-dispatch.md) defines worker-affine FFM callback dispatch.
-- [ADR 003](adr/003-coalesce-worker-mailbox-wakeups.md) defines coalesced worker mailbox wakes.
-- [ADR 004](adr/004-platform-notifier-for-native-wakes.md) defines the platform wake notifier.
-- [ADR 005](adr/005-platform-executor-for-lifecycle.md) defines the platform lifecycle executor.
-- [ADR 006](adr/006-worker-side-response-head-staging.md) defines worker-side response-head staging.
-- [ADR 007](adr/007-heap-streaming-aggregation.md) defines heap streaming aggregation.
-- [ADR 008](adr/008-native-fixed-response-exchange.md) is superseded by [ADR 009](adr/009-preallocated-response-completion-ring.md). ADR 002 callback dispatch, ADR 003 mailbox ordering, and ADR 006 response-head worker staging remain current. ADR 004 moves native direct wakes to the platform notifier. The shared header serializer is the current H5 implementation and is not attributed to ADR 009.
+The [ADRs](adr/README.md) record decisions at the time they were made.
+This document combines those decisions with later changes to describe the current design.
+Where an older ADR differs from this document, use this document for current behavior and the ADR for historical context.
 
-## Keeping this document current
+[ADR 009](adr/009-preallocated-response-completion-ring.md) supersedes [ADR 008](adr/008-native-fixed-response-exchange.md): preallocated native slots replace its queued, deep-copied response transfer.
+This change does not replace the worker-affine callback dispatch in [ADR 002](adr/002-worker-affine-ffm-callback-dispatch.md), the mailbox ordering in [ADR 003](adr/003-coalesce-worker-mailbox-wakeups.md), or worker-side response-head staging in [ADR 006](adr/006-worker-side-response-head-staging.md).
+[ADR 004](adr/004-platform-notifier-for-native-wakes.md) changes how workers are woken: a platform notifier makes the native wake calls, while the mailbox wake coalescing from ADR 003 remains in use.
+The later shared header serializer serves both fixed-final responses and response-head staging; that consolidation is not part of ADR 009's original decision.
 
-An ADR change must update the affected sections here. An architectural code change must update this document and the relevant ADRs in the same change set. Historical ADR text must not be read as the current system when this document states a later replacement.
