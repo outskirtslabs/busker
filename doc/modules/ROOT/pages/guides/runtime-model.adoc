@@ -29,7 +29,7 @@ image::runtime-request-flow.svg[One Busker request crossing from a network event
 
 == From startup to a Ring handler
 
-When xref:api/ol-busker.adoc#start-BANG-[`ol.busker/start!`] returns, Busker has created its first _runtime generation_, one running copy of the server built from a configuration snapshot.
+When xref:ROOT:api/ol-busker.adoc#start-BANG-[`ol.busker/start!`] returns, Busker has created its first _runtime generation_, one running copy of the server built from a configuration snapshot.
 The snapshot is your config map with Busker's defaults applied.
 For as long as that generation runs, Busker keeps the same listeners, network workers, request executor, handlers, and TLS setup.
 
@@ -38,7 +38,7 @@ If validation, listener binding, TLS setup, or another startup stage fails, `sta
 
 Each event loop runs on a dedicated platform thread, an ordinary OS-backed JVM thread, and passes network events to libh2o.
 When a client connects, one of the generation's event loops notices it.
-The xref:configuration.adoc[`:n-workers` setting] controls how many event loops a generation has and defaults to two.
+The xref:ROOT:configuration.adoc[`:n-workers` setting] controls how many event loops a generation has and defaults to two.
 
 The event loops accept connections, negotiate TLS and HTTP versions, read available request data, and send response data when a socket is ready.
 They also enforce connection limits and track how many bytes each HTTP stream or connection may have in flight.
@@ -58,7 +58,7 @@ A handler that computes for a long time occupies one of the platform threads tha
 A long native call can keep that platform thread occupied too.
 Move this kind of sustained CPU work to an executor sized for that work, and avoid blocking native calls in handlers.
 
-See xref:ring-compatibility.adoc[Ring compatibility] for the supported handler and middleware model.
+See xref:ROOT:guides/ring-compatibility.adoc[Ring compatibility] for the supported handler and middleware model.
 
 == When the client cannot keep up
 
@@ -68,7 +68,7 @@ Keeping every unsent byte would let one client consume memory until the process 
 
 _Backpressure_ means that a producer waits when the consumer has no room for more data.
 Busker applies backpressure with a byte-bounded queue for each response.
-The xref:configuration.adoc[`:output-buffer-size` setting] controls the response buffer size and defaults to 32 KiB.
+The xref:ROOT:configuration.adoc[`:output-buffer-size` setting] controls the response buffer size and defaults to 32 KiB.
 Busker also holds the response data currently in flight through the HTTP engine, but it does not keep growing the per-response queue while the client is stalled.
 
 The event loop removes a response chunk from the queue when it can hand that chunk to the HTTP engine.
@@ -92,7 +92,7 @@ On a platform thread the application thread remains blocked for as long as the c
 Run an emitter from a thread you can afford to block, ideally a virtual thread started for that stream.
 If application code closes an emitter, a final response completes, or libh2o reports request termination, Busker dispatches registered close callbacks on virtual threads.
 The callbacks run after Busker releases blocked response writers, and one failing callback does not suppress later callbacks.
-See the xref:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter` API] for callback registration and stream closure details.
+See the xref:ROOT:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter` API] for callback registration and stream closure details.
 
 Uploads are bounded in the other direction.
 Busker asks the network side for another request-body chunk as the handler consumes the current chunk instead of copying the entire upload into JVM memory first.
@@ -126,7 +126,7 @@ Those protocols keep listening for messages about open streams while a response 
 == Reloading while requests are active
 
 Suppose the configuration changes while that slow response is still open.
-xref:api/ol-busker.adoc#reload-BANG-[`ol.busker/reload!`] does not tear down the running generation and then try to replace it.
+xref:ROOT:api/ol-busker.adoc#reload-BANG-[`ol.busker/reload!`] does not tear down the running generation and then try to replace it.
 It builds a candidate generation beside the active one while the active generation keeps serving traffic.
 An unchanged configuration snapshot returns `:unchanged` unless the caller requests a forced reload.
 
@@ -149,7 +149,7 @@ _Draining_ means that a generation accepts no new work while its current request
 Reload uses draining to retire one generation without delaying the new one.
 Shutdown uses the same path but waits for it to complete.
 
-xref:api/ol-busker.adoc#stop-BANG-[`ol.busker/stop!`] starts draining the active generation and waits for every active or already draining generation.
+xref:ROOT:api/ol-busker.adoc#stop-BANG-[`ol.busker/stop!`] starts draining the active generation and waits for every active or already draining generation.
 Busker waits for their response streams, close callbacks, request executors, network workers, listeners, and runtime services before `stop!` returns.
 A slow request or open stream can therefore delay application shutdown.
 
@@ -160,8 +160,8 @@ Calling `stop!` again after the server has stopped is harmless.
 
 == Related documentation
 
-* xref:tutorial-first-server.adoc[Your first Busker server] shows the plain Ring adapter lifecycle from setup through shutdown
-* xref:howto-https-http3.adoc[Serve HTTPS and HTTP/3] applies the same lifecycle to managed certificates and HTTP/3
-* xref:configuration.adoc[Configuration] lists runtime, buffering, connection, and protocol settings
-* xref:ring-compatibility.adoc[Ring compatibility] defines the request, response, middleware, and streaming forms
-* xref:api.adoc[API reference] documents the public lifecycle and response emitter calls
+* xref:ROOT:guides/first-server.adoc[Your first Busker server] shows the plain Ring adapter lifecycle from setup through shutdown
+* xref:ROOT:guides/https-http3.adoc[Serve HTTPS and HTTP/3] applies the same lifecycle to managed certificates and HTTP/3
+* xref:ROOT:configuration.adoc[Configuration] lists runtime, buffering, connection, and protocol settings
+* xref:ROOT:ring-reference.adoc[Ring requests and responses] defines the request, response, middleware, and streaming forms
+* xref:ROOT:api.adoc[API reference] documents the public lifecycle and response emitter calls

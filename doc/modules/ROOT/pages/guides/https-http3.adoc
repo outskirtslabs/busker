@@ -1,6 +1,6 @@
 = Serve HTTPS and HTTP/3
 
-This guide adds managed certificates, HTTPS, and HTTP/3 to the plain application from xref:tutorial-first-server.adoc[Your first Busker server].
+This guide adds managed certificates, HTTPS, and HTTP/3 to the plain application from xref:ROOT:guides/first-server.adoc[Your first Busker server].
 The Ring handler and its `start!` and `stop!` functions stay the same.
 
 == Prepare the host
@@ -70,8 +70,8 @@ Outside systemd it uses `.local/state/my-app` under the current user's home dire
 Keep this directory between deployments and back it up with the rest of the service's durable state.
 Repeated issuance from an empty directory can reach certificate authority rate limits.
 
-See xref:configuration.adoc#_certificates_map_tls_certificates[Certificates] for managed certificate options.
-If you already have a certificate and private key, use the xref:configuration.adoc#_certificates_map_tls_certificates[static certificate settings] instead of adding another full example here.
+See xref:ROOT:configuration.adoc#_certificates_map_tls_certificates[Certificates] for managed certificate options.
+If you already have a certificate and private key, use the xref:ROOT:configuration.adoc#_certificates_map_tls_certificates[static certificate settings] instead of adding another full example here.
 
 == Add a process entry point
 

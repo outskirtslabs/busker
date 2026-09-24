@@ -1,0 +1,51 @@
+= Ring compatibility
+
+Ring separates application code from the HTTP server through request and response maps.
+Busker keeps that model while using virtual threads for application code and libh2o for network I/O.
+This page explains what that choice means for handlers, middleware, and streaming.
+The xref:ROOT:ring-reference.adoc[Ring request and response reference] lists the supported fields, types, and exceptions.
+
+== Synchronous handlers on virtual threads
+
+Busker supports Ring's one-argument handler: it receives a request map and returns a response map.
+Each request runs on a virtual thread, separate from the workers that drive network I/O.
+When a handler waits for Java I/O, the JVM can park its virtual thread and use the carrier thread for other work.
+Application code can therefore read a request body or call another service without adopting a callback-based handler API.
+
+Busker does not support Ring's three-argument asynchronous handler API or middleware that requires it.
+It uses virtual threads as its application concurrency model instead of supporting both styles.
+Virtual threads do not make CPU-intensive work cheaper, and native calls can hold a carrier thread while they run.
+The xref:ROOT:guides/runtime-model.adoc[runtime model] explains how application work and network work are separated.
+
+== Streaming does not require an asynchronous handler
+
+A synchronous handler can return a response before the entire body is available.
+For example, a sequence or an input stream can supply body data over time.
+Busker reads that data and sends it through a bounded queue rather than collecting the whole body in memory.
+When the client cannot keep up, the writer waits for queue space.
+This backpressure limits buffered data without blocking the event-loop worker.
+
+Request bodies work in the other direction.
+The handler reads an `InputStream`, and Busker asks libh2o for more data as the handler consumes it.
+A slow reader does not require Busker to buffer the entire upload first.
+
+== Where the response map is not enough
+
+A Ring response map describes one final response.
+It cannot express a sequence of informational responses, such as `103 Early Hints`, followed by a final response.
+Busker's response emitter supports those cases and lets a producer continue writing after the handler returns.
+
+The emitter is an extension to the Ring model, not an implementation of Ring's asynchronous handler API.
+Emitter operations do not pass through the handler's Ring middleware, so the producer must supply any headers or transformations that middleware would otherwise add.
+See the xref:ROOT:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter` API] for its operations and the xref:ROOT:ring-reference.adoc#_response_emitters[reference example] for its use in a handler.
+
+== Compatibility depends on the application
+
+Synchronous middleware can wrap a Busker handler, but it must produce request and response forms that Busker supports.
+For example, HTTP/2 and HTTP/3 require lowercase response header names, and an application must suppress the response body for a `HEAD` request.
+Busker also leaves form and multipart parsing to application middleware.
+
+The optional `ring-core-protocols` library supplies Ring's body-writing protocol and implementations for additional body types.
+Without it, Busker uses a smaller set of built-in body conversions.
+These differences matter when moving an existing application between Ring servers.
+Consult the xref:ROOT:ring-reference.adoc[reference] for exact body types, header handling, and known compatibility limits.

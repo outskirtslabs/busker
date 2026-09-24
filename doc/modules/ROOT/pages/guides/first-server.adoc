@@ -52,7 +52,7 @@ clj -X:deps prep
 == Write the handler and config
 
 A Busker handler is an ordinary synchronous Ring handler: it takes a request map and returns a response map.
-See xref:ring-compatibility.adoc[Ring compatibility] for the request keys Busker supplies and the response forms it accepts.
+See xref:ROOT:ring-reference.adoc[Ring requests and responses] for the request keys Busker supplies and the response forms it accepts.
 
 Create `main.clj`.
 
@@ -90,7 +90,7 @@ Create `main.clj`.
 The config is a plain map.
 `:entrypoints` names one listener bound to `127.0.0.1:8080` with TLS turned off, so the server speaks plain HTTP.
 `:dispatch` is the request pipeline; here it holds one dispatcher whose `:handler` is your Ring handler.
-See xref:configuration.adoc[Configuration] for the full config shape.
+See xref:ROOT:configuration.adoc[Configuration] for the full config shape.
 
 `start!` saves Busker's opaque server handle in the `server` atom.
 `stop!` uses that handle to stop the server and then clears the atom.
@@ -167,7 +167,7 @@ Busker can also negotiate Brotli and Zstandard when a client advertises `br` or 
 
 == Inspect the server state
 
-`app/server` is an atom containing the handle returned by xref:api/ol-busker.adoc#start-BANG-[`ol.busker/start!`].
+`app/server` is an atom containing the handle returned by xref:ROOT:api/ol-busker.adoc#start-BANG-[`ol.busker/start!`].
 Evaluate this in the same REPL:
 
 [source,clojure]
@@ -176,7 +176,7 @@ Evaluate this in the same REPL:
 ;; => {:phase :running}
 ----
 
-xref:api/ol-busker.adoc#state[`ol.busker/state`] returns the current phase and the normalized config snapshot.
+xref:ROOT:api/ol-busker.adoc#state[`ol.busker/state`] returns the current phase and the normalized config snapshot.
 Evaluate `(busker/state @app/server)` without `select-keys` to inspect the full map.
 
 == Stop the server
@@ -190,9 +190,9 @@ Stop the server from the same REPL:
 ;; => nil
 ----
 
-`app/stop!` calls xref:api/ol-busker.adoc#stop-BANG-[`ol.busker/stop!`], waits for the server to stop, and clears the atom.
+`app/stop!` calls xref:ROOT:api/ol-busker.adoc#stop-BANG-[`ol.busker/stop!`], waits for the server to stop, and clears the atom.
 
 == Where to go next
 
-* xref:configuration.adoc[Configuration] covers TLS, HTTP/3, multiple entrypoints, and every other config key
-* xref:ring-compatibility.adoc[Ring compatibility] covers requests, responses, bodies, middleware, and streaming
+* xref:ROOT:configuration.adoc[Configuration] covers TLS, HTTP/3, multiple entrypoints, and every other config key
+* xref:ROOT:guides/ring-compatibility.adoc[Ring compatibility] explains handlers, middleware, and streaming

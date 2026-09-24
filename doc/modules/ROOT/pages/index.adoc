@@ -42,10 +42,10 @@ Add at least one native dependency for your target platform:
 [source,clojure]
 ----
 ;; Choose at least one of the following.
-com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.4"}
-com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.4"}
-com.outskirtslabs.busker/macos-x86-64 {:mvn/version "0.0.4"}
-com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.4"}
+com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.5"}
+com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.5"}
+com.outskirtslabs.busker/macos-x86-64 {:mvn/version "0.0.5"}
+com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.5"}
 ----
 
 If you include multiple native dependencies, Busker chooses the one matching the current platform.
@@ -61,10 +61,10 @@ Busker statically links these security-sensitive upstream dependencies into its 
 | Upstream date
 
 | https://github.com/h2o/h2o[libh2o]
-| https://github.com/h2o/h2o/commit/3a5d2cb898bdb54795f060be7aba478912f65bb0[2026-07-20 (3a5d2cb)]
+| https://github.com/h2o/h2o/commit/cac7e6568ad98a848f099ecd0a18b881f632479a[2026-09-10 (cac7e65)]
 
 | https://github.com/google/boringssl[BoringSSL]
-| https://github.com/google/boringssl/commit/30a26e970e14f9d943e3961de49bee5cc7e032d3[2026-08-03 (30a26e9)]
+| https://github.com/Ramblurr/boringssl/commit/344fbda02c4b8e43491d632d8445bf53d2491533[0.20260813.0 (344fbda)]
 |===
 
 == Examples

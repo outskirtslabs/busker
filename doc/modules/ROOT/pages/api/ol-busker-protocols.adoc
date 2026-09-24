@@ -1,5 +1,15 @@
 = ol.busker.protocols
 
+
+Public response-body and response-emitter protocols for Ring-compatible applications.
+
+<<SizableResponseBody,`SizableResponseBody`>> supplies known byte sizes for complete responses. <<ResponseEmitter,`ResponseEmitter`>>
+controls asynchronous response output and lifecycle callbacks.
+
+## Related Namespaces
+
+- `ol.busker.response` implements response emission.
+
 [#SizableResponseBody]
 == SizableResponseBody
 
@@ -7,7 +17,7 @@
 _protocol_
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/protocols.clj#L5-L10[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/protocols.clj#L13-L18[source,window=_blank]
 
 
 [#body-size-in-bytes]
@@ -37,7 +47,7 @@ Controls an asynchronous server-to-client stream for one HTTP response.
 _protocol_
 
 [.api-source]
-link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/protocols.clj#L12-L92[source,window=_blank]
+link:https://github.com/outskirtslabs/busker/blob/main/src/main/clojure/ol/busker/protocols.clj#L20-L100[source,window=_blank]
 
 
 [#open-QMARK-]

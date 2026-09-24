@@ -138,7 +138,7 @@
 (deftest first-server-doc-source-test
   (let [[documented-deps _ documented-main]
         (clojure-source-blocks
-         (io/file "doc" "modules" "ROOT" "pages" "tutorial-first-server.adoc"))]
+         (io/file "doc" "modules" "ROOT" "pages" "guides" "first-server.adoc"))]
     (is (= {:deps (str/trim (slurp (example-path "first-server" "deps.edn")))
             :main (str/trim (slurp (example-path "first-server" "main.clj")))}
            {:deps (str/trim documented-deps)
@@ -147,7 +147,7 @@
 (deftest https-http3-guide-config-test
   (let [[documented-config]
         (clojure-source-blocks
-         (io/file "doc" "modules" "ROOT" "pages" "howto-https-http3.adoc"))
+         (io/file "doc" "modules" "ROOT" "pages" "guides" "https-http3.adoc"))
         user-config (-> (read-string documented-config)
                         (assoc-in [:tls :storage :factory]
                                   'ol.clave.storage.file/file-storage)

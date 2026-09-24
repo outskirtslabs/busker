@@ -1,18 +1,16 @@
 * xref:index.adoc[Home]
 
-.Tutorials
-* xref:tutorial-first-server.adoc[Your first Busker server]
-
-.How-to guides
-* xref:howto-https-http3.adoc[Serve HTTPS and HTTP/3]
+.Guides
+* xref:guides/index.adoc[Overview]
+* xref:guides/first-server.adoc[Your first Busker server]
+* xref:guides/https-http3.adoc[Serve HTTPS and HTTP/3]
+* xref:guides/runtime-model.adoc[Runtime model]
+* xref:guides/ring-compatibility.adoc[Ring compatibility]
 
 .Reference
 * xref:configuration.adoc[Configuration]
-* xref:ring-compatibility.adoc[Ring compatibility]
+* xref:ring-reference.adoc[Ring requests and responses]
 include::partial$api-nav.adoc[]
-
-.Explanation
-* xref:runtime-model.adoc[Runtime model]
 
 .Project
 * xref:security.adoc[Security]

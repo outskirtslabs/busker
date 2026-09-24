@@ -1,25 +1,11 @@
-= Ring compatibility
+= Ring requests and responses
 
-This page is a reference for checking whether an existing Ring application will run on Busker.
-It lists the request fields Busker supplies, the response forms it accepts, and where Busker differs from other Ring servers.
+This reference lists the request fields Busker supplies, the response forms it accepts, and known compatibility limits.
+See xref:guides/ring-compatibility.adoc[Ring compatibility] for the reasons behind its handler and streaming model.
 
 Busker accepts only synchronous (one-argument) Ring handlers; a handler receives one request map and returns one response map.
-
 Ring's asynchronous (three-argument) handler API is not supported, and neither is middleware that requires it.
 Busker requires JDK 25 and runs each handler on a virtual thread.
-Under this architecture threads are no longer a scarce resource that need to be pooled and managed, instead they are an abundant resource that can be created as needed to satisfy your application needs.
-
-When a handler has to wait, for a request body, a database, or another service, it blocks only its own virtual thread, which the JVM parks until the data arrives.
-
-Ring's async callback style was proposed to avoid exactly that kind of blocking, which makes sense when using platform threads (of which there are ususally only the number of CPUs*2 available).
-Busker takes the opinion that one concurrency model for application code is enough, and we chose virtual threads.
-
-Most handlers never need to think about threads at all.
-Waiting is what virtual threads are good at, and web handlers spend most of their time waiting for I/O.
-
-Two exceptions matter.
-CPU-intensive work does not park a virtual thread, so a heavy handler holds a carrier thread for its whole run; offload that work to a platform-thread pool.
-And a virtual thread remains pinned to its carrier platform thread while it executes native code.
 
 == Request maps
 

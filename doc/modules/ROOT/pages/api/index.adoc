@@ -16,6 +16,6 @@ This release publishes 4 namespaces.
 | Ring middleware for common HTTP handling patterns.
 
 | xref:api/ol-busker-protocols.adoc[`ol.busker.protocols`]
-| -
+| Public response-body and response-emitter protocols for Ring-compatible applications.
 
 |===
