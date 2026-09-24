@@ -1,13 +1,13 @@
 {
-  "h2o-0.0.1-7Fp7So5XAADQ9Y8DaxKaUguQ-kVxs9_uTDGjgkFzV8ZA": {
+  "h2o-0.0.1-7Fp7SmtXAAC36s404Qa2Y-jlSBFaXhCgqDEpkLsMcGyD": {
     "name": "h2o-zig",
-    "url": "git+https://github.com/outskirtslabs/h2o-zig.git#9cb90143f8515abf11898d5de3f8a5e9cc185527",
-    "hash": "sha256-Sor4f9jaXJrbeiClrI4rNH8N6tDEx4II9b9QvX9si+Q="
+    "url": "git+https://github.com/outskirtslabs/h2o-zig.git#edde60c4fde93660d149875e456eab230516ffb9",
+    "hash": "sha256-97iGjA55s4Sn88vuObWnhjc34sITqTy9r9EXeaBRJsY="
   },
-  "N-V-__8AAGQJoAFAIqzfpmAk5gvm6O2U1WijZkzy4GF-uK9T": {
+  "N-V-__8AACk3oQGoUNgWlQYaYUkwA5z4QVD3Yv7B3ydFzOhS": {
     "name": "h2o",
-    "url": "git+https://github.com/h2o/h2o.git?ref=master#3a5d2cb898bdb54795f060be7aba478912f65bb0",
-    "hash": "sha256-refmrzRcjoip1PZZK4wfZL2GoPvTahHytoS2KzkdNvc="
+    "url": "git+https://github.com/h2o/h2o.git?ref=master#cac7e6568ad98a848f099ecd0a18b881f632479a",
+    "hash": "sha256-nkMrpz+ja8vpvGstXN9KifbeQQOjf/3EYTzsOQU8qKs="
   },
   "N-V-__8AADdLBADNETOk9pvYZ-k7F8a08-U43YCrYSlxu621": {
     "name": "wslay",
@@ -34,15 +34,15 @@
     "url": "git+https://github.com/facebook/zstd.git?ref=v1.5.7#f8745da6ff1ad1e7bab384bd1f9d742439278e99",
     "hash": "sha256-h35u+KqPsc9xZQ7xJu15M4etPnBIM33NUVG4NKzMZHw="
   },
-  "boringssl-0.20260803.0-EhtkNcs5AABZbwLHRGfg9683007kfB-ToRrFTmn5PcTr": {
+  "boringssl-0.20260813.0-EhtkNbw1AAAUFQcMyMfTt_wNBPjR2UgNVkR3htV8lB5C": {
     "name": "boringssl",
-    "url": "git+https://github.com/Ramblurr/boringssl.git?ref=h2o-zig/boringssl-0.20260803.0-pic#481bf9149379137499d71dda643653017c15c02d",
-    "hash": "sha256-5PM4TBZs7+qSA1ayO2uZPsTdXgtJwkm9f5KJl7PoDSo="
+    "url": "git+https://github.com/Ramblurr/boringssl.git?ref=h2o-zig/boringssl-0.20260813.0-pic#344fbda02c4b8e43491d632d8445bf53d2491533",
+    "hash": "sha256-iDZVT14GznIZokZytbvPfxaWS0zQ5o70DBLXS5iJS4A="
   },
-  "N-V-__8AAKQHeA4HEwAvXeweCGieN0PG2fqSS2jzYcwSY-F5": {
+  "N-V-__8AAEhRag6gHL85MNqOxGFtJs5Lu9fK22BDYLMwOJs6": {
     "name": "boringssl",
-    "url": "https://github.com/google/boringssl/archive/30a26e970e14f9d943e3961de49bee5cc7e032d3.tar.gz",
-    "hash": "sha256-MzRXrWh7uHwqncoZYWKWs5cmUyaZcApws1FflQXp78s="
+    "url": "https://github.com/google/boringssl/archive/7c1efd8d6ffb36a57feba44e8c73cf674801f3cb.tar.gz",
+    "hash": "sha256-OEcC7w5ykHXdh/gYFRxMYu1zAztkoaIkT5oUDZT2Etk="
   },
   "nasm-3.0.1-B_NnpQpTAAA25UxvqONakXtmj-a78PGe3xfgyDFgetb0": {
     "name": "nasm",
@@ -59,10 +59,10 @@
     "url": "git+https://github.com/allyourcodebase/zlib.git#c5115f4b69ef660f72a835c6638f80508ef284c7",
     "hash": "sha256-LXTzZptvs9dHFNndYCV+PjlTtmTn8O7BtLLJQ6Ul18c="
   },
-  "patch-2.6.1-po1jOY5vAABWkdNnlxzrwMOSWfjOb_RUH8tcJVPK8Mgl": {
+  "patch-2.6.1-po1jOedqAADkiQDv3hXHuQBDzGLVhCfrp38vXHB6xZ1W": {
     "name": "patch",
-    "url": "git+https://github.com/akunaakwei/zig-patch.git#a5bf3778de3cae7ee7cdbaa0db3cdc3715b1bcbf",
-    "hash": "sha256-Tb0wcCIK/CQG6rKIzYS/4nOOrgyhsbcHrnBMzeXIQW0="
+    "url": "git+https://github.com/akunaakwei/zig-patch#918b45387bb0e8afe629984faf2353fab0efab21",
+    "hash": "sha256-PWCXh1SRg3C+NWFNBW8rt8EG+afQ6ZZZRrVgRnu7INk="
   },
   "N-V-__8AAJPSEgDcozcxiSvegfkjtNmn6GcEB8wT_c3xq86P": {
     "name": "patch",
