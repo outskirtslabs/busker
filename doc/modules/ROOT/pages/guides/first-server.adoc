@@ -22,7 +22,7 @@ Busker ships its native code as a separate jar for each supported platform.
 {:paths ["."]
  :deps {org.clojure/clojure {:mvn/version "1.12.5"}
         ;; Choose the package for your platform.
-        com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.4"}
+        com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.5"}
 
         com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
                                   :git/sha "07fb6b7962a8d534bbb11006c78a4c5a99160d97"}}
@@ -34,10 +34,10 @@ Replace that line with the matching entry below if you use another platform:
 
 [source,clojure]
 ----
-com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.4"}
-com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.4"}
-com.outskirtslabs.busker/macos-x86-64 {:mvn/version "0.0.4"}
-com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.4"}
+com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.5"}
+com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.5"}
+com.outskirtslabs.busker/macos-x86-64 {:mvn/version "0.0.5"}
+com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.5"}
 ----
 
 The `--enable-native-access=ALL-UNNAMED` JVM option lets Busker call its native code without a startup warning.
