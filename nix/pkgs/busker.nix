@@ -46,7 +46,7 @@ clojureLib.mkCljLib {
   inherit pkgs jdk gitRev;
   name = "busker";
   version = "0.0.2";
-  src = ../.;
+  src = ../..;
   extraSrcExcludes = [
     "bb.edn"
     ".gitlibs"

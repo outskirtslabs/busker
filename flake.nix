@@ -52,17 +52,17 @@
               "dirty";
         in
         rec {
-          apple-sdk = pkgs: pkgs.callPackage ./pkgs/apple-sdk.nix { };
+          apple-sdk = pkgs: pkgs.callPackage ./nix/pkgs/apple-sdk.nix { };
           locker = pkgs: (busker pkgs).locker;
           shim =
             pkgs:
-            pkgs.callPackage ./pkgs/shim.nix {
+            pkgs.callPackage ./nix/pkgs/shim.nix {
               inherit clojureLib gitRev zig2nix;
               apple-sdk = self.packages.${pkgs.system}.apple-sdk;
             };
           busker =
             pkgs:
-            pkgs.callPackage ./pkgs/busker.nix {
+            pkgs.callPackage ./nix/pkgs/busker.nix {
               inherit clojureLib gitRev;
               shim = self.packages.${pkgs.system}.shim;
             };

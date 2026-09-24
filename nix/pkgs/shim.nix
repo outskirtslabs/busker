@@ -12,7 +12,7 @@
 }:
 let
   system = stdenv.hostPlatform.system;
-  root = toString ../.;
+  root = toString ../..;
   clojure = pkgs.clojure.override { jdk = jdk25; };
   zig = zig2nix.packages.${system}."zig-0_16_0";
   zig2nixEnv = zig2nix.outputs.zig-env.${system} { inherit zig; };
@@ -56,7 +56,7 @@ let
       "shim/${target.dir}/target/"
     ]) shimTargets;
   filteredSrc = lib.cleanSourceWith {
-    src = ../.;
+    src = ../..;
     filter =
       path: _type:
       let
@@ -117,7 +117,7 @@ zig2nixEnv.package {
     export PATH="$JAVA_HOME/bin:$PATH"
     export GIT_REV="${gitRev}"
     if [ ! -f ../deps.edn ]; then
-      cp ${../deps.edn} ../deps.edn
+      cp ${../../deps.edn} ../deps.edn
     fi
     mkdir -p "$out/jars"
     for dir in ${targetNames}; do
