@@ -64,7 +64,7 @@ Busker statically links these security-sensitive upstream dependencies into its 
 | https://github.com/h2o/h2o/commit/cac7e6568ad98a848f099ecd0a18b881f632479a[2026-09-10 (cac7e65)]
 
 | https://github.com/google/boringssl[BoringSSL]
-| https://github.com/Ramblurr/boringssl/commit/344fbda02c4b8e43491d632d8445bf53d2491533[2026-09-10 (344fbda)]
+| https://github.com/Ramblurr/boringssl/commit/344fbda02c4b8e43491d632d8445bf53d2491533[0.20260813.0 (344fbda)]
 |===
 
 == Examples
