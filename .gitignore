@@ -2,7 +2,8 @@
 .idea
 .cpcache/
 .clj-kondo
-**/.claude/settings.local.json
+.claude
+.pi/
 .lsp/
 .nrepl-port
 target/
