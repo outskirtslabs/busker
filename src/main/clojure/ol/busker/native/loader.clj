@@ -49,6 +49,8 @@
           (Files/deleteIfExists (.toPath (io/file temp-lib-path)))
           (catch Exception _))))))
 
-(if-let [lib-path (System/getProperty "ol.libh2oclj.path")]
-  (ffi/load-library lib-path)
-  (load-bundled-library))
+;; Reuse the loaded library when this namespace is re-evaluated.
+(defonce native-library
+  (if-let [lib-path (System/getProperty "ol.libh2oclj.path")]
+    (ffi/load-library lib-path)
+    (load-bundled-library)))

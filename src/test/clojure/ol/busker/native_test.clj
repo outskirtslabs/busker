@@ -6,7 +6,69 @@
    [ol.busker.native :as native]
    [ol.busker.native.loader :as loader])
   (:import
+   [java.io File]
+   [java.util.concurrent TimeUnit]
    [java.nio.file Files Path]))
+
+(defn- run-loader-process [form & jvm-options]
+  (let [output (File/createTempFile "busker-loader-" ".log")
+        process (-> (ProcessBuilder.
+                     ^"[Ljava.lang.String;"
+                     (into-array String
+                                 (concat [(str (System/getProperty "java.home") "/bin/java")
+                                          "--enable-native-access=ALL-UNNAMED"]
+                                         jvm-options
+                                         ["-cp" (System/getProperty "java.class.path")
+                                          "clojure.main" "-e" (pr-str form)])))
+                    (.redirectErrorStream true)
+                    (.redirectOutput output)
+                    (.start))]
+    (try
+      (let [finished? (.waitFor process 60 TimeUnit/SECONDS)]
+        (is finished? (slurp output))
+        (when finished?
+          (is (zero? (.exitValue process)) (slurp output))))
+      (finally
+        (.destroyForcibly process)
+        (.delete output)))))
+
+(deftest namespace-reload-retains-loaded-library
+  (run-loader-process
+   '(do
+      (require '[babashka.ffi :as ffi])
+      (let [load-library ffi/load-library
+            loaded (atom [])]
+        (with-redefs [ffi/load-library (fn [path]
+                                         (let [library (load-library path)]
+                                           (swap! loaded conj library)
+                                           library))]
+          (require '[ol.busker.native :as native]
+                   '[ol.busker :as busker]
+                   '[ol.busker.test-utils :as util]
+                   '[babashka.http-client :as http])
+          (eval
+           '(let [size (native/req-ctx-size)
+                  old-call (ffi/cfn "clj_h2o_req_ctx_size" [] :long)
+                  port (util/free-port)
+                  server (busker/start!
+                          (util/with-handler
+                            (fn [_] {:status 200 :body "still running"})
+                            {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                                  :tls false :http3? false}}}))
+                  url (str "http://127.0.0.1:" port)]
+              (try
+                (assert (= "still running" (:body (http/get url))))
+                (dotimes [_ 2]
+                  (require 'ol.busker.native.loader :reload)
+                  (require 'ol.busker.native :reload)
+                  (assert (= size (old-call) (native/req-ctx-size)
+                             ((ffi/cfn "clj_h2o_req_ctx_size" [] :long))))
+                  (assert (= "still running" (:body (http/get url)))))
+                (finally
+                  (busker/stop! server)))))
+          (assert (= 1 (count @loaded)) (str "Loaded libraries: " (mapv :path @loaded)))
+          (assert (not (.exists (java.io.File. (:path (first @loaded))))))))
+      (shutdown-agents))))
 
 (deftest bundled-library-remains-callable-after-extraction
   (let [{:keys [path] :as library} (loader/load-bundled-library)
@@ -23,21 +85,29 @@
                        "libh2oclj.dylib" "libh2oclj.so")
         path (Files/createTempFile "h2oclj-override-" library-name
                                    (make-array java.nio.file.attribute.FileAttribute 0))
-        key "ol.libh2oclj.path"
-        previous (System/getProperty key)
         missing (str path "-missing")]
     (try
       (loader/copy-resource (str (loader/get-os-arch) "/" library-name) (str path))
-      (System/setProperty key (str path))
-      (require 'ol.busker.native.loader :reload)
-      (is (= (native/req-ctx-size)
-             ((ffi/cfn "clj_h2o_req_ctx_size" [] :long))))
-      (is (thrown? Exception (ffi/load-library missing)))
-      (System/setProperty key missing)
-      (is (thrown? Exception (require 'ol.busker.native.loader :reload)))
+      (run-loader-process
+       '(do
+          (require '[ol.busker.native :as native]
+                   '[ol.busker.native.loader :as loader])
+          (assert (= (System/getProperty "ol.libh2oclj.path") (:path loader/native-library)))
+          (assert (pos? (native/req-ctx-size)))
+          (System/setProperty "ol.libh2oclj.path" "no-such-library-after-initial-load")
+          (require 'ol.busker.native.loader :reload)
+          (require 'ol.busker.native :reload)
+          (assert (pos? (native/req-ctx-size))))
+       (str "-Dol.libh2oclj.path=" path))
+      (run-loader-process
+       '(try
+          (require 'ol.busker.native.loader)
+          (throw (AssertionError. "Invalid initial library path was accepted"))
+          (catch clojure.lang.Compiler$CompilerException e
+            (assert (= (System/getProperty "ol.libh2oclj.path")
+                       (:library (ex-data (ex-cause e)))))))
+       (str "-Dol.libh2oclj.path=" missing))
       (finally
-        (if previous (System/setProperty key previous) (System/clearProperty key))
-        (require 'ol.busker.native.loader :reload)
         (Files/deleteIfExists path)))))
 
 (deftest tls-callback-copies-hostname-and-returned-bytes

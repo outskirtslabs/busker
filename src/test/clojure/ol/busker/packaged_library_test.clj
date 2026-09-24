@@ -34,6 +34,7 @@
                       (test/test-vars
                        [#'ol.busker.native-test/bundled-library-remains-callable-after-extraction
                         #'ol.busker.native-test/native-library-override-and-failures
+                        #'ol.busker.native-test/namespace-reload-retains-loaded-library
                         #'ol.busker.reload-test/reload-activates-new-generation-and-drains-old-test])
                       (let [{:keys [fail error] :as result} @test/*report-counters*]
                         (prn result)
