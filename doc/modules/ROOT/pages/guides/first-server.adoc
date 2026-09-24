@@ -25,7 +25,7 @@ Busker ships its native code as a separate jar for each supported platform.
         com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.5"}
 
         com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
-                                  :git/sha "07fb6b7962a8d534bbb11006c78a4c5a99160d97"}}
+                                  :git/sha "eb221c9d1bc76d5549dc5252b6c9c577af584bc6"}}
  :aliases {:repl {:jvm-opts ["--enable-native-access=ALL-UNNAMED"]}}}
 ----
 

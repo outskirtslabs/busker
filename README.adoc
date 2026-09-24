@@ -32,7 +32,7 @@ Add the Busker git dependency to `deps.edn`:
 [source,clojure]
 ----
 com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
-                          :git/sha "414c1760c5df48a39eac52374fb4ae723a1d0c72"}
+                          :git/sha "eb221c9d1bc76d5549dc5252b6c9c577af584bc6"}
 ----
 
 When using Busker as a git dependency, run `clj -X:deps prep` after bumping the git sha.
