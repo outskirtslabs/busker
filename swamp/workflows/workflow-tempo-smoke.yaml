@@ -1,0 +1,56 @@
+id: 9b7ecc37-396b-4c53-998d-aff4ca267172
+name: tempo-smoke
+description: Check local H1 and H2 execution and saved outputs without optimization or performance scoring.
+version: 1
+inputs:
+  type: object
+  properties:
+    runId: {type: string}
+    repository: {type: string}
+    outputRoot: {type: string}
+  required: [runId, repository, outputRoot]
+  additionalProperties: false
+jobs:
+  - name: smoke
+    steps:
+      - name: h1
+        task:
+          type: model_method
+          modelIdOrName: tempo
+          methodName: benchmarkSmoke
+          inputs:
+            runId: ${{ inputs.runId }}
+            repository: ${{ inputs.repository }}
+            directory: ${{ inputs.outputRoot + '/' + inputs.runId + '-h1' }}
+            protocol: h1
+      - name: check-h1
+        dependsOn:
+          - step: h1
+            condition: {type: succeeded}
+        task:
+          type: assert
+          expr: data.latest('tempo', inputs.runId + '-busker-h1-result').attributes.valid && data.latest('tempo', inputs.runId + '-busker-h1-result').attributes.summary.score == null
+          message: H1 smoke output must be valid and must not contain a performance score.
+          severity: high
+      - name: h2
+        dependsOn:
+          - step: check-h1
+            condition: {type: succeeded}
+        task:
+          type: model_method
+          modelIdOrName: tempo
+          methodName: benchmarkSmoke
+          inputs:
+            runId: ${{ inputs.runId }}
+            repository: ${{ inputs.repository }}
+            directory: ${{ inputs.outputRoot + '/' + inputs.runId + '-tls-h2' }}
+            protocol: tls-h2
+      - name: check-h2
+        dependsOn:
+          - step: h2
+            condition: {type: succeeded}
+        task:
+          type: assert
+          expr: data.latest('tempo', inputs.runId + '-busker-tls-h2-result').attributes.valid && data.latest('tempo', inputs.runId + '-busker-tls-h2-result').attributes.summary.score == null
+          message: H2 smoke output must be valid and must not contain a performance score.
+          severity: high

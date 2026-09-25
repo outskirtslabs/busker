@@ -1,0 +1,39 @@
+id: 7fec9e28-8c2a-4a4b-8bb1-9818e989867a
+name: tempo-profile-smoke
+version: 1
+description: Check a short diagnostic recording without optimization or scoring.
+inputs:
+  type: object
+  properties:
+    runId: {type: string}
+    repository: {type: string}
+    outputRoot: {type: string}
+    collectorDirectory: {type: string}
+    event: {type: string, enum: [ctimer, wall, alloc, jfr]}
+    protocol: {type: string, enum: [h1, tls-h1, tls-h2]}
+  required: [runId, repository, outputRoot, collectorDirectory, event, protocol]
+  additionalProperties: false
+jobs:
+  - name: smoke
+    steps:
+      - name: record
+        task:
+          type: model_method
+          modelIdOrName: tempo
+          methodName: profileSmoke
+          inputs:
+            runId: ${{ inputs.runId }}
+            repository: ${{ inputs.repository }}
+            directory: ${{ inputs.outputRoot + '/' + inputs.runId }}
+            collectorDirectory: ${{ inputs.collectorDirectory }}
+            event: ${{ inputs.event }}
+            protocol: ${{ inputs.protocol }}
+      - name: check
+        dependsOn:
+          - step: record
+            condition: {type: succeeded}
+        task:
+          type: assert
+          expr: data.latest('tempo', inputs.runId + '-' + inputs.protocol + '-' + inputs.event + '-result').attributes.valid && data.latest('tempo', inputs.runId + '-' + inputs.protocol + '-' + inputs.event + '-result').attributes.score == null
+          message: The diagnostic recording must be valid and unscored.
+          severity: high

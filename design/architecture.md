@@ -86,6 +86,79 @@ If startup fails partway through, Busker releases the resources it has already c
 Cleanup continues even if one release operation fails, and the original startup error is retained along with any cleanup errors.
 
 
+## Local optimization tooling
+
+[Tempo](../swamp/README.md) is a development-only Swamp workflow, separate from the
+server runtime. It prepares isolated Git worktrees, runs `bb qa` and serial
+`bb bench:local` measurements, and records source and native-library identity.
+The local benchmark classpath puts shim resources ahead of native copies in
+`target/classes`. Diagnostic recordings cannot supply benchmark scores.
+The current fixed measurement method pins the entire benchmark coordinator and
+server JVM, including GC, JIT, and native threads, to physical CPUs 10–11. Warmup
+and measured h2load clients run on disjoint physical CPUs 12–13. The same
+allocation applies to H1, TLS H2, candidate measurements, and profiling;
+Pi, QA, the controller, and REPL are not pinned. Before a run, the coordinator
+checks its inherited allowed CPU set through a child process and checks host
+core and cache topology. The child check does not prove the coordinator's or
+Java's live thread masks. During every sample the JVM records its thread masks
+at readiness and at the start and end of measurement. For every warmup and
+measured h2load invocation, the wrapper verifies the launched executable and
+records the task masks visible under its live PID after exec.
+These records are point-in-time observations, not proof of continuous CPU
+residence. Missing or inconsistent sample evidence invalidates the measurement.
+Method identity, topology, and resolved h2load path are saved with each result
+and checked when assembling comparisons. Older unpinned results cannot serve
+as new H1/H2 anchors or as parent evidence for the fixed method.
+
+Each scored cell collects two complete batches of the configured three or six
+valid samples before a precision decision. The arithmetic
+mean is the score only when the two-sided Student-t interval has a relative
+half-width no greater than the configured limit (by default 5% at 95%
+confidence). Invalid execution and insufficient remaining time may stop
+collection early, but a precise first batch does not.
+Run config, benchmark records, and comparisons persist the precision settings,
+fixed sample count, and `arithmetic-mean-student-t-v1` identity. Parent imports
+reject missing or different estimator evidence; old median measurements are not
+reclassified. Candidate improvement, H2 protection, and target decisions still
+compare point estimates and do not prove a difference is statistically significant.
+An imprecise baseline stops the campaign. An imprecise candidate cannot be
+scored or accepted; Tempo retains the recorded samples, discards the candidate,
+and starts another attempt from the verified best if limits permit. Other
+invalid measurements still stop the campaign.
+The separate unscored repeatability procedure applies the same configured
+six-sample calculation to both protocols and records version, precision, and
+sample count; its report applies to a later campaign only when those settings
+and the recorded source, native library, and method match the intended run.
+
+Swamp executes official commands and Git operations. Restricted Pi processes
+receive exact saved inputs and file tools; implement and repair may also use a
+dedicated experiment-worktree REPL through `brepl` for namespace reloads,
+evaluation, and focused tests. Swamp stops that REPL before QA or measurement;
+REPL feedback cannot replace official checks. The untracked project `AGENTS.md`
+is saved once per run with its contents and SHA-256 as read-only inference
+guidance, separate from the reviewed Git support snapshot.
+For review, Swamp saves the raw Git diff from the best commit to the tested
+candidate commit as a read-only file and archives its bytes with both revisions
+and a SHA-256 digest. The reviewer can read that file without Git access.
+An edited revision must pass tests, fresh measurements, and review before replacing
+the best revision. H1 acceptance also checks TLS H2 against the initial baseline.
+Run limits are checked between phases; unfinished edits and raw evidence are kept
+separately. This tooling does not change Ring behavior, virtual-thread execution,
+streaming flow control, or server lifecycle rules.
+A supervised run loads its model from a private, commit-derived Swamp snapshot and
+checks a saved file manifest before and after each effect. Scoped child commands
+append directly to private logs, so stopping the separate controller cannot lose
+flushed output held in its process pipes. Ambiguous interrupted steps require
+inspection rather than automatic replay.
+A fresh campaign may cite a stopped parent's exact-version Swamp export. Tempo
+checks its hashed config, step results, raw measurement samples, passing tests,
+review, retained revision, support snapshot, and remaining cumulative time,
+attempts, and Pi calls. An interrupted parent additionally needs a leader-approved
+receipt in its private run directory and unchanged partial Pi logs. That receipt
+disables recovery of the old run; no unresolved effect is replayed. A new run
+remeasures the retained revision before further edits, keeps the original H1/H2
+baseline and the highest verified best-revision H1 score, and refuses missing or inconsistent proof.
+
 ## Decision record reconciliation
 
 The [ADRs](adr/README.md) record decisions at the time they were made.

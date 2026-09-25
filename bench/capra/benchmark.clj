@@ -24,6 +24,7 @@
    [java.io Closeable]
    [java.net URI]
    [java.net.http HttpClient HttpClient$Version HttpRequest HttpResponse HttpResponse$BodyHandlers]
+   [java.nio.file Files NoSuchFileException]
    [java.security MessageDigest]
    [java.time Duration Instant]
    [java.util Properties]
@@ -208,6 +209,24 @@
        :latency (when (>= (count latency) 6)
                   (zipmap [:median :p95 :p99 :mean] (take 4 (drop 2 latency))))})))
 
+(defn- record-affinity! [directory phase]
+  (when-let [method (System/getenv "TEMPO_BENCHMARK_METHOD")]
+    (let [threads (->> (.listFiles (io/file "/proc/self/task"))
+                       (keep (fn [^java.io.File task]
+                               (try
+                                 {:tid     (parse-long (.getName task))
+                                  :allowed (second (re-find #"(?m)^Cpus_allowed_list:\s*(\S+)"
+                                                            (Files/readString (.toPath (io/file task "status")))))}
+                                 (catch NoSuchFileException _ nil))))
+                       vec)
+          evidence {:method method :phase phase :threads threads}]
+      (spit (str directory "/server-affinity-" phase ".json") (json/write-str evidence))
+      (when (or (not= method "pinned-server-10-11-client-12-13")
+                (empty? threads)
+                (some #(not= "10-11" (:allowed %)) threads))
+        (throw (ex-info "Server CPU affinity differs from the benchmark method" evidence)))
+      evidence)))
+
 (defn- sample! [{:keys [adapter protocol warmup duration directory fixtures] :as options}]
   (let [port 5800
         stop (start-server adapter protocol port fixtures)]
@@ -215,9 +234,12 @@
       (let [response (await-ready! protocol port fixtures)
             warm-log (str directory "/warmup.log")
             load-log (str directory "/measurement.log")]
+        (record-affinity! directory "ready")
         (measurements (command! (load-command protocol port warmup options) warm-log (+ warmup 30)) protocol)
+        (record-affinity! directory "measurement-start")
         (let [result (measurements (command! (load-command protocol port duration options) load-log (+ duration 30)) protocol)]
           (check-response! protocol port fixtures)
+          (record-affinity! directory "measurement-end")
           (assoc result :status "ok" :response response)))
       (finally (stop)))))
 

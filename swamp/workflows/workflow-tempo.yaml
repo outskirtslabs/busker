@@ -1,0 +1,66 @@
+id: 84b1af6a-1701-4784-891a-9c30e546a4da
+name: tempo
+version: 1
+description: Run a configured, explicitly authorized optimization experiment. Repetition and saved-step recovery are implemented by the model.
+inputs:
+  type: object
+  properties:
+    confirmLive: {type: boolean, const: true}
+    runId: {type: string}
+    repository: {type: string}
+    revision: {type: string}
+    directory: {type: string}
+    supportDirectory: {type: string}
+    credentialDirectory: {type: string}
+    supportSha256: {type: string}
+    supportRevision: {type: string}
+    referenceRoots: {type: array, items: {type: string}}
+    experimentBrief: {type: string, minLength: 1, maxLength: 32768}
+    limits: {type: object}
+    policy:
+      type: object
+      properties:
+        scorePolicyVersion: {type: string, const: arithmetic-mean-student-t-v1}
+        precision:
+          type: object
+          properties:
+            relativeHalfWidth: {type: number, exclusiveMinimum: 0}
+            confidenceLevel: {type: number, exclusiveMinimum: 0, exclusiveMaximum: 1}
+          additionalProperties: false
+    benchmarkMethod: {type: string, const: pinned-server-10-11-client-12-13}
+    parameters: {type: object}
+  required: [confirmLive, runId, repository, revision, directory, supportDirectory, supportSha256, supportRevision, credentialDirectory, referenceRoots, limits, policy, benchmarkMethod, parameters]
+  additionalProperties: false
+jobs:
+  - name: experiment
+    steps:
+      - name: run
+        task:
+          type: model_method
+          modelIdOrName: tempo
+          methodName: run
+          inputs:
+            confirmLive: ${{ inputs.confirmLive }}
+            runId: ${{ inputs.runId }}
+            repository: ${{ inputs.repository }}
+            revision: ${{ inputs.revision }}
+            directory: ${{ inputs.directory }}
+            supportDirectory: ${{ inputs.supportDirectory }}
+            supportSha256: ${{ inputs.supportSha256 }}
+            supportRevision: ${{ inputs.supportRevision }}
+            credentialDirectory: ${{ inputs.credentialDirectory }}
+            referenceRoots: ${{ inputs.referenceRoots }}
+            limits: ${{ inputs.limits }}
+            experimentBrief: ${{ inputs.?experimentBrief }}
+            policy: ${{ inputs.policy }}
+            benchmarkMethod: ${{ inputs.benchmarkMethod }}
+            parameters: ${{ inputs.parameters }}
+      - name: check-finished
+        dependsOn:
+          - step: run
+            condition: {type: succeeded}
+        task:
+          type: assert
+          expr: data.latest('tempo', inputs.runId + '-report').attributes.state.phase == 'done' && data.latest('tempo', inputs.runId + '-report').attributes.valid
+          message: Tempo must save a final report after cleanup.
+          severity: high
