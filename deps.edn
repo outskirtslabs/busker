@@ -37,11 +37,11 @@
                                   com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.6.2"}
                                   com.outskirtslabs.busker/macos-aarch64   {:mvn/version "0.0.4"}
                                   com.outskirtslabs.busker/linux-x86-64    {:local/root "shim/linux-x86-64"}}}
-           :bench  {:extra-paths ["bench"]
+           :bench  {:replace-paths ["bench"]
                     :main-opts   ["-m" "capra.benchmark"]
 
                     :jvm-opts ["-Xmx8g" "--enable-native-access=ALL-UNNAMED"]
-                    :extra-deps  {org.slf4j/slf4j-nop                      {:mvn/version "2.0.17"}
+                    :extra-deps  {org.slf4j/slf4j-simple                   {:mvn/version "2.0.17"}
                                   aleph/aleph                       {:mvn/version "0.9.9"}
                                   com.s-exp/hirundo                 {:mvn/version "1.0.0-alpha214"}
                                   dev.weavejester/capra             {:mvn/version "0.1.2"}
@@ -49,10 +49,14 @@
                                   org.clojure/data.json             {:mvn/version "2.5.1"}
                                   org.clojars.jj/ring-http-exchange {:mvn/version "1.4.8"}
                                   http-kit/http-kit                 {:mvn/version "2.9.0-beta4"}
-                                  com.outskirtslabs.busker/linux-aarch64 {:local/root "shim/linux-aarch64"}
-                                  com.outskirtslabs.busker/linux-x86-64  {:local/root "shim/linux-x86-64"}
-                                  com.outskirtslabs.busker/macos-aarch64 {:local/root "shim/macos-aarch64"}
-                                  com.outskirtslabs.busker/macos-x86-64  {:local/root "shim/macos-x86-64"}
+                                  com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
+                                                           :git/sha "f3fe46007267d7f0afe87a768e46b604d2e8f327"}
+                                  com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.5"}
+                                  com.outskirtslabs.busker/linux-x86-64  {:mvn/version "0.0.5"}
+                                  com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.5"}
+                                  com.outskirtslabs.busker/macos-x86-64  {:mvn/version "0.0.5"}
+                                  org.eclipse.jetty/jetty-alpn-java-server {:mvn/version "12.1.0"}
+                                  org.eclipse.jetty.http2/jetty-http2-server {:mvn/version "12.1.0"}
                                   ring/ring-jetty-adapter           {:mvn/version "1.15.3"}}}
 
            :neil {:project {:name        com.outskirtslabs/busker

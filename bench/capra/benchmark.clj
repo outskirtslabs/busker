@@ -1,303 +1,344 @@
 (ns capra.benchmark
-  "Ring adapter benchmarks adapted from Capra.
+  "Compares Ring adapters over H1, TLS H1 and TLS H2 with h2load.
 
-  Source: https://github.com/weavejester/capra
-  Source revision: f7b01e5f3179e50739ea108a6c1178ceec07eaa0
+  Adapted from https://github.com/weavejester/capra at
+  f7b01e5f3179e50739ea108a6c1178ceec07eaa0.
   Copyright © 2026 James Reeves. Licensed under EPL-2.0."
   (:require
    [aleph.http :as aleph]
    [capra.server :as capra]
    [clojure.data.json :as json]
+   [clojure.edn :as edn]
    [clojure.java.io :as io]
-   [clojure.java.shell :as shell]
    [clojure.string :as str]
+   [ol.busker :as busker]
    [org.httpkit.server :as http-kit]
    [ring-http-exchange.core :as http-exchange]
+   [ring-http-exchange.ssl :as ssl]
    [ring.adapter.jetty :as jetty]
    [ring.adapter.undertow :as undertow]
-   [s-exp.hirundo :as hirundo]
-   [ol.busker :as busker])
+   [s-exp.hirundo :as hirundo])
   (:import
+   [io.helidon.common.tls TlsConfig]
+   [java.io Closeable]
    [java.net URI]
-   [java.net.http HttpClient HttpRequest HttpResponse HttpResponse$BodyHandlers]
-   [java.time Instant]
-   [java.util Properties]))
+   [java.net.http HttpClient HttpClient$Version HttpRequest HttpResponse HttpResponse$BodyHandlers]
+   [java.security MessageDigest]
+   [java.time Duration Instant]
+   [java.util Properties]
+   [java.util.concurrent TimeUnit]
+   [org.eclipse.jetty.alpn.server ALPNServerConnectionFactory]
+   [org.eclipse.jetty.http2.server HTTP2ServerConnectionFactory]
+   [org.eclipse.jetty.server ConnectionFactory HttpConfiguration HttpConnectionFactory
+    SecureRequestCustomizer Server ServerConnector SslConnectionFactory]
+   [org.eclipse.jetty.util.ssl SslContextFactory$Server]))
 
 (set! *warn-on-reflection* true)
 
-(def ^:private benchmark-revision
-  "f7b01e5f3179e50739ea108a6c1178ceec07eaa0")
-
-(defn- minimal-handler [_]
-  {:status 200
-   :headers {"content-type" "text/plain; charset=UTF-8"}
-   :body "Hello World"})
-
-(defn- realistic-handler [_]
-  (loop [i 0
-         x 0.0]
-    (if (< i 1000)
-      (recur (inc i) (+ x (Math/random)))
-      (do
-        (Thread/sleep 5)
-        {:status 200
-         :headers {"content-type" "text/plain; charset=UTF-8"}
-         :body "Simulated work and I/O response"}))))
-
-(def scenarios
-  [{:id :minimal
-    :handler minimal-handler
-    :expected-body "Hello World"}
-   {:id :realistic
-    :handler realistic-handler
-    :expected-body "Simulated work and I/O response"}])
-
-(defn- response [port]
-  (let [request (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port)))
-                    (.GET)
-                    (.build))]
-    (.send (HttpClient/newHttpClient) request (HttpResponse$BodyHandlers/ofString))))
-
-(defn- await-ready [port expected-body]
-  (loop [attempt 0
-         last-error nil]
-    (let [result (try
-                   (let [^HttpResponse result (response port)]
-                     (when-not (and (= 200 (.statusCode result))
-                                    (= expected-body (.body result)))
-                       (throw (ex-info "Unexpected benchmark response"
-                                       {:status (.statusCode result)
-                                        :body (.body result)})))
-                     result)
-                   (catch Throwable error
-                     error))]
-      (if-not (instance? Throwable result)
-        result
-        (if (= 50 attempt)
-          (throw (ex-info "Benchmark server did not become ready"
-                          {:port port}
-                          (or last-error result)))
-          (do
-            (Thread/sleep 100)
-            (recur (inc attempt) result)))))))
-
-(defn- busker-server [handler port]
-  (let [server (busker/start!
-                {:entrypoints {:benchmark {:bind (str "127.0.0.1:" port)
-                                           :tls false}}
-                 :dispatch [{:handler handler}]})]
-    #(busker/stop! server)))
-
-(defn- aleph-server [handler port]
-  (let [^java.io.Closeable server (aleph/start-server handler {:port port})]
-    #(.close server)))
-
-(defn- capra-server [handler port]
-  (let [server (capra/run-server handler :port port :error-logger (fn [_]))]
-    #(.close server)))
-
-(defn- hirundo-server [handler port]
-  (let [server (hirundo/start! {:http-handler handler :port port})]
-    #(hirundo/stop! server)))
-
-(defn- http-exchange-server [handler port]
-  (let [server (http-exchange/run-http-server handler {:port port})]
-    #(http-exchange/stop-http-server server)))
-
-(defn- http-kit-server [handler port]
-  (http-kit/run-server handler {:port port}))
-
-(defn- jetty-server [handler port]
-  (let [server (jetty/run-jetty handler {:port port :join? false})]
-    #(.stop server)))
-
-(defn- undertow-server [handler port]
-  (let [server (undertow/run-undertow handler {:port port})]
-    #(.stop server)))
-
+(def protocols [:h1 :tls-h1 :tls-h2])
+(def defaults {:warmup 10 :duration 30 :repetitions 3 :connections 128 :streams 64 :threads 2})
 (def adapters
-  [{:id :busker :label "Busker" :start busker-server}
-   {:id :aleph :label "Aleph" :start aleph-server :dependency ["aleph" "aleph"]}
-   {:id :capra :label "Capra" :start capra-server :dependency ["dev.weavejester" "capra"]}
-   {:id :hirundo :label "Hirundo" :start hirundo-server :dependency ["com.s-exp" "hirundo"]}
-   {:id :http-exchange :label "http-exchange" :start http-exchange-server
+  [{:id :busker :label "Busker" :protocols (set protocols)}
+   {:id :aleph :label "Aleph" :protocols (set protocols) :dependency ["aleph" "aleph"]}
+   {:id :capra :label "Capra" :protocols #{:h1} :dependency ["dev.weavejester" "capra"]}
+   {:id :hirundo :label "Hirundo" :protocols (set protocols) :dependency ["com.s-exp" "hirundo"]}
+   {:id :http-exchange :label "http-exchange" :protocols #{:h1 :tls-h1}
     :dependency ["org.clojars.jj" "ring-http-exchange"]}
-   {:id :http-kit :label "http-kit" :start http-kit-server :dependency ["http-kit" "http-kit"]}
-   {:id :jetty :label "Ring Jetty" :start jetty-server :dependency ["ring" "ring-jetty-adapter"]}
-   {:id :undertow :label "Ring Undertow" :start undertow-server
+   {:id :http-kit :label "http-kit" :protocols #{:h1} :dependency ["http-kit" "http-kit"]}
+   {:id :jetty :label "Ring Jetty" :protocols (set protocols) :dependency ["ring" "ring-jetty-adapter"]}
+   {:id :undertow :label "Ring Undertow" :protocols (set protocols)
     :dependency ["luminus" "ring-undertow-adapter"]}])
 
-(defn- wrk [port {:keys [warmup duration connections threads]}]
-  (let [run (fn [duration]
-              (shell/sh "wrk" "--duration" duration
-                        "--connections" (str connections)
-                        "--threads" (str threads)
-                        (str "http://127.0.0.1:" port)))]
-    (when-not (zero? (:exit (run warmup)))
-      (throw (ex-info "wrk warm-up failed" {:port port})))
-    (let [result (run duration)]
-      (if (zero? (:exit result))
-        result
-        (throw (ex-info "wrk measurement failed" {:port port :result result}))))))
+(defn- handler [_]
+  {:status 200 :headers {"content-type" "text/plain; charset=UTF-8" "content-length" "11"}
+   :body "Hello World"})
 
-(defn- parse-number [output pattern]
-  (some-> (re-find pattern output) second Double/parseDouble))
-
-(defn- request-errors [output]
-  (let [values (or (some-> (re-find #"Socket errors: ([^\n]+)" output) second) "")
-        errors (into {:connect 0 :read 0 :write 0 :timeout 0}
-                     (map (fn [[_ name count]] [(keyword name) (parse-long count)]))
-                     (re-seq #"(connect|read|write|timeout) (\d+)" values))]
-    (assoc errors :total (reduce + (vals errors)))))
-
-(defn- wrk-measurements [output]
-  {:requests-per-second (parse-number output #"Requests/sec:\s+([0-9.]+)")
-   :transfer-per-second (some-> (re-find #"Transfer/sec:\s+([^\s]+)" output) second)
-   :latency (some-> (re-find #"Latency\s+([^\s]+)" output) second)
-   :request-errors (request-errors output)})
-
-(defn- run-adapter [adapter scenario port options]
-  (let [{:keys [id label start]} adapter
-        {:keys [handler expected-body] scenario-id :id} scenario]
-    (println "Running" label "for" (name scenario-id) "scenario...")
-    (flush)
+(defn- command! [args output seconds]
+  (io/make-parents output)
+  (let [builder (doto (ProcessBuilder. ^java.util.List (mapv str args))
+                  (.redirectError (io/file (str output ".err")))
+                  (.redirectOutput (io/file output)))
+        _       (doseq [key ["JAVA_TOOL_OPTIONS" "JDK_JAVA_OPTIONS" "_JAVA_OPTIONS" "CLJ_JVM_OPTS"]]
+                  (.remove (.environment builder) key))
+        process (.start builder)]
     (try
-      (let [stop (start handler port)]
-        (try
-          (await-ready port expected-body)
-          (let [{:keys [out]} (wrk port options)
-                measurements  (wrk-measurements out)
-                error-count   (get-in measurements [:request-errors :total])]
-            (cond-> {:adapter      (name id)
-                     :label        label
-                     :status       (if (zero? error-count) "ok" "failed")
-                     :measurements measurements
-                     :wrk-output   out}
-              (pos? error-count)
-              (assoc :error (str "wrk reported " error-count " request errors"))))
-          (finally
-            (stop))))
-      (catch Throwable error
-        {:adapter (name id)
-         :label   label
-         :status  "failed"
-         :error   (or (ex-message error) (str error))}))))
+      (when-not (.waitFor process (long seconds) TimeUnit/SECONDS)
+        (throw (ex-info "Command timed out" {:command (first args) :log output})))
+      (when-not (zero? (.exitValue process))
+        (throw (ex-info "Command failed" {:command (first args) :exit (.exitValue process) :log output})))
+      (slurp output)
+      (finally
+        (when (.isAlive process)
+          (with-open [children (.descendants process)]
+            (doseq [^java.lang.ProcessHandle child (.toList children)] (.destroyForcibly child)))
+          (.destroyForcibly process)
+          (.waitFor process))))))
 
-(defn- dependency-version [[group artifact]]
-  (let [properties (Properties.)
-        resource (io/resource (str "META-INF/maven/" group "/" artifact "/pom.properties"))]
-    (with-open [stream (io/input-stream resource)]
-      (.load properties stream))
-    (.getProperty properties "version")))
+(defn- fixtures! [directory]
+  (let [certificate (str directory "/server.crt")
+        private-key (str directory "/server.key")
+        keystore    (str directory "/server.p12")]
+    (command! ["openssl" "req" "-x509" "-newkey" "rsa:2048" "-nodes" "-days" "2"
+               "-subj" "/CN=localhost" "-addext" "subjectAltName=DNS:localhost,IP:127.0.0.1"
+               "-keyout" private-key "-out" certificate] (str directory "/certificate.log") 30)
+    (command! ["openssl" "pkcs12" "-export" "-inkey" private-key "-in" certificate
+               "-out" keystore "-passout" "pass:benchmark"] (str directory "/keystore.log") 30)
+    {:certificate certificate :private-key private-key :keystore keystore}))
+
+(defn- jetty-tls! [^Server server port context]
+  (let [config (doto (HttpConfiguration.) (.addCustomizer (SecureRequestCustomizer.)))
+        alpn   (ALPNServerConnectionFactory. ^"[Ljava.lang.String;" (into-array String ["h2" "http/1.1"]))
+        ssl    (doto (SslContextFactory$Server.) (.setSslContext context))
+        parts  (into-array ConnectionFactory
+                           [(SslConnectionFactory. ssl (.getProtocol alpn)) alpn
+                            (HTTP2ServerConnectionFactory. config) (HttpConnectionFactory. config)])]
+    (.addConnector server (doto (ServerConnector. server ^"[Lorg.eclipse.jetty.server.ConnectionFactory;" parts)
+                            (.setHost "127.0.0.1") (.setPort port)))))
+
+(defn- start-server [adapter protocol port {:keys [certificate private-key keystore]}]
+  (let [tls?    (not= :h1 protocol)
+        context (when tls? (ssl/keystore->ssl-context keystore "benchmark"))]
+    (case adapter
+      :busker
+      (let [server (busker/start!
+                    (cond-> {:entrypoints {:benchmark {:bind (str "127.0.0.1:" port)
+                                                       :tls (if tls? {:tls-compatibility-mode :modern} false)
+                                                       :http3? false}}
+                             :dispatch [{:handler handler}]}
+                      tls? (assoc :tls {:certificates {:load [{:type :pem :cert-file certificate
+                                                               :key-file private-key}]}})))]
+        #(busker/stop! server))
+      :aleph
+      (let [^Closeable server (aleph/start-server handler
+                                                  (cond-> {:host "127.0.0.1" :port port}
+                                                    tls? (assoc :http-versions [:http2 :http1]
+                                                                :ssl-context {:certificate-chain certificate :private-key private-key})))]
+        #(.close server))
+      :capra
+      (let [^Closeable server (capra/run-server handler :host "127.0.0.1" :port port)]
+        #(.close server))
+      :hirundo
+      (let [server (hirundo/start! (cond-> {:host "127.0.0.1" :port port :http-handler handler}
+                                     tls? (assoc :tls (.build (doto (TlsConfig/builder) (.sslContext context))))))]
+        #(hirundo/stop! server))
+      :http-exchange
+      (let [server (http-exchange/run-http-server handler
+                                                  (cond-> {:host "127.0.0.1" :port port} tls? (assoc :ssl-context context)))]
+        #(http-exchange/stop-http-server server))
+      :http-kit (http-kit/run-server handler {:ip "127.0.0.1" :port port})
+      :jetty
+      (let [server (jetty/run-jetty handler
+                                    (cond-> {:host "127.0.0.1" :port port :join? false}
+                                      tls? (assoc :http? false :configurator #(jetty-tls! % port context))))]
+        #(.stop server))
+      :undertow
+      (let [server (undertow/run-undertow handler
+                                          (cond-> {:host "127.0.0.1" :port port}
+                                            tls? (assoc :http? false :ssl-port port :ssl-context context :http2? true)))]
+        #(.stop server)))))
+
+(defn- endpoint [protocol port]
+  (str (if (= :h1 protocol) "http" "https") "://localhost:" port "/"))
+
+(defn- check-response! [protocol port fixtures]
+  (let [version (if (= :tls-h2 protocol) HttpClient$Version/HTTP_2 HttpClient$Version/HTTP_1_1)
+        builder (doto (HttpClient/newBuilder) (.version version) (.connectTimeout (Duration/ofSeconds 3)))
+        _       (when-not (= :h1 protocol)
+                  (.sslContext builder (ssl/keystore->ssl-context (:keystore fixtures) "benchmark")))
+        request (-> (HttpRequest/newBuilder (URI/create (endpoint protocol port)))
+                    (.timeout (Duration/ofSeconds 5)) (.GET) (.build))]
+    (with-open [client (.build builder)]
+      (let [^HttpResponse response (.send client request (HttpResponse$BodyHandlers/ofString))]
+        (when-not (and (= 200 (.statusCode response)) (= "Hello World" (.body response))
+                       (= "11" (.orElse (.firstValue (.headers response) "content-length") nil))
+                       (= "text/plain;charset=utf-8"
+                          (some-> (.orElse (.firstValue (.headers response) "content-type") nil)
+                                  str/lower-case (str/replace #"\s+" "")))
+                       (= version (.version response)))
+          (throw (ex-info "Response or negotiated protocol differs" {:status (.statusCode response)
+                                                                     :body (.body response)
+                                                                     :protocol (str (.version response))})))
+        (when-not (= :h1 protocol)
+          (let [^javax.net.ssl.SSLSession session (.get (.sslSession response))]
+            (when-not (= "TLSv1.3" (.getProtocol session))
+              (throw (ex-info "Expected TLS 1.3" {:negotiated (.getProtocol session)})))))
+        {:status (.statusCode response) :body (.body response) :protocol (str (.version response))}))))
+
+(defn- await-ready! [protocol port fixtures]
+  (loop [attempt 0]
+    (let [result (try (check-response! protocol port fixtures) (catch Exception e e))]
+      (if (instance? Exception result)
+        (if (< attempt 30)
+          (do (Thread/sleep 100) (recur (inc attempt)))
+          (throw result))
+        result))))
+
+(defn- load-command [protocol port seconds {:keys [connections streams threads]}]
+  (let [h2? (= :tls-h2 protocol)]
+    (into ["h2load" "-D" (str seconds) "-c" (str (if h2? (quot connections streams) connections))
+           "-m" (str (if h2? streams 1)) "-t" (str threads)
+           "--tls13-ciphers=TLS_AES_128_GCM_SHA256"]
+          (concat (if h2? ["--alpn-list=h2"] ["--h1"]) [(endpoint protocol port)]))))
+
+(defn- measurements [output protocol]
+  (let [output (-> output
+                   (str/replace "No protocol negotiated. Fallback behaviour may be activated" "")
+                   (str/replace "Server does not support ALPN. Falling back to HTTP/1.1." ""))
+        requests (some->> (re-find #"requests:\s+(\d+) total, (\d+) started, (\d+) done, (\d+) succeeded, (\d+) failed, (\d+) errored, (\d+) timeout" output)
+                          rest (mapv parse-long))
+        statuses (some->> (re-find #"status codes:\s+(\d+) 2xx, (\d+) 3xx, (\d+) 4xx, (\d+) 5xx" output)
+                          rest (mapv parse-long))
+        rate     (some-> (re-find #"finished in [^,]+,\s+([0-9.]+) req/s" output) second parse-double)
+        negotiated (some-> (re-find #"Application protocol:\s+(h2|http/1\.1)\b" output) second)
+        latency  (some-> (re-find #"(?m)^request\s*:\s+(.+)$" output) second str/trim (str/split #"\s+"))]
+    (when-not (and requests statuses rate (pos? rate))
+      (throw (ex-info "Incomplete h2load summary" {})))
+    (let [[total started done succeeded failed errored timeout] requests
+          [ok redirect client-error server-error] statuses]
+      (when-not (and (= total done succeeded) (<= done ok started) (pos? done)
+                     (every? zero? [failed errored timeout redirect client-error server-error])
+                     (= negotiated (if (= protocol :tls-h2) "h2" "http/1.1")))
+        (throw (ex-info "Invalid h2load result" {:requests requests :statuses statuses :protocol negotiated})))
+      (when-not (= :h1 protocol)
+        (when-not (and (re-find #"TLS Protocol:\s+TLSv1\.3\b" output)
+                       (re-find #"Cipher:\s+TLS_AES_128_GCM_SHA256\b" output))
+          (throw (ex-info "Unexpected load-generator TLS negotiation" {}))))
+      {:requests-per-second rate :requests done
+       :latency (when (>= (count latency) 6)
+                  (zipmap [:median :p95 :p99 :mean] (take 4 (drop 2 latency))))})))
+
+(defn- sample! [{:keys [adapter protocol warmup duration directory fixtures] :as options}]
+  (let [port 5800
+        stop (start-server adapter protocol port fixtures)]
+    (try
+      (let [response (await-ready! protocol port fixtures)
+            warm-log (str directory "/warmup.log")
+            load-log (str directory "/measurement.log")]
+        (measurements (command! (load-command protocol port warmup options) warm-log (+ warmup 30)) protocol)
+        (let [result (measurements (command! (load-command protocol port duration options) load-log (+ duration 30)) protocol)]
+          (check-response! protocol port fixtures)
+          (assoc result :status "ok" :response response)))
+      (finally (stop)))))
+
+(defn- version [[group artifact]]
+  (let [props (Properties.)]
+    (with-open [in (io/input-stream (io/resource (str "META-INF/maven/" group "/" artifact "/pom.properties")))]
+      (.load props in))
+    (.getProperty props "version")))
 
 (defn- environment []
-  {:busker-revision (-> (shell/sh "git" "rev-parse" "HEAD") :out str/trim)
-   :capra-benchmark-revision benchmark-revision
-   :java-version (System/getProperty "java.version")
-   :java-vm (System/getProperty "java.vm.name")
-   :operating-system (str (System/getProperty "os.name") " " (System/getProperty "os.version"))
-   :processors (.availableProcessors (Runtime/getRuntime))
-   :adapter-versions (into {}
-                           (keep (fn [{:keys [id dependency]}]
-                                   (when dependency
-                                     [id (dependency-version dependency)])))
-                           adapters)})
+  (let [source (str (io/resource "ol/busker.clj"))
+        revision (second (re-find #"/busker/([0-9a-f]{40})/" source))
+        platform (if (str/includes? (System/getProperty "os.name") "Mac") "macos" "linux")
+        arch (if (= "aarch64" (System/getProperty "os.arch")) "aarch64" "x86-64")
+        artifact (str platform "-" arch)
+        native (io/resource (str artifact "/libh2oclj." (if (= platform "macos") "dylib" "so")))
+        digest (MessageDigest/getInstance "SHA-256")]
+    (when-not (and revision native (= "0.0.5" (version ["com.outskirtslabs.busker" artifact])))
+      (throw (ex-info "Benchmark requires Git Busker and native 0.0.5" {:source source :native (str native)})))
+    (with-open [in (io/input-stream native)]
+      (let [buffer (byte-array 65536)]
+        (loop [] (let [n (.read in buffer)] (when (pos? n) (.update digest buffer 0 n) (recur))))))
+    {:busker-revision revision :native-version "0.0.5" :native-resource (str native)
+     :native-sha256 (.formatHex (java.util.HexFormat/of) (.digest digest))
+     :java-version (System/getProperty "java.version") :processors (.availableProcessors (Runtime/getRuntime))
+     :max-heap-bytes (.maxMemory (Runtime/getRuntime))
+     :jvm-options (vec (.getInputArguments (java.lang.management.ManagementFactory/getRuntimeMXBean)))
+     :adapter-versions (into {} (keep (fn [{:keys [id dependency]}] (when dependency [id (version dependency)]))) adapters)}))
 
-(defn- selected-items [kind selection items]
-  (if-not selection
-    items
-    (let [matches (filterv #(= selection (name (:id %))) items)]
-      (when (empty? matches)
-        (throw (ex-info (str "Unknown " (name kind))
-                        {kind       selection
-                         :available (mapv (comp name :id) items)})))
-      matches)))
+(defn- run-sample [options]
+  (let [{:keys [directory warmup duration]} options
+        input (str directory "/input.edn")
+        output (str directory "/result.json")]
+    (io/make-parents input)
+    (spit input (pr-str options))
+    (try
+      (command! [(str (System/getProperty "java.home") "/bin/java")
+                 "-Xms512m" "-Xmx2g" "-XX:ActiveProcessorCount=2" "--enable-native-access=ALL-UNNAMED"
+                 "-cp" (System/getProperty "java.class.path") "clojure.main" "-m" "capra.benchmark" "--sample" input]
+                (str directory "/server.log") (+ warmup duration 120))
+      (let [result (json/read-str (slurp output) :key-fn keyword)
+            errors (str (slurp (str directory "/server.log"))
+                        (slurp (str directory "/server.log.err")))]
+        (if (re-find #"(?m)ERROR[: ]|SEVERE:|Exception in thread|UT005071" errors)
+          (assoc result :status "failed" :error "Server logged errors; see server.log and server.log.err")
+          result))
+      (catch Exception e
+        (merge (when (.isFile (io/file output)) (json/read-str (slurp output) :key-fn keyword))
+               {:status "failed" :process-error (ex-message e) :directory directory})))))
+
+(defn- summary [samples]
+  (if (every? #(= "ok" (:status %)) samples)
+    (let [rates (vec (sort (map :requests-per-second samples)))
+          n (count rates)]
+      {:status "ok" :requests-per-second (/ (+ (nth rates (quot (dec n) 2)) (nth rates (quot n 2))) 2.0)
+       :range [(first rates) (last rates)] :samples samples})
+    {:status "failed" :samples samples}))
+
+(defn- options [args]
+  (let [opts (loop [opts defaults [flag value & more :as remaining] args]
+               (cond
+                 (empty? remaining) opts
+                 (= flag "--smoke") (recur (assoc opts :warmup 1 :duration 1 :repetitions 1) (rest remaining))
+                 (and value (#{"--adapter" "--protocol" "--output"} flag))
+                 (recur (assoc opts (keyword (subs flag 2)) value) more)
+                 (and value (str/starts-with? flag "--") (contains? defaults (keyword (subs flag 2))))
+                 (recur (assoc opts (keyword (subs flag 2)) (parse-long value)) more)
+                 :else (throw (ex-info "Unknown option or missing value" {:argument flag}))))]
+    (doseq [key (keys defaults)]
+      (when-not (pos-int? (get opts key)) (throw (ex-info "Expected a positive integer" {:option key}))))
+    (when-not (and (zero? (mod (:connections opts) (:streams opts)))
+                   (zero? (mod (quot (:connections opts) (:streams opts)) (:threads opts))))
+      (throw (ex-info "Connections must divide into H2 streams and client threads" {})))
+    (doseq [[key choices] [[:adapter (map (comp name :id) adapters)] [:protocol (map name protocols)]]]
+      (when (and (get opts key) (not (some #{(get opts key)} choices)))
+        (throw (ex-info "Unknown selection" {:option key :choices choices}))))
+    opts))
 
 (defn benchmark
-  "Runs selected Ring adapters and handler scenarios, then writes the results.
-
-  Options:
-
-  | key            | description
-  |----------------|-------------
-  | `:warmup`      | `wrk` warm-up duration
-  | `:duration`    | `wrk` measurement duration
-  | `:connections` | simultaneous connections
-  | `:threads`     | `wrk` threads
-  | `:adapter`     | optional adapter ID
-  | `:scenario`    | optional scenario ID
-  | `:output`      | JSON result file
-
-  Returns the complete result map."
-  [{:keys [output adapter scenario]
-    :as options}]
-  (let [options            (merge {:warmup     "5s"
-                                   :duration   "1m"
-                                   :connections 128
-                                   :threads     2}
-                                  options)
-        selected-adapters  (selected-items :adapter adapter adapters)
-        selected-scenarios (selected-items :scenario scenario scenarios)
-        environment        (environment)
-        parameters         (dissoc options :output)
-        _                  (println "Benchmark environment:" (json/write-str environment))
-        _                  (println "Benchmark parameters:" (json/write-str parameters))
-        result             {:run-at      (str (Instant/now))
-                            :environment environment
-                            :parameters  parameters
-                            :scenarios
-                            (mapv
-                             (fn [scenario-index {:keys [id] :as selected-scenario}]
-                               {:scenario (name id)
-                                :results
-                                (mapv
-                                 (fn [adapter-index selected-adapter]
-                                   (run-adapter selected-adapter selected-scenario
-                                                (+ 5800
-                                                   (* scenario-index (count selected-adapters))
-                                                   adapter-index)
-                                                options))
-                                 (range)
-                                 selected-adapters)})
-                             (range)
-                             selected-scenarios)}]
-    (io/make-parents output)
-    (spit output (json/write-str result))
+  "Runs selected protocols in fresh JVMs and writes results and logs under `:output`.
+  Durations are seconds; `:connections` is the total in-flight request budget.
+  H2 divides that budget into connections with `:streams` requests each."
+  [{:keys [output repetitions adapter protocol] :as opts}]
+  (let [directory (.getAbsolutePath (io/file (or output (str "bench/results/" (System/currentTimeMillis)))))
+        _ (when (.exists (io/file directory))
+            (throw (ex-info "Output directory already exists; choose a new run directory" {:directory directory})))
+        fixtures (fixtures! directory)
+        selected (filter #(or (nil? adapter) (= adapter (name (:id %)))) adapters)
+        modes (filter #(or (nil? protocol) (= protocol (name %))) protocols)
+        env (assoc (environment) :h2load-version
+                   (str/trim (command! ["h2load" "--version"] (str directory "/h2load-version.log") 10)))
+        result {:run-at (str (Instant/now)) :environment env :parameters (dissoc opts :output)
+                :results
+                (mapv (fn [{:keys [id label protocols]}]
+                        {:adapter id :label label
+                         :protocols
+                         (into {} (for [mode modes]
+                                    [mode (if-not (protocols mode)
+                                            {:status "unsupported"}
+                                            (summary
+                                             (mapv (fn [i]
+                                                     (println label (name mode) "repetition" (inc i)) (flush)
+                                                     (run-sample (assoc opts :adapter id :protocol mode :fixtures fixtures
+                                                                        :directory (str directory "/" (name id) "/" (name mode) "/" (inc i)))))
+                                                   (range repetitions))))]))}) selected)}]
+    (spit (str directory "/results.json") (json/write-str result))
+    (println "Results:" (str directory "/results.json"))
     result))
 
-(defn- command-line-options [args]
-  (loop [options {}
-         [arg value & remaining] args]
-    (case arg
-      nil options
-      "--smoke" (recur (merge options {:warmup     "1s"
-                                       :duration   "1s"
-                                       :connections 16})
-                       (cons value remaining))
-      "--adapter" (if value
-                    (recur (assoc options :adapter value) remaining)
-                    (throw (ex-info "Missing --adapter value" {})))
-      "--scenario" (if value
-                     (recur (assoc options :scenario value) remaining)
-                     (throw (ex-info "Missing --scenario value" {})))
-      "--output" (if value
-                   (recur (assoc options :output value) remaining)
-                   (throw (ex-info "Missing --output value" {})))
-      (throw (ex-info "Unknown benchmark argument" {:argument arg})))))
-
 (defn -main [& args]
-  (try
-    (let [options (command-line-options args)
-          output  (or (:output options)
-                      (str "bench/results/" (System/currentTimeMillis) ".json"))
-          result  (benchmark (assoc options :output output))]
-      (println "Wrote benchmark results to" output)
-      (doseq [{:keys [scenario results]} (:scenarios result)]
-        (println scenario)
-        (doseq [{:keys [label status measurements error]} results]
-          (println " " label status (or (:requests-per-second measurements) error))))
-      (when (some #(not= "ok" (:status %))
-                  (mapcat :results (:scenarios result)))
-        (throw (ex-info "Benchmark did not complete successfully" {:output output}))))
-    (finally
-      (shutdown-agents))))
+  (let [sample? (= "--sample" (first args))
+        exit (try
+               (if sample?
+                 (let [opts (edn/read-string (slurp (second args)))
+                       result (try (assoc (sample! opts) :environment (environment))
+                                   (catch Throwable e {:status "failed" :error (ex-message e)}))]
+                   (spit (str (:directory opts) "/result.json") (json/write-str result))
+                   (if (= "ok" (:status result)) 0 1))
+                 (let [result (benchmark (options args))]
+                   (doseq [{:keys [label protocols]} (:results result)]
+                     (println label (into {} (for [[p r] protocols] [p (or (:requests-per-second r) (:status r))]))))
+                   (if (some #(= "failed" (:status %)) (mapcat (comp vals :protocols) (:results result))) 1 0)))
+               (catch Throwable e (binding [*out* *err*] (println (ex-message e))) 1))]
+    (shutdown-agents)
+    (System/exit exit)))

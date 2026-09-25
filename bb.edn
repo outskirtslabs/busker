@@ -165,6 +165,10 @@
                   {:doc "Run the short local benchmark smoke profile"
                    :task (apply clojure "-M:bench" "--smoke" *command-line-args*)}
 
+                  bench:test
+                  {:doc "Test benchmark result parsing and workload settings"
+                   :task (clojure "-M:bench:kaocha --config-file bench/tests.edn")}
+
                   bench:graph
                   {:doc "Render benchmark JSON as SVG throughput graphs"
                    :task (apply shell "python3" "bench/graph.py" *command-line-args*)}

@@ -1,0 +1,1 @@
+{"results":[{"adapter":"busker","label":"Busker","protocols":{"h1":{"status":"ok","requests-per-second":1000},"tls-h1":{"status":"ok","requests-per-second":800},"tls-h2":{"status":"ok","requests-per-second":1200}}},{"adapter":"capra","label":"Capra","protocols":{"h1":{"status":"failed"},"tls-h1":{"status":"unsupported"},"tls-h2":{"status":"unsupported"}}}]}

@@ -23,15 +23,15 @@ def number(value):
 def chart(scenario, output):
     results = [result for result in scenario["results"] if result["status"] == "ok"]
     excluded = [result for result in scenario["results"] if result["status"] != "ok"]
-    results.sort(key=lambda result: number(result["measurements"]["requests-per-second"]), reverse=True)
-    maximum = max((number(result["measurements"]["requests-per-second"]) for result in results), default=1.0)
+    results.sort(key=lambda result: number(result["requests-per-second"]), reverse=True)
+    maximum = max((number(result["requests-per-second"]) for result in results), default=1.0)
     plot_width = WIDTH - LEFT - RIGHT
     plot_height = HEIGHT - TOP - BOTTOM - (30 if excluded else 0)
     step = plot_height / max(len(results), 1)
     rows = []
 
     for index, result in enumerate(results):
-        value = number(result["measurements"]["requests-per-second"])
+        value = number(result["requests-per-second"])
         y = TOP + index * step + step * 0.2
         width = plot_width * value / maximum
         color = BUSKER_COLOR if result["adapter"] == "busker" else OTHER_COLOR
@@ -43,7 +43,7 @@ def chart(scenario, output):
             ]
         )
 
-    title = f'{scenario["scenario"].capitalize()} handler throughput'
+    title = f'{scenario["protocol"].upper()} throughput'
     output.write_text(
         "\n".join(
             [
@@ -68,8 +68,13 @@ def main(source, destination):
     data = json.loads(pathlib.Path(source).read_text(encoding="utf-8"))
     destination = pathlib.Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    for scenario in data["scenarios"]:
-        chart(scenario, destination / f'{scenario["scenario"]}-throughput.svg')
+    for protocol in ("h1", "tls-h1", "tls-h2"):
+        results = [
+            {"adapter": adapter["adapter"], "label": adapter["label"], **adapter["protocols"][protocol]}
+            for adapter in data["results"] if protocol in adapter["protocols"]
+        ]
+        if results:
+            chart({"protocol": protocol, "results": results}, destination / f"{protocol}-throughput.svg")
 
 
 if __name__ == "__main__":

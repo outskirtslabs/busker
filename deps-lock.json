@@ -1,5 +1,11 @@
 {
   "git": {
+    "com.outskirtslabs/busker/f3fe46007267d7f0afe87a768e46b604d2e8f327": {
+      "common_dir": "https/github.com/outskirtslabs/busker",
+      "rev": "f3fe46007267d7f0afe87a768e46b604d2e8f327",
+      "sha256": "1d5cmw2zrr5qxnmqbx62h5ff9w5jpg5hg3ggiqc3b33pilfd7zib",
+      "url": "https://github.com/outskirtslabs/busker"
+    },
     "io.github.outskirtslabs/clave/04f7bf854bcbe379df14e3f9d7221af9d0c030d6": {
       "common_dir": "https/github.com/outskirtslabs/clave",
       "rev": "04f7bf854bcbe379df14e3f9d7221af9d0c030d6",
@@ -464,11 +470,23 @@
     "com/oracle/oci/sdk/oci-java-sdk-bom/3.86.2/oci-java-sdk-bom-3.86.2.pom": {
       "sha256": "a675ffec09645b396e8fd1a503450b93a72e80be831209eaf551f7597e77b8f7"
     },
+    "com/outskirtslabs/busker/linux-aarch64/0.0.5/linux-aarch64-0.0.5.jar": {
+      "sha256": "7cd360d553edab0115b6230fd05eb97da4201830276b02fb16a9f00468efe4db"
+    },
+    "com/outskirtslabs/busker/linux-aarch64/0.0.5/linux-aarch64-0.0.5.pom": {
+      "sha256": "23f034d012e1b9d86b6eaafbcf1c3d25a77beecff5ba162b2a5c15e88745d930"
+    },
     "com/outskirtslabs/busker/macos-aarch64/0.0.4/macos-aarch64-0.0.4.jar": {
       "sha256": "81fe54a7f2d7b18b7f214e3b5a998585fdb4cc7a82d23f34d38245868c44a5e5"
     },
     "com/outskirtslabs/busker/macos-aarch64/0.0.4/macos-aarch64-0.0.4.pom": {
       "sha256": "1e6784074fce2575e3f279f20fe2719ef0f242da6ee417173d47b9e844420601"
+    },
+    "com/outskirtslabs/busker/macos-x86-64/0.0.5/macos-x86-64-0.0.5.jar": {
+      "sha256": "487d87a57684918c375939d2a9276b9cc5bbef109c9d1a2ddc7ac45b98aa5638"
+    },
+    "com/outskirtslabs/busker/macos-x86-64/0.0.5/macos-x86-64-0.0.5.pom": {
+      "sha256": "83e7e4635550e9fe84c87e06cbcb7ea603904e1eb42348615ea11be7a78365c8"
     },
     "com/s-exp/hirundo/1.0.0-alpha214/hirundo-1.0.0-alpha214.jar": {
       "sha256": "85fefcefce56c3f232739caca6b2188b3e0836162fcb8b803a714ae8695b9719"
@@ -2186,6 +2204,42 @@
     "org/eclipse/jetty/ee9/websocket/jetty-ee9-websocket/12.1.0/jetty-ee9-websocket-12.1.0.pom": {
       "sha256": "7be060486fe3db0bce9d1e335ce7f346b9df28dcb64982b832852c2bf136894c"
     },
+    "org/eclipse/jetty/http2/jetty-http2-common/12.1.0/jetty-http2-common-12.1.0.jar": {
+      "sha256": "31de56f3d778b67fd67f85ca200bec7f0d4733b1237270384d67878447b740c2"
+    },
+    "org/eclipse/jetty/http2/jetty-http2-common/12.1.0/jetty-http2-common-12.1.0.pom": {
+      "sha256": "2b7e347126f74ba0abd38eef395cd0127188757148223184c760fbbf2118f6fd"
+    },
+    "org/eclipse/jetty/http2/jetty-http2-hpack/12.1.0/jetty-http2-hpack-12.1.0.jar": {
+      "sha256": "0d85f7a035e7ba3210b773f15bbf28768f93358d98e34a72189eacd2ab526805"
+    },
+    "org/eclipse/jetty/http2/jetty-http2-hpack/12.1.0/jetty-http2-hpack-12.1.0.pom": {
+      "sha256": "772fada1cce77681ef8735f2ed5e6b2ad2c94ac04eceb11606cf3dcfa052c2c8"
+    },
+    "org/eclipse/jetty/http2/jetty-http2-server/12.1.0/jetty-http2-server-12.1.0.jar": {
+      "sha256": "37d7d67dba82d968b8d6f6cbfe23236a75daefccc0bc65634962893f84d77fc4"
+    },
+    "org/eclipse/jetty/http2/jetty-http2-server/12.1.0/jetty-http2-server-12.1.0.pom": {
+      "sha256": "f8e5ae10f551060c88d4002180c03de96a94d8975334d62fd47c0226081c9290"
+    },
+    "org/eclipse/jetty/http2/jetty-http2/12.1.0/jetty-http2-12.1.0.pom": {
+      "sha256": "94df6843245bbcf15b25dbb7ca1bc0652b1dc64edfa7db9af1864c26414b1050"
+    },
+    "org/eclipse/jetty/jetty-alpn-java-server/12.1.0/jetty-alpn-java-server-12.1.0.jar": {
+      "sha256": "7234fe664631b080228e0485475210d04e6aa58da12a9bd163ce8449f7c369b8"
+    },
+    "org/eclipse/jetty/jetty-alpn-java-server/12.1.0/jetty-alpn-java-server-12.1.0.pom": {
+      "sha256": "b2abae3b6eb74a6d44186238005a3eb45dfa1b5731a11da5eb6165596baede2a"
+    },
+    "org/eclipse/jetty/jetty-alpn-server/12.1.0/jetty-alpn-server-12.1.0.jar": {
+      "sha256": "00adc58cd0a687ec0a5446c830e483f1b7758d1a63b58dbc04706a7d3d4af4db"
+    },
+    "org/eclipse/jetty/jetty-alpn-server/12.1.0/jetty-alpn-server-12.1.0.pom": {
+      "sha256": "2e895171f62649b378a440441f0417f1f947cb63075d76ade37fc93f40cb4a82"
+    },
+    "org/eclipse/jetty/jetty-alpn/12.1.0/jetty-alpn-12.1.0.pom": {
+      "sha256": "4a107490a65848af2c5e686f7f8df6a530a2f2b9038fd325963897c2e5264029"
+    },
     "org/eclipse/jetty/jetty-client/9.4.58.v20250814/jetty-client-9.4.58.v20250814.jar": {
       "sha256": "629371e5f65f321832930538bd485e5fd637d180412ea75f592881921e2d4b83"
     },
@@ -2512,6 +2566,12 @@
     },
     "org/slf4j/slf4j-parent/2.1.0-alpha1/slf4j-parent-2.1.0-alpha1.pom": {
       "sha256": "ce4735b1f9c821de0b92b8dbe40b071c6ea320732e593559c6ea6df965f8738f"
+    },
+    "org/slf4j/slf4j-simple/2.0.17/slf4j-simple-2.0.17.jar": {
+      "sha256": "ddfea59ac074c6d3e24ac2c38622d2d963895e17f70b38ed4bdae4d780be6964"
+    },
+    "org/slf4j/slf4j-simple/2.0.17/slf4j-simple-2.0.17.pom": {
+      "sha256": "fb30e8e2f6aea2d29842798677ed4541b9b2255715c158350ca2c5f5c7b864b0"
     },
     "org/sonatype/oss/oss-parent/6/oss-parent-6.pom": {
       "sha256": "b4306d13e8f5392458a1b30866f1cff161b3d2e6999a88d059eea3932c8a8499"

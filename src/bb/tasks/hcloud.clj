@@ -34,60 +34,37 @@
            "--image" "ubuntu-26.04"))
 
 (defn setup
-  "Installs the Busker benchmark prerequisites on the server."
+  "Installs Nix and the benchmark tools pinned by flake.lock."
   [_]
-  (ssh! (str "export DEBIAN_FRONTEND=noninteractive &&"
-             " apt-get update &&"
-             " if ! apt-cache show openjdk-25-jdk-headless >/dev/null 2>&1;"
-             " then echo 'openjdk-25-jdk-headless is not available from apt' >&2;"
-             " exit 1; fi &&"
-             " apt-get install -y --no-install-recommends"
-             " ca-certificates curl git openssh-client"
-             " openjdk-25-jdk-headless rlwrap rsync wrk &&"
-             " update-alternatives --set java"
-             " /usr/lib/jvm/java-25-openjdk-amd64/bin/java &&"
-             " if ! [ -x /usr/local/bin/clojure ] ||"
-             " ! /usr/local/bin/clojure -Sdescribe >/dev/null 2>&1; then"
-             " tmp=$(mktemp -d) &&"
-             " curl -fsSL -o $tmp/linux-install.sh"
-             " https://github.com/clojure/brew-install/"
-             "releases/latest/download/linux-install.sh &&"
-             " bash $tmp/linux-install.sh && rm -rf $tmp; fi &&"
-             " java_spec=$(java -XshowSettings:properties -version 2>&1 |"
-             " awk -F'= ' '/java.specification.version/ {print $2; exit}') &&"
-             " case $java_spec in 2[5-9]|[3-9][0-9]*) ;;"
-             " *) echo \"Java 25 or newer is required, found $java_spec\" >&2;"
-             " exit 1 ;; esac")))
+  (ssh! (str "test -x /nix/var/nix/profiles/default/bin/nix-env || "
+             "(curl -L https://nixos.org/nix/install | sh -s -- --daemon)"))
+  (ssh! (str "mkdir -p " remote-directory "/bench"))
+  (let [target (str "root@" (server-ip) ":" remote-directory)]
+    (p/shell "scp" "flake.lock" (str target "/flake.lock"))
+    (p/shell "scp" "bench/tools.nix" (str target "/bench/tools.nix")))
+  (ssh! (str "/nix/var/nix/profiles/default/bin/nix-env -if "
+             remote-directory "/bench/tools.nix")))
 
 (defn upload
-  "Uploads the current directory to the Busker benchmark server."
+  "Uploads tracked benchmark files, excluding local credentials and build output."
   [_]
-  (let [ip (server-ip)
-        target (str "root@" ip ":" remote-directory)]
-    (println "Uploading current directory to benchmarking server...")
-    (p/shell "rsync" "-az"
-             "--exclude=.worktrees/"
-             "--exclude=shim/"
-             "--exclude=.lsp/"
-             "--exclude=archive/"
-             "."
-             target)
-    (p/shell "rsync" "-azR"
-             "shim/linux-aarch64/deps.edn"
-             "shim/linux-x86-64/deps.edn"
-             "shim/linux-x86-64/resources/"
-             "shim/macos-aarch64/deps.edn"
-             "shim/macos-x86-64/deps.edn"
-             target)))
+  (let [target (str "root@" (server-ip) ":" remote-directory)
+        files (:out (p/shell {:out :string} "git" "ls-files" "-z"))]
+    (println "Uploading tracked files to benchmarking server...")
+    (p/shell {:in files} "rsync" "-az" "--from0" "--files-from=-"
+             "--rsync-path=/root/.nix-profile/bin/rsync"
+             "--exclude=.env*" "--exclude=/.git/***" "--exclude=/.scratch-org/***"
+             "--exclude=/.pi/***" "--exclude=/.agents/***" "--exclude=/dev/***"
+             "--exclude=/target/***" "--exclude=/shim/***" "." target)))
 
 (defn bench
   "Uploads Busker and runs its Ring adapter benchmarks on the server."
   [opts]
   (upload opts)
-  (ssh! (str "cd " remote-directory
-             " && /usr/local/bin/clojure -X:deps prep :aliases '[:bench]'"
-             " && timeout --signal=TERM --kill-after=10s 30m"
-             " /usr/local/bin/clojure -M:bench")))
+  (ssh! (str "export PATH=/root/.nix-profile/bin:$PATH && cd " remote-directory
+             " && clojure -X:deps prep :aliases '[:bench]'"
+             " && timeout --signal=TERM --kill-after=10s 2h"
+             " clojure -M:bench")))
 
 (defn delete
   "Deletes the Busker benchmark server."
@@ -107,7 +84,7 @@
                   "Commands:\n"
                   "  create  Create the benchmark server\n"
                   "  setup   Install benchmark prerequisites\n"
-                  "  upload  Upload the current directory\n"
+                  "  upload  Upload tracked benchmark files\n"
                   "  bench   Upload and run the benchmarks\n"
                   "  delete  Delete the benchmark server"))
     (cli/dispatch [{:cmds ["create"] :fn create :restrict true}
