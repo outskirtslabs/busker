@@ -59,7 +59,11 @@
                                   org.eclipse.jetty.http2/jetty-http2-server {:mvn/version "12.1.0"}
                                   ring/ring-jetty-adapter           {:mvn/version "1.15.3"}}}
            :bench-local
-           {:jvm-opts ["-Dbusker.bench.local=true"]
+           {:extra-paths ["shim/linux-aarch64/resources"
+                          "shim/linux-x86-64/resources"
+                          "shim/macos-aarch64/resources"
+                          "shim/macos-x86-64/resources"]
+            :jvm-opts ["-Dbusker.bench.local=true"]
             :override-deps {com.outskirtslabs/busker {:local/root "."}
                             com.outskirtslabs.busker/linux-aarch64 {:local/root "shim/linux-aarch64"}
                             com.outskirtslabs.busker/linux-x86-64 {:local/root "shim/linux-x86-64"}
