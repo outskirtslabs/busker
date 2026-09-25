@@ -1,6 +1,8 @@
 (ns capra.benchmark-test
   (:require
    [capra.benchmark :as benchmark]
+   [clojure.java.io :as io]
+   [clojure.java.shell :as shell]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]))
 
@@ -71,3 +73,43 @@
     (is (= #{:h1} (:capra support) (:http-kit support)))
     (is (= #{:h1 :tls-h1} (:http-exchange support)))
     (is (= (set benchmark/protocols) (:busker support)))))
+
+(deftest identifies-local-checkout-and-rejects-mixed-sources
+  (let [root (.toFile (java.nio.file.Files/createTempDirectory
+                       "busker-bench-origin-" (make-array java.nio.file.attribute.FileAttribute 0)))
+        source (io/file root "src/main/clojure/ol/busker.clj")
+        resource-path "linux-x86-64/libh2oclj.so"
+        native (io/file root "shim/linux-x86-64/resources" resource-path)
+        url #(.toURL (.toURI ^java.io.File %))
+        origin #(#'benchmark/local-origin root (url source) (url native) resource-path)
+        git! (fn [& args]
+               (let [result (apply shell/sh "git" (concat args [:dir (str root)]))]
+                 (when-not (zero? (:exit result)) (throw (ex-info "Fixture Git command failed" result)))
+                 nil))]
+    (try
+      (doseq [file [source native]] (io/make-parents file) (spit file "fixture"))
+      (git! "init" "--quiet")
+      (git! "add" ".")
+      (git! "-c" "user.name=Benchmark test" "-c" "user.email=benchmark@example.invalid"
+            "-c" "commit.gpgsign=false" "-c" "core.hooksPath=/dev/null"
+            "commit" "--quiet" "-m" "fixture")
+      (let [result (origin)]
+        (is (= :local (:busker-mode result)))
+        (is (false? (:busker-dirty? result)))
+        (is (re-matches #"[0-9a-f]{40}" (:busker-revision result)))
+        (is (nil? (:native-version result)))
+        (is (= (.getCanonicalPath root) (:busker-checkout result))))
+      (spit source "changed")
+      (is (true? (:busker-dirty? (origin))))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (#'benchmark/local-origin root (url native) (url native) resource-path)))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (#'benchmark/local-origin root (url source) (url source) resource-path)))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (#'benchmark/local-origin root (url source)
+                                             (java.net.URL. "jar:file:/published.jar!/linux-x86-64/libh2oclj.so")
+                                             resource-path)))
+      (io/delete-file native)
+      (is (thrown? clojure.lang.ExceptionInfo (origin)))
+      (finally
+        (doseq [file (reverse (file-seq root))] (io/delete-file file))))))

@@ -12,6 +12,22 @@ bb bench
 bb bench --adapter busker --protocol tls-h2 --duration 30 --repetitions 3
 ```
 
+`bb bench` uses pinned Git Busker and published native libraries.
+To use the current checkout and its existing native build output instead:
+
+```sh
+bb build  # Only when build output is missing or needs updating; stop other runs first.
+bb bench:local --adapter busker --protocol h1
+bb bench:local --protocol h1  # All adapters; only Busker uses local dependencies.
+bb bench:local --smoke --adapter busker
+```
+
+Local mode does not rebuild automatically.
+Run it from the checkout root; it rejects a mixture of checkout source and published native libraries.
+Each result records local mode, the source location, checkout revision and dirty state, and the native library SHA-256.
+Local native output has no claimed release version; its recorded version is `null`.
+The dirty flag includes untracked files and does not prove that native output matches the current source; rebuild when native sources change.
+
 Results and raw logs go into a new `bench/results/<timestamp>/` directory.
 Use `--output PATH` to select another new directory; existing directories are rejected.
 `results.json` contains median requests per second, minimum/maximum rates, and every repetition.

@@ -10,6 +10,7 @@
    [clojure.data.json :as json]
    [clojure.edn :as edn]
    [clojure.java.io :as io]
+   [clojure.java.shell :as shell]
    [clojure.string :as str]
    [ol.busker :as busker]
    [org.httpkit.server :as http-kit]
@@ -226,25 +227,49 @@
       (.load props in))
     (.getProperty props "version")))
 
+(defn- local-origin [root source native resource-path]
+  (doseq [[resource path] [[source (io/file root "src/main/clojure/ol/busker.clj")]
+                           [native (io/file root "shim" (first (str/split resource-path #"/"))
+                                            "resources" resource-path)]]]
+    (when-not (and resource (= "file" (.getProtocol ^java.net.URL resource))
+                   (.isFile ^java.io.File path)
+                   (= (.getCanonicalFile (io/file resource)) (.getCanonicalFile ^java.io.File path)))
+      (throw (ex-info "Local benchmark requires checkout source and local native build output; run bb build first"
+                      {:expected (str path) :actual (str resource)}))))
+  (let [directory (.getCanonicalPath (io/file root))
+        revision (shell/sh "git" "rev-parse" "HEAD" :dir directory)
+        status (shell/sh "git" "status" "--porcelain" :dir directory)]
+    (when-not (= 0 (:exit revision) (:exit status))
+      (throw (ex-info "Cannot identify benchmark checkout" {:directory directory})))
+    {:busker-mode :local :busker-checkout directory
+     :busker-revision (str/trim (:out revision))
+     :busker-dirty? (not (str/blank? (:out status))) :native-version nil}))
+
 (defn- environment []
-  (let [source (str (io/resource "ol/busker.clj"))
-        revision (second (re-find #"/busker/([0-9a-f]{40})/" source))
+  (let [source (io/resource "ol/busker.clj")
+        revision (second (re-find #"/busker/([0-9a-f]{40})/" (str source)))
         platform (if (str/includes? (System/getProperty "os.name") "Mac") "macos" "linux")
         arch (if (= "aarch64" (System/getProperty "os.arch")) "aarch64" "x86-64")
         artifact (str platform "-" arch)
-        native (io/resource (str artifact "/libh2oclj." (if (= platform "macos") "dylib" "so")))
+        resource-path (str artifact "/libh2oclj." (if (= platform "macos") "dylib" "so"))
+        native (io/resource resource-path)
+        origin (if (Boolean/getBoolean "busker.bench.local")
+                 (local-origin "." source native resource-path)
+                 (do
+                   (when-not (and revision native (= "0.0.5" (version ["com.outskirtslabs.busker" artifact])))
+                     (throw (ex-info "Benchmark requires Git Busker and native 0.0.5"
+                                     {:source (str source) :native (str native)})))
+                   {:busker-mode :pinned :busker-revision revision :native-version "0.0.5"}))
         digest (MessageDigest/getInstance "SHA-256")]
-    (when-not (and revision native (= "0.0.5" (version ["com.outskirtslabs.busker" artifact])))
-      (throw (ex-info "Benchmark requires Git Busker and native 0.0.5" {:source source :native (str native)})))
     (with-open [in (io/input-stream native)]
       (let [buffer (byte-array 65536)]
         (loop [] (let [n (.read in buffer)] (when (pos? n) (.update digest buffer 0 n) (recur))))))
-    {:busker-revision revision :native-version "0.0.5" :native-resource (str native)
-     :native-sha256 (.formatHex (java.util.HexFormat/of) (.digest digest))
-     :java-version (System/getProperty "java.version") :processors (.availableProcessors (Runtime/getRuntime))
-     :max-heap-bytes (.maxMemory (Runtime/getRuntime))
-     :jvm-options (vec (.getInputArguments (java.lang.management.ManagementFactory/getRuntimeMXBean)))
-     :adapter-versions (into {} (keep (fn [{:keys [id dependency]}] (when dependency [id (version dependency)]))) adapters)}))
+    (merge origin {:busker-resource (str source) :native-resource (str native)
+                   :native-sha256 (.formatHex (java.util.HexFormat/of) (.digest digest))
+                   :java-version (System/getProperty "java.version") :processors (.availableProcessors (Runtime/getRuntime))
+                   :max-heap-bytes (.maxMemory (Runtime/getRuntime))
+                   :jvm-options (vec (.getInputArguments (java.lang.management.ManagementFactory/getRuntimeMXBean)))
+                   :adapter-versions (into {} (keep (fn [{:keys [id dependency]}] (when dependency [id (version dependency)]))) adapters)})))
 
 (defn- run-sample [options]
   (let [{:keys [directory warmup duration]} options
@@ -255,6 +280,7 @@
     (try
       (command! [(str (System/getProperty "java.home") "/bin/java")
                  "-Xms512m" "-Xmx2g" "-XX:ActiveProcessorCount=2" "--enable-native-access=ALL-UNNAMED"
+                 (str "-Dbusker.bench.local=" (Boolean/getBoolean "busker.bench.local"))
                  "-cp" (System/getProperty "java.class.path") "clojure.main" "-m" "capra.benchmark" "--sample" input]
                 (str directory "/server.log") (+ warmup duration 120))
       (let [result (json/read-str (slurp output) :key-fn keyword)

@@ -50,7 +50,7 @@
                                   org.clojars.jj/ring-http-exchange {:mvn/version "1.4.8"}
                                   http-kit/http-kit                 {:mvn/version "2.9.0-beta4"}
                                   com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
-                                                           :git/sha "f3fe46007267d7f0afe87a768e46b604d2e8f327"}
+                                                            :git/sha "f3fe46007267d7f0afe87a768e46b604d2e8f327"}
                                   com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.5"}
                                   com.outskirtslabs.busker/linux-x86-64  {:mvn/version "0.0.5"}
                                   com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.5"}
@@ -58,6 +58,13 @@
                                   org.eclipse.jetty/jetty-alpn-java-server {:mvn/version "12.1.0"}
                                   org.eclipse.jetty.http2/jetty-http2-server {:mvn/version "12.1.0"}
                                   ring/ring-jetty-adapter           {:mvn/version "1.15.3"}}}
+           :bench-local
+           {:jvm-opts ["-Dbusker.bench.local=true"]
+            :override-deps {com.outskirtslabs/busker {:local/root "."}
+                            com.outskirtslabs.busker/linux-aarch64 {:local/root "shim/linux-aarch64"}
+                            com.outskirtslabs.busker/linux-x86-64 {:local/root "shim/linux-x86-64"}
+                            com.outskirtslabs.busker/macos-aarch64 {:local/root "shim/macos-aarch64"}
+                            com.outskirtslabs.busker/macos-x86-64 {:local/root "shim/macos-x86-64"}}}
 
            :neil {:project {:name        com.outskirtslabs/busker
                             :description "Busker is your Clojure web server that plays live on the open web"

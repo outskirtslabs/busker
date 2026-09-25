@@ -157,6 +157,10 @@
                   {:doc  "Run the Ring adapter benchmark suite"
                    :task (apply clojure "-M:bench" *command-line-args*)}
 
+                  bench:local
+                  {:doc "Run with checkout Busker and existing local native libraries"
+                   :task (apply clojure "-M:bench:bench-local" *command-line-args*)}
+
                   bench:busker
                   {:doc  "Run the benchmark suite with Busker only"
                    :task (apply clojure "-M:bench" "--adapter" "busker" *command-line-args*)}
