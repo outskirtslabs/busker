@@ -33,7 +33,7 @@
 
                   build
                   {:doc     "Compile all the things"
-                   :depends [clean jar:native]}
+                   :depends [jar:native]}
 
                   jar:lib
                   {:depends [build]
