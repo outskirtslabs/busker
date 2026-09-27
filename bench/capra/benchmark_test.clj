@@ -68,6 +68,40 @@
                 ["--protocol" "h3"] ["--adapter" "unknown"] ["--unknown" "1"]]]
     (is (thrown? clojure.lang.ExceptionInfo (#'benchmark/options args)) (pr-str args))))
 
+(deftest tolerates-only-disappearing-procfs-threads
+  (let [task (io/file "/proc/self/task/123")
+        status "Cpus_allowed_list:\t10-11\n"
+        missing (java.nio.file.NoSuchFileException. "/proc/self/task/123/status")
+        exited (java.nio.file.FileSystemException. "/proc/self/task/123/status" nil "No such process")
+        denied (java.nio.file.FileSystemException. "/proc/self/task/123/status" nil "Permission denied")]
+    (is (= {:tid 123 :allowed "10-11"}
+           (#'benchmark/read-thread-affinity task (fn [_] status))))
+    (is (nil? (#'benchmark/read-thread-affinity task (fn [_] (throw missing)))))
+    (is (nil? (#'benchmark/read-thread-affinity task (fn [_] (throw exited)))))
+    (is (thrown? java.nio.file.FileSystemException
+                 (#'benchmark/read-thread-affinity task (fn [_] (throw denied)))))
+    (is (thrown? java.io.IOException
+                 (#'benchmark/read-thread-affinity task (fn [_] (throw (java.io.IOException. "No such process"))))))))
+
+(deftest requires-nonempty-pinned-server-threads
+  (let [valid {:method "pinned-server-10-11-client-12-13"
+               :phase "ready"
+               :threads [{:tid 123 :allowed "10-11"}]}]
+    (is (= valid (#'benchmark/check-affinity! valid)))
+    (doseq [invalid [(assoc valid :threads [])
+                     (assoc valid :threads [{:tid 123 :allowed "0-31"}])
+                     (assoc valid :method "unpinned")]]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (#'benchmark/check-affinity! invalid))))))
+
+(deftest failed-sample-retains-exception-stack
+  (let [error (java.io.IOException. "sample failure")
+        output (java.io.StringWriter.)
+        result (binding [*err* output] (#'benchmark/failed-sample error))]
+    (is (= {:status "failed" :error "sample failure"} result))
+    (is (str/includes? (str output) "java.io.IOException: sample failure"))
+    (is (str/includes? (str output) "at capra.benchmark_test"))))
+
 (deftest does-not-pretend-unsupported-protocols-work
   (let [support (into {} (map (juxt :id :protocols)) benchmark/adapters)]
     (is (= #{:h1} (:capra support) (:http-kit support)))
