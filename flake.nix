@@ -132,10 +132,6 @@
               name = "APPLE_SDK_PATH";
               value = "${apple-sdk}";
             }
-            {
-              name = "ZIG_GLOBAL_CACHE_DIR";
-              value = ".zig-cache-global";
-            }
           ];
         };
     };
