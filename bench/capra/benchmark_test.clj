@@ -63,10 +63,19 @@
 (deftest validates-options
   (is (= benchmark/defaults (#'benchmark/options [])))
   (is (= 1 (:repetitions (#'benchmark/options ["--smoke"]))))
+  (is (= 4 (:busker-workers (#'benchmark/options ["--adapter" "busker" "--busker-workers" "4"]))))
   (doseq [args [["--duration" "0"] ["--duration" "oops"] ["--duration"]
                 ["--connections" "127"] ["--streams" "128"]
-                ["--protocol" "h3"] ["--adapter" "unknown"] ["--unknown" "1"]]]
+                ["--protocol" "h3"] ["--adapter" "unknown"] ["--unknown" "1"]
+                ["--busker-workers" "4"] ["--adapter" "jetty" "--busker-workers" "4"]
+                ["--adapter" "busker" "--busker-workers" "0"]
+                ["--adapter" "busker" "--busker-workers" "oops"]]]
     (is (thrown? clojure.lang.ExceptionInfo (#'benchmark/options args)) (pr-str args))))
+(deftest counts-effective-busker-event-loops
+  (let [threads [(Thread. "h2o-evloop-1") (Thread. "busker-lifecycle")
+                 (Thread. "h2o-evloop-2") (Thread. "h2o-evloop-3")
+                 (Thread. "h2o-evloop-4")]]
+    (is (= 4 (#'benchmark/busker-worker-count threads)))))
 
 (deftest tolerates-only-disappearing-procfs-threads
   (let [task (io/file "/proc/self/task/123")

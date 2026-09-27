@@ -18,6 +18,7 @@ export const benchmarkParametersSchema = z.strictObject({
   connections: z.number().int().positive(),
   streams: z.number().int().positive(),
   threads: z.number().int().positive(),
+  "busker-workers": z.number().int().positive().optional(),
 });
 export const scoredRepetitionsSchema = z.union([z.literal(3), z.literal(6)]);
 export const scorePolicyVersion = "arithmetic-mean-student-t-v1" as const;
@@ -53,6 +54,11 @@ const sampleSchema = z.object({
     body: z.literal("Hello World"),
     protocol: z.string(),
   }),
+  "busker-workers-effective": z.strictObject({
+    ready: z.number().int().positive(),
+    "measurement-start": z.number().int().positive(),
+    "measurement-end": z.number().int().positive(),
+  }).optional(),
 });
 const reportSchema = z.object({
   environment: environmentSchema.extend({ "h2load-version": z.string() }),
@@ -266,6 +272,19 @@ export function validateBenchmark(
   const cell = cells[expected.protocol];
   if (cell.samples.length !== expected.parameters.repetitions) {
     throw new Error("Missing benchmark repetitions");
+  }
+  if (
+    expected.parameters["busker-workers"] !== undefined &&
+    (expected.adapter !== "busker" ||
+      cell.samples.some((sample) => {
+        const counts = sample["busker-workers-effective"];
+        return !counts ||
+          Object.values(counts).some((count) =>
+            count !== expected.parameters["busker-workers"]
+          );
+      }))
+  ) {
+    throw new Error("Effective Busker worker count differs");
   }
   for (
     const environment of [

@@ -191,6 +191,48 @@ Deno.test("local benchmark checks source, native bytes, sample settings, and rec
     100,
   ]);
 });
+Deno.test("explicit Busker worker count requires three matching observations per raw sample", () => {
+  const report = fixture();
+  const counts = { ready: 4, "measurement-start": 4, "measurement-end": 4 };
+  const workerExpectation = {
+    ...expected,
+    parameters: { ...expected.parameters, "busker-workers": 4 },
+  };
+  Object.assign(report.parameters, { "busker-workers": 4 });
+  for (const sample of report.results[0].protocols.h1.samples) {
+    Object.assign(sample, { "busker-workers-effective": counts });
+  }
+  deepStrictEqual(
+    validateBenchmark(report, workerExpectation).samples.length,
+    3,
+  );
+  const sample = report.results[0].protocols.h1.samples[1];
+  for (const phase of Object.keys(counts)) {
+    Object.assign(sample, {
+      "busker-workers-effective": { ...counts, [phase]: 2 },
+    });
+    throws(
+      () => validateBenchmark(report, workerExpectation),
+      /Effective Busker worker count/,
+    );
+    const missing = { ...counts };
+    Reflect.deleteProperty(missing, phase);
+    Object.assign(sample, { "busker-workers-effective": missing });
+    throws(() => validateBenchmark(report, workerExpectation));
+  }
+  Reflect.deleteProperty(sample, "busker-workers-effective");
+  throws(
+    () => validateBenchmark(report, workerExpectation),
+    /Effective Busker worker count/,
+  );
+  Object.assign(sample, { "busker-workers-effective": counts });
+  Object.assign(report.parameters, { "busker-workers": 2 });
+  throws(
+    () => validateBenchmark(report, workerExpectation),
+    /Wrong benchmark parameter/,
+  );
+});
+
 Deno.test("smoke output cannot supply a score, even when its rates are positive", () => {
   const report = fixture();
   report.environment["busker-dirty?"] = true;

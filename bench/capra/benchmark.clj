@@ -97,7 +97,7 @@
     (.addConnector server (doto (ServerConnector. server ^"[Lorg.eclipse.jetty.server.ConnectionFactory;" parts)
                             (.setHost "127.0.0.1") (.setPort port)))))
 
-(defn- start-server [adapter protocol port {:keys [certificate private-key keystore]}]
+(defn- start-server [adapter protocol port {:keys [certificate private-key keystore]} busker-workers]
   (let [tls?    (not= :h1 protocol)
         context (when tls? (ssl/keystore->ssl-context keystore "benchmark"))]
     (case adapter
@@ -106,6 +106,7 @@
                     (cond-> {:entrypoints {:benchmark {:bind (str "127.0.0.1:" port)
                                                        :tls (if tls? {:tls-compatibility-mode :modern} false)
                                                        :http3? false}}
+                             :n-workers busker-workers
                              :dispatch [{:handler handler}]}
                       tls? (assoc :tls {:certificates {:load [{:type :pem :cert-file certificate
                                                                :key-file private-key}]}})))]
@@ -236,21 +237,38 @@
           evidence {:method method :phase phase :threads threads}]
       (spit (str directory "/server-affinity-" phase ".json") (json/write-str evidence))
       (check-affinity! evidence))))
+(defn- busker-worker-count [threads]
+  (count (filter #(str/starts-with? (.getName ^Thread %) "h2o-evloop-") threads)))
+
+(defn- check-busker-workers! [adapter expected]
+  (when (= :busker adapter)
+    (let [actual (busker-worker-count (keys (Thread/getAllStackTraces)))]
+      (when-not (= expected actual)
+        (throw (ex-info "Effective Busker worker count differs" {:expected expected :actual actual})))
+      actual)))
 
 (defn- sample! [{:keys [adapter protocol warmup duration directory fixtures] :as options}]
   (let [port 5800
-        stop (start-server adapter protocol port fixtures)]
+        workers (or (:busker-workers options) 2)
+        stop (start-server adapter protocol port fixtures workers)]
     (try
       (let [response (await-ready! protocol port fixtures)
+            effective (check-busker-workers! adapter workers)
             warm-log (str directory "/warmup.log")
             load-log (str directory "/measurement.log")]
         (record-affinity! directory "ready")
         (measurements (command! (load-command protocol port warmup options) warm-log (+ warmup 30)) protocol)
         (record-affinity! directory "measurement-start")
-        (let [result (measurements (command! (load-command protocol port duration options) load-log (+ duration 30)) protocol)]
+        (let [measurement-start (check-busker-workers! adapter workers)
+              result (measurements (command! (load-command protocol port duration options) load-log (+ duration 30)) protocol)]
           (check-response! protocol port fixtures)
           (record-affinity! directory "measurement-end")
-          (assoc result :status "ok" :response response)))
+          (let [measurement-end (check-busker-workers! adapter workers)]
+            (cond-> (assoc result :status "ok" :response response)
+              effective (assoc :busker-workers-effective
+                               {:ready effective
+                                :measurement-start measurement-start
+                                :measurement-end measurement-end})))))
       (finally (stop)))))
 
 (defn- version [[group artifact]]
@@ -340,9 +358,15 @@
                  (= flag "--smoke") (recur (assoc opts :warmup 1 :duration 1 :repetitions 1) (rest remaining))
                  (and value (#{"--adapter" "--protocol" "--output"} flag))
                  (recur (assoc opts (keyword (subs flag 2)) value) more)
+                 (and value (= flag "--busker-workers"))
+                 (recur (assoc opts :busker-workers (parse-long value)) more)
                  (and value (str/starts-with? flag "--") (contains? defaults (keyword (subs flag 2))))
                  (recur (assoc opts (keyword (subs flag 2)) (parse-long value)) more)
                  :else (throw (ex-info "Unknown option or missing value" {:argument flag}))))]
+    (when (contains? opts :busker-workers)
+      (when-not (and (= "busker" (:adapter opts)) (pos-int? (:busker-workers opts)))
+        (throw (ex-info "Busker workers require a selected Busker adapter and positive count"
+                        {:adapter (:adapter opts) :busker-workers (:busker-workers opts)}))))
     (doseq [key (keys defaults)]
       (when-not (pos-int? (get opts key)) (throw (ex-info "Expected a positive integer" {:option key}))))
     (when-not (and (zero? (mod (:connections opts) (:streams opts)))
