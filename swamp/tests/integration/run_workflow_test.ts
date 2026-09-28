@@ -61,6 +61,8 @@ Deno.test("Swamp exercises complete orchestration with fixed tools: repairs, rej
       return new TextDecoder().decode(result.stdout).trim();
     };
     await git("init", "--initial-branch=main");
+    await git("config", "user.name", "Tempo Fixture");
+    await git("config", "user.email", "tempo-fixture@example.test");
     await Deno.mkdir(join(repository, "src/main/clojure/ol"), {
       recursive: true,
     });

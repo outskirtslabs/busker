@@ -28,6 +28,8 @@ Deno.test("worktree snapshots preserve rejected and unfinished code without touc
   const root = await Deno.makeTempDir({ prefix: "tempo-workspace-fixture-" });
   try {
     await git(root, "init", "--initial-branch=main");
+    await git(root, "config", "user.name", "Workspace Author");
+    await git(root, "config", "user.email", "workspace@example.test");
     await Deno.mkdir(join(root, ".worktrees"));
     await Deno.writeTextFile(join(root, ".gitignore"), ".worktrees/\n");
     await Deno.writeTextFile(join(root, "source.txt"), "initial\n");
@@ -67,6 +69,10 @@ Deno.test("worktree snapshots preserve rejected and unfinished code without touc
       else Deno.env.set("GIT_INDEX_FILE", previousIndex);
     }
     notStrictEqual(edited, initial);
+    deepStrictEqual(
+      await git(root, "show", "-s", "--format=%an <%ae>%n%cn <%ce>", edited),
+      "Workspace Author <workspace@example.test>\nWorkspace Author <workspace@example.test>",
+    );
     await markBestRevision(workspace, edited);
     deepStrictEqual(
       await git(root, "rev-parse", "refs/tempo/fixture/best"),

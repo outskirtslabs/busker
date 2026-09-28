@@ -71,6 +71,8 @@ Deno.test("fixed Swamp runs export exact parent evidence and inherit the origina
       return new TextDecoder().decode(result.stdout).trim();
     };
     await git("init", "--initial-branch=main");
+    await git("config", "user.name", "Tempo Fixture");
+    await git("config", "user.email", "tempo-fixture@example.test");
     await Deno.mkdir(join(repository, "src/main/clojure/ol"), {
       recursive: true,
     });

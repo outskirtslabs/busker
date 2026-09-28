@@ -120,6 +120,9 @@ Precision passes when the two-sided Student-t confidence interval's half-width,
 divided by the mean, is at most `policy.precision.relativeHalfWidth` at
 `policy.precision.confidenceLevel`. Defaults are `0.05` and `0.95`. Failed
 precision is inconclusive, never a score or target claim.
+An imprecise baseline stops the campaign. A completed, error-free but imprecise
+candidate is discarded, and the campaign continues from the verified best if
+limits permit. Execution and provenance failures still stop the campaign.
 Saved config, benchmark output, and comparison evidence identify
 `arithmetic-mean-student-t-v1`, the exact precision settings, and the fixed count.
 Median-era evidence cannot be imported or silently reclassified.
@@ -145,6 +148,13 @@ authorization for the actual run first. The selected commit must contain the
 Use the Nix devshell on Linux with a running systemd user manager, Swamp, Pi,
 h2load, and JDK tools. Keep other heavy work off the machine during measurement.
 The current runner records affinity and cgroup settings but does not reserve CPUs.
+The current method pins the coordinator and full server JVM to physical CPUs
+10–11, and warmup and measured h2load clients to CPUs 12–13. Profiling uses the
+same allocation; Pi, QA, the controller, and REPL do not. Each sample records JVM
+thread masks at readiness and at measurement start and end. The h2load wrapper
+checks the launched executable and live task masks. These are point-in-time
+checks, not proof of continuous CPU residence. Missing or inconsistent evidence
+invalidates the measurement; unpinned historical results cannot be imported.
 
 Create a YAML input file containing these required fields:
 
@@ -250,6 +260,9 @@ through `bb qa`, fresh measurements, and a read-only review before acceptance.
 Pi is fixed to `openai-codex`, `gpt-6-astra`, and medium thinking. The
 Markdown prompts are exported with the support snapshot; each invocation archives
 the exact prompt copies it used.
+For review, Swamp also archives the exact best-to-candidate Git diff with both
+revisions and its SHA-256. The reviewer receives it as a read-only, citable input
+without needing Git access.
 At run start, Tempo saves the untracked project `AGENTS.md` as a separate
 versioned inference input containing its exact text and SHA-256. The input is
 read-only guidance, not Git-reviewed support code; system and step instructions
@@ -273,6 +286,27 @@ and valid baseline measurements; an infrastructure failure is not a successful
 workflow. Budget exhaustion can finish normally without meeting the target.
 Git refs under `refs/tempo/<runId>/` retain snapshots and the best revision.
 The main checkout is unchanged, and the experiment finishes at the best revision.
+
+## Adopt accepted changes
+
+Experiment commits are private checkpoints, not ready-made project commits.
+They use the repository's configured `user.name` and `user.email`. Configure
+those before starting a run. Acceptance updates only the experiment's best
+reference; it does not authorize merging its checkpoint history into `main`.
+
+After the final report confirms valid, reviewed results:
+
+- Start from a clean index and check the configured Git identity.
+- Apply each accepted change with `git cherry-pick --no-commit <checkpoint>`,
+  then create a normal `git commit` explaining why the change matters and any
+  important implementation choices. Do not reuse the checkpoint message or
+  fast-forward the experiment branch into `main`.
+- Compare the adopted application files with the tested best using
+  `git diff --no-ext-diff --exit-code <tested-best> HEAD -- <accepted-paths>`.
+  If intervening application changes prevent an exact match, resolve and test
+  them rather than claiming the combined version was benchmarked.
+- Record the checkpoint-to-project commit correspondence in the run notes.
+  Keep the original experiment refs and measurement records unchanged.
 
 ## Saved evidence and recovery
 

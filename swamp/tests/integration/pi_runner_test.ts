@@ -450,6 +450,8 @@ Deno.test("saved Pi effects preserve Git edits and traces after malformed output
         return new TextDecoder().decode(result.stdout).trim();
       };
       await git("init", "--initial-branch=main");
+      await git("config", "user.name", "Tempo Fixture");
+      await git("config", "user.email", "tempo-fixture@example.test");
       await Deno.mkdir(join(repository, ".worktrees"));
       await Deno.mkdir(join(repository, "src/main"), { recursive: true });
       await Deno.writeTextFile(join(repository, ".gitignore"), ".worktrees/\n");

@@ -174,16 +174,12 @@ export async function snapshotWorkspace(
   const parentTree = await git(workspace.path, ["rev-parse", "HEAD^{tree}"]);
   const commit = tree === parentTree ? parent : revision(
     await git(workspace.path, [
-      "-c",
-      "user.name=Tempo",
-      "-c",
-      "user.email=tempo@localhost",
       "commit-tree",
       tree,
       "-p",
       parent,
       "-m",
-      "tempo: preserve experiment changes",
+      "tempo: save private experiment checkpoint",
     ]),
   );
   await git(workspace.path, ["update-ref", target, commit, "0".repeat(40)]);
