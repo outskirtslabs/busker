@@ -18,6 +18,7 @@
    [java.io OutputStream]
    [java.lang.foreign Arena MemorySegment]
    [java.nio ByteBuffer]
+   [java.util.concurrent ConcurrentHashMap]
    [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicReference]))
 
 (set! *warn-on-reflection* true)
@@ -68,6 +69,26 @@
   (or (pos? (.get ^AtomicInteger (:drain-state_ st)))
       (some? (.get ^AtomicReference (:in-flight_ st)))
       (pos? (bbq/queued-bytes (:bbq st)))))
+
+(defn- untrack-work!
+  [st]
+  (when-let [^ConcurrentHashMap work (-> st :req :worker :callback-dispatch :streaming-work)]
+    (.remove work (:drain-state_ st))))
+
+(defn- track-work!
+  [st]
+  (when-let [^ConcurrentHashMap work (-> st :req :worker :callback-dispatch :streaming-work)]
+    (.put work (:drain-state_ st) true)
+    ;; Stop may race publication; either side removes the registration.
+    (when (.get ^AtomicBoolean (:stopped?_ st))
+      (untrack-work! st))))
+
+(defn- retire-work!
+  [st]
+  (untrack-work! st)
+  ;; A producer can activate the writer between idle CAS and removal.
+  (when (pending-work? st)
+    (track-work! st)))
 
 (defn package-chunks
   "Build a contiguous array of h2o_sendvec_t descriptors from a vector of Chunks.
@@ -140,7 +161,8 @@
                   (.set ^AtomicBoolean (:stopped?_ st) true)))
               (case (.get drain-state_)
                 0 nil
-                1 (when-not (.compareAndSet drain-state_ drain-active drain-idle)
+                1 (if (.compareAndSet drain-state_ drain-active drain-idle)
+                    (retire-work! st)
                     (recur))
                 2 (do
                     (.compareAndSet drain-state_ drain-signalled drain-active)
@@ -155,7 +177,8 @@
     (loop []
       (case (.get drain-state_)
         0 (if (.compareAndSet drain-state_ drain-idle drain-active)
-            (let [result
+            (let [_ (track-work! st)
+                  result
                   (pi/send-required-msg
                    worker
                    [:h2o/sendvec
@@ -167,6 +190,7 @@
                 (do
                   (.set ^AtomicBoolean (:stopped?_ st) true)
                   (.set drain-state_ drain-idle)
+                  (untrack-work! st)
                   (throw (java.io.IOException. "Response worker closed")))))
             (recur))
         1 (if (.compareAndSet drain-state_ drain-active drain-signalled)
@@ -187,7 +211,9 @@
   [st]
   (try
     (release-chunks (:buffer-pool st) (:in-flight_ st))
-    (when-not (.get ^AtomicBoolean (:stopped?_ st)) (send-vecs st))
+    (if (.get ^AtomicBoolean (:stopped?_ st))
+      (untrack-work! st)
+      (send-vecs st))
     (catch Exception e
       (report-error e))))
 
@@ -197,6 +223,7 @@
   [st _reason]
   (try
     (.set ^AtomicBoolean (:stopped?_ st) true)
+    (untrack-work! st)
     (bbq/close (:bbq st))
     (when-some [^ByteBuffer buf (.getAndSet ^AtomicReference (:current-buffer_ st) nil)]
       (bp/return (:buffer-pool st) buf))

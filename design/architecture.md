@@ -72,6 +72,8 @@ Until that callback, libh2o may still need the previous chunk's memory.
 This allows libh2o to control the pace of delivery and keeps the data valid while it is in use.
 This links application writes to network progress and prevents a slow client from causing unlimited buffering.
 
+Each worker tracks streams with pending data or a send in progress, instead of checking every active request for streaming work.
+
 ## Lifecycle
 
 A generation is a running set of workers, listeners, and native resources.

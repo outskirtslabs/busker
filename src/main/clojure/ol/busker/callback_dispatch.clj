@@ -17,6 +17,7 @@
    [java.io InputStream]
    [java.lang Thread]
    [java.util HashMap]
+   [java.util.concurrent ConcurrentHashMap]
    [java.util.concurrent.atomic AtomicLong AtomicReference]
    [ol.busker.response H2OResponseEmitter]))
 
@@ -30,6 +31,7 @@
             ^AtomicReference phase_
             ^AtomicReference thread_
             ^HashMap entries
+            ^ConcurrentHashMap streaming-work
             counters
             body-callback
             proceed-callback
@@ -167,6 +169,7 @@
                                      phase_
                                      thread_
                                      entries
+                                     (ConcurrentHashMap.)
                                      counters
                                      nil nil nil nil nil nil nil)
         body-callback (partial body-callback! dispatch)
@@ -260,12 +263,7 @@
 (defn pending-response-work?
   "Returns true when this worker has queued or in-flight response data."
   [dispatch]
-  (boolean
-   (some
-    (fn [[_ ^H2OResponseEmitter emitter]]
-      (some-> (response/writer-if-created emitter)
-              response-queue/pending-work?))
-    (.values ^HashMap (:entries dispatch)))))
+  (not (.isEmpty ^ConcurrentHashMap (:streaming-work dispatch))))
 
 (defn finish!
   "Closes any unexpected entries after the worker has stopped."
