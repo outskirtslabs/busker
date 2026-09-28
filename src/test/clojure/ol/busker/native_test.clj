@@ -374,7 +374,7 @@
 (defn- copied-request-values [{:keys [req has-body ring-data]}]
   {:request-address (.address ^java.lang.foreign.MemorySegment req)
    :has-body has-body
-   :ring-data ring-data})
+   :ring-data (force ring-data)})
 
 (def ^:private expected-copied-request-values
   {:has-body 1
@@ -428,6 +428,36 @@
              {:headers (native/build-ring-headers-map header 1 supplied-arena)
               :arena-scope-calls @scope-calls_
               :arena-allocation-calls @allocation-calls_})))))
+
+(deftest request-snapshot-realizes-after-native-cleanup
+  (let [snapshot
+        (with-open [arena (ffi/confined-arena)]
+          (let [{:keys [pointer]} (copied-request-context arena)
+                pairs [["Cookie" "a=1"] ["cookie" "b=2"]
+                       ["X-Test" "café"] ["x-test" ""]]
+                headers (ffi/alloc arena (* 32 (count pairs)))]
+            (doseq [[i [name value]] (map-indexed vector pairs)]
+              (ffi/write (ffi/slice headers (* i 32) 32) native/ffi-clj-header-t
+                         {:name (ffi/string->ptr arena name)
+                          :name_len (alength (.getBytes ^String name "UTF-8"))
+                          :value (ffi/string->ptr arena value)
+                          :value_len (alength (.getBytes ^String value "UTF-8"))}))
+            (ffi/write pointer (ffi/place native/ffi-clj-req-ctx-t [:meta :headers]) headers)
+            (ffi/write pointer (ffi/place native/ffi-clj-req-ctx-t [:meta :headers_len]) (count pairs))
+            (let [copied (native/copy-request-context pointer arena)]
+              (is (= 1 (:has-body copied)))
+              (is (not (realized? (:ring-data copied))))
+              (:ring-data copied))))
+        request (native/overlay-lazy-ring-request
+                 #(native/assemble-ring-request snapshot nil) {:extra true})]
+    (is (:extra request))
+    (is (not (realized? snapshot)))
+    (is (= {"cookie" "a=1;b=2" "x-test" "café,"} (:headers request)))
+    (is (= :post (:request-method request)))
+    (is (= "/things" (:uri request)))
+    (is (= "q=1" (:query-string request)))
+    (is (= "HTTP/2.0" (:protocol request)))
+    (is (:ol.busker/early-data? request))))
 
 (deftest default-request-copy-retains-an-implicit-scope-test
   (with-open [source-arena (ffi/shared-arena)]

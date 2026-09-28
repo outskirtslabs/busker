@@ -816,34 +816,77 @@
     443
     80))
 
+(defn- decode-request-snapshot
+  [^bytes bytes ^longs ends http-version has-body early-data]
+  (let [text (fn [i]
+               (let [start (if (zero? i) 0 (aget ends (dec i)))
+                     length (- (aget ends i) start)]
+                 (when (pos? length)
+                   (String. bytes (int start) (int length) "UTF-8"))))]
+    {:authority (text 0)
+     :method (text 1)
+     :path (text 2)
+     :remote-addr (text 3)
+     :scheme (text 4)
+     :headers (when (> (alength ends) 5)
+                (reduce (fn [result i]
+                          (let [name (str/lower-case (text i))
+                                value (text (inc i))]
+                            (if (contains? result name)
+                              (update result name str (if (= "cookie" name) ";" ",") value)
+                              (assoc result name value))))
+                        {} (range 5 (alength ends) 2)))
+     :http-version http-version
+     :has-body has-body
+     :early-data early-data}))
+
 (defn ^:no-doc copy-request-context
   ([ctx-ptr]
    (copy-request-context ctx-ptr (ffi/auto-arena)))
   ([ctx-ptr ^Arena arena]
    (let [ctx (ffi/reinterpret ctx-ptr (ffi/sizeof ffi-clj-req-ctx-t) arena)
          req (ffi/read ctx (ffi/place ffi-clj-req-ctx-t :req))
-         {:keys [method method_len path path_len authority authority_len
-                 scheme scheme_len remote_addr remote_addr_len headers headers_len
-                 http_version has_body is_early_data]}
-         (ffi/read ctx (ffi/place ffi-clj-req-ctx-t :meta))]
+         ;; Offsets follow ffi-clj-req-meta-t and ffi-clj-header-t; layout tests
+         ;; verify them against the shim. Only the copied bytes reach the delay.
+         meta-seg (ffi/slice ctx 8 104)
+         headers (ffi/read meta-seg :pointer 40)
+         header-count (if (ffi/null? headers) 0 (long (ffi/read meta-seg :long 88)))
+         header-seg (when (pos? header-count)
+                      (ffi/reinterpret headers (* header-count 32) arena))
+         n (+ 5 (* 2 header-count))
+         pointers (object-array n)
+         ends (long-array n)
+         total (loop [i 0 offset 0]
+                 (if (= i n)
+                   offset
+                   (let [seg (if (< i 5) meta-seg header-seg)
+                         ptr-offset (if (< i 5) (* i 8) (* (- i 5) 16))
+                         len-offset (if (< i 5) (+ 48 (* i 8)) (+ ptr-offset 8))
+                         ptr (ffi/read seg :pointer ptr-offset)
+                         len (if (ffi/null? ptr) 0 (max 0 (long (ffi/read seg :long len-offset))))
+                         end (+ offset len)]
+                     (aset pointers i ptr)
+                     (aset ends i end)
+                     (recur (inc i) end))))
+         bytes (byte-array total)
+         target (MemorySegment/ofArray bytes)
+         http-version (ffi/read meta-seg :int 96)
+         has-body (ffi/read meta-seg :int16 100)
+         early-data (ffi/read meta-seg :int16 102)]
+     (dotimes [i n]
+       (let [start (if (zero? i) 0 (aget ends (dec i)))
+             len (- (aget ends i) start)]
+         (when (pos? len)
+           (MemorySegment/copy (ffi/reinterpret (aget pointers i) len arena) 0 target start len))))
      {:req req
-      :has-body has_body
-      :ring-data
-      {:method (->string method method_len arena)
-       :path (->string path path_len arena)
-       :authority (->string authority authority_len arena)
-       :scheme (->string scheme scheme_len arena)
-       :remote-addr (->string remote_addr remote_addr_len arena)
-       :headers (build-ring-headers-map headers headers_len arena)
-       :http-version http_version
-       :has-body has_body
-       :early-data is_early_data}})))
+      :has-body has-body
+      :ring-data (delay (decode-request-snapshot bytes ends http-version has-body early-data))})))
 
 (defn create-handler
   "Creates and configures an H2O handler with its request and cleanup callbacks.
 
   `hostconf-ptr` and `flat-config-ptr` are native configuration pointers; callback
-  functions receive decoded request data and request identity respectively; `arena`
+  functions receive copied request data and request identity respectively; `arena`
   retains the native callback trampolines. Returns the handler pointer and references
   that keep both trampolines reachable."
   [hostconf-ptr on-req-callback on-cleanup-callback flat-config-ptr arena]
@@ -957,10 +1000,10 @@
   (OverlayLazyRingRequest. (delay (request-fn)) overlay #{} nil))
 
 (defn ^:no-doc assemble-ring-request
-  [{:keys [method path authority scheme remote-addr headers
-           http-version has-body early-data]}
-   ^InputStream input-stream]
-  (let [default-port (default-server-port scheme)
+  [ring-data ^InputStream input-stream]
+  (let [{:keys [method path authority scheme remote-addr headers
+                http-version has-body early-data]} (force ring-data)
+        default-port (default-server-port scheme)
         {:keys [server-name server-port]}
         (util/parse-authority authority default-port)
         [uri query-string] (if path

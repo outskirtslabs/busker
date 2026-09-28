@@ -28,7 +28,8 @@ Lifecycle work uses platform threads because it can wait for threads and native 
 ## Requests
 
 The shim calls Clojure request callbacks with native request context data.
-`ol.busker.native` decodes it, `ol.busker.request` builds Ring-compatible request state, and a virtual-thread handler produces a Ring response.
+Busker copies request metadata into JVM memory before the native callback returns.
+The handler thread decodes that copy when it reads the request, so decoding does not depend on the native request remaining valid.
 Streaming request bodies use a `java.nio.channels.ReadableByteChannel` and native proceed callbacks.
 Callback-dispatch maps module and request sequence identifiers to live requests until cleanup.
 
