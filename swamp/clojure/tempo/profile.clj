@@ -107,7 +107,7 @@
                            (str/trim (#'benchmark/command! ["h2load" "--version"]
                                                            (str directory "/h2load-version.log") 10)))
         fixtures (when-not (= :h1 protocol) (#'benchmark/fixtures! directory))
-        stop (#'benchmark/start-server :busker protocol 5800 fixtures)]
+        stop (#'benchmark/start-server :busker protocol 5800 fixtures 2)]
     (try
       (#'benchmark/await-ready! protocol 5800 fixtures)
       (#'benchmark/record-affinity! directory "ready")
