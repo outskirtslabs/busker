@@ -1,5 +1,5 @@
 {:min-bb-version "0.8.156"
- :paths          ["src/bb"]
+ :paths          ["src/bb" "bench"]
  :deps           {borkdude/rewrite-edn   {:mvn/version "0.4.9"}
                   lambdaisland/kaocha    {:mvn/version "1.91.1392"}
                   outskirtslabs/bb-tasks {:git/url "https://github.com/outskirtslabs/bb-tasks"
