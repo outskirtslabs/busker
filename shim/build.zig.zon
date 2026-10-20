@@ -2,11 +2,11 @@
     .name = .http_clj,
     .version = "0.0.1",
     .fingerprint = 0xaabaf927ba0e83fa,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .@"h2o-zig" = .{
-            .url = "git+https://github.com/outskirtslabs/h2o-zig.git#edde60c4fde93660d149875e456eab230516ffb9",
-            .hash = "h2o-0.0.1-7Fp7SmtXAAC36s404Qa2Y-jlSBFaXhCgqDEpkLsMcGyD",
+            .url = "git+https://github.com/outskirtslabs/h2o-zig.git#945db7d1f2f5d1e5b60cdd1c76608fb9b11d3585",
+            .hash = "h2o-0.0.1-7Fp7SrxWAAD2HHE5BJ5OoZ5TWeOluQqlKB4qhryigWIu",
         },
     },
     .paths = .{

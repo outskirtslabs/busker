@@ -6,6 +6,7 @@ description: Updates Busker's h2o-zig Zig and Nix pins, synchronizes duplicated 
 # Update the h2o-zig Pin
 
 Run every project command inside the Nix devshell. Run the steps sequentially; never run another command in parallel with `bb build`.
+Use Zig 0.17.0 for compilation and tests. The devshell's `zig2nix` command uses Zig 0.16 only for dependency fetching, with an isolated cache. Keep that split until the pinned zig2nix supports the Zig 0.17 fetch API.
 
 ## Pin locations
 
@@ -96,9 +97,10 @@ Run all checks sequentially from the repository root:
 
 ```bash
 nix build .#shim -L
-bb build
-bb test
+bb fmt && bb qa
 nix flake check -L
 ```
+
+Normal shim builds also run the native QUIC forwarding regression tests. For a focused run, use `cd shim && zig build test`. If the upstream forwarding callback contract changes, update the shim's TTL and decoder handling together with these tests.
 
 Report the exact h2o-zig and BoringSSL revisions, changed files, and validation results.

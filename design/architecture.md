@@ -88,6 +88,15 @@ Reaching the timeout does not make memory safe to free: Busker must first stop a
 If startup fails partway through, Busker releases the resources it has already created.
 Cleanup continues even if one release operation fails, and the original startup error is retained along with any cleanup errors.
 
+### HTTP/3 packet forwarding
+
+HTTP/3 contexts forward QUIC packets to the worker or generation selected by the connection ID.
+The shim drops packets with a zero forwarding TTL and decrements TTL in each forwarded envelope.
+This is an internal hop count, not the IP packet TTL; it prevents forwarding loops during routing and reloads.
+On receipt, the shim caps TTL at the context's configured default and rejects envelopes without an IPv4 or IPv6 source address.
+These checks are performed by Busker's callbacks, as required by the current libh2o callback contract.
+Native socketpair regression tests cover these rules and run during normal shim builds.
+
 ## Decision record reconciliation
 
 The [ADRs](adr/README.md) record decisions at the time they were made.

@@ -14,8 +14,10 @@ let
   system = stdenv.hostPlatform.system;
   root = toString ../..;
   clojure = pkgs.clojure.override { jdk = jdk25; };
-  zig = zig2nix.packages.${system}."zig-0_16_0";
-  zig2nixEnv = zig2nix.outputs.zig-env.${system} { inherit zig; };
+  zig = zig2nix.packages.${system}."zig-0_17_0";
+  # Keep dependency fetching on 0.16 until zig2nix supports 0.17's fetch API.
+  fetchZig = zig2nix.packages.${system}."zig-0_16_0";
+  zig2nixEnv = zig2nix.outputs.zig-env.${system} { zig = fetchZig; };
   shimTargets = [
     {
       dir = "linux-x86-64";
@@ -86,7 +88,7 @@ let
     lockfile = "./deps-lock.json";
   };
 in
-zig2nixEnv.package {
+(zig2nixEnv.package {
   pname = "busker-shim";
   version = "0.0.2";
   src = filteredSrc;
@@ -138,4 +140,7 @@ zig2nixEnv.package {
     ${targetChecks}
     ${jarChecks}
   '';
-}
+}).overrideAttrs (old: {
+  # Compile with 0.17; only fixed-output dependency fetches use 0.16.
+  nativeBuildInputs = map (input: if input == fetchZig.hook then zig.hook else input) old.nativeBuildInputs;
+})

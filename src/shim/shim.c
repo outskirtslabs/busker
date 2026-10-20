@@ -2351,6 +2351,9 @@ static int clj_forward_quic_packets(h2o_quic_ctx_t *h3ctx,
   int allow_thread_fallback = 0;
   int fd;
 
+  if (ttl == 0)
+    return 0;
+
   if (node_id != NULL) {
     target_node_id = *node_id;
     if (target_node_id == ctx->node_id && thread_id == ctx->thread_id)
@@ -2379,7 +2382,7 @@ static int clj_forward_quic_packets(h2o_quic_ctx_t *h3ctx,
 
   char header_buf[CLJ_QUIC_FORWARDED_HEADER_MAX_SIZE];
   size_t header_len =
-      clj_encode_quic_forwarded_header(header_buf, destaddr, srcaddr, ttl);
+      clj_encode_quic_forwarded_header(header_buf, destaddr, srcaddr, ttl - 1);
   if (header_len == SIZE_MAX)
     return 0;
 
@@ -2416,6 +2419,10 @@ static int clj_rewrite_forwarded_quic_datagram(h2o_quic_ctx_t *h3ctx,
   if (encapsulated.offset == SIZE_MAX)
     return 1;
 
+  if (encapsulated.srcaddr.sa.sa_family != AF_INET &&
+      encapsulated.srcaddr.sa.sa_family != AF_INET6)
+    return 0;
+
   switch (encapsulated.destaddr.sa.sa_family) {
   case AF_UNSPEC:
     break;
@@ -2436,7 +2443,9 @@ static int clj_rewrite_forwarded_quic_datagram(h2o_quic_ctx_t *h3ctx,
   msg->msg_iov[0].iov_len -= encapsulated.offset;
   *destaddr = encapsulated.destaddr;
   *srcaddr = encapsulated.srcaddr;
-  *ttl = encapsulated.ttl;
+  /* Forwarding envelopes are unauthenticated; cap their hop limit. */
+  *ttl = encapsulated.ttl < h3ctx->default_ttl ? encapsulated.ttl
+                                            : h3ctx->default_ttl;
 
   return 1;
 }
