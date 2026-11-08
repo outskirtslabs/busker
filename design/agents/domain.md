@@ -4,7 +4,7 @@ Engineering skills use these rules when reading this repo's domain documentation
 
 ## Before exploring
 
-Read `CONTEXT.md` at the repository root when it exists.
+Read `GLOSSARY.md` at the repository root when it exists.
 
 Read relevant ADRs under `design/adr/` when that directory exists.
 
@@ -17,13 +17,13 @@ Skill(domain-modeling) creates these files when the project resolves domain term
 This repo uses a single domain context.
 
 ```text
-CONTEXT.md
+GLOSSARY.md
 design/adr/
 ```
 
 ## Use the glossary's vocabulary
 
-Use terms as defined in `CONTEXT.md` when naming issues, proposals, hypotheses, and tests.
+Use terms as defined in `GLOSSARY.md` when naming issues, proposals, hypotheses, and tests.
 
 Do not replace defined terms with synonyms that the glossary rejects.
 

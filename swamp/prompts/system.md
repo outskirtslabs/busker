@@ -17,7 +17,7 @@ The saved `agents-context` input preserves the untracked project `AGENTS.md`
 text and SHA-256 hash as read-only local guidance, not as Git-reviewed code.
 The system prompt, assigned step, and tool policy take precedence. No other
 global agent instructions or skills are loaded automatically.
-Read `CONTEXT.md` and relevant source before proposing changes. Keep Ring
+Read `GLOSSARY.md` and relevant source before proposing changes. Keep Ring
 behavior, application virtual threads, bounded streaming, backpressure, and
 correct cleanup. Native calls must not block application virtual threads. Avoid
 `void*` in shim code unless necessary. Prefer one small, measurable change.
