@@ -43,6 +43,7 @@
                     :jvm-opts ["-Xmx8g" "--enable-native-access=ALL-UNNAMED"]
                     :extra-deps  {org.slf4j/slf4j-simple                   {:mvn/version "2.0.17"}
                                   aleph/aleph                       {:mvn/version "0.9.9"}
+                                  com.s-exp/enso                    {:mvn/version "1.0.0-beta94"}
                                   com.s-exp/hirundo                 {:mvn/version "1.0.0-alpha214"}
                                   dev.weavejester/capra             {:mvn/version "0.1.2"}
                                   luminus/ring-undertow-adapter     {:mvn/version "1.5.2"}

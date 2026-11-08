@@ -488,6 +488,12 @@
     "com/outskirtslabs/busker/macos-x86-64/0.0.5/macos-x86-64-0.0.5.pom": {
       "sha256": "83e7e4635550e9fe84c87e06cbcb7ea603904e1eb42348615ea11be7a78365c8"
     },
+    "com/s-exp/enso/1.0.0-beta94/enso-1.0.0-beta94.jar": {
+      "sha256": "a05a61be4b8c480489a18c881ce33c921a5a55ea13117ef649b856a63f6aab54"
+    },
+    "com/s-exp/enso/1.0.0-beta94/enso-1.0.0-beta94.pom": {
+      "sha256": "a64644a1b8553ab17ca9bd56e3c7b85a3b38d70ace311678743c77f202b0ef85"
+    },
     "com/s-exp/hirundo/1.0.0-alpha214/hirundo-1.0.0-alpha214.jar": {
       "sha256": "85fefcefce56c3f232739caca6b2188b3e0836162fcb8b803a714ae8695b9719"
     },

@@ -18,6 +18,7 @@
    [ring-http-exchange.ssl :as ssl]
    [ring.adapter.jetty :as jetty]
    [ring.adapter.undertow :as undertow]
+   [s-exp.enso :as enso]
    [s-exp.hirundo :as hirundo])
   (:import
    [io.helidon.common.tls TlsConfig]
@@ -43,6 +44,7 @@
   [{:id :busker :label "Busker" :protocols (set protocols)}
    {:id :aleph :label "Aleph" :protocols (set protocols) :dependency ["aleph" "aleph"]}
    {:id :capra :label "Capra" :protocols #{:h1} :dependency ["dev.weavejester" "capra"]}
+   {:id :enso :label "Enso" :protocols (set protocols) :dependency ["com.s-exp" "enso"]}
    {:id :hirundo :label "Hirundo" :protocols (set protocols) :dependency ["com.s-exp" "hirundo"]}
    {:id :http-exchange :label "http-exchange" :protocols #{:h1 :tls-h1}
     :dependency ["org.clojars.jj" "ring-http-exchange"]}
@@ -120,6 +122,11 @@
       :capra
       (let [^Closeable server (capra/run-server handler :host "127.0.0.1" :port port)]
         #(.close server))
+      :enso
+      (let [server (enso/run-server handler
+                                    (cond-> {:host "127.0.0.1" :port port}
+                                      tls? (assoc :ssl-context context :http2 true)))]
+        #(enso/stop server))
       :hirundo
       (let [server (hirundo/start! (cond-> {:host "127.0.0.1" :port port :http-handler handler}
                                      tls? (assoc :tls (.build (doto (TlsConfig/builder) (.sslContext context))))))]

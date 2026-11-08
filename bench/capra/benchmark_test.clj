@@ -115,7 +115,7 @@
   (let [support (into {} (map (juxt :id :protocols)) benchmark/adapters)]
     (is (= #{:h1} (:capra support) (:http-kit support)))
     (is (= #{:h1 :tls-h1} (:http-exchange support)))
-    (is (= (set benchmark/protocols) (:busker support)))))
+    (is (= (set benchmark/protocols) (:busker support) (:enso support)))))
 
 (deftest identifies-local-checkout-and-rejects-mixed-sources
   (let [root (.toFile (java.nio.file.Files/createTempDirectory

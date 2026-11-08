@@ -69,6 +69,7 @@ Adapters run sequentially with their normal execution defaults:
 | `busker` | yes | yes | yes | Modern TLS; HTTP/3 disabled |
 | `aleph` | yes | yes | yes | TLS advertises H2 and H1 |
 | `capra` | yes | unsupported | unsupported | Defaults |
+| `enso` | yes | yes | yes | Shared TLS context with HTTP/2 enabled; other defaults |
 | `hirundo` | yes | yes | yes | Helidon TLS context |
 | `http-exchange` | yes | yes | unsupported | JDK HTTPS context |
 | `http-kit` | yes | unsupported | unsupported | Defaults |
