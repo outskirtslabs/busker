@@ -46,16 +46,6 @@
   [module-id request-seq status headers]
   (->InformationalCommand module-id request-seq status (vec headers)))
 
-(defn command-module-id
-  "Returns the request module identifier from `command`."
-  ^long [command]
-  (:module-id command))
-
-(defn command-request-seq
-  "Returns the request sequence from `command`."
-  ^long [command]
-  (:request-seq command))
-
 (defn- headers-segment
   [headers arena]
   (if (zero? (count headers))

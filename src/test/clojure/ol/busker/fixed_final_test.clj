@@ -4,29 +4,18 @@
    [clojure.string :as str]
    [babashka.ffi :as mem]
    [ol.busker :as busker]
-   [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.fixed-final :as fixed-final]
-   [ol.busker.worker-context :as worker-context]
-   [ol.busker.generation :as generation]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
-   [ol.busker.response :as response]
    [ol.busker.test-utils :as util])
   (:import
    [java.lang.foreign MemorySegment]
    [java.net InetSocketAddress Socket]
+   [java.nio ByteBuffer]
    [java.nio.charset StandardCharsets]
+   [java.util.concurrent CountDownLatch TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicReference]
    [java.util.concurrent.locks ReentrantReadWriteLock]))
-
-(defn- prepared-command
-  ([^bytes body]
-   (prepared-command 1 1 200 [["content-type" "text/plain"]] 2 body))
-  ([module-id request-seq status headers compress-hint ^bytes body]
-   (let [header-staging-bytes (fixed-final/header-staging-bytes headers)
-         body-length (alength body)]
-     (fixed-final/prepared-command module-id request-seq status headers
-                                   header-staging-bytes body-length compress-hint body))))
 
 (defn- direct-plan
   [module-id request-seq status headers content-length compress-hint body body-length]
@@ -41,6 +30,7 @@
   {:response-receiver_             (AtomicReference. receiver)
    :response-receiver-open?_       (AtomicBoolean. true)
    :response-receiver-lock         (ReentrantReadWriteLock.)
+   :response-slot-monitor          (Object.)
    :response-slots                 response-slots
    :response-slot-payload-capacity response-slot-payload-capacity})
 
@@ -55,18 +45,6 @@
   (proxy [clojure.lang.AFn clojure.lang.IFn$OLL] []
     (invokePrim [receiver claim-handle] (long (f receiver claim-handle)))
     (invoke [receiver claim-handle] (f receiver claim-handle))))
-
-(defn- serialized-headers
-  [headers headers-len]
-  (let [header-size (mem/sizeof h2o/ffi-clj-header-t)]
-    (mapv
-     (fn [idx]
-       (let [{:keys [name name_len value value_len]}
-             (mem/read (mem/slice headers (* idx header-size) header-size)
-                       h2o/ffi-clj-header-t)]
-         [(h2o/->string name name_len)
-          (h2o/->string value value_len)]))
-     (range headers-len))))
 
 (deftest response-slot-contains-packed-metadata-headers-and-body
   (with-open [arena (mem/confined-arena)]
@@ -177,12 +155,16 @@
     (let [receiver (mem/alloc arena 1)
           worker (direct-response-worker receiver [] 64)
           writes_ (atom 0)]
-      (with-redefs [h2o/mt-response-try-claim (unary-long-fn (constantly 0))
+      (with-redefs [h2o/mt-response-use-acquire (constantly 1)
+                    h2o/mt-response-use-release (fn [_])
+                    h2o/mt-response-try-claim (unary-long-fn (constantly 0))
                     fixed-final/write-direct-response-slot!
                     (fn [& _] (swap! writes_ inc))]
         (is (= :overloaded
-               (fixed-final/try-publish-direct-response!
-                worker (direct-plan 1 1 200 [] 0 0 (byte-array 0) 0))))
+               (fixed-final/publish-direct-producer!
+                worker (direct-plan 1 1 200 [] -1 0 nil 0) 1
+                (fn [_] (swap! writes_ inc))
+                false (constantly false) (fn [publish!] (publish!)))))
         (is (zero? @writes_))))))
 
 (deftest direct-response-slot-is-aborted-when-packing-fails
@@ -192,7 +174,9 @@
           claim-handle 65537
           worker (direct-response-worker receiver [slot] 0)
           aborted_ (atom [])]
-      (with-redefs [h2o/mt-response-try-claim (unary-long-fn (constantly claim-handle))
+      (with-redefs [h2o/mt-response-use-acquire (constantly 1)
+                    h2o/mt-response-use-release (fn [_])
+                    h2o/mt-response-try-claim (unary-long-fn (constantly claim-handle))
                     h2o/mt-response-publish (receiver-handle->long-fn (constantly 1))
                     h2o/mt-response-abort
                     (receiver-handle->long-fn
@@ -201,7 +185,7 @@
                        1))]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo
                               #"does not fit"
-                              (fixed-final/try-publish-direct-response!
+                              (fixed-final/publish-direct-response!
                                worker (direct-plan 1 1 200 [] 1 0
                                                    (byte-array [1]) 1))))
         (is (= [[receiver claim-handle]] @aborted_))))))
@@ -212,7 +196,9 @@
           claim-handle 65537
           worker (direct-response-worker receiver [slot] 0)
           aborted_ (atom [])]
-      (with-redefs [h2o/mt-response-try-claim
+      (with-redefs [h2o/mt-response-use-acquire (constantly 1)
+                    h2o/mt-response-use-release (fn [_])
+                    h2o/mt-response-try-claim
                     (unary-long-fn (constantly claim-handle))
                     h2o/mt-response-publish
                     (receiver-handle->long-fn (constantly 0))
@@ -221,118 +207,124 @@
                      (fn [actual-receiver actual-handle]
                        (swap! aborted_ conj [actual-receiver actual-handle])
                        1))]
-        (is (= :overloaded
-               (fixed-final/try-publish-direct-response!
-                worker (direct-plan 1 1 200 [] 0 0 (byte-array 0) 0))))
+        (is (thrown-with-msg? IllegalStateException
+                              #"publication failed"
+                              (fixed-final/publish-direct-response!
+                               worker (direct-plan 1 1 200 [] 0 0 (byte-array 0) 0))))
         (is (= [[receiver claim-handle]] @aborted_))))))
 
-(deftest worker-reuses-and-explicitly-releases-fixed-final-scratch
-  (let [scratch_ (AtomicReference.)
-        worker {:fixed-final-scratch_ scratch_}
-        req {:worker worker
-             :req-ctx-ptr :request-context
-             :config {:output-buffer-size 3}}
-        sent_ (atom [])
-        staging-calls_ (atom 0)
-        first-command (prepared-command (byte-array [65 66 67]))
-        second-command (prepared-command (byte-array [88 89]))]
-    (.set worker-context/worker-context worker)
-    (try
-      (is (nil? (.get scratch_)))
-      (with-redefs [fixed-final/header-staging-bytes (fn [_]
-                                                       (swap! staging-calls_ inc)
-                                                       0)
-                    h2o/send-fixed-final
-                    (fn [_ status headers headers-len content-length compress-hint body body-len]
-                      (swap! sent_ conj {:status status
-                                         :headers (serialized-headers headers headers-len)
-                                         :content-length content-length
-                                         :compress-hint compress-hint
-                                         :body (vec (mem/read-array body :byte (long body-len)))
-                                         :body-segment body}))]
-        (fixed-final/execute! req first-command)
-        (fixed-final/execute! req second-command))
-      (is (zero? @staging-calls_))
-      (is (= [{:status 200
-               :headers [["content-type" "text/plain"]]
-               :content-length 3
-               :compress-hint 2
-               :body [65 66 67]}
-              {:status 200
-               :headers [["content-type" "text/plain"]]
-               :content-length 2
-               :compress-hint 2
-               :body [88 89]}]
-             (mapv #(dissoc % :body-segment) @sent_)))
-      (is (= (mapv #(.address ^MemorySegment (:body-segment %)) @sent_)
-             (repeat 2 (.address ^MemorySegment (:body-segment (first @sent_))))))
-      (is (= [88 89]
-             (vec (mem/read-array (:body-segment (first @sent_)) :byte 2))))
-      (is (= (+ fixed-final/max-header-staging-bytes 3)
-             (.-capacity ^ol.busker.fixed_final.FixedFinalScratch (.get scratch_))))
-      (fixed-final/close-worker-scratch! worker)
-      (is (nil? (.get scratch_)))
-      (is (thrown? IllegalStateException
-                   (mem/read-array (:body-segment (first @sent_)) :byte 2)))
-      (finally
-        (fixed-final/close-worker-scratch! worker)
-        (.remove worker-context/worker-context)))))
-
-(deftest workers-use-separate-fixed-final-scratch
-  (let [first-worker {:fixed-final-scratch_ (AtomicReference.)}
-        second-worker {:fixed-final-scratch_ (AtomicReference.)}]
-    (try
-      (let [first-segment (#'fixed-final/worker-scratch-segment first-worker 8)
-            second-segment (#'fixed-final/worker-scratch-segment second-worker 8)]
-        (is (not= (.address ^MemorySegment first-segment)
-                  (.address ^MemorySegment second-segment))))
-      (finally
-        (fixed-final/close-worker-scratch! first-worker)
-        (fixed-final/close-worker-scratch! second-worker)))))
-
-(deftest worker-reasserts-output-buffer-size-before-native-send
-  (let [worker (Object.)
-        req {:worker worker
-             :req-ctx-ptr :request-context
-             :config {:output-buffer-size 3}}
-        sent?_ (atom false)]
-    (.set worker-context/worker-context worker)
-    (try
-      (with-redefs [h2o/send-fixed-final (fn [& _] (reset! sent?_ true))]
-        (is (thrown? clojure.lang.ExceptionInfo
-                     (fixed-final/execute! req (prepared-command (byte-array 4)))))
-        (is (false? @sent?_)))
-      (finally
-        (.remove worker-context/worker-context)))))
-
-(deftest stale-command-skips-native-work-and-live-command-runs-on-the-worker
+(deftest producer-view-expires-without-invalidating-slot-storage
   (with-open [arena (mem/shared-arena)]
-    (let [dispatch (callback-dispatch/create arena)
-          worker {:callback-dispatch dispatch}
-          req {:worker worker :req-ctx-ptr :request-context}
-          module-id (:module-id dispatch)
-          command (assoc (prepared-command (byte-array [65])) :module-id module-id)
-          executed_ (AtomicReference.)]
-      (callback-dispatch/bind-thread! dispatch (Thread/currentThread))
-      (callback-dispatch/register! dispatch module-id 1 req nil)
-      (.set worker-context/worker-context worker)
-      (try
-        (with-redefs [fixed-final/execute!
-                      (fn [actual-req actual-command]
-                        (.set executed_ {:request-context (:req-ctx-ptr actual-req)
-                                         :command actual-command
-                                         :thread (Thread/currentThread)}))]
-          (generation/evloop-msg-processor :h2o/send-fixed-final
-                                           [(assoc command :module-id (inc module-id))])
-          (is (nil? (.get executed_)))
-          (generation/evloop-msg-processor :h2o/send-fixed-final
-                                           [command])
-          (is (= {:request-context :request-context
-                  :command command
-                  :thread (Thread/currentThread)}
-                 (.get executed_))))
-        (finally
-          (.remove worker-context/worker-context))))))
+    (let [size (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t)
+          slot (mem/alloc arena (+ size 65))
+          aliases_ (atom [])
+          foreign-result (promise)
+          caller_ (atom nil)
+          result (promise)
+          producer (fn [^ByteBuffer buffer]
+                     (reset! caller_ (Thread/currentThread))
+                     (reset! aliases_ [buffer (.slice buffer) (.duplicate buffer)])
+                     (let [thread (Thread/startVirtualThread
+                                   #(deliver foreign-result
+                                             (try (.put buffer 0 (byte 99)) :wrote
+                                                  (catch java.lang.WrongThreadException _ :rejected))))]
+                       (.join thread))
+                     (.put buffer (byte-array [99 97 116])))
+          thread (Thread/startVirtualThread
+                  #(deliver result
+                            (try
+                              (#'fixed-final/write-direct-producer-slot!
+                               slot 64 (direct-plan 1 1 200 [] -1 0 nil 0) 32 producer)
+                              {:status :prepared
+                               :aliases (mapv (fn [^ByteBuffer buffer]
+                                                (try (.get buffer 0) :readable
+                                                     (catch IllegalStateException _ :expired)))
+                                              @aliases_)}
+                              (catch Throwable error error))))]
+      (.join thread 2000)
+      (is (= {:status :prepared :aliases [:expired :expired :expired]}
+             (deref result 1000 :timeout)))
+      (is (= :rejected (deref foreign-result 1000 :timeout)))
+      (is (identical? thread @caller_))
+      (is (= {:body-len 3 :payload-len 3 :content-length 3}
+             (select-keys (mem/read slot h2o/ffi-clj-fixed-response-slot-data-t)
+                          [:body-len :payload-len :content-length])))
+      (is (= [99 97 116] (vec (mem/read-array (mem/slice slot size 3) :byte 3)))))))
+
+(deftest producer-exception-closes-alias-and-preserves-explicit-content-length
+  (with-open [arena (mem/shared-arena)]
+    (let [size (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t)
+          slot (mem/alloc arena (+ size 65))
+          alias_ (atom nil)
+          plan (direct-plan 1 1 200 [] 7 0 nil 0)]
+      (is (thrown-with-msg? Exception #"producer failed"
+                            (#'fixed-final/write-direct-producer-slot!
+                             slot 64 plan 16
+                             (fn [buffer]
+                               (reset! alias_ buffer)
+                               (throw (Exception. "producer failed"))))))
+      (is (thrown? IllegalStateException (.get ^ByteBuffer @alias_ 0)))
+      (#'fixed-final/write-direct-producer-slot!
+       slot 64 plan 16 (fn [^ByteBuffer buffer] (.put buffer (byte 1))))
+      (is (= {:body-len 1 :content-length 7}
+             (select-keys (mem/read slot h2o/ffi-clj-fixed-response-slot-data-t)
+                          [:body-len :content-length]))))))
+
+(deftest accepted-fixed-publication-survives-wake-failure
+  (let [worker {:response-slot-monitor (Object.)
+                :response-receiver-open?_ (AtomicBoolean. true)
+                :response-slots [:slot]
+                :response-slot-payload-capacity 64}
+        released?_ (atom false)]
+    (with-redefs [h2o/mt-response-publish (receiver-handle->long-fn (constantly 1))
+                  h2o/mt-response-abort (fn [& _] (throw (AssertionError. "published slot aborted")))
+                  h2o/mt-response-use-release (fn [_] (reset! released?_ true))
+                  pi/wake (fn [_] (throw (Exception. "wake failed")))]
+      (is (= :accepted
+             (#'fixed-final/prepare-and-publish!
+              worker [:receiver 65537] (constantly false) (fn [& _])
+              (fn [publish!] (publish!))))))
+    (is (true? @released?_))))
+
+(deftest fixed-producer-rejection-skips-callback
+  (doseq [rejection [:closed :overloaded]]
+    (with-redefs-fn
+      {#'fixed-final/claim-response! (fn [& _] rejection)}
+      #(is (= rejection
+              (fixed-final/publish-direct-producer!
+               {:response-slot-payload-capacity 64}
+               (direct-plan 1 1 200 [] -1 0 nil 0) 16
+               (fn [_] (throw (AssertionError. "rejected producer invoked")))
+               false (constantly false)
+               (fn [_] (throw (AssertionError. "rejected response accepted")))))))))
+
+(deftest fixed-capacity-wait-rechecks-release-and-cancellation
+  (doseq [cancel? [false true]]
+    (let [worker {:response-slot-monitor (Object.)}
+          checked (CountDownLatch. 1)
+          available?_ (atom false)
+          cancelled?_ (atom false)
+          result (promise)]
+      (with-redefs-fn
+        {#'fixed-final/claim-once!
+         (fn [_]
+           (if @available?_
+             [:receiver 65537]
+             (do (.countDown checked) :overloaded)))}
+        (fn []
+          (let [thread (Thread/startVirtualThread
+                        #(deliver result
+                                  (#'fixed-final/claim-response!
+                                   worker true (fn [] @cancelled?_))))]
+            (try
+              (is (.await checked 2 TimeUnit/SECONDS))
+              (if cancel? (reset! cancelled?_ true) (reset! available?_ true))
+              (fixed-final/notify-capacity! worker)
+              (is (= (if cancel? :closed [:receiver 65537])
+                     (deref result 2000 :timeout)))
+              (finally
+                (.interrupt thread)
+                (.join thread 2000)))))))))
 
 (defn- fixed-final-server
   []
@@ -355,21 +347,6 @@
       (.write out (.getBytes request StandardCharsets/US_ASCII))
       (.flush out)
       (slurp (.getInputStream socket)))))
-
-(deftest fixed-final-response-skips-clojure-message-dispatch-test
-  (let [ops_ (atom [])
-        process-message generation/evloop-msg-processor]
-    (with-redefs-fn
-      {#'generation/evloop-msg-processor
-       (fn [op args]
-         (swap! ops_ conj op)
-         (process-message op args))}
-      #(let [[server port] (fixed-final-server)]
-         (try
-           (is (.contains ^String (request-text port "GET") "generic"))
-           (finally
-             (busker/stop! server)))))
-    (is (zero? (count (filter #{:h2o/send-fixed-final} @ops_))))))
 
 (deftest response-ring-applies-live-response-from-a-virtual-thread
   (let [[server port] (fixed-final-server)
@@ -405,29 +382,10 @@
                   @drain-threads_))
       (finally
         (busker/stop! server)))))
-(deftest native-helper-sends-final-body-and-suppresses-head-body
-  (let [[server port] (fixed-final-server)
-        commit-final! (fn [req write-resp committed_ response _]
-                        (let [body (.getBytes "inline" StandardCharsets/UTF_8)
-                              headers [["content-type" "text/plain"]]
-                              command (prepared-command (:dispatch-module-id req)
-                                                        (:dispatch-request-seq req)
-                                                        (:status response)
-                                                        headers
-                                                        h2o/H2O_COMPRESS_HINT_ENABLE
-                                                        body)
-                              head (dissoc response :body)]
-                          (when (compare-and-set! committed_ nil head)
-                            (when-let [writer (response/writer-if-created write-resp)]
-                              (pi/stop writer))
-                            (pi/send-msg (:worker req) [:h2o/send-fixed-final command])
-                            {:head head :body nil})))]
+(deftest retained-fixed-response-suppresses-head-body
+  (let [[server port] (fixed-final-server)]
     (try
-      (with-redefs-fn {#'response/commit-final! commit-final!}
-        #(let [get-response (request-text port "GET")
-               head-response (request-text port "HEAD")]
-           (is (.contains get-response "inline"))
-           (is (not (.contains (second (str/split get-response #"\r\n\r\n" 2)) "generic")))
-           (is (not (.contains (second (str/split head-response #"\r\n\r\n" 2)) "inline")))))
+      (is (= "generic" (second (str/split (request-text port "GET") #"\r\n\r\n" 2))))
+      (is (= "" (second (str/split (request-text port "HEAD") #"\r\n\r\n" 2))))
       (finally
         (busker/stop! server)))))

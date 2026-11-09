@@ -1,7 +1,7 @@
 # Architecture decision records
 
-These records explain the design decisions made during Busker's development.
-See [Busker architecture](../architecture.md) for the current design and how later decisions replace earlier ones.
+These records describe Busker's design decisions.
+See [Busker architecture](../architecture.md) for the execution, response-storage and lifecycle contracts.
 
 - [001 — Response emitter close callback executor](001-response-emitter-close-callbacks.md)
   - Runs application close callbacks separately from event-loop threads.
@@ -15,10 +15,8 @@ See [Busker architecture](../architecture.md) for the current design and how lat
   - Runs start, reload, and stop work on platform threads.
 - [006 — Worker-side response head staging](006-worker-side-response-head-staging.md)
   - Prepares native status and header data on the event-loop worker.
-- [007 — Heap streaming aggregation](007-heap-streaming-aggregation.md)
-  - Combines application writes in heap buffers before the worker prepares native sends.
+- [007 — Bounded native streaming storage](007-bounded-native-streaming-storage.md)
+  - Retains reusable native blocks through producer access and asynchronous sends.
 - [008 — Apply complete fixed responses through H2O's event loop](008-native-fixed-response-exchange.md)
-  - Introduced a queued transfer of complete responses.
-  - Superseded by ADR 009.
 - [009 — Publish complete responses through preallocated native slots](009-preallocated-response-completion-ring.md)
-  - Replaces ADR 008's transfer with reusable native response-ring slots.
+  - Sends fixed-response bodies directly from slots retained until native cleanup.

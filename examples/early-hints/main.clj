@@ -25,17 +25,17 @@
 
 (defn page
   [{:ol.busker.request/keys [emitter] :as req}]
-  (future
+  (Thread/startVirtualThread
+   (fn []
     (when (#{"HTTP/2.0" "HTTP/3.0"} (:protocol req))
       (proto/emit! emitter {:status 103
                             :headers {"link" "</app.css>; rel=preload; as=style"}})
-      (proto/flush emitter)
+      (proto/flush! emitter)
       (Thread/sleep 100))
     (proto/emit! emitter {:status 200
                           :headers {"content-type" "text/html; charset=utf-8"
                                     "x-protocol" (:protocol req)}})
-    (proto/emit! emitter html)
-    (proto/close emitter))
+    (proto/emit! emitter html {:end? true})))
   {:body emitter})
 
 (defn handler

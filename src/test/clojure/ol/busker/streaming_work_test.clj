@@ -1,80 +1,70 @@
 (ns ol.busker.streaming-work-test
   (:require
-   [clojure.test :refer [deftest is testing]]
+   [clojure.test :refer [deftest is]]
+   [ol.busker.buffer-pool :as pool]
    [ol.busker.callback-dispatch :as dispatch]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.response-queue :as queue])
   (:import
    [java.util HashMap]
-   [java.util.concurrent ConcurrentHashMap]
-   [java.util.concurrent.atomic AtomicBoolean AtomicInteger]))
+   [java.util.concurrent ConcurrentHashMap]))
 
-(defn- fixture []
-  (let [dispatch {:streaming-work (ConcurrentHashMap.)
-                  :entries (HashMap.)}
-        writer (queue/new-response-state
-                {:worker {:callback-dispatch dispatch}
-                 :config {:buffer-pool ::unused :output-buffer-size 64}})]
-    [dispatch writer]))
+(defn- with-controller [f]
+  (let [p (pool/create-stream-pool 64)
+        d {:streaming-work (ConcurrentHashMap.) :entries (HashMap.)}
+        commands (atom [])
+        st (queue/create-response-writer
+            {:worker {:callback-dispatch d}
+             :config {:buffer-pool p :output-buffer-size 64}
+             :reserve-command! (fn [_ cancelled?] (if (cancelled?) :closed (Object.)))
+             :publish-command! (fn [_ command] (swap! commands conj command) :accepted)
+             :release-command! (fn [_] nil)
+             :apply-head! (fn [_ _] nil)})]
+    (try
+      (with-redefs [pi/wake (fn [_] nil)] (f d st commands))
+      (finally (queue/on-cleanup st) (pool/retire! p)))))
 
-(deftest streaming-work-transitions
-  (let [[d st] (fixture)]
-    (with-redefs [pi/send-required-msg (fn [_ _] :accepted)
-                  pi/wake (fn [_] nil)
-                  queue/drain-chunks (fn [& _] nil)]
-      (is (false? (dispatch/pending-response-work? d)))
-      (is (= :sent-msg (queue/schedule-drain! st)))
-      (is (dispatch/pending-response-work? d))
-      (is (= :signalled (queue/schedule-drain! st)))
-      (queue/send-vecs st)
-      (is (false? (dispatch/pending-response-work? d)))
-      (queue/schedule-drain! st)
-      (queue/on-stop st nil)
-      (is (false? (dispatch/pending-response-work? d)))
-      (queue/schedule-drain! st)
-      (is (false? (dispatch/pending-response-work? d))))))
+(deftest empty-markers-become-runnable-only-after-flush
+  (with-controller
+    (fn [d st commands]
+      (let [result (queue/emit-bounded! st nil 0 nil {})]
+        (queue/consume-record! st (peek (first @commands)))
+        (is (false? (dispatch/pending-response-work? d)))
+        (is (identical? (:progress result) (queue/flush! st)))
+        (is (dispatch/pending-response-work? d))
+        (queue/send-vecs st)
+        (is (= {:status :proceeded} (deref (:progress result) 1000 :timeout)))
+        (is (false? (dispatch/pending-response-work? d)))))))
 
-(deftest streaming-work-rejection
-  (let [[d st] (fixture)]
-    (with-redefs [pi/send-required-msg (fn [_ _] :closed)]
-      (is (thrown? java.io.IOException (queue/schedule-drain! st)))
-      (is (false? (dispatch/pending-response-work? d))))))
+(deftest flush-before-command-consumption-does-not-strand-output
+  (with-controller
+    (fn [d st commands]
+      (let [result (queue/emit-bounded! st nil 0 nil {})]
+        (queue/flush! st)
+        (is (false? (dispatch/pending-response-work? d)))
+        (queue/consume-record! st (peek (first @commands)))
+        (is (dispatch/pending-response-work? d))
+        (queue/send-vecs st)
+        (is (= {:status :proceeded} (deref (:progress result) 1000 :timeout)))
+        (let [next-result (queue/emit-bounded! st nil 0 nil {:flush? true})]
+          (queue/consume-record! st (peek (second @commands)))
+          (is (dispatch/pending-response-work? d))
+          (queue/send-vecs st)
+          (is (= {:status :proceeded} (deref (:progress next-result) 1000 :timeout))))))))
 
-(deftest streaming-work-in-flight
-  (let [[d st] (fixture)]
-    (with-redefs [pi/send-required-msg (fn [_ _] :accepted)
-                  queue/drain-chunks (fn [& _] [true [] []])]
-      (queue/schedule-drain! st)
-      (queue/send-vecs st)
-      (is (.get ^AtomicBoolean (:stopped?_ st)))
-      (is (dispatch/pending-response-work? d))
-      (queue/on-proceed st)
-      (is (false? (dispatch/pending-response-work? d))))))
-
-(deftest streaming-work-retirement-race
-  (let [[d st] (fixture)
-        pending? queue/pending-work?]
-    (with-redefs [pi/send-required-msg (fn [_ _] :accepted)]
-      (queue/schedule-drain! st)
-      ;; Model activation after the idle CAS, before retirement removes its entry.
-      (.set ^AtomicInteger (:drain-state_ st) 0)
-      (queue/schedule-drain! st)
-      (#'queue/retire-work! st)
-      (is (dispatch/pending-response-work? d))
-      ;; Model activation after removal, before the retirement recheck.
-      (.set ^AtomicInteger (:drain-state_ st) 0)
-      (with-redefs [queue/pending-work? (fn [writer]
-                                        (queue/schedule-drain! writer)
-                                        (pending? writer))]
-        (#'queue/retire-work! st))
+(deftest native-stop-removes-runnable-controls
+  (with-controller
+    (fn [d st _]
+      (queue/close! st)
       (is (dispatch/pending-response-work? d))
       (queue/on-stop st nil)
-      (#'queue/track-work! st)
+      (is (false? (dispatch/pending-response-work? d)))
+      (queue/flush! st)
       (is (false? (dispatch/pending-response-work? d))))))
 
 (deftest fixed-final-entries-are-not-scanned
-  (let [[d _] (fixture)]
-    (testing "request entries do not participate in the streaming work query"
+  (with-controller
+    (fn [d _ _]
       (.put ^HashMap (:entries d) 1 [nil (delay (throw (AssertionError.)))])
       (with-redefs [queue/pending-work? (fn [_] (throw (AssertionError.)))]
         (is (false? (dispatch/pending-response-work? d)))))))

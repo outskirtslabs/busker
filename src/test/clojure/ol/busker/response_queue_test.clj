@@ -1,0 +1,479 @@
+(ns ol.busker.response-queue-test
+  (:require
+   [clojure.test :refer [deftest is]]
+   [ol.busker.buffer-pool :as pool]
+   [ol.busker.byte-bounded-queue :as budget]
+   [ol.busker.internal.protocols :as pi]
+   [ol.busker.native :as native]
+   [ol.busker.response-queue :as queue]
+   [ol.busker.worker-mailbox :as mailbox])
+  (:import
+   [java.io OutputStream]
+   [java.nio ByteBuffer]))
+
+(defn- controller [p commands]
+  (queue/create-response-writer
+   {:config {:output-buffer-size (:block-size p) :buffer-pool p}
+    :reserve-command! (fn [_ cancelled?] (if (cancelled?) :closed (Object.)))
+    :publish-command! (fn [_ command] (swap! commands conj command) :accepted)
+    :release-command! (fn [_] nil)
+    :apply-head! (fn [_ _] nil)}))
+
+(defn- consume! [st commands]
+  (let [pending @commands]
+    (reset! commands [])
+    (doseq [command pending] (queue/consume-record! st (peek command)))))
+
+(deftest close-does-not-wait-for-private-producer
+  (with-redefs [pi/wake (fn [_] nil)]
+    (let [p (pool/create-stream-pool 8)
+          commands (atom [])
+          st (controller p commands)
+          entered (promise)
+          resume (promise)
+          result (promise)
+          producer (Thread/startVirtualThread
+                    (fn []
+                      (deliver result
+                               (queue/emit-bounded!
+                                st nil 8
+                                (fn [^ByteBuffer b]
+                                  (.put b (byte 7))
+                                  (deliver entered true)
+                                  @resume
+                                  (.put b (byte 8)))
+                                {}))))]
+      (try
+        (is (= true (deref entered 1000 :timeout)))
+        (is (true? (queue/close! st)))
+        (is (= 1 (pool/checked-out p)))
+        (is (false? (pool/retire! p)))
+        (deliver resume true)
+        (is (= {:status :closed} (deref result 1000 :timeout)))
+        (.join producer 1000)
+        (is (= [] @commands))
+        (is (= [0 0] [(pool/checked-out p) (budget/queued-bytes (:budget st))]))
+        (finally
+          (deliver resume true)
+          (.join producer 1000)
+          (queue/on-cleanup st)
+          (pool/retire! p))))))
+
+(deftest empty-writes-use-receipt-credit-and-close-at-capacity
+  (with-redefs [pi/wake (fn [_] nil)]
+    (let [p (pool/create-stream-pool 8)
+          commands (atom [])
+          st (controller p commands)]
+      (try
+        (let [writes (mapv (fn [_] (queue/emit-bounded! st nil 0 nil {:wait? false})) (range 64))]
+          (is (every? #(= :accepted (:status %)) writes))
+          (is (= {:status :full} (queue/emit-bounded! st nil 0 nil {:wait? false})))
+          (is (identical? (:progress (peek writes)) (queue/flush! st)))
+          (is (true? (queue/close! st)))
+          (is (false? (queue/close! st)))
+          (is (every? #(= {:status :closed} @(:progress %)) writes))
+          (is (= 0 (pool/checked-out p))))
+        (finally (queue/on-cleanup st) (pool/retire! p))))))
+
+(deftest producer-exception-does-not-commit-or-retain-reservations
+  (with-redefs [pi/wake (fn [_] nil)]
+    (let [p (pool/create-stream-pool 8)
+          commands (atom [])
+          st (controller p commands)]
+      (try
+        (is (thrown? IllegalArgumentException
+                     (queue/emit-bounded! st {:status 201} 8
+                                          (fn [_] (throw (IllegalArgumentException. "producer"))) {})))
+        (is (nil? (queue/committed-head st)))
+        (is (= [] @commands))
+        (is (= [0 0 0] [(pool/checked-out p) (budget/queued-bytes (:budget st))
+                        (:reserved-receipts @(:state_ st))]))
+        (finally (queue/on-cleanup st) (pool/retire! p))))))
+
+(deftest final-storage-survives-stop-until-cleanup
+  (with-redefs [pi/wake (fn [_] nil)
+                native/sendvec (fn [& _] nil)]
+    (let [p (pool/create-stream-pool 8)
+          commands (atom [])
+          st (controller p commands)]
+      (try
+        (let [result (queue/emit-bounded! st nil 8
+                                          (fn [^ByteBuffer b] (.put b (byte 1))) {:end? true})]
+          (is (= {:status :closed} @(:progress result)))
+          (consume! st commands)
+          (queue/send-vecs st)
+          (is (= [1 0] [(pool/checked-out p) (budget/queued-bytes (:budget st))]))
+          (queue/on-proceed st)
+          (queue/on-stop st nil)
+          (is (= 1 (pool/checked-out p)))
+          (queue/on-cleanup st)
+          (queue/on-cleanup st)
+          (is (= 0 (pool/checked-out p))))
+        (finally (queue/on-cleanup st) (pool/retire! p))))))
+
+(deftest synchronous-proceed-sees-installed-storage-and-settles-the-batch
+  (let [current (atom nil)
+        installed (atom false)]
+    (with-redefs [pi/wake (fn [_] nil)
+                  native/sendvec (fn [& _]
+                                   (reset! installed (some? (:in-flight @(:state_ @current))))
+                                   (queue/on-proceed @current))]
+      (let [p (pool/create-stream-pool 8)
+            commands (atom [])
+            st (controller p commands)]
+        (reset! current st)
+        (try
+          (let [a (queue/emit-bounded! st nil 1 (fn [^ByteBuffer b] (.put b (byte 1))) {})
+                b (queue/emit-bounded! st nil 0 nil {:flush? true})]
+            (consume! st commands)
+            (queue/send-vecs st)
+            (is (true? @installed))
+            (is (= [{:status :proceeded} {:status :proceeded}]
+                   [@(:progress a) @(:progress b)]))
+            (is (= [nil 0] [(:in-flight @(:state_ st)) (pool/checked-out p)])))
+          (finally (queue/on-cleanup st) (pool/retire! p)))))))
+
+(deftest global-block-pressure-flushes-the-unflushed-subset
+  (with-redefs [pi/wake (fn [_] nil)]
+    (let [p (pool/create-stream-pool 8)
+          streams (mapv (fn [_] (controller p (atom []))) (range 257))]
+      (try
+        (doseq [st (take 256 streams)]
+          (queue/emit-bounded! st nil 1 (fn [^ByteBuffer b] (.put b (byte 1))) {}))
+        (is (= {:status :full}
+               (queue/emit-bounded! (peek streams) nil 1
+                                    (fn [_] (throw (AssertionError. "Producer must not run")))
+                                    {:wait? false})))
+        (is (every? #(= 1 (:flush-prefix @(:state_ %))) (take 256 streams)))
+        (is (= 256 (pool/checked-out p)))
+        (finally
+          (doseq [st streams] (queue/on-cleanup st))
+          (pool/retire! p))))))
+
+(deftest mailbox-full-releases-preparation-without-calling-producer
+  (with-redefs [pi/wake (fn [_] nil)]
+    (let [p (pool/create-stream-pool 8)
+          commands (atom [])
+          st (controller p commands)
+          st (assoc-in st [:req :reserve-command!] (fn [_ _] :full))]
+      (try
+        (is (= {:status :full}
+               (queue/emit-bounded! st {:status 201} 8
+                                    (fn [_] (throw (AssertionError. "Producer must not run")))
+                                    {:wait? false})))
+        (is (= [nil 0 0] [(queue/committed-head st) (pool/checked-out p)
+                          (budget/queued-bytes (:budget st))]))
+        (finally (queue/on-cleanup st) (pool/retire! p))))))
+
+(defn- mailbox-controller [p m]
+  (queue/create-response-writer
+   {:config {:output-buffer-size (:block-size p) :buffer-pool p}
+    :reserve-command! #(mailbox/reserve! m %1 %2)
+    :publish-command! #(mailbox/publish! m %1 %2)
+    :release-command! #(mailbox/release! m %)
+    :wake-command-waiters! #(mailbox/wake-waiters! m)
+    :apply-head! (fn [_ _] nil)}))
+
+(defn- consume-mailbox! [st m]
+  (loop []
+    (when-let [command (mailbox/poll! m)]
+      (queue/consume-record! st (peek command))
+      (recur))))
+
+(defn- credits [st m]
+  {:blocks (pool/checked-out (:buffer-pool st))
+   :bytes (budget/queued-bytes (:budget st))
+   :receipts (count (:receipts @(:state_ st)))
+   :reserved-receipts (:reserved-receipts @(:state_ st))
+   :permits (:used @(:state_ m))})
+
+(deftest incremental-eof-settles-locally-after-prior-proceed-or-empty-source
+  (doseq [payload [(byte-array [1 2]) (byte-array 0)]]
+    (let [sends (atom [])]
+      (with-redefs [pi/wake (fn [_] nil)
+                    native/sendvec (fn [_ _ count state] (swap! sends conj [count state]))]
+        (let [p (pool/create-stream-pool 8)
+              m (mailbox/create)
+              st (mailbox-controller p m)
+              entered (promise)
+              resume (promise)
+              result (promise)
+              producer (Thread/startVirtualThread
+                        #(deliver result
+                                  (queue/emit-incremental!
+                                   st nil
+                                   (fn [^OutputStream out]
+                                     (.write out ^bytes payload)
+                                     (deliver entered true)
+                                     @resume) {})))]
+          (try
+            (is (= true (deref entered 1000 :timeout)))
+            (let [receipt (queue/flush! st)]
+              (is (= #{receipt} (:receipts @(:state_ st))))
+              (consume-mailbox! st m)
+              (queue/send-vecs st)
+              (when (pos? (alength ^bytes payload)) (queue/on-proceed st))
+              (is (not (realized? receipt)))
+              (is (nil? (:in-flight @(:state_ st))))
+              (deliver resume true)
+              (is (= {:status :accepted :progress receipt} (deref result 1000 :timeout)))
+              (consume-mailbox! st m)
+              (queue/send-vecs st)
+              (is (not (realized? receipt)))
+              (is (identical? receipt (queue/flush! st)))
+              (queue/send-vecs st)
+              (is (= {:status :proceeded} (deref receipt 1000 :timeout)))
+              (is (= (if (pos? (alength ^bytes payload))
+                       [[1 native/H2O_SEND_STATE_IN_PROGRESS]] []) @sends))
+              (is (= {:blocks 0 :bytes 0 :receipts 0 :reserved-receipts 0 :permits 0}
+                     (credits st m)))
+              (queue/on-cleanup st)
+              (queue/on-cleanup st)
+              (is (= {:status :proceeded} @receipt)))
+            (finally
+              (deliver resume true)
+              (.join producer 1000)
+              (queue/on-cleanup st)
+              (pool/retire! p))))))))
+
+(deftest incremental-preparation-failure-releases-initial-reservations
+  (with-redefs [pi/wake (fn [_] nil)]
+    (let [p (pool/create-stream-pool 8)
+          m (mailbox/create)
+          st (mailbox-controller p m)
+          st (assoc-in st [:req :reserve-command!]
+                       (fn [_ _] (throw (IllegalStateException. "reservation failed"))))]
+      (try
+        (is (thrown-with-msg? IllegalStateException #"reservation failed"
+                              (queue/emit-incremental!
+                               st {:status 201}
+                               (fn [_] (throw (AssertionError. "Source must not run"))) {})))
+        (is (= {:blocks 0 :bytes 0 :receipts 0 :reserved-receipts 0 :permits 0}
+               (credits st m)))
+        (is (= {:accepted 0 :head nil :producer nil}
+               (select-keys @(:state_ st) [:accepted :head :producer])))
+        (is (nil? (queue/flush! st)))
+        (is (zero? (mailbox/queued m)))
+        (finally (queue/on-cleanup st) (pool/retire! p))))))
+
+(deftest incremental-source-failure-keeps-accepted-receipt-and-native-storage
+  (let [sends (atom [])]
+    (with-redefs [pi/wake (fn [_] nil)
+                  native/sendvec (fn [_ _ count state] (swap! sends conj [count state]))]
+      (let [p (pool/create-stream-pool 8)
+            m (mailbox/create)
+            st (mailbox-controller p m)
+            entered (promise)
+            resume (promise)
+            result (promise)
+            failure (ex-info "Source failed" {})
+            producer (Thread/startVirtualThread
+                      #(deliver result
+                                (queue/emit-incremental!
+                                 st nil
+                                 (fn [^OutputStream out]
+                                   (.write out (byte-array [1 2]))
+                                   (deliver entered true)
+                                   @resume
+                                   (.write out (byte-array [3 4]))
+                                   (throw failure)) {})))]
+        (try
+          (is (= true (deref entered 1000 :timeout)))
+          (let [receipt (queue/flush! st)]
+            (is (= #{receipt} (:receipts @(:state_ st))))
+            (consume-mailbox! st m)
+            (queue/send-vecs st)
+            (is (not (realized? receipt)))
+            (deliver resume true)
+            (is (= {:status :accepted :progress receipt} (deref result 1000 :timeout)))
+            (is (= {:status :failed :cause failure} (deref receipt 1000 :timeout)))
+            (consume-mailbox! st m)
+            (is (= {:blocks 1 :bytes 0 :receipts 0 :reserved-receipts 0 :permits 0}
+                   (credits st m)))
+            (is (= [[1 native/H2O_SEND_STATE_IN_PROGRESS]] @sends))
+            (queue/on-proceed st)
+            (is (= [[1 native/H2O_SEND_STATE_IN_PROGRESS] [0 native/H2O_SEND_STATE_ERROR]] @sends))
+            (queue/on-cleanup st)
+            (queue/on-cleanup st)
+            (is (= {:blocks 0 :bytes 0 :receipts 0 :reserved-receipts 0 :permits 0}
+                   (credits st m)))
+            (is (= {:status :failed :cause failure} @receipt)))
+          (finally
+            (deliver resume true)
+            (.join producer 1000)
+            (queue/on-cleanup st)
+            (pool/retire! p)))))))
+
+(deftest close-captures-chunk-prefix-not-source-eof
+  (with-redefs [pi/wake (fn [_] nil)]
+    (let [p (pool/create-stream-pool 8)
+          commands (atom [])
+          st (controller p commands)
+          entered (promise)
+          resume (promise)
+          result (promise)
+          producer (Thread/startVirtualThread
+                    (fn []
+                      (deliver result
+                               (queue/emit-incremental!
+                                st nil
+                                (fn [^OutputStream out]
+                                  (.write out (byte-array [1 2]))
+                                  (deliver entered true)
+                                  @resume
+                                  (.write out (byte-array [3 4]))) {}))))]
+      (try
+        (is (= true (deref entered 1000 :timeout)))
+        (let [receipt (queue/flush! st)]
+          (is (= 2 (:flush-prefix @(:state_ st))))
+          (is (true? (queue/close! st)))
+          (is (= {:status :closed} @receipt))
+          (deliver resume true)
+          (let [returned (deref result 1000 :timeout)]
+            (is (= {:status :accepted :progress receipt} returned)))
+          (is (= 2 (count @commands)))
+          (is (= 2 (:accepted @(:state_ st)))))
+        (finally
+          (deliver resume true)
+          (.join producer 1000)
+          (queue/on-cleanup st)
+          (pool/retire! p))))))
+
+(defn- await-condition!
+  "Spins until `ready?` returns true and throws after five seconds."
+  [ready?]
+  (let [deadline (+ (System/nanoTime) 5000000000)]
+    (while (not (ready?))
+      (when (> (System/nanoTime) deadline)
+        (throw (ex-info "Condition was not reached" {})))
+      (Thread/onSpinWait))))
+
+(deftest pending-byte-fullness-alone-rejects-and-flushes
+  (with-redefs [pi/wake (fn [_] nil)]
+    (let [p (pool/create-stream-pool 8)
+          m (mailbox/create)
+          st (mailbox-controller p m)]
+      (try
+        (let [first-write (queue/emit-bounded! st nil 8
+                                               (fn [^ByteBuffer b] (.put b (byte-array 8 (byte 1))))
+                                               {})]
+          (is (= :accepted (:status first-write)))
+          (is (= 0 (:flush-prefix @(:state_ st))))
+          (is (= {:blocks 1 :bytes 8 :receipts 1 :reserved-receipts 0 :permits 1}
+                 (credits st m)))
+          (is (= {:status :full}
+                 (queue/emit-bounded! st nil 1
+                                      (fn [_] (throw (AssertionError. "Producer must not run")))
+                                      {:wait? false})))
+          (is (= 1 (:flush-prefix @(:state_ st))) "Pressure makes the older write ready.")
+          (is (= {:blocks 1 :bytes 8 :receipts 1 :reserved-receipts 0 :permits 1}
+                 (credits st m)))
+          (is (= 1 (:accepted @(:state_ st)))))
+        (finally (queue/on-cleanup st) (pool/retire! p))))))
+
+(deftest full-bytes-flush-older-output-before-a-blocking-writer-parks
+  (with-redefs [pi/wake (fn [_] nil)
+                native/sendvec (fn [& _] nil)]
+    (let [p (pool/create-stream-pool 8)
+          m (mailbox/create)
+          st (mailbox-controller p m)
+          result (promise)]
+      (try
+        (queue/emit-bounded! st nil 8 (fn [^ByteBuffer b] (.put b (byte-array 8 (byte 1)))) {})
+        (let [writer (Thread/startVirtualThread
+                      #(deliver result
+                                (queue/emit-bounded! st nil 1
+                                                     (fn [^ByteBuffer b] (.put b (byte 2))) {})))]
+          (try
+            (await-condition! #(= 1 (:flush-prefix @(:state_ st))))
+            (is (not (realized? result)) "No byte credit returns before the older write is sent.")
+            (consume-mailbox! st m)
+            (queue/send-vecs st)
+            (is (= :accepted (:status (deref result 5000 ::timeout))))
+            (is (= {:blocks 2 :bytes 1 :receipts 2 :reserved-receipts 0 :permits 1}
+                   (credits st m)))
+            (finally (.join writer 1000))))
+        (finally (queue/on-cleanup st) (pool/retire! p))))))
+
+(deftest close-between-preparation-and-acceptance-publishes-nothing
+  (with-redefs [pi/wake (fn [_] nil)]
+    (let [p (pool/create-stream-pool 8)
+          m (mailbox/create)
+          st (mailbox-controller p m)
+          fill pool/fill-native-range!
+          called (atom 0)]
+      (try
+        (with-redefs [pool/fill-native-range!
+                      (fn [segment capacity producer]
+                        (let [written (fill segment capacity producer)]
+                          (is (true? (queue/close! st)))
+                          written))]
+          (is (= {:status :closed}
+                 (queue/emit-bounded! st {:status 201} 3
+                                      (fn [^ByteBuffer b]
+                                        (swap! called inc)
+                                        (.put b (byte-array [1 2 3])))
+                                      {}))))
+        (is (= 1 @called))
+        (is (nil? (queue/committed-head st)))
+        (is (= 0 (:accepted @(:state_ st))))
+        (is (zero? (mailbox/queued m)))
+        (is (nil? (queue/flush! st)))
+        (is (= {:blocks 0 :bytes 0 :receipts 0 :reserved-receipts 0 :permits 0}
+               (credits st m)))
+        (finally (queue/on-cleanup st) (pool/retire! p))))))
+
+(deftest blocking-writer-progresses-after-global-block-exhaustion
+  (with-redefs [pi/wake (fn [_] nil)
+                native/sendvec (fn [& _] nil)]
+    (let [p (pool/create-stream-pool 8)
+          mailboxes (vec (repeatedly 257 mailbox/create))
+          streams (mapv #(mailbox-controller p %) mailboxes)
+          fresh (peek streams)
+          result (promise)]
+      (try
+        (doseq [st (pop streams)]
+          (queue/emit-bounded! st nil 1 (fn [^ByteBuffer b] (.put b (byte 1))) {}))
+        (is (= 256 (pool/checked-out p)))
+        (let [writer (Thread/startVirtualThread
+                      #(deliver result
+                                (queue/emit-bounded! fresh nil 1
+                                                     (fn [^ByteBuffer b] (.put b (byte 2))) {})))]
+          (try
+            (await-condition! #(every? (fn [st] (= 1 (:flush-prefix @(:state_ st)))) (pop streams)))
+            (is (not (realized? result)) "Pressure does not reclaim queued blocks.")
+            (let [st (first streams)]
+              (consume-mailbox! st (first mailboxes))
+              (queue/send-vecs st)
+              (is (not (realized? result)) "A block in native use stays checked out.")
+              (queue/on-proceed st))
+            (is (= :accepted (:status (deref result 5000 ::timeout))))
+            (is (= 256 (pool/checked-out p)))
+            (finally (.join writer 1000))))
+        (finally
+          (doseq [st streams] (queue/on-cleanup st))
+          (pool/retire! p))))))
+
+(deftest wake-failure-after-streaming-acceptance-keeps-output-and-end
+  (let [sends (atom [])]
+    (with-redefs [pi/wake (fn [_] (throw (IllegalStateException. "wake failed")))
+                  native/sendvec (fn [_ _ count state] (swap! sends conj [count state]))]
+      (let [p (pool/create-stream-pool 8)
+            m (mailbox/create)
+            st (mailbox-controller p m)]
+        (try
+          (let [result (binding [*err* (java.io.StringWriter.)]
+                         (queue/emit-bounded! st {:status 200} 1
+                                              (fn [^ByteBuffer b] (.put b (byte 1)))
+                                              {:end? true}))]
+            (is (= :accepted (:status result)))
+            (is (= {:status :closed} (deref (:progress result) 1000 ::timeout)))
+            (is (= [false 1 1] [(queue/open? st) (:end-prefix @(:state_ st)) (mailbox/queued m)]))
+            (binding [*err* (java.io.StringWriter.)]
+              (consume-mailbox! st m)
+              (queue/send-vecs st))
+            (is (= [[1 native/H2O_SEND_STATE_FINAL]] @sends))
+            (queue/on-cleanup st)
+            (is (= {:blocks 0 :bytes 0 :receipts 0 :reserved-receipts 0 :permits 0}
+                   (credits st m))))
+          (finally (queue/on-cleanup st) (pool/retire! p)))))))

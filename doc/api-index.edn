@@ -9,14 +9,6 @@
     "start!" "start-BANG-",
     "state" "state",
     "stop!" "stop-BANG-"}},
-  "ol.busker.buffer-pool"
-  {:page "api/ol-busker-buffer-pool.adoc",
-   :vars
-   {"BufferPool" "BufferPool",
-    "borrow" "borrow",
-    "dispose" "dispose",
-    "make-bytebuffer-pool" "make-bytebuffer-pool",
-    "return" "return"}},
   "ol.busker.middleware"
   {:page "api/ol-busker-middleware.adoc",
    :vars {"wrap-reject-early-data" "wrap-reject-early-data"}},
@@ -26,9 +18,9 @@
    {"ResponseEmitter" "ResponseEmitter",
     "SizableResponseBody" "SizableResponseBody",
     "body-size-in-bytes" "body-size-in-bytes",
-    "close" "close",
+    "close!" "close-BANG-",
     "committed?" "committed-QMARK-",
     "emit!" "emit-BANG-",
-    "flush" "flush",
-    "on-close" "on-close",
+    "flush!" "flush-BANG-",
+    "on-close!" "on-close-BANG-",
     "open?" "open-QMARK-"}}}}

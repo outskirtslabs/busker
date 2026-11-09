@@ -2,7 +2,19 @@
   "Starts, drains, reloads, and stops one native server generation.
 
   Key functions create workers and native contexts, coordinate graceful draining, and release
-  receivers and arenas after active work ends.
+  receivers and arenas after active work ends. Lifecycle allocation and disposal
+  run on platform threads; handlers and close callbacks use virtual executors.
+
+  Each worker receives 256 fixed-response slots and a separate shared streaming
+  arena of 256 * `:output-buffer-size` bytes (8 MiB at the default size).
+  Graceful draining leaves admitted responses usable. Receiver admission closes
+  before retirement, but entered producers and native sends keep storage valid
+  until publication, discard or cleanup. A timeout or native failure reports
+  incomplete retirement and retains the generation rather than freeing live data.
+
+  Partial-startup cleanup unregisters receivers before disposing their H2O
+  contexts. Dependent resources must remain allocated if safe cleanup cannot be
+  established; startup still throws its original error.
 
   ## Related Namespaces
 
@@ -24,7 +36,8 @@
    [ol.busker.native :as h2o]
    [ol.busker.native.socket :as socket]
    [ol.busker.request :as request]
-   [ol.busker.response-head :as response-head]
+   [ol.busker.response-queue :as rq]
+   [ol.busker.worker-mailbox :as mailbox]
    [ol.busker.tickets :as tickets]
    [ol.busker.wake-notifier :as wake-notifier]
    [ol.clave.certificate :as clave-certificate]
@@ -49,12 +62,14 @@
 
 (defn- retain-failed-retirement!
   [generation phase-atom error]
-  (trove/log! {:level :error
-               :id    ::callback-retirement-failed
-               :ex    error
-               :data  {:generation-id (::generation-id generation)}})
   (swap! failed-retirements_ conj generation)
-  (reset! phase-atom :retirement-failed))
+  (reset! phase-atom :retirement-failed)
+  (try
+    (trove/log! {:level :error
+                 :id ::callback-retirement-failed
+                 :ex error
+                 :data {:generation-id (::generation-id generation)}})
+    (catch Throwable _ nil)))
 
 (defn- remove-failed-retirement!
   [generation]
@@ -109,32 +124,13 @@
         (fn [req]
           (h2o/proceed-req (:req (:req-ctx req))))))
 
-    :h2o/sendvec
-    (let [[module-id request-seq send-vecs] args]
-      (with-live-request module-id request-seq
-        (fn [_]
-          (send-vecs))))
-
-    :h2o/send-informational
-    (let [[command] args]
-      (with-live-request (response-head/command-module-id command)
-        (response-head/command-request-seq command)
-        (fn [req]
-          (response-head/execute-informational! req command))))
-
-    :h2o/send-fixed-final
-    (let [[command] args]
-      (with-live-request (fixed-final/command-module-id command)
-        (fixed-final/command-request-seq command)
-        (fn [req]
-          (fixed-final/execute! req command))))
-
-    :h2o/start-response
-    (let [[command] args]
-      (with-live-request (response-head/command-module-id command)
-        (response-head/command-request-seq command)
-        (fn [req]
-          (response-head/execute-start! req command))))
+    :h2o/output
+    (let [[module-id request-seq st record] args
+          worker (worker-context/get-current-worker)]
+      (if (and worker (callback-dispatch/entry (:callback-dispatch worker)
+                                               module-id request-seq))
+        (rq/consume-record! st record)
+        (rq/discard-record! st record)))
     nil))
 
 (defn- create-connection-close-callback
@@ -311,7 +307,16 @@
 (defn- close-response-receiver-admission!
   [worker]
   (when-let [^AtomicBoolean receiver-open?_ (:response-receiver-open?_ worker)]
-    (.set receiver-open?_ false)))
+    (.set receiver-open?_ false))
+  (fixed-final/notify-capacity! worker))
+
+(defn- worker-native-failure! [worker cause]
+  (.compareAndSet ^AtomicReference (:native-failure_ worker) nil cause)
+  (.set ^AtomicBoolean (:accepting?_ worker) false)
+  (.set ^AtomicBoolean (:running?_ worker) false)
+  (mailbox/close! (:mailbox worker))
+  (close-response-receiver-admission! worker)
+  (callback-dispatch/fail-responses! (:callback-dispatch worker) cause))
 
 (defn- destroy-response-receiver!
   [worker]
@@ -336,13 +341,14 @@
           (.unlock write-lock))))))
 
 (defn- ready-to-dispose?
-  [{:keys [context-disposed? shutdown-initiated? receiver-destroyed?]}
+  [{:keys [context-disposed? shutdown-initiated?]}
    {:keys [ctx-ptr http3-ctxs active-connection-count_]} worker]
   (and (not context-disposed?)
        shutdown-initiated?
-       receiver-destroyed?
        (all-connections-drained? ctx-ptr http3-ctxs active-connection-count_)
        (response-exchange-drained? worker)
+       (not (mailbox/pending? (:mailbox worker)))
+       (zero? (bp/checked-out (:stream-pool worker)))
        (callback-dispatch/no-live-entries? (:callback-dispatch worker))))
 
 (defn- check-and-initiate-shutdown!
@@ -371,8 +377,10 @@
 (defn- dispose-context-if-ready
   [loop-state worker {:keys [ctx-ptr http3-ctxs] :as state}]
   (if (and (ready-to-dispose? loop-state state worker)
-           (destroy-response-receiver! worker))
+           (destroy-response-receiver! worker)
+           (bp/retire! (:stream-pool worker)))
     (do
+      (retire-current-wakeup-receiver!)
       (doseq [http3-ctx http3-ctxs]
         (when (and http3-ctx (not (mem/null? http3-ctx)))
           (h2o/http3-free-worker-ctx http3-ctx)))
@@ -387,6 +395,8 @@
 (defn- worker-loop
   [worker loop-state
    {:keys [loop-ptr ctx-ptr listener-socks accept-callbacks max-connections] :as state}]
+  (when-let [failure (.get ^AtomicReference (:native-failure_ worker))]
+    (throw failure))
   (let [mailbox-work? (true? (::evloop/mailbox-work? loop-state))
         loop-state (-> (dissoc loop-state ::evloop/mailbox-work?)
                        (check-and-initiate-shutdown! state)
@@ -399,6 +409,9 @@
                         receiver
                         (not (mem/null? receiver))
                         (pos? (h2o/mt-response-ring-drain receiver)))
+        _ (when-not disposed?
+            (when ring-work? (fixed-final/notify-capacity! worker))
+            (callback-dispatch/drain-responses! (:callback-dispatch worker)))
         shutting? (true? (:shutdown-initiated? loop-state))]
     (if disposed?
       (h2o/evloop-run loop-ptr 0)
@@ -408,7 +421,7 @@
                       ring-work? 0
                       mailbox-work? 0
                       (callback-dispatch/pending-response-work?
-                       (:callback-dispatch worker)) 5
+                       (:callback-dispatch worker)) 0
                       shutting? 10
                       :else base-wait)]
         (when-not shutting?
@@ -1023,10 +1036,10 @@
 (defn- init-worker-state
   [{::keys [n-workers loops contexts listener-runtimes http3-worker-contexts
             max-connections shutting-down? message-handler wakeup-receivers response-receivers
-            response-slots response-slot-payload-capacity
+            response-slots response-slot-payload-capacity stream-pools
             wake-notifier arena stop-accepting-remaining_ stopped-accepting_
             active-connection-count_]
-    :as state}]
+    :as state} cleanup-state_]
   (let [workers
         (vec
          (for [thread-idx (range n-workers)]
@@ -1038,28 +1051,46 @@
                  listener-socks-for-thread (mapv :socket thread-listener-states)
                  accept-callbacks-for-thread (mapv :accept-callback-ptr thread-listener-states)
                  http3-ctxs-for-thread (nth http3-worker-contexts thread-idx)]
-             (evloop/start-worker!
-              (fn [worker loop-state]
-                (worker-loop worker
-                             loop-state
-                             {:listener-socks listener-socks-for-thread
-                              :accept-callbacks accept-callbacks-for-thread
-                              :loop-ptr loop-ptr
-                              :ctx-ptr ctx-ptr
-                              :http3-ctxs http3-ctxs-for-thread
-                              :max-connections max-connections
-                              :shutting-down? shutting-down?
-                              :active-connection-count_ active-connection-count_
-                              ::stop-accepting-remaining_ stop-accepting-remaining_
-                              ::stopped-accepting_ stopped-accepting_}))
-              message-handler
-              (nth wakeup-receivers thread-idx)
-              :response-receiver (nth response-receivers thread-idx)
-              :response-slots (nth response-slots thread-idx)
-              :response-slot-payload-capacity response-slot-payload-capacity
-              :callback-dispatch callback-dispatch
-              :wake-notifier wake-notifier))))]
+             (let [worker (evloop/start-worker!
+                           (fn [worker loop-state]
+                             (worker-loop worker
+                                          loop-state
+                                          {:listener-socks listener-socks-for-thread
+                                           :accept-callbacks accept-callbacks-for-thread
+                                           :loop-ptr loop-ptr
+                                           :ctx-ptr ctx-ptr
+                                           :http3-ctxs http3-ctxs-for-thread
+                                           :max-connections max-connections
+                                           :shutting-down? shutting-down?
+                                           :active-connection-count_ active-connection-count_
+                                           ::stop-accepting-remaining_ stop-accepting-remaining_
+                                           ::stopped-accepting_ stopped-accepting_}))
+                           message-handler
+                           (nth wakeup-receivers thread-idx)
+                           :stream-pool (nth stream-pools thread-idx)
+                           :on-native-failure! worker-native-failure!
+                           :discard-command! (fn [[op _ _ st record]]
+                                               (when (= :h2o/output op)
+                                                 (rq/discard-record! st record)))
+                           :response-receiver (nth response-receivers thread-idx)
+                           :response-slots (nth response-slots thread-idx)
+                           :response-slot-payload-capacity response-slot-payload-capacity
+                           :callback-dispatch callback-dispatch
+                           :wake-notifier wake-notifier)]
+               (vswap! cleanup-state_ update ::workers (fnil conj []) worker)
+               worker))))]
     (assoc state ::workers workers)))
+
+(defn- init-stream-pools
+  [{::keys [config n-workers] :as state}]
+  (let [pools_ (atom [])]
+    (try
+      (dotimes [_ n-workers]
+        (swap! pools_ conj (bp/create-stream-pool (:output-buffer-size config))))
+      (assoc state ::stream-pools @pools_)
+      (catch Throwable t
+        (doseq [pool @pools_] (bp/retire! pool))
+        (throw t)))))
 
 (defn- finalize-generation-state
   [state]
@@ -1098,16 +1129,12 @@
   generation)
 
 (defn await-stop-accepting!
-  [{::keys [stopped-accepting_] :as _generation}]
-  @stopped-accepting_
+  [{::keys [stopped-accepting_ phase] :as generation}]
+  (when (= ::timeout (deref stopped-accepting_ 60000 ::timeout))
+    (let [error (ex-info "Workers did not stop accepting; generation retained" {})]
+      (retain-failed-retirement! generation phase error)
+      (throw error)))
   nil)
-
-(defn- request-wakeup-receiver-retirement!
-  [worker]
-  (case (p/send-required-msg worker [:h2o/retire-wakeup-receiver])
-    :accepted true
-    :closed (throw (ex-info "Worker stopped before wake receiver retirement"
-                            {:worker-id (:id worker)}))))
 
 (defn stop!
   ([generation]
@@ -1119,7 +1146,7 @@
    (locking stop-lock
      (let [phase-atom (::phase generation)]
        (when (not= :stopped @phase-atom)
-         (when (contains? #{:stopping :retirement-failed} @phase-atom)
+         (when (contains? #{:stopping :retiring :retirement-failed} @phase-atom)
            (when (= :stopping @phase-atom)
              (when executor
                (when-not (.awaitTermination executor timeout timeunit)
@@ -1128,34 +1155,37 @@
                    (println "Virtual thread request executor pool did not shutdown cleanly"))))
              (when (seq (::workers generation))
                (evloop/broadcast-wake! (::workers generation)))
-             (if (seq (::workers generation))
-               (doseq [worker (::workers generation)]
-                 (request-wakeup-receiver-retirement! worker))
-               (do
-                 (doseq [receiver (::wakeup-receivers generation)]
-                   (when (and receiver (not (mem/null? receiver)))
-                     (h2o/mt-destroy-wakeup-receiver receiver)))
-                 (doseq [receiver (::response-receivers generation)]
-                   (when (and receiver (not (mem/null? receiver)))
-                     (h2o/mt-destroy-response-receiver receiver)))))
              (reset! phase-atom :retiring))
            (let [{:keys [joined? error]}
                  (try
-                   (when (seq (::workers generation))
-                     (evloop/join-all! (::workers generation)))
-                   {:joined? (not-any? (fn [worker]
-                                         (.isAlive ^Thread (:thread worker)))
-                                       (::workers generation))}
+                   (let [deadline (+ (System/nanoTime) (.toNanos timeunit timeout))]
+                     (doseq [worker (::workers generation)]
+                       (let [remaining (- deadline (System/nanoTime))]
+                         (when (pos? remaining)
+                           (.join ^Thread (:thread worker)
+                                  (max 1 (quot remaining 1000000)))))))
+                   {:joined? (and
+                              (not-any? (fn [worker]
+                                          (or (.isAlive ^Thread (:thread worker))
+                                              (.get ^AtomicReference (:native-failure_ worker))
+                                              (mailbox/pending? (:mailbox worker))
+                                              (not (response-exchange-drained? worker))
+                                              (pos? (bp/checked-out (:stream-pool worker)))))
+                                        (::workers generation))
+                              (every? #(zero? (bp/checked-out %)) (::stream-pools generation)))}
                    (catch InterruptedException t
                      (.interrupt (Thread/currentThread))
                      {:joined? false :error t})
                    (catch Throwable t
                      {:joined? false :error t}))]
              (if-not joined?
-               (retain-failed-retirement!
-                generation phase-atom
-                (or error
-                    (ex-info "Callback retirement could not establish worker join" {})))
+               (let [failure (or error
+                                 (ex-info "Generation retirement timed out; native resources retained" {}))]
+                 (doseq [worker (::workers generation)]
+                   (.compareAndSet ^AtomicReference (:termination-cause_ worker) nil failure)
+                   (p/wake worker))
+                 (retain-failed-retirement! generation phase-atom failure)
+                 (throw failure))
                (do
                  (when (not= false (::wake-notifier-owned? generation))
                    (when-let [notifier (::wake-notifier generation)]
@@ -1169,6 +1199,17 @@
                      (.shutdownNow close-callback-executor)
                      (when-not (.awaitTermination close-callback-executor timeout timeunit)
                        (println "Virtual thread close callback executor did not shutdown cleanly"))))
+                 (doseq [idx (range (count (::workers generation))
+                                    (count (::contexts generation)))]
+                   (doseq [listener (::listener-runtimes generation)]
+                     (when-let [sock (get-in listener [:thread-states idx :socket])]
+                       (h2o/socket-close sock)))
+                   (doseq [ctx (get (::http3-worker-contexts generation) idx)]
+                     (when (and ctx (not (mem/null? ctx)))
+                       (h2o/http3-free-worker-ctx ctx)))
+                   (h2o/mt-destroy-wakeup-receiver (nth (::wakeup-receivers generation) idx))
+                   (h2o/mt-destroy-response-receiver (nth (::response-receivers generation) idx))
+                   (h2o/context-dispose (nth (::contexts generation) idx)))
                  (when-let [http3-contexts (::http3-contexts generation)]
                    (free-http3-contexts http3-contexts))
                  (when-let [ticket-mgr (::native-ticket-mgr generation)]
@@ -1180,8 +1221,9 @@
                  (doseq [{:keys [ssl-ctx-ptr]} (::listener-runtimes generation)]
                    (when ssl-ctx-ptr
                      (h2o/free-ssl-ctx ssl-ctx-ptr)))
-                 (when-let [buffer-pool (-> generation ::config :buffer-pool)]
-                   (bp/dispose buffer-pool))
+                 (doseq [pool (::stream-pools generation)]
+                   (when-not (bp/retire! pool)
+                     (throw (ex-info "Streaming storage remains checked out" {}))))
                  (release-listener-claims! (::listener-claims generation))
                  (when-let [arena (::arena generation)]
                    (.close ^java.lang.AutoCloseable arena))
@@ -1223,19 +1265,19 @@
                           ::executor (new-request-executor)
                           ::close-callback-executor (new-close-callback-executor))
              _ (vreset! cleanup-state_ state)]
-         (cond-> (-> state
-                     init-tls-lookup-state
-                     init-core-state
-                     init-listener-state
-                     init-tls-http3-state
-                     init-worker-state
-                     finalize-generation-state)
+         (cond-> (reduce (fn [state initialize]
+                           (let [next-state (initialize state)]
+                             (vreset! cleanup-state_ next-state)
+                             next-state))
+                         state
+                         [init-tls-lookup-state init-core-state init-stream-pools
+                          init-listener-state init-tls-http3-state
+                          #(init-worker-state % cleanup-state_) finalize-generation-state])
            activate-http3-transports? activate-http3-transports!))
        (catch Throwable t
          (try
            (if-let [state @cleanup-state_]
              (stop! state)
              (release-listener-claims! listener-claims))
-           (catch Throwable _
-             (release-listener-claims! listener-claims)))
+           (catch Throwable _ nil))
          (throw t))))))

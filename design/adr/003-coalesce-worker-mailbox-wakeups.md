@@ -6,41 +6,26 @@ Accepted
 
 ## Context
 
-Each accepted worker-mailbox message previously called the native wake helper. The fixed-final path adds ordinary-data response commands to that mailbox, so it must preserve FIFO order with informational and streaming control messages while reducing repeated wake calls.
-
-The mailbox remains bounded. Producers must not block virtual threads. A wake can fail after a message enters the mailbox, and a consumer can observe an empty mailbox while a producer is adding work.
+Application virtual threads publish commands for a platform worker. Commands must preserve FIFO order without requiring a native wake for every message. A wake can fail after acceptance, and an empty poll can race a producer. Neither event permits accepted work to disappear.
 
 ## Decision
 
-Each worker stores an atomic mailbox-signal generation and a short admission counter. Even generations mean no active signal. Odd generations identify a signal batch.
+Each worker has one mailbox with capacity for 256 commands, including reserved, unpublished permits. All producers use the same accounting. Reserving a permit does not insert an empty FIFO position, so a slow producer cannot delay published commands. A valid permit permits publication without another capacity check. Preparation must either publish or release its permit.
 
-A producer checks that admission remains open, increments the counter, checks again, and offers to the mailbox. It decrements the counter before signalling. A successful offer advances an even generation to an odd token and then calls the native wake helper. Other producers that observe an odd token leave that batch signalled without another native wake.
+Nonblocking worker submission returns `:accepted`, `:overloaded` or `:closed`. Required submission waits interruptibly through Java synchronization and returns `:accepted` or `:closed`. Polling a command or releasing a permit wakes capacity waiters. Closing admission wakes them and rejects new reservations; valid permits and queued work remain accounted for until publication, execution or discard.
 
-Every nonblocking submission returns `:accepted`, `:overloaded`, or `:closed`. Required commands use the same offer path but wait on a Java condition when the result is `:overloaded`. The consumer signals waiting producers after a complete mailbox drain. Closing admission signals them immediately, and they return `:closed` without offering work. This wait performs no native call and does not change mailbox capacity.
+Each worker stores an atomic mailbox-signal generation. Even values mean no active signal; odd values identify a signal batch. Publication changes an even value to an odd token and requests a wake. Other producers that observe an odd token share that signal. The platform notifier performs native wake I/O.
 
-Fixed-final selection remains nonblocking so overload can use its generic response fallback. Generic response start, informational responses, request-body proceed, first stream drain, legacy sendvec, and receiver retirement use required submission. Their callers handle `:closed` as an explicit false return, stream error, or lifecycle failure.
+If notification throws, the producer resets only its exact odd token, acquires a fresh token and retries once. A second failure clears that retry token and logs the failure without changing acceptance. A later producer can request another wake.
 
-If a wake throws, the producer resets only its exact odd token to the next even generation. It then retries once after acquiring a new odd token. A second failure resets only that retry token, logs the accepted message and both failures, and returns successful admission. A later producer can acquire the resulting even generation and retry wake delivery.
+The worker handles at most 256 mailbox commands per pass before native polling. After an empty poll it clears the signal and polls again. Work found by that recheck restores the signal. Turn exhaustion keeps the signal pending. After handling commands, the next native poll uses zero wait: native calls during mailbox processing can schedule H2O callbacks that otherwise wait behind an idle poll.
 
-The consumer drains FIFO messages. After an empty poll, it clears an odd token to its next even generation and polls again. If the second poll finds a message, it marks the generation odd and continues draining before entering the native event loop. If a producer adds work after the second poll, that producer sees an even generation and wakes the event loop.
+Flush and end requests use coalesced per-response sequence prefixes, not mailbox permits. A worker applies a prefix only after its accepted records have arrived or been discarded. Close therefore does not wait for command, byte or receipt capacity. Fixed responses use separate preallocated slots and wait or report full when those slots are exhausted.
 
-Direct `wake` calls for streaming flow control remain immediate.
-
-After a worker drain handles any mailbox message, the immediately following native loop iteration uses zero wait.
-Native downcalls made while draining can add H2O pending callbacks while `h2o_evloop_run` is inactive.
-H2O polls before it runs those callbacks, so using the ordinary idle wait would delay response completion and HTTP/1.1 request reuse.
-
-Streaming response proceed callbacks drain the next queued chunk directly on the worker thread instead of posting another mailbox command. H2O invokes proceed only after consuming the previous chunk, so the direct call preserves its required `sendvec → proceed → sendvec` sequence and lets H2O update write polling in the same event-loop turn.
-
-Each response writer uses an atomic three-state drain marker: idle, active, or active with a producer signal. A producer changes idle to active before posting the first mailbox command. If a command or native send is already active, the producer records a signal and wakes the worker. An empty worker drain retires to idle only when no signal exists; otherwise it consumes the signal and checks the queue again.
-Stop first closes admission, waits for admission sections already in progress, marks stop requested, and wakes the worker. The worker drains every admitted mailbox message before it exits. Later offers return `false`.
+Streaming proceed drains directly on the worker, preserving H2O's send/proceed/send ordering. A bounded, nonrecursive send loop handles synchronous callbacks. Response work registration and removal share the response monitor; a producer cannot signal between an empty check and removal and leave work untracked. Runnable work, native waiting and unflushed output are tracked separately.
 
 ## Consequences
 
-Many accepted mailbox messages can share one native wake. The design retains one FIFO mailbox, its existing capacity, and ordering between informational and final response operations.
+Several commands can share one native wake while informational and body records retain their order. A normal stop rejects new reservations and waits for all admitted publication or discard obligations. Worker failure discards reachable commands and settles responses without assuming native payloads are safe to free.
 
-The worker adds two small atomic fields and exact-token retry logic. Deterministic tests cover coalescing, clear-and-recheck, newer-signal preservation, repeated failures, full and stopped admission, stop coordination, and FIFO delivery.
-
-Long streaming responses avoid one mailbox command per proceed callback. The three-state marker prevents producer work from becoming stranded when enqueue and empty-drain retirement overlap. Deterministic tests cover direct proceed draining and the concurrent producer interleaving; controlled 1-GiB upload and download tests cover sustained backpressure.
-
-A separate fixed-final inbox was rejected. It would require ordering coordination with informational messages, overflow routing, a second shutdown drain, and additional state without evidence that per-command temporary staging dominates the measured delay.
+Deterministic tests cover capacity, publication after close, FIFO delivery, wake coalescing and failure, clear-and-recheck, pending permits during stop, and direct proceed draining. Real slow-reader tests check sustained backpressure and native polling fairness.

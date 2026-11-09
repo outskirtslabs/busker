@@ -187,7 +187,10 @@
                    [native/ffi-h2o-generator-t :stop pointer 8]
                    [native/ffi-clj-req-meta-t :is_early_data 1 102]
                    [native/ffi-clj-req-ctx-t [:meta :headers_len] 1 96]
-                   [native/ffi-clj-req-ctx-t :on-response-generator-stop pointer 168]
+                   [native/ffi-clj-req-ctx-t :fixed-slot pointer 144]
+                   [native/ffi-clj-req-ctx-t :fixed-claim 1 152]
+                   [native/ffi-clj-req-ctx-t :on-response-generator-proceed pointer 176]
+                   [native/ffi-clj-req-ctx-t :on-response-generator-stop pointer 184]
                    [native/ffi-clj-h2o-flat-globalconf-t :compress_args_zstd_quality 1 320]
                    [native/ffi-clj-session-ticket-t :not_after 1 120]]]
     (doseq [[layout path value expected] positions]
@@ -229,6 +232,8 @@
      :on-request-body-chunk         (pointer)
      :response-receiver             (pointer)
      :response-hash-next            (pointer)
+     :fixed-slot                    (pointer)
+     :fixed-claim                   65537
      :generator                     {:proceed (pointer)
                                      :stop    (pointer)}
      :on-response-generator-proceed (pointer)
@@ -247,15 +252,17 @@
    :on-request-body-chunk        120
    :response-receiver             128
    :response-hash-next            136
-   :generator                     144
-   :on-response-generator-proceed 160
-   :on-response-generator-stop    168
-   :preferred-chunk-size          176
-   :dispatch-module-id            184
-   :dispatch-request-seq          192
-   :cleanup                       200
-   :closing                       204
-   :response_started              208})
+   :fixed-slot                    144
+   :fixed-claim                   152
+   :generator                     160
+   :on-response-generator-proceed 176
+   :on-response-generator-stop    184
+   :preferred-chunk-size          192
+   :dispatch-module-id            200
+   :dispatch-request-seq          208
+   :cleanup                       216
+   :closing                       220
+   :response_started              224})
 
 (def ^:private request-metadata-reader-offsets
   {:authority       0
@@ -279,7 +286,7 @@
    :stop    8})
 
 (deftest request-context-layout-test
-  (is (= 216 (ffi/sizeof native/ffi-clj-req-ctx-t)))
+  (is (= 232 (ffi/sizeof native/ffi-clj-req-ctx-t)))
   (doseq [[field expected-offset] request-context-reader-offsets]
     (let [path (case field :meta [:meta :authority] :generator [:generator :proceed] field)
           value (if (contains? #{:preferred-chunk-size :dispatch-module-id :dispatch-request-seq
@@ -445,7 +452,8 @@
             (ffi/write pointer (ffi/place native/ffi-clj-req-ctx-t [:meta :headers]) headers)
             (ffi/write pointer (ffi/place native/ffi-clj-req-ctx-t [:meta :headers_len]) (count pairs))
             (let [copied (native/copy-request-context pointer arena)]
-              (is (= 1 (:has-body copied)))
+              (is (= {:has-body 1 :request-method :post}
+                     (select-keys copied [:has-body :request-method])))
               (is (not (realized? (:ring-data copied))))
               (:ring-data copied))))
         request (native/overlay-lazy-ring-request

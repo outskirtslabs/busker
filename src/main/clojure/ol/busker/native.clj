@@ -4,6 +4,17 @@
   This namespace maps C structures, callbacks, and libh2o operations. Key functions copy
   request data, create handlers, and manage multithread receivers.
 
+  Allocation, socket I/O, H2O request operations and disposal run on platform
+  threads. Fixed-slot claim, publish, abort and use-reference calls are bounded
+  native atomic operations permitted on application virtual threads; they must
+  not wait or invoke application code. They are not a general pin-free FFM API.
+
+  Callback stubs and retained payloads must outlive every possible native use.
+  Non-final streaming proceed ends one send; final payloads remain valid until
+  request-pool cleanup. Receiver use references protect producers while filling
+  slots, and receivers must be unregistered before their contexts are disposed.
+  See [[ol.busker.fixed-final]] and [[ol.busker.response-queue]] for these contracts.
+
   ## Related Namespaces
 
   - [[ol.busker.native.loader]] loads the shim.
@@ -125,6 +136,8 @@
             [:on-request-body-chunk :pointer]
             [:response-receiver :pointer]
             [:response-hash-next :pointer]
+            [:fixed-slot :pointer]
+            [:fixed-claim :long]
             [:generator ffi-h2o-generator-t]
             [:on-response-generator-proceed :pointer]
             [:on-response-generator-stop :pointer]
@@ -356,13 +369,6 @@
   [:pointer :int :pointer :long]
   :void)
 
-(defcfn send-fixed-final
-  "Sends a fixed final response with inline body bytes."
-  "clj_h2o_send_fixed_final"
-  [:pointer :int :pointer :long :long :int
-   :pointer :long]
-  :void)
-
 (defcfn cancel-request
   "Cancel a request after the response has started"
   "clj_h2o_cancel_request"
@@ -436,13 +442,29 @@
   [:pointer :long :long] :pointer)
 
 (defcfn mt-destroy-response-receiver
-  "Unregisters a drained fixed-response receiver."
+  "Unregisters a drained fixed-response receiver before its context is disposed.
+  Requires a platform thread, closed admission and zero pending references."
   "clj_h2o_mt_destroy_response_receiver"
   [:pointer] :void)
 
 (defcfn mt-response-pending
-  "Returns the number of submitted fixed responses not yet consumed by H2O."
+  "Returns fixed-slot and producer-use references that prevent receiver retirement."
   "clj_h2o_mt_response_pending"
+  [:pointer] :long)
+
+(defcfn mt-response-use-acquire
+  "Retains a receiver during preparation. Call under receiver admission protection."
+  "clj_h2o_response_use_acquire"
+  [:pointer] :int)
+
+(defcfn mt-response-use-release
+  "Releases a receiver reference after publication or abort."
+  "clj_h2o_response_use_release"
+  [:pointer] :void)
+
+(defcfn mt-response-ring-retained
+  "Returns slots retained by native requests, excluding runnable ready slots."
+  "clj_h2o_response_ring_retained"
   [:pointer] :long)
 
 (defcfn mt-response-slot-data-size*
@@ -555,7 +577,9 @@
   [:pointer] :long)
 
 (defn mt-response-ring-drain
-  "Applies ready responses on the H2O event-loop thread."
+  "Applies ready responses on the H2O event-loop thread and returns the count.
+  Sending retains slot bodies until request cleanup; a return from this call
+  does not make a slot reusable. Stale request identities release without sending."
   [receiver]
   #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-ring-drain* receiver)))
@@ -566,7 +590,7 @@
   [:pointer] :void)
 
 (defcfn mt-wakeup
-  "Send a wakeup message to the loop owning this receiver"
+  "Send a wakeup message to this receiver's event loop"
   "clj_h2o_mt_wakeup"
   [:pointer] :void)
 
@@ -880,6 +904,11 @@
            (MemorySegment/copy (ffi/reinterpret (aget pointers i) len arena) 0 target start len))))
      {:req req
       :has-body has-body
+      :request-method (let [start (aget ends 0)
+                            length (- (aget ends 1) start)]
+                        (when (pos? length)
+                          (keyword (str/lower-case
+                                    (String. bytes (int start) (int length) "UTF-8")))))
       :ring-data (delay (decode-request-snapshot bytes ends http-version has-body early-data))})))
 
 (defn create-handler
@@ -1070,7 +1099,7 @@
 
 (defcfn http3-open-udp-transport
   "Open a pooled UDP transport reservation for HTTP/3.
-   The returned handle owns the pooled transport metadata and any reservation
+   The returned handle retains the pooled transport metadata and any reservation
    socket until [[http3-release-udp-transport]] is called."
   "clj_h2o_http3_open_udp_transport"
   [:string :int16] :pointer)
@@ -1092,12 +1121,12 @@
 
 (defcfn http3-detach-udp-transport
   "Detach an HTTP/3 worker context from a pooled UDP transport.
-   This closes only the worker-owned dup'd fd."
+   This closes only the worker's duplicated file descriptor."
   "clj_h2o_http3_detach_udp_transport"
   [:pointer] :void)
 
 (defcfn http3-release-udp-transport
-  "Release a pooled UDP transport and close any reservation socket it owns."
+  "Release a pooled UDP transport and close its reservation socket, if present."
   "clj_h2o_http3_release_udp_transport"
   [:pointer] :void)
 

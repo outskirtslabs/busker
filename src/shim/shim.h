@@ -86,6 +86,7 @@ typedef struct {
 
 typedef struct clj_req_ctx_t clj_req_ctx_t;
 typedef struct clj_mt_receiver_t clj_mt_receiver_t;
+typedef struct clj_response_slot_t clj_response_slot_t;
 typedef void (*clj_request_cleanup_cb)(uint64_t module_id,
                                        uint64_t request_seq);
 typedef void (*clj_request_body_chunk_cb)(uint64_t module_id,
@@ -104,6 +105,8 @@ struct clj_req_ctx_t {
   clj_request_body_chunk_cb on_request_body_chunk;
   clj_mt_receiver_t *response_receiver;
   clj_req_ctx_t *response_hash_next;
+  clj_response_slot_t *fixed_slot;
+  uint64_t fixed_claim;
   h2o_generator_t generator;
   clj_response_generator_proceed_cb on_response_generator_proceed;
   clj_response_generator_stop_cb on_response_generator_stop;
@@ -264,10 +267,6 @@ void clj_h2o_send_informational(clj_req_ctx_t *ctx, int status,
                                 const clj_header_t *headers,
                                 size_t headers_len);
 
-void clj_h2o_send_fixed_final(clj_req_ctx_t *ctx, int status,
-                              const clj_header_t *headers,
-                              size_t headers_len, size_t content_length,
-                              int compress_hint, const char *body, size_t body_len);
 /* Create and configure h2o handler with optional callbacks.
  * All callback parameters can be NULL except on_req_callback.
  * supports_request_streaming: 1 to enable, 0 to disable
@@ -295,6 +294,9 @@ void clj_h2o_mt_destroy_wakeup_receiver(clj_mt_receiver_t *receiver);
 void clj_h2o_mt_destroy_response_receiver(clj_mt_receiver_t *receiver);
 void clj_h2o_mt_wakeup(clj_mt_receiver_t *receiver);
 size_t clj_h2o_mt_response_pending(clj_mt_receiver_t *receiver);
+int clj_h2o_response_use_acquire(clj_mt_receiver_t *receiver);
+void clj_h2o_response_use_release(clj_mt_receiver_t *receiver);
+size_t clj_h2o_response_ring_retained(clj_mt_receiver_t *receiver);
 
 
 size_t clj_h2o_response_slot_data_size(void);

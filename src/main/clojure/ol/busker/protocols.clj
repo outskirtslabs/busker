@@ -1,100 +1,91 @@
 (ns ol.busker.protocols
-  "Public response-body and response-emitter protocols for Ring-compatible applications.
+  "Public response-body and response-emitter protocols for Ring applications.
 
-  [[SizableResponseBody]] supplies known byte sizes for complete responses. [[ResponseEmitter]]
-  controls asynchronous response output and lifecycle callbacks.
+  [[SizableResponseBody]] supplies known byte sizes for complete responses.
+  [[ResponseEmitter]] supports informational responses, incremental output,
+  Server-Sent Events and long polling. Ordinary Ring response maps need no emitter
+  calls. An application that uses the request's emitter returns it as `:body` and
+  sends output from virtual threads through [[emit!]].")
 
-  ## Related Namespaces
-
-  - [[ol.busker.response]] implements response emission."
-  (:refer-clojure :exclude [flush]))
-
-;; This protocol is from https://github.com/ring-clojure/ring/blob/content-length/ring-core/src/ring/middleware/content_length.clj
+;; Ring content-length protocol: https://github.com/ring-clojure/ring/blob/content-length/ring-core/src/ring/middleware/content_length.clj
 (defprotocol SizableResponseBody
   (body-size-in-bytes [body ring-response]
-    "Return the number of bytes that `body` will require when it is
-     serialized as a response body. If the number of bytes cannot be ascertained,
-     nil is returned. The ring-response is used for determining supporting
-     information, such as the charset in the case of String bodies."))
+    "Returns the serialized byte count of `body`, or nil if it is not known."))
 
 (defprotocol ResponseEmitter
-  "Controls an asynchronous server-to-client stream for one HTTP response.
+  "Accepts ordered output for one HTTP response and reports transport progress.
 
-   Use this protocol for Server-Sent Events (SSE), response streaming, and long polling.
-   The stream closes when application code calls [[close]], a final response completes,
-   or libh2o reports request termination."
-
+  The response closes on [[close!]], an accepted end operation or native request
+  termination. Graceful generation draining leaves active responses usable.
+  [[on-close!]] runs application cleanup independently of receipt settlement."
   (open? [this]
-    "Returns true while the emitter accepts writes.
-
-     [[close]] changes this value to false before it dispatches close callbacks.")
-
+    "Returns whether this response accepts output.")
   (committed? [this]
-    "Returns true after a final response is committed.
-
-     Writing body data before a final response commits status 200.
-     Accepted informational responses do not commit the final response.")
-
+    "Returns whether final response headers have been accepted.")
   (emit! [this data] [this data opts]
-    "Writes `data` to the client.
+    "Accepts a Ring response map, body value or native-buffer producer.
 
-     Returns true when the writer accepts the data.
-     Returns false when the native writer has stopped.
-     Returns nil when a response map is ignored because another final response is already committed.
-     The call may throw when `data` is invalid or the stream closes during a write.
-     Emitter writes do not pass through Ring middleware.
+     A producer requires `:capacity`, runs synchronously on the calling virtual
+     thread and finishes before this call returns. Its ByteBuffer and derived
+     views expire on callback return; its final position is the byte count. Do not
+     flip it or access it from another thread. Capacity must be a positive integer
+     at most `:output-buffer-size` (B, default 32768); only producers accept it.
 
-     `data` may be a response map or body data.
-     A response map follows these rules:
+     Strings, byte arrays, ByteBuffers, nil and empty bodies are supported in both
+     modes. Nonblocking encoded data must fit B. ByteBuffer input uses its remaining
+     range without changing its position or limit; mutable input is copied before
+     return. Streams, sequences and custom Ring body writers require blocking mode.
+     Strings use the response charset, with UTF-8 as the default or invalid-charset
+     fallback. Malformed or unmappable characters use encoder replacement bytes.
 
-     - Statuses 100 through 199 except 101 are informational and reject `:body`
-     - Status 101 is unsupported
-     - A status of at least 200 commits the only final response
-     - Header names must be lowercase strings, with one value per name
+     A map without `:body` is header-only; `:body nil` is an empty body write with
+     a receipt. Informational statuses 100–199 except 101 reject bodies and `:end?`.
+     Final headers commit once; body-first output commits status 200.
 
-     Body data before a final response commits status 200.
-     With `:close-after? false`, chunks may have these types:
+     | Option | Default | Meaning |
+     |--------|---------|---------|
+     | `:wait?` | `true` | Park for capacity if necessary. |
+     | `:flush?` | `false` | Make this write and preceding output ready to send. |
+     | `:end?` | `false` | End the response after this accepted output. |
+     | `:capacity` | none | Maximum bytes the producer function may write. |
 
-     - `nil`, `byte[]`, `Number`, or `String`
-     - `java.nio.ByteBuffer` or `java.io.InputStream`
-     - Sequential collections of these types
+     Returns `{:status :accepted :progress receipt}` for body output,
+     `{:status :accepted}` for headers, `{:status :full}` without waiting, or
+     `{:status :closed}`. Rejection changes no headers or body output.
+     Invalid input, unknown options and oversized nonblocking data throw while
+     open; calls after closure return closed first. Boolean options require booleans.
+     One producer runs per response; a competing nonblocking call returns full.
+     Recursive emission on the same response throws. Full or known-closed calls
+     skip the producer. Closure during preparation can discard its output after
+     the callback runs; a callback exception before acceptance publishes nothing.
 
-     With `:close-after? true`, Busker writes a complete response body.
-     When `ring-core-protocols` is present, the body must satisfy `ring.core.protocols/StreamableResponseBody`.
-     Without it, Busker uses its fallback chunk types.
-     Busker calculates `content-length` when the body size is known, but it does not infer `content-type`.
+     Waiting covers admission, not transmission. Pending bytes are limited to B,
+     with at most 64 pending body receipts. Each worker has 256 streaming blocks
+     of B bytes. Pressure can flush accepted output before waiting or returning
+     full. `:end? true` also flushes and closes; its receipt may already be closed.
 
-     Options:
+     A receipt is a promise delivering `{:status :proceeded}`, `{:status :closed}`
+     or `{:status :failed :cause error}`. Callers may inspect or dereference it,
+     but must not deliver it. Proceed describes native transport progress, not
+     acknowledgement by the remote application. HTTP/1.1 and HTTP/2 proceed
+     follow socket-write progress; HTTP/3 may proceed during packet preparation.
+     Final sends need not proceed. Close settles unresolved receipts immediately.
 
-     | key             | description |
-     |-----------------|-------------|
-     | `:close-after?` | Close the stream after writing `data` (default `false`) |")
-
-  (flush [this]
-    "Flushes buffered response data to the client.
-
-     This call may throw when the stream is closing or closed.")
-
-  (close [this]
-    "Closes the stream and begins callback delivery.
-
-     Returns true only for the call that claims an open emitter.
-     Later calls return false.
-     Registered callbacks run after the writer is closed.")
-
-  (on-close [this callback]
-    "Registers a zero-argument `callback` to run when the emitter closes.
-
-     Callbacks run exactly once on virtual threads after explicit close, final response
-     completion, or request termination reported by libh2o.
-     Busker cannot run the callback for a client disconnect until libh2o reports it.
-
-     An idle HTTP/1.1 client can disconnect without libh2o noticing right away.
-     If the application sends no more data, the callback may wait until a later write
-     or explicit close. Graceful server shutdown waits for the active stream rather than
-     closing it. For HTTP/2 and HTTP/3, the callback runs after an idle client disconnect
-     without waiting for another application write.
-
-     Callbacks registered before termination run in registration order, and an earlier
-     callback failure does not suppress later callbacks.
-     A callback registered after termination runs promptly on a virtual thread."))
+     Blocking streams and custom Ring body writers can publish incrementally.
+     Failure after their first accepted record returns an accepted result with
+     the settled receipt, rather than throwing a rejection of the whole call.")
+  (flush! [this]
+    "Makes the accepted output prefix ready to send without waiting for capacity.
+     Returns the last body receipt, or nil when no body was accepted. During an
+     incremental write, that receipt can wait for EOF even though the prefix sends.
+     After close, returns the same receipt or nil without scheduling more work.
+     An empty write or flush alone is not a network heartbeat.")
+  (close! [this]
+    "Stops new output, settles pending receipts and requests a final send after
+     accepted data. Returns true only for the first close. Does not wait for a
+     producer, capacity or transmission, and does not release native in-flight
+     storage. Private output from a producer that returns later is discarded.")
+  (on-close! [this callback]
+    "Registers a zero-argument callback, called once on a virtual thread.
+     Callbacks run in registration order; a failure does not suppress later ones.
+     A callback registered after close also runs promptly."))

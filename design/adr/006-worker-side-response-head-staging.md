@@ -4,13 +4,17 @@
 
 Accepted
 
+## Publication
+
+Normalized headers travel in accepted output records with body descriptors and sequence numbers. A map containing headers and a bounded body reserves and accepts both together. A producer exception or rejected admission commits neither. Informational records remain ordered without committing final headers; body-first output installs status 200.
+
+The worker stages headers in a confined arena and installs callback pointers from the live request. Prefix controls cannot overtake an accepted header record that has not yet reached the mailbox. Header-only records consume bounded command capacity but no body receipt.
+
 ## Context
 
 Ring handlers and response producers run on virtual threads. H2O response changes run on the request event-loop platform worker.
 
-The fixed-final path already transfers a pure Java command and stages native headers on that worker. Streaming response starts and informational responses instead allocated FFM header segments on the application virtual thread. Their mailbox closures retained those segments until the worker executed them.
-
-A virtual thread remains mounted during foreign work. Native staging on an application path also makes segment lifetime harder to verify.
+Streaming starts and informational responses require native header descriptors only while the shim copies them into the H2O request pool. Keeping that temporary allocation on the worker gives it a confined lifetime and keeps native allocation off the application thread.
 
 ## Decision
 
@@ -39,4 +43,4 @@ Tests must show that:
 
 ## Consequences
 
-Application virtual threads no longer allocate native response-head memory. Worker execution adds a short confined-arena lifetime to each streaming start and informational response. Fixed-final behavior and streaming body backpressure do not change.
+Application virtual threads prepare Java header data for streaming and informational responses. Worker execution gives each native head a short confined-arena lifetime. Fixed-final headers are packed into a preallocated slot and copied into the H2O request pool during worker execution.

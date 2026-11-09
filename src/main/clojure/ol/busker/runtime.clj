@@ -297,11 +297,10 @@
            (let [result
                  (try
                    (generation/stop! (:instance generation))
+                   (finalize-draining-generation! server-handle generation)
                    :ok
                    (catch Throwable t
-                     t)
-                   (finally
-                     (finalize-draining-generation! server-handle generation)))]
+                     t))]
              result))))
 
 (defn- await-drain!

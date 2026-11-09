@@ -73,9 +73,8 @@ either use their documented default or remain unset.
 | `:dispatch` | Ordered vector of dispatcher maps (see below).
 | `:tls` | Global TLS, certificate, ACME, and session ticket config (see below).
 | `:n-workers` | Positive integer event loop worker count, default `2`.
-| `:buffer-pool` | Response buffering pool implementing xref:api/ol-busker-buffer-pool.adoc#BufferPool[`BufferPool`].
 | `:max-connections` | Positive integer connection cap, default `1024`.
-| `:output-buffer-size` | Response aggregation bytes, default `32768`; `0` disables buffering.
+| `:output-buffer-size` | Positive response byte budget and native streaming block size, default `32768`. Zero is invalid.
 | `:server-name` | Server header value, default `"ol.busker/dev"`.
 | `:proxy-status-identity` | Optional Proxy-Status identity.
 | `:max-request-entity-size` | Optional positive integer request body byte limit.
@@ -104,6 +103,26 @@ either use their documented default or remain unset.
 | `:compress-brotli-level` | Brotli level `0` through `11`, default `1`.
 | `:compress-zstd-level` | Zstandard compression level, default `3`.
 |===
+
+=== Output storage and backpressure
+
+Each worker reserves 256 * `:output-buffer-size` bytes of native streaming storage at startup: 256 reusable blocks. At the default size of 32768 bytes, this is 8 MiB per worker or 16 MiB for two workers, separate from fixed-response slots. The size must be a positive integer no larger than `Integer/MAX_VALUE`. Busker manages the pools internally; `:buffer-pool` is not configurable.
+
+Each worker also has 256 fixed-response slots. A fixed body must fit both `:output-buffer-size` and 32768 bytes. Supported bodies beyond those limits use streaming storage.
+
+All response heads, including streaming and informational heads, are limited to 64 header pairs and 16384 staging bytes. Busker throws before accepting a head that exceeds either limit. These header limits are not configurable; increasing `:output-buffer-size` does not change them.
+
+Each response permits at most that many pending payload bytes and a separate native send of at most that size. At most 64 body receipts may remain pending. Small nonempty writes each initially use a block even when they use fewer bytes. Protocol/compression buffers, request metadata and caller-retained input are additional memory costs.
+
+Blocking emitter calls park under pressure; nonblocking calls return full. Pressure can flush older accepted output. Explicit `flush!` and `close!` require no payload block, receipt slot or mailbox permit.
+
+=== HTTP/1 streaming timeouts
+
+`:http1-req-io-timeout` applies to HTTP/1 request I/O, not just SSE. Increasing it also permits other HTTP/1 I/O stalls to last longer. A silent open stream can expire under this timeout.
+
+SSE heartbeats must send actual comment bytes such as `":\n\n"`, with `{:wait? false :flush? true}`. An empty write or a flush alone is not a heartbeat. A two-second heartbeat works with the default timeout. For a 15-second heartbeat, set `:http1-req-io-timeout 60000`.
+
+Do not accumulate heartbeats while output is stalled: keep at most one pending receipt, poll it with `realized?`, and skip this heartbeat when it is pending or admission returns full. Use `on-close!` independently for connection cleanup. Proxy timeouts are separate and are not changed by this setting.
 
 == Entrypoints (`:entrypoints`)
 
@@ -257,7 +276,7 @@ maintenance operates in the background.
 {:tls {:certificates {:manage ["example.com" "www.example.com"]}}}
 ----
 
-.Bring your own certificates
+.Load certificates from files
 [source,clojure]
 ----
 {:tls {:certificates {:load [{:type :pem

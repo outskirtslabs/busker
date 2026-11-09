@@ -3,7 +3,6 @@
   (:require
    [clojure.walk :as walk]
    [clojure.string :as str]
-   [ol.busker.buffer-pool :as bp]
    [ol.busker.specs :as specs]
    [ol.clave.crypto.impl.parse-ip :as parse-ip]
    [ol.clave.storage :as storage])
@@ -366,10 +365,9 @@
 
 (defn apply-config-defaults
   [user-config]
-  (let [config (base-config-with-defaults user-config)]
-    (cond-> config
-      (not (contains? user-config :buffer-pool))
-      (assoc :buffer-pool (bp/make-bytebuffer-pool {})))))
+  (when (contains? user-config :buffer-pool)
+    (throw (ex-info "Response storage is allocated per worker; :buffer-pool is not configurable" {})))
+  (base-config-with-defaults user-config))
 
 (def ^:private callable-placeholder
   ::callable)
@@ -590,8 +588,7 @@
   "Return the normalized pure-data config snapshot for `user-config`.
 
   The snapshot applies Busker defaults, expands listeners, and strips
-  runtime-owned objects such as buffer pools, storage instances, and direct
-  callable values."
+  runtime objects such as storage instances and direct callable values."
   [user-config]
   (let [config (-> (base-config-with-defaults user-config)
                    config->listeners

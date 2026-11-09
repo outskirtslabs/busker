@@ -384,11 +384,11 @@
                           (proto/emit! emitter {:status 200 :headers {"content-type" "text/plain"}})
                           (doseq [idx (range 5)]
                             (proto/emit! emitter (str "chunk-" idx "-"))
-                            (proto/flush emitter)
+                            (proto/flush! emitter)
                             (when (zero? idx)
                               (deliver first-chunk-sent true))
                             (Thread/sleep chunk-delay-ms))
-                          (proto/close emitter))
+                          (proto/close! emitter))
                         {:body emitter})
                       {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
                                            :http3? true
@@ -430,9 +430,9 @@
                       (let [num-chunks (/ stream-duration-ms chunk-interval-ms)]
                         (doseq [idx (range num-chunks)]
                           (proto/emit! emitter (str "chunk-" idx "-"))
-                          (proto/flush emitter)
+                          (proto/flush! emitter)
                           (Thread/sleep chunk-interval-ms)))
-                      (proto/close emitter))
+                      (proto/close! emitter))
                     {:body emitter})
           server (busker/start!
                   (util/with-static-tls
@@ -491,9 +491,9 @@
                           (let [num-chunks (/ stream-duration-ms chunk-interval-ms)]
                             (doseq [idx (range num-chunks)]
                               (proto/emit! emitter (str "chunk-" idx "-"))
-                              (proto/flush emitter)
+                              (proto/flush! emitter)
                               (Thread/sleep chunk-interval-ms)))
-                          (proto/close emitter))
+                          (proto/close! emitter))
                         {:body emitter})))
           server (busker/start!
                   (util/with-static-tls
@@ -549,9 +549,9 @@
                           (let [num-chunks (/ stream-duration-ms chunk-interval-ms)]
                             (doseq [idx (range num-chunks)]
                               (proto/emit! emitter (str "chunk-" idx "-"))
-                              (proto/flush emitter)
+                              (proto/flush! emitter)
                               (Thread/sleep chunk-interval-ms)))
-                          (proto/close emitter))
+                          (proto/close! emitter))
                         {:body emitter})))
           ;; 2 workers with max 4 connections total
           ;; If it was per-worker, we'd have 8 connections allowed

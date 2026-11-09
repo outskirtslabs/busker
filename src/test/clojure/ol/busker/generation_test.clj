@@ -3,6 +3,8 @@
    [babashka.ffi :as mem]
    [clojure.test :refer [deftest is]]
    [ol.busker.callback-dispatch :as callback-dispatch]
+   [ol.busker.buffer-pool :as bp]
+   [ol.busker.worker-mailbox :as mailbox]
    [ol.busker.config :as config]
    [ol.busker.evloop :as evloop]
    [ol.busker.fixed-final :as fixed-final]
@@ -34,10 +36,28 @@
   (add-req [_ _ _] nil)
   (reap-req [_ _] nil))
 
+(defn- retirement-worker
+  [dispatch receiver_ thread send-fn]
+  (assoc (->RetirementWorker dispatch receiver_ thread send-fn)
+         :native-failure_ (AtomicReference.)
+         :termination-cause_ (AtomicReference.)
+         :mailbox (mailbox/create)
+         :stream-pool (bp/create-stream-pool 1)))
+
 (defn- direct-plan
   [module-id request-seq ^bytes body]
   (fixed-final/direct-response-plan (long module-id) (long request-seq) 200 [] 0 body
                                     (alength body) (alength body) 0))
+
+(defn- publish-producer-without-waiting!
+  "Publishes a one-byte native producer for `module-id` and `request-seq`
+  without waiting for a slot."
+  [worker module-id request-seq]
+  (fixed-final/publish-direct-producer!
+   worker (fixed-final/direct-response-plan (long module-id) (long request-seq) 200 [] 0 nil 0 -1 0)
+   1 (fn [^java.nio.ByteBuffer buffer] (.put buffer (byte 120)))
+   false (constantly false) (fn [publish!] (publish!))))
+
 (defn- connect
   [port]
   (doto (Socket.)
@@ -54,9 +74,7 @@
   (nth (:response-slots worker) (response-claim-index claim-handle)))
 
 (deftest fixed-final-constructor-docs-describe-record-fields
-  (doseq [constructor [#'fixed-final/->FixedFinalCommand
-                       #'fixed-final/->DirectResponsePlan
-                       #'fixed-final/->FixedFinalScratch]]
+  (doseq [constructor [#'fixed-final/->DirectResponsePlan]]
     (is (string? (:doc (meta constructor)))))
   (is (.contains ^String (:doc (meta #'fixed-final/->DirectResponsePlan))
                  "header-bytes")))
@@ -90,9 +108,11 @@
 (deftest mailbox-work-forces-a-nonblocking-native-iteration
   (let [wait-ms_ (atom nil)
         worker (evloop/map->Worker
-                {:mailbox (java.util.concurrent.ArrayBlockingQueue. 1)
+                {:mailbox (mailbox/create)
                  :response-slots []
                  :response-slot-payload-capacity 0
+                 :native-failure_ (AtomicReference.)
+                 :response-slot-monitor (Object.)
                  :callback-dispatch nil})
         loop-state {::evloop/mailbox-work? true}
         native-state {:loop-ptr :loop
@@ -105,6 +125,7 @@
        #'generation/update-receiver-destruction (fn [state _] state)
        #'generation/dispose-context-if-ready (fn [state _ _] state)
        #'callback-dispatch/pending-response-work? (constantly false)
+       #'callback-dispatch/drain-responses! (constantly nil)
        #'generation/update-listener-state! (fn [& _])
        #'h2o/evloop-now (constantly 0)
        #'h2o/cleanup-thread (constantly 1000)
@@ -119,11 +140,13 @@
   (let [wait-ms_ (atom nil)
         receiver (mem/segment 1)
         worker (evloop/map->Worker
-                {:mailbox (java.util.concurrent.ArrayBlockingQueue. 1)
+                {:mailbox (mailbox/create)
                  :callback-dispatch nil
                  :response-slots []
                  :response-slot-payload-capacity 0
-                 :response-receiver_ (AtomicReference. receiver)})
+                 :response-receiver_ (AtomicReference. receiver)
+                 :native-failure_ (AtomicReference.)
+                 :response-slot-monitor (Object.)})
         native-state {:loop-ptr :loop
                       :ctx-ptr :context
                       :listener-socks []
@@ -134,6 +157,7 @@
        #'generation/update-receiver-destruction (fn [state _] state)
        #'generation/dispose-context-if-ready (fn [state _ _] state)
        #'callback-dispatch/pending-response-work? (constantly false)
+       #'callback-dispatch/drain-responses! (constantly nil)
        #'generation/update-listener-state! (fn [& _])
        #'h2o/mt-response-ring-drain
        (fn [actual]
@@ -173,25 +197,31 @@
   (let [wakeup-receiver (mem/segment 1)
         response-receiver (mem/segment 2)
         destroyed_ (atom {:wakeup [] :response []})
+        events_ (atom [])
         phase (atom :running)
         generation-state {::generation/phase phase
                           ::generation/stop-lock (Object.)
                           ::generation/workers []
                           ::generation/wakeup-receivers [wakeup-receiver]
                           ::generation/response-receivers [response-receiver]
+                          ::generation/contexts [:startup-context]
                           ::generation/listener-runtimes []
                           ::generation/listener-claims {}
                           ::generation/config {}}]
-    (with-redefs [h2o/mt-destroy-wakeup-receiver
+    (with-redefs [h2o/context-dispose (fn [_] (swap! events_ conj :context))
+                  h2o/mt-destroy-wakeup-receiver
                   (fn [receiver]
+                    (swap! events_ conj :wakeup)
                     (swap! destroyed_ update :wakeup conj receiver))
                   h2o/mt-destroy-response-receiver
                   (fn [receiver]
+                    (swap! events_ conj :response)
                     (swap! destroyed_ update :response conj receiver))]
       (generation/stop! generation-state))
     (is (= {:wakeup [wakeup-receiver]
             :response [response-receiver]}
            @destroyed_))
+    (is (= [:wakeup :response :context] @events_))
     (is (= :stopped @phase))))
 
 (deftest response-ring-claim-is-bounded-and-reusable-from-a-virtual-thread
@@ -211,8 +241,7 @@
                            handles (mapv (fn [_] (h2o/mt-response-try-claim receiver))
                                          (range capacity))
                            overflow (h2o/mt-response-try-claim receiver)
-                           fallback (fixed-final/try-publish-direct-response!
-                                     worker (direct-plan 999 999 (byte-array [120])))
+                           fallback (publish-producer-without-waiting! worker 999 999)
                            aborted (mapv (fn [claim-handle]
                                            (h2o/mt-response-abort receiver claim-handle))
                                          handles)
@@ -247,8 +276,9 @@
   {:response-receiver_             (AtomicReference. receiver)
    :response-receiver-open?_       (AtomicBoolean. true)
    :response-receiver-lock         (ReentrantReadWriteLock.)
+   :response-slot-monitor          (Object.)
    :response-slots                 [slot]
-   :response-slot-payload-capacity 0})
+   :response-slot-payload-capacity 1})
 
 (defn- unary-long-fn
   [f]
@@ -396,6 +426,7 @@
           release-claim_ (promise)
           result_ (promise)
           destroyed_ (atom [])
+          uses_ (atom 0)
           claim-attempts_ (atom 0)
           claim-fn (unary-long-fn
                     (fn [_]
@@ -403,8 +434,11 @@
                       (deliver claim-entered_ true)
                       @release-claim_
                       0))
-          pending-fn (unary-long-fn (constantly 0))]
-      (with-redefs [h2o/mt-response-try-claim claim-fn
+          pending-fn (unary-long-fn (fn [_] @uses_))]
+      (with-redefs [h2o/mt-response-use-acquire (fn [_] (swap! uses_ inc) 1)
+                    h2o/mt-response-use-release (fn [_] (swap! uses_ dec))
+                    fixed-final/notify-capacity! (constantly nil)
+                    h2o/mt-response-try-claim claim-fn
                     h2o/mt-response-pending pending-fn
                     h2o/mt-destroy-response-receiver
                     (fn [actual-receiver]
@@ -413,9 +447,7 @@
         (let [producer
               (Thread/startVirtualThread
                #(try
-                  (deliver result_
-                           {:result (fixed-final/try-publish-direct-response!
-                                     worker (direct-plan 1 1 (byte-array 0)))})
+                  (deliver result_ {:result (publish-producer-without-waiting! worker 1 1)})
                   (catch Throwable error
                     (deliver result_ {:error error}))))]
           (try
@@ -430,10 +462,11 @@
                       :destroyed?        destroyed?
                       :destroyed         @destroyed_})
                   (str "Receiver destruction must defer while a producer has read it before claim.")))
+            (deliver release-claim_ true)
+            (.join producer 5000)
             (is (= {:response :closed
                     :claim-attempts 1}
-                   {:response (fixed-final/try-publish-direct-response!
-                               worker (direct-plan 1 1 (byte-array 0)))
+                   {:response (publish-producer-without-waiting! worker 1 1)
                     :claim-attempts @claim-attempts_})
                 "Closing admission rejects another producer before it claims a slot.")
             (deliver release-claim_ true)
@@ -455,6 +488,8 @@
     (let [receiver (mem/alloc arena 1)
           slot (mem/alloc arena h2o/ffi-clj-fixed-response-slot-data-t)
           worker (response-receiver-worker receiver slot)
+          uses_ (atom 0)
+          ready_ (atom 0)
           claim-state-changed_ (promise)
           release-claim_ (promise)
           result_ (promise)
@@ -464,13 +499,16 @@
                       (deliver claim-state-changed_ true)
                       @release-claim_
                       1))
-          pending-fn (unary-long-fn (constantly 0))
-          publish-fn (receiver-handle->long-fn (constantly 0))
+          pending-fn (unary-long-fn (fn [_] (+ @uses_ @ready_)))
+          publish-fn (receiver-handle->long-fn (fn [_ _] (reset! ready_ 1)))
           abort-fn (receiver-handle->long-fn (constantly 1))
           slot-writer (proxy [clojure.lang.AFn clojure.lang.IFn$OLOO] []
                         (invokePrim [_ _ _] nil)
                         (invoke [_ _ _] nil))]
-      (with-redefs [h2o/mt-response-try-claim claim-fn
+      (with-redefs [h2o/mt-response-use-acquire (fn [_] (swap! uses_ inc) 1)
+                    h2o/mt-response-use-release (fn [_] (swap! uses_ dec))
+                    fixed-final/notify-capacity! (constantly nil)
+                    h2o/mt-response-try-claim claim-fn
                     h2o/mt-response-pending pending-fn
                     h2o/mt-response-publish publish-fn
                     h2o/mt-response-abort abort-fn
@@ -483,25 +521,29 @@
               (Thread/startVirtualThread
                #(try
                   (deliver result_
-                           {:result (fixed-final/try-publish-direct-response!
+                           {:result (fixed-final/publish-direct-response!
                                      worker (direct-plan 1 1 (byte-array 0)))})
                   (catch Throwable error
                     (deliver result_ {:error error}))))]
           (try
             (is (true? (deref claim-state-changed_ 5000 false)))
             #_{:clj-kondo/ignore [:type-mismatch]}
-            (is (zero? (h2o/mt-response-pending receiver)))
+            (is (= 1 (h2o/mt-response-pending receiver)))
             (is (= {:destroyed?        false
                     :receiver-present? true}
                    {:destroyed?        (boolean (#'generation/destroy-response-receiver! worker))
                     :receiver-present? (some? (.get ^AtomicReference (:response-receiver_ worker)))})
-                (str "A zero pending count cannot permit destruction during native claim accounting."))
+                "The producer reference protects the claim-accounting interval.")
             (deliver release-claim_ true)
-            (is (= {:result :overloaded
+            (is (= {:result :accepted
                     :error  nil}
                    (let [{:keys [result error]} (deref result_ 5000 ::timeout)]
                      {:result result
                       :error  (some-> error class .getName)})))
+            (is (zero? @uses_))
+            (is (false? (#'generation/destroy-response-receiver! worker)))
+            (is (empty? @destroyed_))
+            (reset! ready_ 0)
             (is (true? (#'generation/destroy-response-receiver! worker)))
             (is (= [receiver] @destroyed_))
             (finally
@@ -514,13 +556,14 @@
     (let [receiver (mem/alloc arena 1)
           slot (mem/alloc arena h2o/ffi-clj-fixed-response-slot-data-t)
           worker (response-receiver-worker receiver slot)
+          uses_ (atom 0)
           writer-entered_ (promise)
           release-writer_ (promise)
           result_ (promise)
           destroyed_ (atom [])
           aborts_ (atom 0)
           claim-fn (unary-long-fn (constantly 1))
-          pending-fn (unary-long-fn (constantly 0))
+          pending-fn (unary-long-fn (fn [_] @uses_))
           abort-fn (receiver-handle->long-fn
                     (fn [_ _]
                       (swap! aborts_ inc)
@@ -534,7 +577,9 @@
                           (writer slot payload-capacity plan))
                         (invoke [slot payload-capacity plan]
                           (writer slot payload-capacity plan)))]
-      (with-redefs [h2o/mt-response-try-claim claim-fn
+      (with-redefs [h2o/mt-response-use-acquire (fn [_] (swap! uses_ inc) 1)
+                    h2o/mt-response-use-release (fn [_] (swap! uses_ dec))
+                    h2o/mt-response-try-claim claim-fn
                     h2o/mt-response-abort abort-fn
                     h2o/mt-response-pending pending-fn
                     fixed-final/write-direct-response-slot! slot-writer
@@ -546,12 +591,14 @@
               (Thread/startVirtualThread
                #(try
                   (deliver result_
-                           {:result (fixed-final/try-publish-direct-response!
+                           {:result (fixed-final/publish-direct-response!
                                      worker (direct-plan 1 1 (byte-array 0)))})
                   (catch Throwable error
                     (deliver result_ {:error error}))))]
           (try
             (is (true? (deref writer-entered_ 5000 false)))
+            (is (zero? (.getReadLockCount ^ReentrantReadWriteLock (:response-receiver-lock worker))))
+            (is (= 1 @uses_))
             (is (false? (#'generation/destroy-response-receiver! worker)))
             (is (= [] @destroyed_))
             (deliver release-writer_ true)
@@ -574,6 +621,7 @@
     (let [receiver (mem/alloc arena 1)
           slot (mem/alloc arena h2o/ffi-clj-fixed-response-slot-data-t)
           worker (response-receiver-worker receiver slot)
+          uses_ (atom 0)
           first-zero-observed_ (promise)
           release-disposal_ (promise)
           claim-entered_ (promise)
@@ -596,7 +644,7 @@
                             (deliver first-zero-observed_ true)
                             @release-disposal_
                             0)
-                          @pending_)))
+                          (+ @uses_ @pending_))))
           publish-fn (receiver-handle->long-fn
                       (fn [_ _]
                         (reset! pending_ 1)
@@ -616,7 +664,11 @@
                                            :http3-ctxs []})})
                        (catch Throwable error
                          (deliver disposal-result_ {:error error}))))]
-      (with-redefs [generation/all-connections-drained? (constantly true)
+      (with-redefs [h2o/mt-response-use-acquire (fn [_] (swap! uses_ inc) 1)
+                    h2o/mt-response-use-release (fn [_] (swap! uses_ dec))
+                    mailbox/pending? (constantly false)
+                    bp/checked-out (constantly 0)
+                    generation/all-connections-drained? (constantly true)
                     callback-dispatch/no-live-entries? (constantly true)
                     h2o/mt-response-try-claim claim-fn
                     h2o/mt-response-pending pending-fn
@@ -631,7 +683,7 @@
               (Thread/startVirtualThread
                #(try
                   (deliver producer-result_
-                           {:result (fixed-final/try-publish-direct-response!
+                           {:result (fixed-final/publish-direct-response!
                                      worker (direct-plan 1 1 (byte-array 0)))})
                   (catch Throwable error
                     (deliver producer-result_ {:error error}))))]
@@ -740,7 +792,7 @@
             result_ (promise)
             thread (Thread/startVirtualThread
                     #(deliver result_
-                              {:result (fixed-final/try-publish-direct-response!
+                              {:result (fixed-final/publish-direct-response!
                                         worker (direct-plan 999 999 body))
                                :virtual? (.isVirtual (Thread/currentThread))}))]
         (.join thread 5000)
@@ -755,6 +807,89 @@
         (is (zero? (h2o/mt-response-claimed receiver))))
       (finally
         (generation/stop! instance)))))
+
+(deftest stale-streaming-command-is-discarded-and-released
+  (with-open [arena (mem/shared-arena)]
+    (let [dispatch (doto (callback-dispatch/create arena)
+                     (callback-dispatch/bind-thread! (Thread/currentThread)))
+          pool (bp/create-stream-pool 8)
+          m (mailbox/create)
+          sends_ (atom 0)
+          st (response-queue/create-response-writer
+              {:config {:output-buffer-size 8}
+               :dispatch-module-id (:module-id dispatch) :dispatch-request-seq 1
+               :worker {:stream-pool pool
+                        :reserve-command! (fn [_ wait? cancelled?] (mailbox/reserve! m wait? cancelled?))
+                        :publish-command! (fn [_ permit command] (mailbox/publish! m permit command))
+                        :release-command! (fn [_ permit] (mailbox/release! m permit))
+                        :wake-command-waiters! (fn [_] (mailbox/wake-waiters! m))}
+               :apply-head! (fn [_ _] (throw (AssertionError. "Stale output must not start a response")))})]
+      (.set worker-context/worker-context {:callback-dispatch dispatch})
+      (try
+        (with-redefs [p/wake (constantly nil)
+                      h2o/sendvec (fn [& _] (swap! sends_ inc))]
+          (let [result (response-queue/emit-bounded!
+                        st nil 1 (fn [^java.nio.ByteBuffer buffer] (.put buffer (byte 1)))
+                        {:flush? true})
+                [op & args] (mailbox/poll! m)]
+            (is (= :h2o/output op))
+            (generation/evloop-msg-processor op args)
+            (response-queue/send-vecs st)
+            (is (= {:status :closed} (deref (:progress result) 1000 ::timeout)))
+            (is (= {:open? false :sends 0 :blocks 0 :permits 0}
+                   {:open? (response-queue/open? st) :sends @sends_
+                    :blocks (bp/checked-out pool) :permits (:used @(:state_ m))}))))
+        (finally
+          (.remove worker-context/worker-context)
+          (response-queue/on-cleanup st)
+          (bp/retire! pool))))))
+
+(deftest stop-retains-stream-storage-while-a-delayed-producer-fills
+  (let [port (util/free-port)
+        entered (promise)
+        release (promise)
+        late-write (promise)
+        handler (fn [{emitter :ol.busker.request/emitter}]
+                  (Thread/startVirtualThread
+                   #(try
+                      (protocols/emit! emitter {:status 200} {:flush? true})
+                      (protocols/emit! emitter
+                                       (fn [^java.nio.ByteBuffer buffer]
+                                         (.put buffer (byte 65))
+                                         (deliver entered true)
+                                         (deref release)
+                                         (deliver late-write
+                                                  (try (.put buffer (byte 66)) :written
+                                                       (catch Throwable t t))))
+                                       {:capacity 2 :end? true})
+                      (catch Throwable _ nil)))
+                  {:body emitter})
+        instance (generation/start!
+                  (config/load!
+                   {:entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                    :dispatch [{:handler handler}]})
+                  nil)
+        pools (::generation/stream-pools instance)
+        checked-out #(reduce + (map bp/checked-out pools))
+        stopped (promise)]
+    (try
+      (with-open [socket (connect port)]
+        (request-stream! socket "/")
+        (is (true? (deref entered 5000 false))))
+      (let [stopper (doto (Thread. #(deliver stopped (try (generation/stop! instance) :stopped
+                                                          (catch Throwable t t))))
+                      (.start))]
+        (is (= ::pending (deref stopped 500 ::pending))
+            "Stop cannot finish while a producer fills a stream block.")
+        (is (pos? (checked-out)))
+        (deliver release true)
+        (is (= :written (deref late-write 5000 ::timeout)))
+        (is (= :stopped (deref stopped 30000 ::timeout)))
+        (.join stopper 5000)
+        (is (zero? (checked-out))))
+      (finally
+        (deliver release true)
+        (when-not (realized? stopped) (generation/stop! instance))))))
 
 (deftest response-ring-rejects-invalid-and-duplicate-sequential-slot-transitions
   (let [port (util/free-port)
@@ -1008,27 +1143,47 @@
           (finally
             (generation/stop! instance)))))))
 
-(deftest ordinary-fixed-response-falls-back-when-the-ring-is-full
+(deftest ordinary-fixed-response-parks-until-a-ring-slot-is-released
   (let [port (util/free-port)
-        instance
-        (generation/start!
-         (config/load!
-          {:entrypoints {:http {:bind (str "127.0.0.1:" port)
-                                :tls false}}
-           :dispatch [{:handler (constantly {:status 200 :body "ring-fallback"})}]})
-         nil)
+        instance (generation/start!
+                  (config/load!
+                   {:entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                    :n-workers 1
+                    :dispatch [{:handler (constantly {:status 200 :body "ring-wakeup"})}]})
+                  nil)
         worker (first (::generation/workers instance))
         receiver (.get ^AtomicReference (:response-receiver_ worker))
         handles (mapv (fn [_] (h2o/mt-response-try-claim receiver))
-                      (range (h2o/mt-response-ring-capacity receiver)))]
+                      (range (h2o/mt-response-ring-capacity receiver)))
+        monitor (:response-slot-monitor worker)
+        full_ (promise)
+        result_ (promise)
+        try-claim h2o/mt-response-try-claim]
     (try
       (is (every? pos? handles))
-      (let [result (util/curl :http nil port "/" :max-time 5)]
-        (is (= {:exit 0 :out "ring-fallback"}
-               (select-keys result [:exit :out]))))
+      (with-redefs [h2o/mt-response-try-claim
+                    (unary-long-fn
+                     (fn [receiver]
+                       (let [claim (try-claim receiver)]
+                         (when (zero? claim) (deliver full_ true))
+                         claim)))]
+        (let [client (Thread/startVirtualThread
+                      #(deliver result_ (util/curl :http nil port "/" :max-time 5)))]
+          (try
+            (is (true? (deref full_ 5000 false)))
+            ;; Taking this monitor proves admission has released it to park.
+            (locking monitor
+              (is (not (realized? result_)))
+              (is (= 256 (h2o/mt-response-claimed receiver)))
+              (is (= 1 (h2o/mt-response-abort receiver (first handles))))
+              (fixed-final/notify-capacity! worker))
+            (is (= {:exit 0 :out "ring-wakeup"}
+                   (select-keys (deref result_ 6000 {}) [:exit :out])))
+            (finally (.join client 6000)))))
       (finally
         (doseq [claim-handle handles]
           (h2o/mt-response-abort receiver claim-handle))
+        (fixed-final/notify-capacity! worker)
         (generation/stop! instance)))))
 
 (deftest worker-receiver-retirement-precedes-notifier-stop-test
@@ -1038,7 +1193,7 @@
           receiver (Object.)
           notifier (Object.)
           receiver_ (AtomicReference. receiver)
-          worker (->RetirementWorker
+          worker (retirement-worker
                   dispatch receiver_ (Thread.)
                   (fn [msg]
                     (is (= [:h2o/retire-wakeup-receiver] msg))
@@ -1054,13 +1209,18 @@
                             ::generation/listener-runtimes []
                             ::generation/listener-claims {}
                             ::generation/config {}}]
-      (with-redefs [evloop/broadcast-wake! (fn [_] (swap! events_ conj :broadcast))
+      (with-redefs [evloop/broadcast-wake!
+                    (fn [_]
+                      (when (.get receiver_)
+                        (p/send-required-msg worker [:h2o/retire-wakeup-receiver])))
                     wake-notifier/stop-and-join! (fn [_]
+                                                   (is (nil? (.get receiver_)))
+                                                   (is (not (.isAlive ^Thread (:thread worker))))
                                                    (swap! events_ conj :notifier-stop)
-                                                   true)
-                    evloop/join-all! (fn [_] (swap! events_ conj :join))]
+                                                   true)]
         (generation/stop! generation-state))
-      (is (= {:retirement-order [:receiver-destroy :join :notifier-stop]
+      (bp/retire! (:stream-pool worker))
+      (is (= {:retirement-order [:receiver-destroy :notifier-stop]
               :phase :stopped
               :receiver nil}
              {:retirement-order (filterv #{:notifier-stop :receiver-destroy :join} @events_)
@@ -1070,7 +1230,7 @@
 (deftest failed-worker-retirement-retains-the-callback-arena-test
   (with-open [arena (mem/shared-arena)]
     (let [dispatch (callback-dispatch/create arena)
-          worker (->RetirementWorker dispatch (AtomicReference.) nil (constantly :accepted))
+          worker (retirement-worker dispatch (AtomicReference.) (Thread.) (constantly :accepted))
           phase (atom :running)
           generation-state {::generation/phase phase
                             ::generation/stop-lock (Object.)
@@ -1081,14 +1241,15 @@
                             ::generation/config {}
                             ::generation/arena arena}]
       (try
-        (with-redefs [evloop/broadcast-wake! (constantly nil)
-                      evloop/join-all! (fn [_]
-                                         (throw (InterruptedException. "simulated")))]
-          (generation/stop! generation-state))
+        (.set ^AtomicReference (:native-failure_ worker)
+              (ex-info "simulated worker failure" {}))
+        (with-redefs [evloop/broadcast-wake! (constantly nil)]
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"retirement timed out"
+                                (generation/stop! generation-state))))
         (is (= :retirement-failed @phase))
         (is (= 1 (.byteSize (mem/alloc arena 1))))
         (finally
-          (Thread/interrupted)
+          (bp/retire! (:stream-pool worker))
           (swap! @#'generation/failed-retirements_
                  (fn [retirements]
                    (vec (remove #(identical? generation-state %) retirements)))))))))
@@ -1096,7 +1257,7 @@
 (deftest successful-retirement-retry-releases-retained-generation-test
   (let [arena (mem/shared-arena)
         dispatch (callback-dispatch/create arena)
-        worker (->RetirementWorker dispatch (AtomicReference.) (Thread.) (constantly :accepted))
+        worker (retirement-worker dispatch (AtomicReference.) (Thread.) (constantly :accepted))
         phase (atom :running)
         generation-state {::generation/phase phase
                           ::generation/stop-lock (Object.)
@@ -1106,19 +1267,23 @@
                           ::generation/listener-claims {}
                           ::generation/config {}
                           ::generation/arena arena}
-        attempts (atom 0)]
+        permit (mailbox/reserve! (:mailbox worker) false (constantly false))]
     (try
-      (with-redefs [evloop/broadcast-wake! (constantly nil)
-                    evloop/join-all! (fn [_]
-                                       (when (= 1 (swap! attempts inc))
-                                         (throw (InterruptedException. "simulated"))))]
-        (generation/stop! generation-state)
-        (Thread/interrupted)
+      (with-redefs [evloop/broadcast-wake! (constantly nil)]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"retirement timed out"
+                              (generation/stop! generation-state)))
+        (is (= :retirement-failed @phase))
+        (is (.isAlive (.scope ^Arena arena)))
+        (mailbox/release! (:mailbox worker) permit)
         (generation/stop! generation-state))
+      (is (false? (.isAlive (.scope ^Arena arena))))
       (is (= :stopped @phase))
       (is (not (some #(identical? generation-state %)
                      @@#'generation/failed-retirements_)))
       (finally
+        (bp/retire! (:stream-pool worker))
+        (when (.isAlive (.scope ^Arena arena))
+          (.close ^Arena arena))
         (swap! @#'generation/failed-retirements_
                (fn [retirements]
                  (vec (remove #(identical? generation-state %) retirements))))))))
@@ -1265,16 +1430,16 @@
                                              (protocols/emit! emitter {:status 200
                                                                        :headers {"content-type" "text/event-stream"}})
                                              (protocols/emit! emitter "event: ready\n\n")
-                                             (protocols/flush emitter)
+                                             (protocols/flush! emitter)
                                              @probe-after-disconnect_
                                              (try
                                                (protocols/emit! emitter "event: probe\n\n")
-                                               (protocols/flush emitter)
+                                               (protocols/flush! emitter)
                                                (catch Exception _
                                                  nil))
                                              @release-active_
                                              (when (protocols/open? emitter)
-                                               (protocols/close emitter))))
+                                               (protocols/close! emitter))))
                                           {:body emitter})
                                         (let [body (slurp (:body ring-request))
                                               emitter (:ol.busker.request/emitter ring-request)]
@@ -1282,10 +1447,10 @@
                                            (fn []
                                              (protocols/emit! emitter {:status 200 :headers {}})
                                              (protocols/emit! emitter (subs body 0 6))
-                                             (protocols/flush emitter)
+                                             (protocols/flush! emitter)
                                              @normal-proceed_
                                              (protocols/emit! emitter (subs body 6))
-                                             (protocols/close emitter)))
+                                             (protocols/close! emitter)))
                                           {:body emitter})))}]})
              nil)]
         (try

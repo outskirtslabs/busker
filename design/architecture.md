@@ -1,9 +1,7 @@
 # Busker architecture
 
 Busker is a Clojure HTTP server built on [libh2o] through the Java Foreign Function and Memory API.
-This document can be thought of as a materialized view of the [ADRs](./adr/README.md).
-Busker has been quite a journey as I've attempted to increase performance while sticking to my goals, so many of the ADRs have been superceded or subtly changed.
-So I created this document to document the current state.
+This document describes its execution, response-storage and lifecycle contracts. The [ADRs](./adr/README.md) describe individual design decisions.
 
 This document is for Busker contributors/maintainers as it only covers implementation details.
 Familiarity with the [user-facing docs][docs] is a pre-req.
@@ -36,10 +34,10 @@ Callback-dispatch maps module and request sequence identifiers to live requests 
 ## Responses
 
 Internally there are two paths for responses to take: streaming responses or fixed-final.
-A Ring response is sent down the fixed-final path if it has a complete string or byte-array body that fits within some configured size limits. 
+A Ring response returned by a handler is sent down the fixed-final path when nothing has been written to its emitter, its status is 200 to 999 other than 204 and 304, and its body is a byte array or a string whose response charset is UTF-8, of at most `:output-buffer-size` and 32768 bytes.
 This is a perf optimization so small requests can be sent in one clj->h2o operation.
 
-All other responses use the streaming path, which sends body data in chunks with backpressure to prevent the application from producing data faster than the client can read it.
+Other supported bodies use the streaming path, which sends body data in chunks with backpressure to prevent the application from producing data faster than the client can read it. Every response head, including streaming and informational heads, must fit 64 header pairs and 16384 staging bytes. Excess headers cause an exception before acceptance; streaming does not increase header capacity.
 
 ### Fixed-final responses
 
@@ -54,26 +52,25 @@ The slots are `clj_response_slot_t` structs maintained in a ring-buffer in nativ
 
 When a Ring handler returns a response, Busker claims a slot, copies the headers and body into it.
 It then publishes the slot and requests a worker wake.
-The slot keeps those bytes valid until the worker drains the ring and sends the response.
+The slot keeps those bytes valid until native request cleanup, including after a final send returns. H2O reads the body directly from the slot; only headers are copied into its request pool. Cleanup detaches the slot reference and checks its claim token before making the slot reusable. Slots being filled survive concurrent disconnects until their producers return.
+
+An `emit!` producer with `:end? true` on an emitter without earlier output also uses a slot, through a confined ByteBuffer view, when its capacity is at most 32768 bytes, the request method is not HEAD and the status is not 204, 205 or 304. Ring returns on this path use no streaming controller or receipt. Slot exhaustion parks a blocking caller or rejects a nonblocking operation; it does not select a second copying transport.
 
 ### Streaming responses
 
-The streaming path supports bodies that arrive over time or do not fit the fixed-final limits.
-Busker sends the status and headers first, then sends the body in chunks.
-It also uses this path when no fixed-final slot is available.
+The streaming path handles incremental bodies, supported bodies beyond the fixed-body limits, responses that already sent informational headers, and Ring returns the fixed path does not take, such as nil bodies, 204 and 304 statuses, ByteBuffers and strings in other charsets. Those Ring returns create a streaming writer and an internal receipt. A platform thread allocates 256 native blocks per worker in a shared FFM arena. Each block has `:output-buffer-size` bytes (B). This reserves 8 MiB per worker at the default B=32768, separately from fixed slots. The worker sends descriptors for these blocks without copying their payloads. Blocking strings and ByteBuffers larger than B are encoded or copied straight into successive blocks; byte arrays are copied in B-sized pieces.
 
-Application code writes body data on a virtual thread.
-Busker combines small writes into chunks and places them in a queue for that response.
-The queue limits buffered bytes, not the number of chunks, so large writes cannot bypass the memory limit.
-When the queue is full, the writing virtual thread waits without blocking the event-loop worker.
+Each response admits one producer at a time. A bounded write reserves bytes, a block, a receipt and a mailbox permit before invoking application code. The callback runs synchronously on its calling virtual thread through a confined view of the shared block. Closing that view revokes application access before publication without freeing the backing storage. Neither close nor native cleanup waits for a callback to return while holding a lock.
 
-The event-loop worker takes chunks from the queue and passes them to libh2o which writes them to the socket.
-libh2o requires Busker to wait for a proceed callback before submitting the next chunk for that response.
-Until that callback, libh2o may still need the previous chunk's memory.
-This allows libh2o to control the pace of delivery and keeps the data valid while it is in use.
-This links application writes to network progress and prevents a slow client from causing unlimited buffering.
+Acceptance registers the output record and receipt atomically against closure. Reserved mailbox permits do not occupy FIFO positions: a slow private producer cannot prevent the worker from consuming published commands. Accepted records stay reachable until publication or explicit discard. The worker copies descriptors, not payload bytes, when combining native blocks into a send.
 
-Each worker tracks streams with pending data or a send in progress, instead of checking every active request for streaming work.
+Three separate limits have separate release events. Pending byte credit is B per response and returns when records enter a native send. Each response has at most 64 unsettled receipts; receipt credit returns on settlement. Physical blocks remain checked out through native use. Each response has at most one native send, containing at most B bytes. Non-final proceed releases its blocks; final sends retain theirs until request cleanup. Native stop settles receipts but cannot release a still-live send.
+
+One logical incremental write can publish a begin record, several data records and an EOF marker while retaining one receipt. Close captures only the accepted prefix, not future bytes or EOF from a blocked input source. A source that returns after close discards private bytes. Failure after begin acceptance terminates the response and returns the accepted receipt rather than reporting that no output was accepted.
+
+Flush and end requests occupy coalesced per-response state, not mailbox entries. Each captures an accepted sequence prefix. The worker waits until that prefix has arrived before applying the control, so a control cannot overtake an accepted but unpublished head. Empty body writes are ordered local receipt markers, not empty intermediate native sends. Pressure flushes previously accepted output; global pool pressure tracks responses with unflushed blocks rather than scanning all requests.
+
+Workers process bounded mailbox turns and one ready batch per selected response before polling native I/O. When H2O calls proceed during the send, so that the response is ready again at once, the worker sends up to 256 batches of that response in the same turn. Proceed can drain directly without another mailbox message, with reentrant callbacks handled by a trampoline. Unflushed output does not make the worker poll continuously. Close settles pending receipts immediately, independently of native storage release, and dispatches ordered callbacks on virtual threads.
 
 ## Lifecycle
 
@@ -83,10 +80,11 @@ This lets configuration changes take effect without immediately interrupting act
 
 The previous generation stops accepting new connections but must still let its handlers send responses.
 Busker keeps its response queues and native memory available until that work finishes or the shutdown timeout is reached.
-Reaching the timeout does not make memory safe to free: Busker must first stop any thread or native operation that could still use it.
+Reaching the timeout does not make memory safe to free. Receiver admission closes first; previously entered producers and native requests retain their generation until publication, discard or cleanup. A producer that ignores interruption can delay release indefinitely. Failed retirement reports and retains the affected arenas and callback stubs instead of invalidating live addresses.
 
-If startup fails partway through, Busker releases the resources it has already created.
-Cleanup continues even if one release operation fails, and the original startup error is retained along with any cleanup errors.
+During context disposal, the event-loop worker directly retires its wake receiver: it quiesces the notifier endpoint, waits for admitted notifier calls, closes the endpoint and unregisters the receiver before freeing it. Queued tokens for a closed endpoint perform no native work.
+
+If startup fails partway through, Busker attempts to stop the partial generation and rethrows the original startup error. Contexts without workers also have their wake and response receivers unregistered before context disposal. Cleanup cannot continue through dependent native resources when their safe release is uncertain. Such resources must remain allocated; an error or timeout is not evidence that native callers have finished.
 
 ### HTTP/3 packet forwarding
 
@@ -97,14 +95,13 @@ On receipt, the shim caps TTL at the context's configured default and rejects en
 These checks are performed by Busker's callbacks, as required by the current libh2o callback contract.
 Native socketpair regression tests cover these rules and run during normal shim builds.
 
-## Decision record reconciliation
+## Related decisions
 
-The [ADRs](adr/README.md) record decisions at the time they were made.
-This document combines those decisions with later changes to describe the current design.
-Where an older ADR differs from this document, use this document for current behavior and the ADR for historical context.
-
-[ADR 009](adr/009-preallocated-response-completion-ring.md) supersedes [ADR 008](adr/008-native-fixed-response-exchange.md): preallocated native slots replace its queued, deep-copied response transfer.
-This change does not replace the worker-affine callback dispatch in [ADR 002](adr/002-worker-affine-ffm-callback-dispatch.md), the mailbox ordering in [ADR 003](adr/003-coalesce-worker-mailbox-wakeups.md), or worker-side response-head staging in [ADR 006](adr/006-worker-side-response-head-staging.md).
-[ADR 004](adr/004-platform-notifier-for-native-wakes.md) changes how workers are woken: a platform notifier makes the native wake calls, while the mailbox wake coalescing from ADR 003 remains in use.
-The later shared header serializer serves both fixed-final responses and response-head staging; that consolidation is not part of ADR 009's original decision.
+- [ADR 001](adr/001-response-emitter-close-callbacks.md): virtual-thread close callbacks.
+- [ADR 002](adr/002-worker-affine-ffm-callback-dispatch.md): worker-affine callback identities and lifetime.
+- [ADR 003](adr/003-coalesce-worker-mailbox-wakeups.md): mailbox permits, ordered controls and wake coalescing.
+- [ADR 004](adr/004-platform-notifier-for-native-wakes.md): platform-thread native wake calls.
+- [ADR 006](adr/006-worker-side-response-head-staging.md): worker-side streaming header staging.
+- [ADR 007](adr/007-bounded-native-streaming-storage.md): bounded native streaming blocks.
+- [ADR 009](adr/009-preallocated-response-completion-ring.md): retained fixed-response slots.
 

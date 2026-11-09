@@ -1,11 +1,22 @@
 (ns ^:no-doc ol.busker.response
-  "Response handling for h2o HTTP server."
+  "Adapts Ring responses and implements [[ol.busker.protocols/ResponseEmitter]].
+
+  Handlers and producers run on virtual threads. This module validates options,
+  normalizes headers and content length, encodes body data and dispatches ordered
+  close callbacks. Strings use the response charset with a UTF-8 fallback;
+  ByteBuffers are copied through duplicates without changing caller positions.
+  Blocking streams, sequences and Ring body writers publish incrementally.
+
+  Eligible complete responses use [[ol.busker.fixed-final]] slots. An ordinary
+  Ring return on that path needs no streaming controller or public receipt.
+  Informational output and other bodies use [[ol.busker.response-queue]], which
+  accepts bounded operations atomically and sends them on the platform worker.
+  Close callbacks run on virtual threads; receipt settlement and native storage
+  release are separate events."
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]
    [ol.busker.fixed-final :as fixed-final]
-   [ol.busker.response-serialization :as serialization]
-   [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as p]
    [ol.busker.protocols.content-length]
@@ -16,548 +27,486 @@
    [taoensso.trove :as trove])
   (:import
    [java.io InputStream OutputStream]
-   [java.nio ByteBuffer]
-   [java.nio.charset Charset StandardCharsets]
-   [java.util.concurrent.atomic AtomicBoolean]
-   [ol.busker.fixed_final DirectResponsePlan]
+   [java.nio ByteBuffer CharBuffer]
+   [java.nio.charset Charset CharsetEncoder CodingErrorAction StandardCharsets]
    [ol.busker.internal.protocols Request]))
 
 (set! *warn-on-reflection* true)
 
+(def ^:private byte-array-class (Class/forName "[B"))
+
 (defn dissoc-header
-  "Remove all case variations of a header by name (case-insensitive)."
+  "Removes all case variations of `header-name`."
   [headers ^String header-name]
-  (let [target-lower (.toLowerCase header-name java.util.Locale/ROOT)]
-    (into {}
-          (remove (fn [[k _]]
-                    (= (.toLowerCase (str k) java.util.Locale/ROOT) target-lower))
-                  headers))))
+  (into {} (remove (fn [[k _]] (.equalsIgnoreCase header-name (str k)))) headers))
 
-(defn- coerce-content-length
-  [val]
-  (if (number? val) (long val)
-      (Long/parseLong val)))
+(defn- coerce-content-length [value]
+  (if (number? value) (long value) (Long/parseLong value)))
 
-(defn- expand-header-values
-  [headers]
+(defn- expand-header-values [headers]
   (mapcat (fn [[name value]]
             (if (sequential? value)
               (map #(vector name %) value)
               [[name value]]))
           headers))
 
-;; TODO intern common header names?
+(defn build-headers
+  "Returns `[headers header-count content-length]` for a final response.
+  Expands sequential values into separate pairs and converts names and values to
+  strings. Removes content-length from the pairs; absent length is `-1`."
+  [response]
+  (let [length (second (hdr.util/find-header response "content-length"))
+        headers (cond-> (:headers response) length (dissoc-header "content-length"))
+        pairs (mapv (fn [[name value]] [(str name) (str value)])
+                    (expand-header-values headers))]
+    [pairs (count pairs) (if length (coerce-content-length length) -1)]))
 
 (defn build-headers2
-  "Build lowercase Java header pairs for an informational response.
-  Returns `[response headers header-count content-length]`."
-  [resp]
-  (let [content-length-val (second (hdr.util/find-header resp "content-length"))
-        content-length (if content-length-val
-                         (coerce-content-length content-length-val)
-                         -1)
-        filtered-headers (if content-length-val
-                           (dissoc-header (:headers resp) "content-length")
-                           (:headers resp))
-        header-pairs (->> (expand-header-values filtered-headers)
-                          (mapv (fn [[name value]]
-                                  [(str/lower-case (str name)) (str value)])))]
-    [resp header-pairs (count header-pairs) content-length]))
+  "Returns `[response headers header-count content-length]` for an informational
+  response, with lowercase header names and the normalization of [[build-headers]]."
+  [response]
+  (let [[headers n length] (build-headers response)]
+    [response (mapv (fn [[name value]] [(str/lower-case name) value]) headers) n length]))
 
-(defn build-headers
-  "Build Java header pairs for a final response.
-  Returns `[headers header-count content-length]`."
-  [resp]
-  (let [content-length-val (second (hdr.util/find-header resp "content-length"))
-        content-length (if content-length-val
-                         (coerce-content-length content-length-val)
-                         -1)
-        filtered-headers (if content-length-val
-                           (dissoc-header (:headers resp) "content-length")
-                           (:headers resp))
-        header-pairs (->> (expand-header-values filtered-headers)
-                          (mapv (fn [[name value]]
-                                  [(str name) (str value)])))]
-    [header-pairs (count header-pairs) content-length]))
+(defn get-compress-hint [response]
+  (get h2o/->compress-hint (:h2o/compress-hint response) h2o/H2O_COMPRESS_HINT_ENABLE))
+
+(defn- response-charset ^Charset [response]
+  (try
+    (Charset/forName (or (hdr.util/get-charset response) "utf-8"))
+    (catch IllegalArgumentException _ StandardCharsets/UTF_8)))
+
+(defn- encoder ^CharsetEncoder [response]
+  (doto (.newEncoder (response-charset response))
+    (.onMalformedInput CodingErrorAction/REPLACE)
+    (.onUnmappableCharacter CodingErrorAction/REPLACE)))
+
+(defn- encoded-length [^String value response]
+  (let [encoder (encoder response)
+        chars (CharBuffer/wrap value)
+        bytes (ByteBuffer/allocate 8192)]
+    (loop [total 0 flushing? false]
+      (let [result (if flushing? (.flush encoder bytes) (.encode encoder chars bytes true))
+            total (Math/addExact (long total) (long (.position bytes)))]
+        (.clear bytes)
+        (cond
+          (.isError result) (do (.throwException result) total)
+          (.isOverflow result) (recur total flushing?)
+          flushing? total
+          :else (recur total true))))))
+
+(defn- known-length [body response]
+  (cond
+    (nil? body) 0
+    (string? body) (encoded-length body response)
+    (instance? byte-array-class body) (alength ^bytes body)
+    (instance? ByteBuffer body) (.remaining ^ByteBuffer body)
+    (fn? body) nil
+    :else (p/body-size-in-bytes body response)))
 
 (defn with-content-length [response]
   (if (hdr.util/get-header response "content-length")
     response
-    (if-let [size (p/body-size-in-bytes (:body response) response)]
-      (hdr.util/header response "content-length" (str size))
+    (if-let [length (known-length (:body response) response)]
+      (hdr.util/header response "content-length" (str length))
       response)))
 
-(def ^:private byte-array-class (Class/forName "[B"))
+(defn- write-string! [^String body response ^OutputStream out]
+  (let [encoder (encoder response)
+        chars (CharBuffer/wrap body)
+        bytes (ByteBuffer/allocate 8192)]
+    (loop [flushing? false]
+      (let [result (if flushing? (.flush encoder bytes) (.encode encoder chars bytes true))]
+        (when (.isError result) (.throwException result))
+        (.write out (.array bytes) 0 (.position bytes))
+        (.clear bytes)
+        (cond
+          (.isOverflow result) (recur flushing?)
+          (not flushing?) (recur true))))))
 
-(defn- informational-status? [status]
-  (and (<= 100 status)
-       (< status 200)
-       (not= 101 status)))
-
-(defn- final-status? [^long status]
-  (>= status 200))
-
-(defn- schedule-start-response!
-  [^Request req status headers content-length compress-hint]
-  (pi/send-required-msg
-   (:worker req)
-   [:h2o/start-response
-    (response-head/start-command (:dispatch-module-id req)
-                                 (:dispatch-request-seq req)
-                                 status
-                                 headers
-                                 content-length
-                                 compress-hint)]))
-
-(defn- schedule-informational!
-  [^Request req status headers]
-  (pi/send-required-msg
-   (:worker req)
-   [:h2o/send-informational
-    (response-head/informational-command (:dispatch-module-id req)
-                                         (:dispatch-request-seq req)
-                                         status
-                                         headers)]))
-
-(def ^:private informational-sent (Object.))
-
-(defn- mark-informational!
-  [committed_]
-  (loop []
-    (let [state @committed_]
-      (cond
-        (map? state) false
-        (identical? informational-sent state) true
-        (compare-and-set! committed_ nil informational-sent) true
-        :else (recur)))))
-
-(defn- send-informational!
-  [^Request req resp]
-  (when (:body resp)
-    (throw (ex-info "Body payloads are not allowed for 1xx informational responses" {:status (:status resp)})))
-  (let [status (:status resp)
-        headers (or (:headers resp) {})
-        [_ header-pairs _ _] (build-headers2 {:headers headers})]
-    (schedule-informational! req status header-pairs)))
-
-(defn get-compress-hint [resp]
-  (get h2o/->compress-hint (:h2o/compress-hint resp) h2o/H2O_COMPRESS_HINT_ENABLE))
-
-(defn- string-body-bytes
-  [^String body response]
-  (try
-    (let [^Charset charset (Charset/forName (or (hdr.util/get-charset response) "utf-8"))]
-      (.getBytes body charset))
-    (catch IllegalArgumentException _
-      (.getBytes body StandardCharsets/UTF_8))))
-
-(defn- write-fallback-body-to-stream!
-  [chunk response ^OutputStream out]
-  (cond
-    (nil? chunk)                       nil
-    (instance? byte-array-class chunk) (.write out ^bytes chunk)
-    (number? chunk)                    (.write out (int chunk))
-    (string? chunk)                    (.write out ^bytes (string-body-bytes chunk response))
-    (instance? ByteBuffer chunk)       (let [dup   (.duplicate ^ByteBuffer chunk)
-                                             len   (.remaining dup)
-                                             bytes (byte-array len)]
-                                         (.get dup bytes)
-                                         (.write out bytes))
-    (instance? InputStream chunk)      (io/copy chunk out)
-    (sequential? chunk)                (doseq [part chunk]
-                                         (write-fallback-body-to-stream! part response out))
-    :else                              (throw (ex-info "Unsupported response chunk" {:type (class chunk)}))))
+(defn- write-byte-buffer! [^ByteBuffer body ^OutputStream out]
+  (let [source (.duplicate body)
+        bytes (byte-array (min 8192 (.remaining source)))]
+    (while (.hasRemaining source)
+      (let [n (min (alength bytes) (.remaining source))]
+        (.get source bytes 0 n)
+        (.write out bytes 0 n)))))
 
 #_{:clj-kondo/ignore [:unresolved-namespace]}
 (compile-if
+ (do (require '[ring.core.protocols :as ring-protocols]) true)
  (do
-   (require '[ring.core.protocols :as ring-protocols])
-   true)
+   (defn- streamable-response-body? [body]
+     (satisfies? ring.core.protocols/StreamableResponseBody body))
+   (defn- write-ring-body! [body response out]
+     (ring.core.protocols/write-body-to-stream body response out)))
  (do
-   (defn- streamable-response-body?
-     [chunk]
-     (satisfies? ring.core.protocols/StreamableResponseBody chunk))
-   (defn- write-body-to-stream!
-     [chunk response ^OutputStream out]
-     (ring.core.protocols/write-body-to-stream chunk response out)))
- (do
-   (defn- streamable-response-body?
-     [_]
-     false)
-   (defn- write-body-to-stream!
-     [chunk response ^OutputStream out]
-     (write-fallback-body-to-stream! chunk response out))))
+   (defn- streamable-response-body? [_] false)
+   (defn- write-ring-body! [body _ _]
+     (throw (ex-info "Unsupported response body" {:type (class body)})))))
 
-(defn- fixed-final-body-bytes
-  [body]
+(defn- write-body! [body response ^OutputStream out]
   (cond
-    (string? body)                     (.getBytes ^String body StandardCharsets/UTF_8)
-    (instance? byte-array-class body) (aclone ^bytes body)
-    :else                              nil))
+    (nil? body) nil
+    (string? body) (write-string! body response out)
+    (instance? byte-array-class body) (.write out ^bytes body)
+    (instance? ByteBuffer body) (write-byte-buffer! body out)
+    (instance? InputStream body) (io/copy body out)
+    (number? body) (.write out (int body))
+    (sequential? body) (doseq [part body] (write-body! part response out))
+    :else (write-ring-body! body response out)))
 
-(defn- utf8-charset?
-  [charset]
-  (try
-    (= StandardCharsets/UTF_8 (Charset/forName charset))
-    (catch IllegalArgumentException _
-      false)))
+(defn- write-adapted-body! [body response out complete?]
+  (if (and complete? (streamable-response-body? body)
+           (not (or (string? body) (instance? byte-array-class body)
+                    (instance? ByteBuffer body) (nil? body))))
+    (write-ring-body! body response out)
+    (write-body! body response out)))
 
-(def ^:private missing-content-length (Object.))
+(defn- bounded-body? [body]
+  (or (nil? body) (string? body) (instance? byte-array-class body)
+      (instance? ByteBuffer body) (fn? body)))
 
-(defn- append-fixed-header
-  [headers name value]
-  (let [name (str name)]
-    (if (sequential? value)
-      (reduce (fn [result item]
-                (conj result [name (str item)]))
-              headers
-              value)
-      (conj headers [name (str value)]))))
+(defn- supported-body? [body]
+  (or (bounded-body? body) (number? body) (instance? InputStream body)
+      (sequential? body) (streamable-response-body? body)))
 
-(defn- fixed-final-header-data
-  [headers]
-  (reduce-kv
-   (fn [[result content-length] name value]
-     (if (.equalsIgnoreCase ^String (str name) "content-length")
-       [result (if (identical? missing-content-length content-length)
-                 value
-                 content-length)]
-       [(append-fixed-header result name value) content-length]))
-   [[] missing-content-length]
-   (or headers {})))
+(defn- bounded-producer [body response]
+  (cond
+    (fn? body) body
+    (nil? body) (fn [_])
+    (string? body)
+    (fn [^ByteBuffer buffer]
+      (let [encoder (encoder response)
+            result (.encode encoder (CharBuffer/wrap ^String body) buffer true)]
+        (when (.isError result) (.throwException result))
+        (when (.isOverflow result) (throw (java.nio.BufferOverflowException.)))
+        (let [result (.flush encoder buffer)]
+          (when (.isError result) (.throwException result))
+          (when (.isOverflow result) (throw (java.nio.BufferOverflowException.))))))
+    (instance? byte-array-class body) (fn [^ByteBuffer buffer] (.put buffer ^bytes body))
+    :else (fn [^ByteBuffer buffer] (.put buffer (.duplicate ^ByteBuffer body)))))
 
-(defn- fixed-final-data
-  [^Request req response final?]
-  (let [status (:status response)
-        body (:body response)
-        output-buffer-size (get-in req [:config :output-buffer-size])
-        [headers content-length-value] (fixed-final-header-data (:headers response))
-        charset (hdr.util/get-charset response)]
-    (when (and final?
-               (some? status)
-               (final-status? status)
-               (not (contains? #{204 304} status))
-               (nat-int? output-buffer-size)
-               (or (string? body) (instance? byte-array-class body))
-               (or (not (string? body))
-                   (nil? charset)
-                   (utf8-charset? charset)))
-      (let [header-payload-bytes (fixed-final/header-utf8-bytes headers)
-            header-staging-bytes (+ (serialization/descriptor-bytes headers)
-                                    header-payload-bytes
-                                    (* 2 (count headers)))]
-        (when (and (<= (count headers) fixed-final/max-header-pairs)
-                   (<= header-staging-bytes fixed-final/max-header-staging-bytes))
-          (let [body-length (if (string? body)
-                              (serialization/utf8-length body)
-                              (alength ^bytes body))]
-            (when (<= body-length
-                      (min output-buffer-size
-                           fixed-final/response-ring-max-body-bytes))
-              (let [content-length (if (identical? missing-content-length content-length-value)
-                                     body-length
-                                     (coerce-content-length content-length-value))
-                    compress-hint (get-compress-hint response)
-                    compress-hint (if (and (= h2o/H2O_COMPRESS_HINT_ENABLE compress-hint)
-                                           (< body-length
-                                              (or (get-in req [:config :compress-min-size]) 0)))
-                                    h2o/H2O_COMPRESS_HINT_DISABLE
-                                    compress-hint)]
-                (fixed-final/direct-response-plan
-                 (long (:dispatch-module-id req))
-                 (long (:dispatch-request-seq req))
-                 (long status) headers (long header-payload-bytes) body
-                 (long body-length) (long content-length) (long compress-hint))))))))))
+(defn- options [opts body buffer-size]
+  (when-not (map? opts)
+    (throw (ex-info "Emitter options must be a map" {:options opts})))
+  (doseq [key (keys opts)]
+    (when-not (contains? #{:wait? :flush? :end? :capacity} key)
+      (throw (ex-info "Unknown emitter option" {:option key}))))
+  (doseq [key [:wait? :flush? :end?]]
+    (when (and (contains? opts key) (not (boolean? (get opts key))))
+      (throw (ex-info "Emitter option must be boolean" {:option key :value (get opts key)}))))
+  (if (fn? body)
+    (when-not (and (integer? (:capacity opts)) (pos? (:capacity opts))
+                   (<= (:capacity opts) buffer-size))
+      (throw (ex-info "Producer capacity must be a positive integer no larger than output-buffer-size"
+                      {:capacity (:capacity opts) :output-buffer-size buffer-size})))
+    (when (contains? opts :capacity)
+      (throw (ex-info "Capacity is only valid for a producer function" {}))))
+  (merge {:wait? true :flush? false :end? false} opts))
 
-(defn- fixed-final-command-from-data
-  [^Request req ^DirectResponsePlan plan]
-  (let [status (.-status plan)
-        headers (.-headers plan)
-        body (.-body plan)
-        content-length (.-content-length plan)
-        compress-hint (.-compress-hint plan)
-        header-staging-bytes (fixed-final/header-staging-bytes headers)
-        body-bytes (fixed-final-body-bytes body)]
-    (fixed-final/prepared-command (:dispatch-module-id req)
-                                  (:dispatch-request-seq req) status headers
-                                  header-staging-bytes content-length compress-hint
-                                  body-bytes)))
+(defn- informational? [status]
+  (and (<= 100 status 199) (not= 101 status)))
 
-(defn- schedule-fixed-final!
-  [^Request req ^DirectResponsePlan plan]
-  (fixed-final/try-publish-direct-response! (:worker req) plan))
+(defn- normalized-head [response length informational?]
+  (let [response (assoc response :status (or (:status response) 200))
+        response (if (and (some? length) (not informational?)
+                          (not (hdr.util/get-header response "content-length")))
+                   (hdr.util/header response "content-length" (str length))
+                   response)
+        [headers n content-length] (build-headers response)
+        headers (if informational?
+                  (mapv (fn [[name value]] [(str/lower-case name) value]) headers)
+                  headers)]
+    (when (or (> n fixed-final/max-header-pairs)
+              (> (fixed-final/header-staging-bytes headers) fixed-final/max-header-staging-bytes))
+      (throw (ex-info "Response headers exceed bounded header storage" {:header-count n})))
+    {:status (:status response) :headers headers :content-length (if (= 205 (:status response)) 0 content-length)
+     :compress-hint (get-compress-hint response) :response (dissoc response :body)}))
 
-(defn- schedule-fixed-final-mailbox!
-  [^Request req command]
-  (pi/send-msg (:worker req) [:h2o/send-fixed-final command]))
+(defn- apply-head! [req head informational?]
+  (let [{:keys [status headers content-length compress-hint]} head
+        module-id (:dispatch-module-id req)
+        request-seq (:dispatch-request-seq req)]
+    (if informational?
+      (response-head/execute-informational!
+       req (response-head/informational-command module-id request-seq status headers))
+      (response-head/execute-start!
+       req (response-head/start-command module-id request-seq status headers content-length compress-hint)))))
 
-(defn- response-writer
-  [write-resp]
-  (if (delay? write-resp) @write-resp write-resp))
-
-(defn- created-response-writer
-  [write-resp]
-  (if (delay? write-resp)
-    (when (realized? write-resp) @write-resp)
-    write-resp))
-
-(defn- commit-final!
-  [^Request req write-resp committed_ {:keys [body status] :as response} final?]
-  (let [response' (cond-> response
-                    (nil? status) (assoc :status 200))]
-    (when-not (final-status? (:status response'))
-      (throw (ex-info "Final response status must be >= 200" {:status (:status response')})))
-    (let [fixed-data (fixed-final-data req response' final?)
-          response' (if fixed-data
-                      (if (hdr.util/get-header response' "content-length")
-                        response'
-                        (hdr.util/header response' "content-length"
-                                         (.-content-length ^DirectResponsePlan fixed-data)))
-                      (cond-> response'
-                        final? with-content-length))
-          head (dissoc response' :body)
-          state @committed_]
-      (when (and (not (map? state))
-                 (compare-and-set! committed_ state head))
-        (let [fixed-result (when fixed-data
-                             (if (identical? informational-sent state)
-                               (schedule-fixed-final-mailbox!
-                                req (fixed-final-command-from-data req fixed-data))
-                               (schedule-fixed-final! req fixed-data)))]
-          (cond
-            (= :accepted fixed-result)
-            (do
-              (when-let [writer (created-response-writer write-resp)]
-                (pi/stop writer))
-              {:head head :body nil})
-
-            (= :closed fixed-result)
-            (do
-              (when-let [writer (created-response-writer write-resp)]
-                (pi/stop writer))
-              nil)
-
-            :else
-            (let [[headers _header-count content-length] (build-headers head)
-                  writer (response-writer write-resp)
-                  result (schedule-start-response!
-                          req (:status head) headers content-length
-                          (get-compress-hint response'))]
-              (if (= :accepted result)
-                {:head head :body body}
-                (do
-                  (pi/stop writer)
-                  nil)))))))))
-
-(defn- write-body-chunk!
-  [chunk ^OutputStream out response close-after?]
-  (if close-after?
-    (write-body-to-stream! chunk response out)
-    (cond
-      (nil? chunk)                       nil
-      (instance? byte-array-class chunk) (.write out ^bytes chunk)
-      (number? chunk)                    (.write out (int chunk))
-      (string? chunk)                    (.write out ^bytes (string-body-bytes chunk response))
-      (instance? ByteBuffer chunk)       (let [dup   (.duplicate ^ByteBuffer chunk)
-                                               len   (.remaining dup)
-                                               bytes (byte-array len)]
-                                           (.get dup bytes)
-                                           (.write out bytes))
-      (instance? InputStream chunk)      (io/copy chunk out)
-      (sequential? chunk)                (doseq [part chunk]
-                                           (write-body-chunk! part out response false))
-      (streamable-response-body? chunk)  (throw (ex-info "StreamableResponseBody chunk requires close-after? true" {:type (class chunk)}))
-      :else                              (throw (ex-info "Unsupported response chunk" {:type (class chunk)})))))
-
-(defn- run-close-callbacks!
-  [callbacks]
+(defn- run-close-callbacks! [callbacks]
   (doseq [callback callbacks]
-    (try
-      (callback)
-      (catch Throwable t
-        (trove/log! {:level :error :id ::close-callback-failed :ex t})))))
+    (try (callback)
+         (catch Throwable t
+           (try (trove/log! {:level :error :id ::close-callback-failed :ex t})
+                (catch Throwable _ nil))))))
 
-(defn- reserve-close-callbacks!
-  [callback-tail_ callbacks]
+(defn- reserve-close-callbacks! [callback-tail_ callbacks]
   (when (seq callbacks)
     (let [complete (promise)
-          task (reify Runnable
-                 (run [_]
-                   (try
-                     (run-close-callbacks! callbacks)
-                     (finally
-                       (deliver complete true)))))]
-      (loop []
-        (let [previous @callback-tail_
-              chained-task (reify Runnable
-                             (run [_]
-                               (try
-                                 @previous
-                                 (.run task)
-                                 (finally
-                                   (deliver complete true)))))]
-          (if (compare-and-set! callback-tail_ previous complete)
-            chained-task
-            (recur)))))))
+          previous (swap-vals! callback-tail_ (constantly complete))]
+      (reify Runnable
+        (run [_]
+          (try
+            @(first previous)
+            (run-close-callbacks! callbacks)
+            (finally (deliver complete true))))))))
 
-(defn- dispatch-close-callback!
-  [callback-dispatch task]
+(defn- dispatch-close-callback! [dispatch task]
   (when task
-    (try
-      (callback-dispatch task)
-      (catch Throwable _
-        (Thread/startVirtualThread task)))))
+    (try (dispatch task)
+         (catch Throwable _ (Thread/startVirtualThread task)))))
 
-(defn- terminal!
-  [lifecycle-lock lifecycle_ callback-tail_ callback-dispatch]
+(defn- terminal! [lock state_ tail_ dispatch]
   (let [[changed? task]
-        (locking lifecycle-lock
-          (let [{:keys [phase callbacks]} @lifecycle_]
-            (if (= :closed phase)
-              [false nil]
-              (let [task (reserve-close-callbacks! callback-tail_ callbacks)]
-                (reset! lifecycle_ {:phase :closed :callbacks []})
-                [true task]))))]
-    (dispatch-close-callback! callback-dispatch task)
+        (locking lock
+          (if (= :closed (:phase @state_))
+            [false nil]
+            (let [task (reserve-close-callbacks! tail_ (:callbacks @state_))]
+              (swap! state_ assoc :phase :closed :callbacks [])
+              (when-let [receipt (:last-receipt @state_)]
+                (deliver receipt {:status :closed}))
+              (.notifyAll ^Object lock)
+              [true task])))]
+    (dispatch-close-callback! dispatch task)
     changed?))
 
-(defn- begin-close!
-  [lifecycle-lock lifecycle_]
-  (locking lifecycle-lock
-    (let [{:keys [phase] :as lifecycle} @lifecycle_]
-      (when (= :open phase)
-        (reset! lifecycle_ (assoc lifecycle :phase :closing))
-        true))))
+(defn- acquire-producer! [lock state_ wait?]
+  (locking lock
+    (loop []
+      (let [{:keys [phase producer]} @state_]
+        (cond
+          (= producer (Thread/currentThread))
+          (throw (ex-info "Recursive emit! on the same response is not supported" {}))
+          (= :closed phase) :closed
+          (nil? producer) (do (swap! state_ assoc :producer (Thread/currentThread)) :accepted)
+          (not wait?) :full
+          :else (do (.wait ^Object lock) (recur)))))))
 
-(defn- register-close-callback!
-  [lifecycle-lock lifecycle_ callback-tail_ callback-dispatch callback]
-  (let [task
-        (locking lifecycle-lock
-          (let [{:keys [phase] :as lifecycle} @lifecycle_]
-            (if (= :closed phase)
-              (reserve-close-callbacks! callback-tail_ [callback])
-              (do
-                (reset! lifecycle_ (update lifecycle :callbacks conj callback))
-                nil))))]
-    (dispatch-close-callback! callback-dispatch task)))
+(defn- release-producer! [lock state_]
+  (locking lock
+    (swap! state_ assoc :producer nil)
+    (.notifyAll ^Object lock)))
 
-(deftype H2OResponseEmitter [^Request req
-                             write-resp
-                             committed_
-                             lifecycle-lock
-                             lifecycle_
-                             callback-dispatch
-                             callback-tail_]
+(defn- wake-slot-waiters! [req]
+  (when-let [monitor (get-in req [:worker :response-slot-monitor])]
+    (locking monitor (.notifyAll ^Object monitor))))
+
+(declare emit-value! close-emitter!)
+
+(deftype H2OResponseEmitter [^Request req writer_ lifecycle-lock lifecycle_ callback-dispatch callback-tail_]
   p/ResponseEmitter
   (open? [_]
-    (let [writer (created-response-writer write-resp)]
-      (and (= :open (:phase @lifecycle_))
-           (or (nil? writer)
-               (not (.get ^AtomicBoolean (:stopped?_ writer)))))))
+    (and (= :open (:phase @lifecycle_))
+         (if-let [writer @writer_] (response-queue/open? writer) true)))
   (committed? [_]
-    (map? @committed_))
-  (emit! [this data]
-    (p/emit! this data {}))
-  (emit! [this data {:keys [close-after?]
-                     :or   {close-after? false}}]
+    (if-let [writer @writer_]
+      (response-queue/committed? writer)
+      (some? (:committed @lifecycle_))))
+  (emit! [this data] (p/emit! this data {}))
+  (emit! [this data opts] (emit-value! this data opts))
+  (flush! [_]
+    (if-let [writer @writer_]
+      (response-queue/flush! writer)
+      (:last-receipt @lifecycle_)))
+  (close! [this] (close-emitter! this))
+  (on-close! [_ callback]
+    (let [task (locking lifecycle-lock
+                 (if (= :closed (:phase @lifecycle_))
+                   (reserve-close-callbacks! callback-tail_ [callback])
+                   (do (swap! lifecycle_ update :callbacks conj callback) nil)))]
+      (dispatch-close-callback! callback-dispatch task))))
 
-    (cond
-      (not (p/open? this)) false
-        ;; map data, possibly with headers/status
-      (map? data)
-      (let [status   (:status data)
-            resp-map (assoc data :status status)]
-        (if (informational-status? status)
-          (when (mark-informational! committed_)
-            (= :accepted (send-informational! req resp-map)))
-          (when-not (map? @committed_)
-            (when-let [{:keys [head body]} (commit-final! req write-resp committed_ resp-map close-after?)]
-              (reset! committed_ head)
-              (when body
-                (write-body-chunk! body (:out-stream (response-writer write-resp)) head true))
-              (when close-after?
-                (p/close this))
-              true))))
-        ;; body data
-      :else
-      (let [state @committed_
-            head (if (map? state)
-                   state
-                   (when-let [{:keys [head]}
-                              (commit-final! req write-resp committed_
-                                             {:status 200 :headers {}} close-after?)]
-                     (reset! committed_ head)))]
-        (when head
-          (write-body-chunk! data (:out-stream (response-writer write-resp)) head close-after?)
-          (when close-after? (p/close this))
-          true))))
-  (flush [_]
-    (.flush ^OutputStream (:out-stream (response-writer write-resp))))
-  (close [_]
-    (let [writer (or (created-response-writer write-resp)
-                     (when-not (map? @committed_)
-                       (response-writer write-resp)))]
-      (if (and (or (nil? writer)
-                   (not (.get ^AtomicBoolean (:stopped?_ writer))))
-               (begin-close! lifecycle-lock lifecycle_))
-        (try
-          (when writer
-            (.close ^OutputStream (:out-stream writer)))
-          true
-          (finally
-            (terminal! lifecycle-lock lifecycle_ callback-tail_ callback-dispatch)))
-        (if (and writer (.get ^AtomicBoolean (:stopped?_ writer)))
-          (do
-            (terminal! lifecycle-lock lifecycle_ callback-tail_ callback-dispatch)
-            false)
-          false))))
-  (on-close [_ callback]
-    (register-close-callback! lifecycle-lock lifecycle_ callback-tail_ callback-dispatch callback)))
+(defn writer-if-created [value]
+  (if (instance? H2OResponseEmitter value)
+    @(.writer_ ^H2OResponseEmitter value)
+    (if (delay? value) (when (realized? value) @value) value)))
 
-(defn ^:no-doc writer-if-created
-  [value]
-  (created-response-writer
-   (if (instance? H2OResponseEmitter value)
-     (.write-resp ^H2OResponseEmitter value)
-     value)))
+(defn- ensure-writer! [^H2OResponseEmitter emitter]
+  (let [lock (.lifecycle-lock emitter)]
+    (locking lock
+      (when (= :open (:phase @(.lifecycle_ emitter)))
+        (or @(.writer_ emitter)
+            (let [req (.req emitter)
+                  writer (response-queue/create-response-writer
+                          (assoc req
+                                 :apply-head! #(apply-head! req %1 %2)
+                                 :on-terminal! #(do
+                                                  (terminal! (.lifecycle-lock emitter) (.lifecycle_ emitter)
+                                                             (.callback-tail_ emitter) (.callback-dispatch emitter))
+                                                  (wake-slot-waiters! req))))]
+              (reset! (.writer_ emitter) writer)))))))
+
+(defn close-emitter! [^H2OResponseEmitter emitter]
+  (let [lock (.lifecycle-lock emitter)
+        changed?
+        (locking lock
+          (if (= :closed (:phase @(.lifecycle_ emitter)))
+            false
+            (if-let [writer (ensure-writer! emitter)]
+              (response-queue/close! writer)
+              false)))]
+    (wake-slot-waiters! (.req emitter))
+    changed?))
 
 (defn new-response-emitter
-  ([req]
-   (new-response-emitter req Thread/startVirtualThread))
-  ([req callback-dispatch]
-   (let [write-resp (delay (response-queue/create-response-writer req))
-         committed_ (atom nil)
-         lifecycle-lock (Object.)
-         lifecycle_ (atom {:phase :open :callbacks []})
-         callback-tail_ (atom (promise))]
-     (deliver @callback-tail_ true)
-     (H2OResponseEmitter. req write-resp committed_ lifecycle-lock lifecycle_ callback-dispatch callback-tail_))))
+  ([req] (new-response-emitter req Thread/startVirtualThread))
+  ([req dispatch]
+   (let [tail (promise)]
+     (deliver tail true)
+     (H2OResponseEmitter. req (atom nil) (Object.)
+                          (atom {:phase :open :callbacks [] :producer nil}) dispatch (atom tail)))))
 
 (defn stop-emitter
-  "Stops an initialized response writer before dispatching emitter close callbacks."
+  "Stops admission and settles receipts without releasing native in-flight storage."
   [^H2OResponseEmitter emitter]
-  (when-let [writer (created-response-writer (.write-resp emitter))]
-    (pi/stop writer))
-  (terminal! (.lifecycle-lock emitter)
-             (.lifecycle_ emitter)
-             (.callback-tail_ emitter)
-             (.callback-dispatch emitter)))
+  (let [lock (.lifecycle-lock emitter)]
+    (locking lock
+      (when-let [writer @(.writer_ emitter)]
+        (response-queue/on-stop writer nil))
+      (terminal! (.lifecycle-lock emitter) (.lifecycle_ emitter)
+                 (.callback-tail_ emitter) (.callback-dispatch emitter))))
+  (wake-slot-waiters! (.req emitter)))
 
-(defn- response-emitter-body?
-  [body]
-  (and (some? body)
-       (not (string? body))
-       (not (instance? byte-array-class body))
-       (satisfies? p/ResponseEmitter body)))
+(defn- fixed-plan [req head body length]
+  (fixed-final/direct-response-plan
+   (long (:dispatch-module-id req)) (long (:dispatch-request-seq req))
+   (long (:status head)) (:headers head)
+   (long (fixed-final/header-utf8-bytes (:headers head))) body (long length)
+   (long (:content-length head)) (long (:compress-hint head))))
 
-(defn send-ring-response!
-  [emitter ring-resp]
-  (try
-    (if (response-emitter-body? (:body ring-resp))
-      (when (:status ring-resp)
-        (p/emit! emitter (dissoc ring-resp :body) {:close-after? false}))
-      (p/emit! emitter ring-resp {:close-after? true}))
-    (catch Throwable e
-      e
-      (.printStackTrace e)))
-  nil)
+(defn- fixed-producer! [^H2OResponseEmitter emitter head producer capacity opts]
+  (let [req (.req emitter)
+        lock (.lifecycle-lock emitter)
+        receipt (promise)
+        result (fixed-final/publish-direct-producer!
+                (:worker req) (fixed-plan req head nil 0) capacity producer (:wait? opts)
+                #(not (p/open? emitter))
+                (fn [publish!]
+                  (locking lock
+                    (if (p/open? emitter)
+                      (do
+                        (swap! (.lifecycle_ emitter) assoc :committed head :last-receipt receipt)
+                        (publish!)
+                        (terminal! (.lifecycle-lock emitter) (.lifecycle_ emitter)
+                                   (.callback-tail_ emitter) (.callback-dispatch emitter))
+                        :accepted)
+                      :closed))))]
+    (case result
+      :accepted {:status :accepted :progress receipt}
+      :overloaded {:status :full}
+      :closed {:status :closed})))
+
+(defn emit-value! [^H2OResponseEmitter emitter data raw-opts]
+  (if-not (p/open? emitter)
+    {:status :closed}
+    (let [req (.req emitter)
+          response? (map? data)
+          body? (or (not response?) (contains? data :body))
+          body (if response? (:body data) data)
+          buffer-size (get-in req [:config :output-buffer-size])
+          opts (options raw-opts body buffer-size)
+          status (if response? (or (:status data) 200) 200)
+          _ (when-not (and (integer? status) (<= 100 status 999) (not= 101 status))
+              (throw (ex-info "Unsupported response status" {:status status})))
+          info? (informational? status)
+          _ (when (and info? (or body? (:end? opts)))
+              (throw (ex-info "Informational responses reject a body and end?" {:status status})))
+          _ (when (and body? (not (supported-body? body)))
+              (throw (ex-info "Unsupported response body" {:type (class body)})))
+          _ (when (and body? (not (:wait? opts)) (not (bounded-body? body)))
+              (throw (ex-info "Nonblocking output requires a bounded body" {:type (class body)})))
+          current-head (when-let [writer @(.writer_ emitter)] (response-queue/committed-head writer))
+          validation-response (if response? data (or (:response current-head) {:status 200}))
+          validation-length (when (and body? (not (fn? body))) (known-length body validation-response))
+          _ (when (and (not (:wait? opts)) validation-length (> validation-length buffer-size))
+              (throw (ex-info "Nonblocking body exceeds output-buffer-size"
+                              {:bytes validation-length :output-buffer-size buffer-size})))
+          _ (when response?
+              (normalized-head data (when (:end? opts) validation-length) info?))
+          _ (when (and response? (not info?) (p/committed? emitter))
+              (throw (ex-info "Final response headers have already been accepted" {})))
+          grant (acquire-producer! (.lifecycle-lock emitter) (.lifecycle_ emitter) (:wait? opts))]
+      (if (not= :accepted grant)
+        {:status grant}
+        (try
+          (let [writer @(.writer_ emitter)
+                committed (if writer (response-queue/committed-head writer) (:committed @(.lifecycle_ emitter)))
+                _ (when (and response? (not info?) committed)
+                    (throw (ex-info "Final response headers have already been accepted" {})))
+                response (if response? data (or (:response committed) {:status 200 :headers {}}))
+                length (when (and body? (not (fn? body))) (known-length body response))
+                capacity (if (fn? body) (:capacity opts) (or length 0))
+                _ (when (and (not (:wait? opts)) (> capacity buffer-size))
+                    (throw (ex-info "Nonblocking body exceeds output-buffer-size"
+                                    {:bytes capacity :output-buffer-size buffer-size})))
+                head (when (or response? (nil? committed))
+                       (normalized-head response (when (:end? opts) length) info?))
+                effective-head (or head committed (normalized-head response nil false))
+                opts (assoc opts :body? body? :informational? info?
+                            :suppress-body? (or (= :head (:request-method req))
+                                                (contains? #{204 205 304} (:status effective-head))))]
+            (if (and (fn? body) (:end? opts) (nil? writer) (not info?)
+                     (<= capacity fixed-final/response-ring-max-body-bytes)
+                     (not (:suppress-body? opts)))
+              (fixed-producer! emitter effective-head body capacity opts)
+              (if-let [writer (ensure-writer! emitter)]
+                (if (and (bounded-body? body) (<= capacity buffer-size))
+                  (response-queue/emit-bounded! writer head capacity (bounded-producer body response) opts)
+                  (response-queue/emit-incremental! writer head
+                                                    #(write-adapted-body! body response % (:end? opts)) opts))
+                {:status :closed})))
+          (finally (release-producer! (.lifecycle-lock emitter) (.lifecycle_ emitter))))))))
+
+(defn- ordinary-fixed-plan [req response]
+  (let [body (:body response)
+        status (or (:status response) 200)
+        b (get-in req [:config :output-buffer-size])]
+    (when (and (integer? status) (<= 200 status 999) (not (contains? #{204 304} status))
+               (or (instance? byte-array-class body)
+                   (and (string? body) (= StandardCharsets/UTF_8 (response-charset response)))))
+      (let [length (known-length body response)
+            [headers n _] (build-headers response)]
+        (when (and (<= length (min b fixed-final/response-ring-max-body-bytes))
+                   (<= n fixed-final/max-header-pairs)
+                   (<= (fixed-final/header-staging-bytes headers) fixed-final/max-header-staging-bytes))
+          (let [head (normalized-head response length false)
+                head (if (and (= h2o/H2O_COMPRESS_HINT_ENABLE (:compress-hint head))
+                              (< length (or (get-in req [:config :compress-min-size]) 0)))
+                       (assoc head :compress-hint h2o/H2O_COMPRESS_HINT_DISABLE)
+                       head)]
+            [head (fixed-plan req head body length)]))))))
+
+(defn send-ring-response! [^H2OResponseEmitter emitter response]
+  (let [lock (.lifecycle-lock emitter)]
+    (try
+      (if (and (:body response) (satisfies? p/ResponseEmitter (:body response)))
+        (when (:status response) (p/emit! emitter (dissoc response :body)))
+        (if-let [[head plan] (when (and (p/open? emitter) (nil? @(.writer_ emitter)))
+                               (ordinary-fixed-plan (.req emitter) response))]
+          (when (= :accepted (acquire-producer! (.lifecycle-lock emitter) (.lifecycle_ emitter) true))
+            (try
+              (if (and (p/open? emitter) (nil? @(.writer_ emitter)))
+                (fixed-final/publish-direct-response!
+                 (:worker (.req emitter)) plan #(not (p/open? emitter))
+                 (fn [publish!]
+                   (locking lock
+                     (if (p/open? emitter)
+                       (do
+                         (swap! (.lifecycle_ emitter) assoc :committed head)
+                         (publish!)
+                         (terminal! (.lifecycle-lock emitter) (.lifecycle_ emitter)
+                                    (.callback-tail_ emitter) (.callback-dispatch emitter))
+                         :accepted)
+                       :closed))))
+                (when (p/open? emitter)
+                  (response-queue/emit-incremental!
+                   (ensure-writer! emitter) (normalized-head response nil false)
+                   #(write-adapted-body! (:body response) response % true)
+                   {:wait? true :end? true :body? true})))
+              (finally (release-producer! (.lifecycle-lock emitter) (.lifecycle_ emitter)))))
+          (p/emit! emitter response {:end? true})))
+      (catch Throwable error
+        (stop-emitter emitter)
+        (trove/log! {:level :error :id ::response-failed :ex error})))
+    nil))

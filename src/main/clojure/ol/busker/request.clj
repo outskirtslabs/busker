@@ -5,7 +5,9 @@
   and coordinate callback completion with [[ol.busker.evloop]]."
   (:require
    [babashka.ffi :as mem]
+   [clojure.string :as str]
    [ol.busker.callback-dispatch :as callback-dispatch]
+   [ol.busker.fixed-final :as fixed-final]
    [ol.busker.worker-context :as worker-context]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
@@ -120,8 +122,18 @@
             has-body? (= 1 (:has-body req-ctx))
             write-req (when has-body?
                         (set-req-body-channel worker module-id request-seq))
-            req (Request. worker config req-ctx-ptr req-ctx write-req
-                          callback-pointers module-id request-seq)
+            req (assoc (Request. worker
+                                 (assoc config :buffer-pool (:stream-pool worker))
+                                 req-ctx-ptr req-ctx write-req
+                                 callback-pointers module-id request-seq)
+                       :request-method (or (:request-method req-ctx)
+                                           (keyword (str/lower-case
+                                                     (or (:method (force (:ring-data req-ctx))) "get"))))
+                       :reserve-command! #((:reserve-command! worker) worker %1 %2)
+                       :publish-command! #((:publish-command! worker) worker %1 %2)
+                       :release-command! #((:release-command! worker) worker %)
+                       :wake-command-waiters! #((:wake-command-waiters! worker) worker)
+                       :on-native-failure! #((:on-native-failure! worker) worker %))
             emitter (response/new-response-emitter req close-callback-dispatch)
             ring-request-data (:ring-data req-ctx)]
         (callback-dispatch/register! dispatch module-id request-seq req emitter)
@@ -164,6 +176,8 @@
   [module-id request-seq]
   (try
     (when-let [worker (worker-context/get-current-worker)]
-      (callback-dispatch/retire! (:callback-dispatch worker) module-id request-seq))
+      (try
+        (callback-dispatch/retire! (:callback-dispatch worker) module-id request-seq)
+        (finally (fixed-final/notify-capacity! worker))))
     (catch Exception e
       (h2o/report-almost-fatal-error "The request cleanup callback errored" e))))

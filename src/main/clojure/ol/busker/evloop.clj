@@ -3,7 +3,12 @@
 
   [[Worker]] directly implements [[ol.busker.internal.protocols/WorkerThread]]. Key functions
   admit messages, request worker shutdown, drain mailboxes, and bind worker context for
-  worker-affine response operations.
+  worker-affine response operations. Each platform worker processes at most 256
+  mailbox commands per turn before native polling. The 256-command capacity
+  includes unpublished permits; reservations do not occupy FIFO positions.
+  Application virtual threads can wait for capacity through Java synchronization.
+  Stop rejects new reservations and drains admitted work, including outstanding
+  publication or discard obligations, before a normal exit.
 
   ## Related Namespaces
 
@@ -11,16 +16,15 @@
   - [[ol.busker.wake-notifier]] signals native event-loop wakes."
   (:require
    [ol.busker.callback-dispatch :as callback-dispatch]
-   [ol.busker.fixed-final :as fixed-final]
    [ol.busker.internal.protocols :as p]
    [ol.busker.wake-notifier :as notifier]
    [ol.busker.worker-context :as worker-context]
+   [ol.busker.worker-mailbox :as mailbox]
    [taoensso.trove :as trove])
   (:import
    [java.util HashMap]
-   [java.util.concurrent ArrayBlockingQueue]
-   [java.util.concurrent.locks Condition ReentrantLock ReentrantReadWriteLock]
-   [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicLong AtomicReference]))
+   [java.util.concurrent.locks ReentrantReadWriteLock]
+   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
 
 (set! *warn-on-reflection* true)
 
@@ -28,17 +32,27 @@
 
 (defonce ^:private next-id_ (atom 0))
 
-;; ------------------------------
-;; Control messages
-;; ------------------------------
+(declare signal-mailbox!)
 
-;; ------------------------------
-;; Worker loop
-;; ------------------------------
+(defn reserve-command! [worker wait? cancelled?]
+  (mailbox/reserve! (:mailbox worker) wait? cancelled?))
 
-(defn- offer-mailbox!
-  [worker msg]
-  (.offer ^ArrayBlockingQueue (:mailbox worker) msg))
+(defn release-command! [worker permit]
+  (mailbox/release! (:mailbox worker) permit)
+  (try (p/wake worker) (catch Throwable _ nil)))
+
+(defn wake-command-waiters! [worker]
+  (mailbox/wake-waiters! (:mailbox worker)))
+
+(defn publish-command! [worker permit command]
+  (let [m (:mailbox worker)
+        published? (locking (:lock m)
+                     (if (.get ^AtomicBoolean (:running?_ worker))
+                       (do (mailbox/publish! m permit command) true)
+                       (do (mailbox/release! m permit) false)))]
+    (when-not published?
+      (when-let [discard (:discard-command! worker)] (discard command))))
+  (try (signal-mailbox! worker command) (catch Throwable _ nil)))
 
 (defn- log-mailbox-wakeup-failure!
   [worker msg first-error second-error reset?]
@@ -75,71 +89,24 @@
                       (log-mailbox-wakeup-failure! worker msg first-error
                                                    second-error reset?))))))))))))
 
-(defn- signal-mailbox-space!
-  [worker]
-  (when (pos? (.get ^AtomicInteger (:mailbox-waiters_ worker)))
-    (let [^ReentrantLock lock (:mailbox-lock worker)]
-      (.lock lock)
-      (try
-        (.signalAll ^Condition (:mailbox-space worker))
-        (finally
-          (.unlock lock))))))
-
-(defn- await-mailbox-space!
-  [worker]
-  (let [^AtomicInteger waiters_ (:mailbox-waiters_ worker)
-        ^ReentrantLock lock (:mailbox-lock worker)
-        ^Condition space (:mailbox-space worker)]
-    (.incrementAndGet waiters_)
-    (.lock lock)
-    (try
-      (while (and (.get ^AtomicBoolean (:running?_ worker))
-                  (.get ^AtomicBoolean (:accepting?_ worker))
-                  (zero? (.remainingCapacity ^ArrayBlockingQueue (:mailbox worker))))
-        (.await space))
-      (finally
-        (.unlock lock)
-        (.decrementAndGet waiters_)))))
-
-(defn- admit-message!
-  [worker msg]
-  (if (and (.get ^AtomicBoolean (:running?_ worker))
-           (.get ^AtomicBoolean (:accepting?_ worker)))
-    (do
-      (.incrementAndGet ^AtomicInteger (:admissions_ worker))
-      (let [accepted?
-            (try
-              (and (.get ^AtomicBoolean (:accepting?_ worker))
-                   (offer-mailbox! worker msg))
-              (finally
-                (.decrementAndGet ^AtomicInteger (:admissions_ worker))))]
-        (if accepted?
-          (do
-            (signal-mailbox! worker msg)
-            :accepted)
-          (if (and (.get ^AtomicBoolean (:running?_ worker))
-                   (.get ^AtomicBoolean (:accepting?_ worker)))
-            :overloaded
-            :closed))))
-    :closed))
-
-(defn- required-message!
-  [worker msg]
-  (loop []
-    (case (admit-message! worker msg)
-      :accepted :accepted
+(defn- submit-message! [worker msg wait?]
+  (let [permit (reserve-command! worker wait? (constantly false))]
+    (case permit
+      :full :overloaded
       :closed :closed
-      :overloaded (do
-                    (await-mailbox-space! worker)
-                    (recur)))))
+      (do (publish-command! worker permit msg) :accepted))))
+
+(defn- admit-message! [worker msg]
+  (submit-message! worker msg false))
+
+(defn- required-message! [worker msg]
+  (submit-message! worker msg true))
 
 (defn- request-stop!
   [worker]
   (if (.compareAndSet ^AtomicBoolean (:accepting?_ worker) true false)
     (do
-      (signal-mailbox-space! worker)
-      (while (pos? (.get ^AtomicInteger (:admissions_ worker)))
-        (Thread/onSpinWait))
+      (mailbox/close! (:mailbox worker))
       (.set ^AtomicBoolean (:stop-requested?_ worker) true)
       (p/wake worker)
       :accepted)
@@ -151,10 +118,6 @@
             ^AtomicBoolean running?_
             ^AtomicBoolean accepting?_
             ^AtomicBoolean stop-requested?_
-            ^AtomicInteger admissions_
-            ^AtomicInteger mailbox-waiters_
-            ^ReentrantLock mailbox-lock
-            ^Condition mailbox-space
             ^AtomicLong mailbox-signal_
             ^AtomicLong wake-generation_
             ^AtomicBoolean sleep-armed?_
@@ -170,7 +133,6 @@
             ^ReentrantReadWriteLock response-receiver-lock
             response-slots
             ^long response-slot-payload-capacity
-            ^AtomicReference fixed-final-scratch_
             callback-dispatch
             ^HashMap requests
             args]
@@ -190,7 +152,7 @@
     (if (= stop-msg msg)
       (request-stop! this)
       (required-message! this msg)))
-  (count-msgs [_] (.size ^ArrayBlockingQueue mailbox))
+  (count-msgs [_] (mailbox/queued mailbox))
   (add-req [_ req-id request]
     (.put requests req-id request))
   (reap-req [_ req-id]
@@ -227,28 +189,27 @@
 
 (defn- drain-mailbox!
   [^Worker worker]
-  (loop [handled? false]
-    (if-let [message (.poll ^ArrayBlockingQueue (:mailbox worker))]
-      (do
-        (handle-message! worker message)
-        (recur true))
-      (do
-        (clear-mailbox-signal! worker)
-        (if-let [message (.poll ^ArrayBlockingQueue (:mailbox worker))]
-          (do
-            (mark-mailbox-signalled! worker)
-            (handle-message! worker message)
-            (recur true))
-          (do
-            (when (.get ^AtomicBoolean (:stop-requested?_ worker))
-              (.set ^AtomicBoolean (:running?_ worker) false))
-            (when handled?
-              (signal-mailbox-space! worker))
-            handled?))))))
+  (loop [handled 0]
+    (if (= handled 256)
+      (do (mark-mailbox-signalled! worker) true)
+      (if-let [message (mailbox/poll! (:mailbox worker))]
+        (do (handle-message! worker message) (recur (inc handled)))
+        (do
+          (clear-mailbox-signal! worker)
+          (if-let [message (mailbox/poll! (:mailbox worker))]
+            (do
+              (mark-mailbox-signalled! worker)
+              (handle-message! worker message)
+              (recur (inc handled)))
+            (do
+              (when (and (.get ^AtomicBoolean (:stop-requested?_ worker))
+                         (not (mailbox/pending? (:mailbox worker))))
+                (.set ^AtomicBoolean (:running?_ worker) false))
+              (pos? handled))))))))
 
 (defn- mailbox-empty?
   [^Worker worker]
-  (.isEmpty ^ArrayBlockingQueue (:mailbox worker)))
+  (zero? (mailbox/queued (:mailbox worker))))
 
 (defn- run-evloop-on-thread!
   [^Worker worker]
@@ -261,6 +222,8 @@
       (loop [state {}
              wake-seen (long 0)]
         (when (.get running?_)
+          (when-let [cause (.get ^AtomicReference (:termination-cause_ worker))]
+            (throw cause))
           (let [mailbox-work? (drain-mailbox! worker)
                 wake-requested (.get wake-generation_)]
             (when (.get running?_)
@@ -279,24 +242,23 @@
                                        (finally
                                          (.set sleep-armed?_ false)))]
                       (recur next-state wake-requested))))))))))
-    (catch InterruptedException _
-      (.set ^AtomicBoolean (:running?_ worker) false))
+    (catch InterruptedException error
+      (when-let [fail (:on-native-failure! worker)] (fail worker error)))
     (catch Throwable error
-      (println "[evloop] worker crashed:" (.getMessage error))
-      (println error))
+      (when-let [fail (:on-native-failure! worker)] (fail worker error)))
     (finally
       (try
         (.set ^AtomicBoolean (:accepting?_ worker) false)
-        (signal-mailbox-space! worker)
+        (locking (:lock (:mailbox worker))
+          (.set ^AtomicBoolean (:running?_ worker) false)
+          (mailbox/close! (:mailbox worker)))
+        (when-let [discard (:discard-command! worker)]
+          (loop []
+            (when-let [command (mailbox/poll! (:mailbox worker))]
+              (discard command)
+              (recur))))
         (finally
-          (try
-            (fixed-final/close-worker-scratch! worker)
-            (finally
-              (.remove worker-context/worker-context))))))))
-
-;; ------------------------------
-;; Public API
-;; ------------------------------
+          (.remove worker-context/worker-context))))))
 
 (defn start-worker!
   "Start a worker on a platform thread (daemon).
@@ -318,7 +280,8 @@
 
   [loop-fn message-handler wakeup-receiver
    & {:keys [callback-dispatch wake-notifier response-receiver response-slots
-             response-slot-payload-capacity thread-name-prefix]
+             response-slot-payload-capacity thread-name-prefix stream-pool
+             on-native-failure! discard-command!]
       :or {thread-name-prefix "h2o-evloop"}}]
   (when-not callback-dispatch
     (throw (ex-info "Worker requires a callback dispatcher" {})))
@@ -328,7 +291,6 @@
         receiver_ (AtomicReference. wakeup-receiver)
         response-receiver_ (AtomicReference. response-receiver)
         wake-endpoint (notifier/endpoint receiver_)
-        mailbox-lock (ReentrantLock.)
         worker (map->Worker {:id id
                              :thread nil
                              :callback-dispatch callback-dispatch
@@ -336,16 +298,22 @@
                              :running?_ (AtomicBoolean. true)
                              :accepting?_ (AtomicBoolean. true)
                              :stop-requested?_ (AtomicBoolean. false)
-                             :admissions_ (AtomicInteger.)
-                             :mailbox-waiters_ (AtomicInteger.)
-                             :mailbox-lock mailbox-lock
-                             :mailbox-space (.newCondition mailbox-lock)
                              :mailbox-signal_ (AtomicLong.)
                              :wake-generation_ (AtomicLong.)
                              :sleep-armed?_ (AtomicBoolean. false)
                              :wake-notifier wake-notifier
                              :wake-endpoint wake-endpoint
-                             :mailbox (ArrayBlockingQueue. 256)
+                             :mailbox (mailbox/create)
+                             :stream-pool stream-pool
+                             :reserve-command! reserve-command!
+                             :publish-command! publish-command!
+                             :release-command! release-command!
+                             :wake-command-waiters! wake-command-waiters!
+                             :on-native-failure! on-native-failure!
+                             :discard-command! discard-command!
+                             :response-slot-monitor (Object.)
+                             :native-failure_ (AtomicReference.)
+                             :termination-cause_ (AtomicReference.)
                              :evloop nil
                              :loop-fn loop-fn
                              :message-handler message-handler
@@ -354,8 +322,7 @@
                              :response-receiver-open?_ (AtomicBoolean. true)
                              :response-receiver-lock (ReentrantReadWriteLock.)
                              :response-slots response-slots
-                             :response-slot-payload-capacity response-slot-payload-capacity
-                             :fixed-final-scratch_ (AtomicReference.)})
+                             :response-slot-payload-capacity response-slot-payload-capacity})
         thread (Thread. #(run-evloop-on-thread!
                           (assoc worker :thread (Thread/currentThread)))
                         (format "%s-%d" thread-name-prefix id))
@@ -366,7 +333,7 @@
 
 (defn join-worker!
   "Join a worker thread without sending stop messages. Assumes the worker will
-   exit on its own (e.g. after draining)."
+   exit after draining."
   [worker]
   (when-let [^Thread t (:thread worker)]
     (.join t)

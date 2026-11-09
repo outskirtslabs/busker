@@ -22,19 +22,21 @@
 
 (defn stream
   [{:ol.busker.request/keys [emitter] :as req}]
-  (future
-    (try
-      (proto/emit! emitter {:status 200
+  (Thread/startVirtualThread
+   (fn []
+     (try
+       (proto/emit! emitter {:status 200
                             :headers {"cache-control" "no-cache"
                                       "content-type" "text/event-stream"
                                       "x-protocol" (:protocol req)}})
-      (doseq [line (cycle @source-lines)]
-        (proto/emit! emitter (str "data: " line "\n\n"))
-        (proto/flush emitter)
-        (Thread/sleep 1000))
-      (catch Throwable _)
-      (finally
-        (proto/close emitter))))
+       (loop [lines (cycle @source-lines)]
+         (when (= :accepted (:status (proto/emit! emitter
+                                                (str "data: " (first lines) "\n\n")
+                                                {:flush? true})))
+           (Thread/sleep 1000)
+           (recur (rest lines))))
+       (finally
+         (proto/close! emitter)))))
   {:body emitter})
 
 (defn handler

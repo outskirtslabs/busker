@@ -794,7 +794,7 @@
   (testing "async response"
     (with-server [_ (test-server (fn [{emitter :ol.busker.request/emitter}]
                                    (future
-                                     (h2o/emit! emitter {:status 200 :body "Hello Async"}))
+                                     (h2o/emit! emitter {:status 200 :body "Hello Async"} {:end? true}))
                                    {:body emitter})
                                  {:entrypoints {:plain {:bind (str "127.0.0.1:" (plain-port))
                                                         :http3? false
@@ -812,8 +812,7 @@
                                    (future
                                      (h2o/emit! emitter {:status 103 :headers {"Link" "</style.css>; rel=preload; as=style"}})
                                      (h2o/emit! emitter {:status 200 :headers {"content-type" "text/html"}})
-                                     (h2o/emit! emitter "<!doctype html><h1>Hello world</h1>")
-                                     (h2o/close emitter))
+                                     (h2o/emit! emitter "<!doctype html><h1>Hello world</h1>" {:end? true}))
                                    {:body emitter})
                                  :entrypoints {:plain {:bind (str "127.0.0.1:" (plain-port))
                                                        :http3? false
@@ -835,10 +834,8 @@
     (with-server [_ (test-server (fn [{emitter :ol.busker.request/emitter}]
                                    (future
                                      (h2o/emit! emitter {:status 200 :headers {"content-type" "text/event-stream" "connection" "keep-alive"}})
-                                     (h2o/emit! emitter "event: hello\ndata: first\n\n")
-                                     (h2o/flush emitter)
-                                     (h2o/emit! emitter "event: close\ndata:\n\n")
-                                     (h2o/close emitter))
+                                     (h2o/emit! emitter "event: hello\ndata: first\n\n" {:flush? true})
+                                     (h2o/emit! emitter "event: close\ndata:\n\n" {:end? true}))
                                    {:body emitter}))]
       (let [{:keys [headers status body]} (req :get "/")]
         (is (= "text/event-stream" (get headers "content-type")))
@@ -861,9 +858,9 @@
                           (let [num-chunks (/ stream-duration-ms chunk-interval-ms)]
                             (doseq [idx (range num-chunks)]
                               (h2o/emit! emitter (str "chunk-" idx "-"))
-                              (h2o/flush emitter)
+                              (h2o/flush! emitter)
                               (Thread/sleep chunk-interval-ms)))
-                          (h2o/close emitter))
+                          (h2o/close! emitter))
                         {:body emitter})))
           server (busker/start!
                   (util/with-handler
@@ -925,9 +922,9 @@
                       (let [num-chunks (/ stream-duration-ms chunk-interval-ms)]
                         (doseq [idx (range num-chunks)]
                           (h2o/emit! emitter (str "chunk-" idx "-"))
-                          (h2o/flush emitter)
+                          (h2o/flush! emitter)
                           (Thread/sleep chunk-interval-ms)))
-                      (h2o/close emitter))
+                      (h2o/close! emitter))
                     {:body emitter})
           server (busker/start!
                   (util/with-static-tls

@@ -73,8 +73,7 @@ Busker also holds the response data currently in flight through the HTTP engine,
 
 The event loop removes a response chunk from the queue when it can hand that chunk to the HTTP engine.
 It waits for the engine to report progress on the current send before handing over more.
-Once the queue fills, the next application write or flush waits until the network side releases enough space.
-Busker waits rather than dropping response chunks.
+Once capacity fills, a blocking application write parks until space is available. A nonblocking write returns full without accepting any part of that call. Flush never waits for capacity.
 
 For an ordinary Ring body such as an `InputStream` or lazy sequence, the handler's job ends when it returns the response map.
 The request task is not finished, though.
@@ -86,10 +85,7 @@ Underneath, the JVM parks the virtual thread and gives its platform thread other
 The request task stays alive until it has read and queued the complete body.
 
 Long-lived responses use Busker's response emitter so application code can send chunks after the handler returns.
-Backpressure applies to the emitter too, so an `emit!` or `flush` call waits on the calling thread when the response queue is full.
-On a virtual thread the JVM parks it, and the wait is cheap.
-On a platform thread the application thread remains blocked for as long as the client is slow.
-Run an emitter from a thread you can afford to block, ideally a virtual thread started for that stream.
+Backpressure applies to the emitter too. By default, `emit!` parks the calling virtual thread when capacity is full. With `:wait? false`, the call accepts the whole bounded write or returns full. Busker creates no sender thread per connection for nonblocking output. `flush!` and `close!` return without waiting for capacity or producer completion.
 If application code closes an emitter, a final response completes, or libh2o reports request termination, Busker dispatches registered close callbacks on virtual threads.
 The callbacks run after Busker releases blocked response writers, and one failing callback does not suppress later callbacks.
 See the xref:ROOT:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter` API] for callback registration and stream closure details.
@@ -154,9 +150,11 @@ Busker waits for their response streams, close callbacks, request executors, net
 A slow request or open stream can therefore delay application shutdown.
 
 Each generation gives its request executor up to 60 seconds to finish before asking remaining tasks to stop immediately.
-Application code should treat interruption as cancellation and release its own resources promptly.
+Application code should treat interruption as cancellation and release its resources promptly.
 Call `stop!` from an application lifecycle thread or shutdown hook rather than from a request handler, because a handler belongs to the work that `stop!` waits for.
 Calling `stop!` again after the server has stopped is harmless.
+
+A retirement timeout or uncertain native cleanup reports failure; it does not make live memory safe to free. Busker retains affected generation resources while producers or native requests may still access them. A producer that ignores interruption can delay memory reclamation indefinitely.
 
 == Related documentation
 

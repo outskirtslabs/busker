@@ -4,7 +4,6 @@
   (:require
    [clojure.spec.alpha :as s]
    [clojure.string :as str]
-   [ol.busker.buffer-pool :as bp]
    [ol.clave.issuers :as issuers]
    [ol.clave.specs :as clave]
    [ol.clave.storage :as storage]))
@@ -431,9 +430,9 @@
 
 (def output-buffer-size
   {:key ::output-buffer-size
-   :doc "Response aggregation buffer size in bytes; 0 disables buffering."
+   :doc "Positive streaming block size and pending-byte limit per response. Each worker reserves 256 blocks."
    :default 32768})
-(s/def ::output-buffer-size nat-int?)
+(s/def ::output-buffer-size #(and (pos-int? %) (<= % Integer/MAX_VALUE)))
 
 (def server-name
   {:key ::server-name
@@ -597,12 +596,6 @@
    :default 3})
 (s/def ::compress-zstd-level int?)
 
-(def buffer-pool
-  {:key ::buffer-pool
-   :doc "ByteBuffer pool for response buffering."
-   :default nil})
-(s/def ::buffer-pool #(satisfies? bp/BufferPool %))
-
 (def config
   {:key ::config
    :doc "Top-level Busker configuration map."
@@ -640,8 +633,7 @@
                    ::compress-min-size
                    ::compress-gzip-level
                    ::compress-brotli-level
-                   ::compress-zstd-level
-                   ::buffer-pool]))
+                   ::compress-zstd-level]))
 
 (def all-descriptors
   [disabled?
@@ -725,7 +717,6 @@
    compress-gzip-level
    compress-brotli-level
    compress-zstd-level
-   buffer-pool
    config])
 
 (def descriptor-by-key

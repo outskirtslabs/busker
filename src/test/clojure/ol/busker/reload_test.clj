@@ -516,12 +516,10 @@
                                           (proto/emit! emitter
                                                        {:status 200
                                                         :headers {"content-type" "text/plain"}})
-                                          (proto/emit! emitter "old-generation-")
-                                          (proto/flush emitter)
+                                          (proto/emit! emitter "old-generation-" {:flush? true})
                                           (deliver old-first-chunk true)
                                           (deref old-release 5000 true)
-                                          (proto/emit! emitter "stream-complete")
-                                          (proto/close emitter))
+                                          (proto/emit! emitter "stream-complete" {:end? true}))
                                         {:body emitter}))
                  :n-workers 2))]
     (try
@@ -568,12 +566,10 @@
                                           (proto/emit! emitter
                                                        {:status 200
                                                         :headers {"content-type" "text/plain"}})
-                                          (proto/emit! emitter "old-generation-")
-                                          (proto/flush emitter)
+                                          (proto/emit! emitter "old-generation-" {:flush? true})
                                           (deliver old-first-chunk true)
                                           (deref old-release 5000 true)
-                                          (proto/emit! emitter "stream-complete")
-                                          (proto/close emitter))
+                                          (proto/emit! emitter "stream-complete" {:end? true}))
                                         {:body emitter}))
                  :n-workers 2))]
     (try
@@ -628,12 +624,10 @@
                                           (proto/emit! emitter
                                                        {:status 200
                                                         :headers {"content-type" "text/plain"}})
-                                          (proto/emit! emitter "old-generation-")
-                                          (proto/flush emitter)
+                                          (proto/emit! emitter "old-generation-" {:flush? true})
                                           (deliver old-first-chunk true)
                                           (deref old-release 5000 true)
-                                          (proto/emit! emitter "stream-complete")
-                                          (proto/close emitter))
+                                          (proto/emit! emitter "stream-complete" {:end? true}))
                                         {:body emitter}))
                  :n-workers 1))]
     (try

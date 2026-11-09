@@ -96,16 +96,34 @@
   (live-entry dispatch module-id request-seq))
 
 (defn- close-entry!
-  [[req emitter]]
+  [[req emitter] cleanup?]
   (try
     (when-some [^InputStream input-stream (-> req :write-req :input-stream)]
       (.close input-stream))
-    (when emitter
-      (response/stop-emitter emitter))
     (catch Throwable t
-      (trove/log! {:level :error
-                   :id    ::entry-close-failed
-                   :ex    t}))))
+      (try (trove/log! {:level :error :id ::input-close-failed :ex t})
+           (catch Throwable _ nil)))
+    (finally
+      (when emitter
+        (try
+          (response/stop-emitter emitter)
+          (finally
+            (when cleanup?
+              (when-let [writer (response/writer-if-created emitter)]
+                (response-queue/on-cleanup writer)))))))))
+
+(defn fail-responses!
+  "Settles live responses after worker failure without releasing native sends."
+  [dispatch cause]
+  (doseq [[_ emitter :as entry] (vec (.values ^HashMap (:entries dispatch)))]
+    (try
+      (try
+        (when-let [writer (response/writer-if-created emitter)]
+          (response-queue/fail! writer cause))
+        (finally (close-entry! entry false)))
+      (catch Throwable t
+        (try (trove/log! {:level :error :id ::response-failure-cleanup :ex t})
+             (catch Throwable _ nil))))))
 
 (defn- body-callback!
   [dispatch module-id request-seq chunk-seg chunk-len is-last]
@@ -142,8 +160,10 @@
   [dispatch module-id request-seq reason]
   (try
     (when-let [[_ ^H2OResponseEmitter emitter] (live-entry dispatch module-id request-seq)]
-      (when-let [writer (response/writer-if-created emitter)]
-        (response-queue/on-stop writer reason)))
+      (try
+        (when-let [writer (response/writer-if-created emitter)]
+          (response-queue/on-stop writer reason))
+        (finally (response/stop-emitter emitter))))
     (catch Throwable t
       (increment! dispatch :callback-fault)
       (trove/log! {:level :error
@@ -256,14 +276,21 @@
     (increment! dispatch :malformed)
     (if-let [entry (.remove ^HashMap (:entries dispatch) request-seq)]
       (do
-        (close-entry! entry)
+        (close-entry! entry true)
         (increment! dispatch :retired))
       (increment! dispatch :duplicate))))
 
 (defn pending-response-work?
-  "Returns true when this worker has queued or in-flight response data."
+  "Returns true when a tracked response can run without native progress."
   [dispatch]
-  (not (.isEmpty ^ConcurrentHashMap (:streaming-work dispatch))))
+  (boolean (some response-queue/runnable?
+                 (.values ^ConcurrentHashMap (:streaming-work dispatch)))))
+
+(defn drain-responses!
+  "Visits tracked responses once; native wait and unflushed data do not poll."
+  [dispatch]
+  (doseq [writer (.values ^ConcurrentHashMap (:streaming-work dispatch))]
+    (response-queue/send-vecs writer)))
 
 (defn finish!
   "Closes any unexpected entries after the worker has stopped."
@@ -272,7 +299,7 @@
     (when-not (.isEmpty entries)
       (increment! dispatch :forced)
       (doseq [entry (vec (.values entries))]
-        (close-entry! entry))
+        (close-entry! entry false))
       (.clear entries))
     (.set ^AtomicReference (:phase_ dispatch) :closed)
     dispatch))

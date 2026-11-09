@@ -8,9 +8,9 @@ Accepted
 
 Ring handlers, middleware, response producers, and request-body readers run on virtual threads. H2O request operations run on a dedicated event-loop platform thread. The worker mailbox transfers request-affine operations between those threads and revalidates each request immediately before native use.
 
-The mailbox already limits command count, coalesces command wakes, preserves FIFO order, and closes the empty-drain race. Streaming responses separately limit bytes and send one native batch at a time.
+The mailbox limits command count, coalesces command wakes, preserves FIFO order, and closes the empty-drain race. Streaming responses separately limit bytes and send one native batch at a time.
 
-The first producer in a mailbox signal batch still calls `clj_h2o_mt_wakeup` through FFM. Direct streaming signals call the same function. H2O's wake path acquires its multithread-queue mutex and writes to a nonblocking eventfd or pipe. A virtual thread remains mounted while a foreign function runs, so mutex or scheduler delay can retain its carrier.
+H2O's `clj_h2o_mt_wakeup` path acquires its multithread-queue mutex and writes to a nonblocking eventfd or pipe. A virtual thread remains mounted while a foreign function runs, so mutex or scheduler delay can retain its carrier. Busker therefore performs native wakes on a platform notifier thread.
 
 The event-loop worker cannot wake itself while it is sleeping inside `h2o_evloop_run`. Polling with a short timeout would consume CPU or add response latency. H2O's multithread queue has no command or byte limit and does not replace Busker's Java backpressure.
 
@@ -32,13 +32,13 @@ The notifier clears an endpoint's pending-token flag before calling `clj_h2o_mt_
 
 The H2O receiver remains a wake-only receiver. Commands, response bytes, and Java request references do not enter H2O's multithread message list.
 
-Generation retirement submits a control command while the endpoint is open and wakeable. The event-loop worker handles that command by moving its endpoint from open to quiescing, waiting for any in-flight notifier call, closing the endpoint, unregistering and freeing its receiver, and clearing the receiver reference. Stale queued tokens observe the closed endpoint and skip native work. Runtime shutdown stops and joins the shared notifier only after all generations retire.
+The event-loop worker retires its wake receiver directly during context disposal. It moves the endpoint from open to quiescing, waits for any in-flight notifier call, closes the endpoint, unregisters and frees its receiver, and clears the receiver reference. Stale queued tokens observe the closed endpoint and skip native work. Runtime shutdown stops and joins the shared notifier only after all generations retire.
 
-The following behavior remains unchanged:
+The notifier works with:
 
 - one FIFO worker mailbox;
 - the mailbox signal-generation protocol;
-- `FixedFinalCommand` preparation and execution;
+- fixed-response slot publication and worker-side draining;
 - worker-local request identities and live-request lookup;
 - per-request response byte limits;
 - direct streaming proceed draining;
@@ -59,13 +59,11 @@ Tests must demonstrate:
 - fixed-final, streaming, informational, request-body, stop, reload, and multi-worker behavior remains exact; and
 - full validation and controlled large-payload tests pass.
 
-The canonical benchmark must classify the throughput hypothesis. A matching profile is required only if the candidate advances.
-
 ## Consequences
 
-Application request paths no longer enter H2O through FFM merely to wake an event loop. Native mutex and eventfd work moves to one platform notifier thread per `SharedRuntime`.
+Application request paths use Java operations to request event-loop wakes. One platform notifier thread per `SharedRuntime` performs native mutex and eventfd work.
 
 An idle wake gains one Java queue handoff. Under sustained load, the armed check should avoid most notifier and native wake work because the event-loop worker is already active. The net throughput effect remains a measurement question.
 Reload keeps one notifier while generations overlap. Endpoint state and in-flight counts prevent an old queued token from reaching a retired receiver.
 
-This decision does not change public Ring behavior or introduce a native command transport. Lifecycle calls made directly by arbitrary virtual threads remain a separate question outside this attempt.
+The notifier carries wake requests only. Java mailboxes and response slots carry application output; H2O's native message list carries neither commands nor payload bytes.

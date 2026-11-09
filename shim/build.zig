@@ -81,26 +81,30 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = optimize,
     }).artifact("h2o-evloop");
-    const forwarding_test = b.addExecutable(.{
-        .name = "test-quic-forwarding",
-        .root_module = b.createModule(.{
-            .target = b.graph.host,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    forwarding_test.root_module.addCSourceFile(.{
-        .file = b.path("../src/shim/test_quic_forwarding.c"),
-        .flags = &.{ "-std=c17", "-D_GNU_SOURCE", "-DH2O_USE_LIBUV=0", "-DCLJ_DEBUG=0" },
-    });
-    forwarding_test.root_module.addIncludePath(test_h2o.getEmittedIncludeTree());
-    forwarding_test.root_module.linkLibrary(test_h2o);
-    forwarding_test.root_module.linkSystemLibrary("pthread", .{});
-    forwarding_test.root_module.linkSystemLibrary("dl", .{});
-    forwarding_test.root_module.linkSystemLibrary("m", .{});
-    const run_forwarding_test = b.addRunArtifact(forwarding_test);
-    b.step("test", "Test QUIC forwarding callbacks").dependOn(&run_forwarding_test.step);
-    b.getInstallStep().dependOn(&run_forwarding_test.step);
+    const test_step = b.step("test", "Test native callbacks and fixed-slot lifetime");
+    const native_tests = [_][]const u8{ "quic_forwarding", "fixed_retention" };
+    for (native_tests) |test_name| {
+        const forwarding_test = b.addExecutable(.{
+            .name = b.fmt("test-{s}", .{test_name}),
+            .root_module = b.createModule(.{
+                .target = b.graph.host,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        forwarding_test.root_module.addCSourceFile(.{
+            .file = b.path(b.fmt("../src/shim/test_{s}.c", .{test_name})),
+            .flags = &.{ "-std=c17", "-D_GNU_SOURCE", "-DH2O_USE_LIBUV=0", "-DCLJ_DEBUG=0" },
+        });
+        forwarding_test.root_module.addIncludePath(test_h2o.getEmittedIncludeTree());
+        forwarding_test.root_module.linkLibrary(test_h2o);
+        forwarding_test.root_module.linkSystemLibrary("pthread", .{});
+        forwarding_test.root_module.linkSystemLibrary("dl", .{});
+        forwarding_test.root_module.linkSystemLibrary("m", .{});
+        const run_forwarding_test = b.addRunArtifact(forwarding_test);
+        test_step.dependOn(&run_forwarding_test.step);
+        b.getInstallStep().dependOn(&run_forwarding_test.step);
+    }
 
     const compile_flags_step = b.step("compile-flags", "Generate compile_flags.txt for LSP");
     const compile_flags_cmd = b.addSystemCommand(&[_][]const u8{ "sh", "-c" });

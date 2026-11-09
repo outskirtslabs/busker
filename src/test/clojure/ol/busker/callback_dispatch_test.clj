@@ -2,8 +2,16 @@
   (:require
    [babashka.ffi :as ffi]
    [clojure.test :refer [deftest is]]
+   [ol.busker.buffer-pool :as pool]
    [ol.busker.callback-dispatch :as callback-dispatch]
-   [ol.busker.native :as h2o]))
+   [ol.busker.internal.protocols :as pi]
+   [ol.busker.native :as h2o]
+   [ol.busker.protocols :as protocols]
+   [ol.busker.response :as response]
+   [ol.busker.response-queue :as queue])
+  (:import
+   [java.io IOException InputStream]
+   [java.nio ByteBuffer]))
 
 (deftest stable-pointers-and-nonrepeating-identities-test
   (with-open [arena (ffi/shared-arena)]
@@ -83,3 +91,47 @@
 (deftest request-context-layout-matches-the-shim-test
   (is (= (h2o/req-ctx-size)
          (ffi/sizeof h2o/ffi-clj-req-ctx-t))))
+
+(deftest input-close-failure-does-not-suppress-response-cleanup-test
+  (with-open [arena (ffi/shared-arena)]
+    (let [dispatch (callback-dispatch/create arena)
+          _ (callback-dispatch/bind-thread! dispatch (Thread/currentThread))
+          module-id (:module-id dispatch)
+          request-seq (callback-dispatch/allocate-identity! dispatch)
+          p (pool/create-stream-pool 8)
+          commands (atom [])
+          input-closes (atom 0)
+          input (proxy [InputStream] []
+                  (read ([] -1) ([_ _ _] -1))
+                  (close []
+                    (swap! input-closes inc)
+                    (throw (IOException. "input close failed"))))
+          req {:config {:output-buffer-size 8}
+               :write-req {:input-stream input}
+               :worker {:stream-pool p
+                        :reserve-command! (fn [_ _ _] (Object.))
+                        :publish-command! (fn [_ _ command] (swap! commands conj command))
+                        :release-command! (fn [_ _] nil)}}
+          emitter (response/new-response-emitter (pi/map->Request req))
+          closed (promise)]
+      (try
+        (with-redefs [pi/wake (fn [_] nil)
+                      h2o/sendvec (fn [& _] nil)]
+          (protocols/on-close! emitter #(deliver closed true))
+          (let [writer (queue/create-response-writer (assoc req :apply-head! (fn [_ _] nil)))
+                _ (reset! (.writer_ ^ol.busker.response.H2OResponseEmitter emitter) writer)
+                result (queue/emit-bounded! writer nil 1
+                                            (fn [^ByteBuffer b] (.put b (byte 1)))
+                                            {:end? true})]
+            (doseq [command @commands] (queue/consume-record! writer (peek command)))
+            (queue/send-vecs writer)
+            (is (= 1 (pool/checked-out p)) "The final send keeps its block until cleanup.")
+            (callback-dispatch/register! dispatch module-id request-seq req emitter)
+            (binding [*err* (java.io.StringWriter.)]
+              (callback-dispatch/retire! dispatch module-id request-seq))
+            (is (= 1 @input-closes))
+            (is (= {:status :closed} @(:progress result)))
+            (is (true? (deref closed 5000 false)))
+            (is (false? (protocols/open? emitter)))
+            (is (= 0 (pool/checked-out p)))))
+        (finally (pool/retire! p))))))
