@@ -22,6 +22,7 @@
    [ol.busker.protocols.content-length]
    [ol.busker.response-head :as response-head]
    [ol.busker.response-queue :as response-queue]
+   [ol.busker.response-serialization :as serialization]
    [ol.busker.util :refer [compile-if]]
    [ol.busker.util.headers :as hdr.util]
    [taoensso.trove :as trove])
@@ -82,18 +83,20 @@
     (.onUnmappableCharacter CodingErrorAction/REPLACE)))
 
 (defn- encoded-length [^String value response]
-  (let [encoder (encoder response)
-        chars (CharBuffer/wrap value)
-        bytes (ByteBuffer/allocate 8192)]
-    (loop [total 0 flushing? false]
-      (let [result (if flushing? (.flush encoder bytes) (.encode encoder chars bytes true))
-            total (Math/addExact (long total) (long (.position bytes)))]
-        (.clear bytes)
-        (cond
-          (.isError result) (do (.throwException result) total)
-          (.isOverflow result) (recur total flushing?)
-          flushing? total
-          :else (recur total true))))))
+  (if (= StandardCharsets/UTF_8 (response-charset response))
+    (serialization/utf8-length value)
+    (let [encoder (encoder response)
+          chars (CharBuffer/wrap value)
+          bytes (ByteBuffer/allocate 8192)]
+      (loop [total 0 flushing? false]
+        (let [result (if flushing? (.flush encoder bytes) (.encode encoder chars bytes true))
+              total (Math/addExact (long total) (long (.position bytes)))]
+          (.clear bytes)
+          (cond
+            (.isError result) (do (.throwException result) total)
+            (.isOverflow result) (recur total flushing?)
+            flushing? total
+            :else (recur total true)))))))
 
 (defn- known-length [body response]
   (cond
@@ -465,11 +468,10 @@
     (when (and (integer? status) (<= 200 status 999) (not (contains? #{204 304} status))
                (or (instance? byte-array-class body)
                    (and (string? body) (= StandardCharsets/UTF_8 (response-charset response)))))
-      (let [length (known-length body response)
-            [headers n _] (build-headers response)]
-        (when (and (<= length (min b fixed-final/response-ring-max-body-bytes))
-                   (<= n fixed-final/max-header-pairs)
-                   (<= (fixed-final/header-staging-bytes headers) fixed-final/max-header-staging-bytes))
+      (let [length (if (string? body)
+                     (serialization/utf8-length body)
+                     (alength ^bytes body))]
+        (when (<= length (min b fixed-final/response-ring-max-body-bytes))
           (let [head (normalized-head response length false)
                 head (if (and (= h2o/H2O_COMPRESS_HINT_ENABLE (:compress-hint head))
                               (< length (or (get-in req [:config :compress-min-size]) 0)))
@@ -478,9 +480,11 @@
             [head (fixed-plan req head body length)]))))))
 
 (defn send-ring-response! [^H2OResponseEmitter emitter response]
-  (let [lock (.lifecycle-lock emitter)]
+  (let [lock (.lifecycle-lock emitter)
+        body (:body response)]
     (try
-      (if (and (:body response) (satisfies? p/ResponseEmitter (:body response)))
+      (if (and body (not (string? body)) (not (instance? byte-array-class body))
+               (satisfies? p/ResponseEmitter body))
         (when (:status response) (p/emit! emitter (dissoc response :body)))
         (if-let [[head plan] (when (and (p/open? emitter) (nil? @(.writer_ emitter)))
                                (ordinary-fixed-plan (.req emitter) response))]
@@ -507,6 +511,7 @@
               (finally (release-producer! (.lifecycle-lock emitter) (.lifecycle_ emitter)))))
           (p/emit! emitter response {:end? true})))
       (catch Throwable error
-        (stop-emitter emitter)
+        (when-let [writer (ensure-writer! emitter)]
+          (response-queue/fail! writer error {:if-open? true}))
         (trove/log! {:level :error :id ::response-failed :ex error})))
     nil))

@@ -20,6 +20,8 @@ If notification throws, the producer resets only its exact odd token, acquires a
 
 The worker handles at most 256 mailbox commands per pass before native polling. After an empty poll it clears the signal and polls again. Work found by that recheck restores the signal. Turn exhaustion keeps the signal pending. After handling commands, the next native poll uses zero wait: native calls during mailbox processing can schedule H2O callbacks that otherwise wait behind an idle poll.
 
+Mailbox processing can submit output between native loop calls. The shim build applies the [completion-time interest repair](../architecture.md#native-write-completion) to the pinned H2O artifact so clearing a completed write callback cannot leave stale write interest for the next poll. This is a Busker integration requirement, not an upstream-confirmed rule about that submission phase; it does not replace the zero-wait poll needed to deliver pending callbacks promptly.
+
 Flush and end requests use coalesced per-response sequence prefixes, not mailbox permits. A worker applies a prefix only after its accepted records have arrived or been discarded. Close therefore does not wait for command, byte or receipt capacity. Fixed responses use separate preallocated slots and wait or report full when those slots are exhausted.
 
 Streaming proceed drains directly on the worker, preserving H2O's send/proceed/send ordering. A bounded, nonrecursive send loop handles synchronous callbacks. Response work registration and removal share the response monitor; a producer cannot signal between an empty check and removal and leave work untracked. Runnable work, native waiting and unflushed output are tracked separately.

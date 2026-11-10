@@ -18,13 +18,19 @@ Application producers write through a temporary confined ByteBuffer view of a sh
 
 The platform worker constructs send descriptors pointing to the same blocks; it does not copy payload bytes when packaging a send. Each response has at most one native send of at most B bytes. Installing the complete in-flight record returns pending-byte credit before native entry, so synchronous callbacks can find it. Non-final proceed releases blocks and settles eligible last-byte receipt markers. Final sends retain blocks until request-pool cleanup, even if close has already settled their receipts.
 
+Failure while sending an ordinary Ring response uses the streaming writer's error-final control, creating the writer if needed. The worker starts a minimal head before sending an error when no final head has started. Application failures, including incremental source errors, check admission and request abort atomically under the queue lock. A prior close or accepted end preserves the accepted prefix and normal final send even while waiting for mailbox consumption or proceed. Transport failures remain unconditional: publication, worker or native-send failure can discard pending output after graceful closure. Native stop notifications suppress further sends; an application failure that wins while open requests termination rather than reporting that native transport has already stopped. Earlier receipt results remain unchanged. Neither receipt settlement nor a termination request releases an active native send.
+
 Private blocks remain valid until the producer exits. Disconnect, interruption and retirement deadlines do not permit reuse while it is writing. The pool records free and checked-out blocks and rejects stale or duplicate releases. Retirement closes admission and frees the shared arena only when no blocks remain checked out; otherwise the caller retains the pool and retries.
 
 Capacity pressure flushes accepted output. Global pool pressure visits only responses with published unflushed blocks; it cannot reclaim private callbacks or native sends. Blocking calls park through Java synchronization, while nonblocking calls return full without invoking their producer.
 
+Native sends can begin between event-loop calls as well as from proceed callbacks. The [local H2O build patch](../architecture.md#native-write-completion) records interest reconciliation before write completion callbacks; it does not change send ordering, byte credit, receipt settlement or block-release events.
+
 ## Required verification
 
 Tests check confined-view expiry and cross-thread rejection, exact bytes through real transports and compression, private-block retention during disconnect, final cleanup without proceed, duplicate release detection, and retirement with a delayed producer. Capacity tests distinguish pending bytes, receipt slots, physical blocks and mailbox permits, including global pressure across several responses.
+
+Normal native builds also check between-loop write completion, rearm, close and errors on Linux. Real stalled-reader cases cover TCP and TLS 1.2/1.3, exact fixed and streaming bytes, and observed producer stalling during server stop. These cases do not establish other event-loop backends or delayed zerocopy reclamation.
 
 ## Consequences
 

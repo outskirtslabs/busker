@@ -1,20 +1,27 @@
 (ns ol.busker.response-test
   (:require
+   [clojure.java.io :as io]
    [clojure.string :as str]
-   [clojure.test :refer [deftest is]]
+   [clojure.test :refer [deftest is testing]]
    [ol.busker :as busker]
    [ol.busker.protocols :as protocols]
-   [ol.busker.test-utils :as util])
+   [ol.busker.response :as response]
+   [ol.busker.test-utils :as util]
+   [ring.core.protocols :as ring-protocols])
   (:import
-   [java.io InputStream OutputStream]
+   [java.io ByteArrayInputStream InputStream OutputStream]
    [java.net InetSocketAddress Socket]
    [java.nio ByteBuffer]
    [java.nio.charset StandardCharsets]
-   [java.util.concurrent CountDownLatch TimeUnit]))
+   [java.security KeyStore]
+   [java.security.cert CertificateFactory]
+   [java.util.concurrent CountDownLatch TimeUnit]
+   [javax.net.ssl SNIHostName SSLContext SSLSocket SSLSocketFactory TrustManagerFactory]))
 
 (defn- start-server
   ([handler] (start-server handler {}))
-  ([handler config]
+  ([handler config] (start-server handler config nil))
+  ([handler config tls-protocol]
    (let [port (util/free-port)
          server (busker/start!
                  (util/with-handler
@@ -25,9 +32,10 @@
                    (merge {:n-workers 1
                            :compress? false
                            :entrypoints {:http {:bind (str "127.0.0.1:" port)
-                                                :http3? false :tls false}}}
+                                                :http3? false :tls (if tls-protocol {} false)}}}
+                          (when tls-protocol {:tls util/static-tls})
                           config)))
-         ready (util/wait-for-curl-ready! :http :h1 port "/__ready" :max-time 2)]
+         ready (util/wait-for-curl-ready! (if tls-protocol :https :http) :h1 port "/__ready" :max-time 2)]
      (if (zero? (:exit ready))
        [server port]
        (do (busker/stop! server)
@@ -45,15 +53,42 @@
     (when (= ::timeout outcome) (throw (ex-info "Operation timed out" {})))
     (if-let [cause (:error outcome)] (throw cause) (:value outcome))))
 
+(def ^:private tls-socket-factory
+  (delay
+    (let [store (KeyStore/getInstance (KeyStore/getDefaultType))
+          trust (TrustManagerFactory/getInstance (TrustManagerFactory/getDefaultAlgorithm))
+          context (SSLContext/getInstance "TLS")]
+      (.load store nil nil)
+      (with-open [input (io/input-stream (util/fixture-cert-path))]
+        (.setCertificateEntry store "fixture" (.generateCertificate (CertificateFactory/getInstance "X.509") input)))
+      (.init trust store)
+      (.init context nil (.getTrustManagers trust) nil)
+      (.getSocketFactory context))))
+
 (defn- connect
   ([port] (connect port {}))
-  ([port {:keys [receive-buffer-size send-buffer-size]}]
+  ([port {:keys [receive-buffer-size send-buffer-size tls-protocol]}]
    (let [socket (Socket.)]
      (when receive-buffer-size (.setReceiveBufferSize socket (int receive-buffer-size)))
      (when send-buffer-size (.setSendBufferSize socket (int send-buffer-size)))
      (.setSoTimeout socket 10000)
      (.connect socket (InetSocketAddress. "127.0.0.1" (int port)) 2000)
-     socket)))
+     (if tls-protocol
+       (try
+         (let [^SSLSocket tls (.createSocket ^SSLSocketFactory @tls-socket-factory socket ^String util/tls-sni-host (int port) true)
+               parameters (.getSSLParameters tls)]
+           (.setProtocols parameters (into-array String [tls-protocol]))
+           (.setServerNames parameters [(SNIHostName. ^String util/tls-sni-host)])
+           (.setEndpointIdentificationAlgorithm parameters "HTTPS")
+           (.setSSLParameters tls parameters)
+           (.setSoTimeout tls 10000)
+           (.startHandshake tls)
+           (is (= tls-protocol (.getProtocol (.getSession tls))))
+           tls)
+         (catch Throwable cause
+           (.close socket)
+           (throw cause)))
+       socket))))
 
 (defn- request-bytes [port method path]
   (with-open [^Socket socket (connect port)]
@@ -106,6 +141,145 @@
       (finally
         (when (realized? ready) (protocols/close! @ready))
         (busker/stop! server)))))
+
+(deftest ordinary-string-response-byte-lengths
+  (let [response_ (atom {:status 200 :body ""})
+        [server port] (start-server (fn [_] @response_))]
+    (try
+      (doseq [[charset-name charset] [["utf-8" StandardCharsets/UTF_8]
+                                      ["invalid-charset" StandardCharsets/UTF_8]
+                                      ["utf-16" StandardCharsets/UTF_16]
+                                      ["iso-8859-1" StandardCharsets/ISO_8859_1]]
+              body ["" "Hello World" "é漢😀" (str (char 0xd800) "x" (char 0xdc00))
+                    (apply str (repeat 32768 "a"))
+                    (apply str (repeat 32769 "a"))]]
+        (reset! response_ {:status 200
+                           :headers {"content-type" (str "text/plain; charset=" charset-name)}
+                           :body body})
+        (with-open [^Socket socket (connect port)]
+          (request-stream! socket)
+          (let [expected (.getBytes ^String body ^java.nio.charset.Charset charset)
+                {:keys [headers body]} (read-response! socket)]
+            (is (str/includes? headers "200 OK"))
+            (is (= (vec expected) (vec body))))))
+      (finally (busker/stop! server)))))
+
+(deftest ordinary-response-header-normalization
+  (let [response_ (atom {})
+        [server port] (start-server (fn [_] @response_))]
+    (try
+      (doseq [body ["é" (.getBytes "é" StandardCharsets/UTF_8)]
+              length-headers [{} {"CoNtEnT-LeNgTh" "2"} {"CONTENT-LENGTH" 2}]]
+        (reset! response_ {:body body
+                           :headers (merge {"Content-Type" "text/plain; charset=invalid-charset"
+                                            "X-Repeat" '("first" "second")}
+                                           length-headers)})
+        (let [wire (request-text port "GET" "/")]
+          (is (str/starts-with? wire "HTTP/1.1 200"))
+          (is (= ["2"] (mapv second (re-seq #"(?im)^content-length: ([^\r]+)\r?$" wire))))
+          (is (= ["first" "second"] (mapv second (re-seq #"(?im)^x-repeat: ([^\r]+)\r?$" wire))))
+          (is (str/ends-with? wire "\r\n\r\né"))))
+      (doseq [status [204 304]]
+        (reset! response_ {:status status :headers {"Content-Length" "7"} :body "ignored"})
+        (let [wire (request-text port "GET" "/")]
+          (is (str/starts-with? wire (str "HTTP/1.1 " status)))
+          (is (= "" (second (str/split wire #"\r\n\r\n" 2))))))
+      (finally (busker/stop! server)))))
+
+(deftest ordinary-response-rejects-invalid-headers-before-output
+  (let [response_ (atom {})
+        [server port] (start-server (fn [_] @response_))]
+    (try
+      (reset! response_ {:body "ok" :headers {"X-Repeat" (repeat 64 "value")}})
+      (let [wire (request-text port "GET" "/")]
+        (is (= 64 (count (re-seq #"(?im)^x-repeat: value\r?$" wire))))
+        (is (str/ends-with? wire "\r\n\r\nok")))
+      (finally (busker/stop! server))))
+  (doseq [headers [{"X-Repeat" (repeat 65 "value")}
+                   {"X-Large" (apply str (repeat 16384 "x"))}
+                   {"Content-Length" "not-a-number"}
+                   {"Content-Length" ["2" "2"]}]]
+    (is (thrown? Exception
+                 (#'response/normalized-head {:body "ok" :headers headers} 2 false)))
+    (is (thrown? Exception
+                 (#'response/ordinary-fixed-plan
+                  {:dispatch-module-id 1 :dispatch-request-seq 1
+                   :config {:output-buffer-size 32768}}
+                  {:body "ok" :headers headers})))))
+
+(deftest invalid-ring-response-terminates-transport
+  (doseq [headers [{"X-Repeat" (repeat 65 "value")}
+                   {"X-Large" (apply str (repeat 16384 "x"))}
+                   {"Content-Length" "not-a-number"}
+                   {"Content-Length" ["2" "2"]}]
+          informational? [false true]]
+    (let [closed (promise)
+          [server port] (start-server
+                         (fn [{emitter :ol.busker.request/emitter}]
+                           (protocols/on-close! emitter #(deliver closed true))
+                           (when informational? (protocols/emit! emitter {:status 103}))
+                           {:body "invalid-body" :headers headers}))]
+      (try
+        (with-open [^Socket socket (connect port)]
+          (.setSoTimeout socket 2000)
+          (request-stream! socket)
+          (let [wire (String. (.readAllBytes (.getInputStream socket)) StandardCharsets/UTF_8)]
+            (is (str/includes? wire "HTTP/1.1 200 OK\r\n"))
+            (is (str/includes? (str/lower-case wire) "transfer-encoding: chunked\r\n"))
+            (is (not (str/includes? wire "invalid-body")))
+            (is (not (str/ends-with? wire "\r\n0\r\n\r\n")))))
+        (is (true? (deref closed 2000 false)))
+        (finally
+          (is (= {:value nil}
+                 (deref (on-virtual-thread #(busker/stop! server)) 5000 ::timeout))))))))
+
+(deftest ordinary-ring-body-forms
+  (let [response_ (atom {:status 200 :body nil})
+        [server port] (start-server (fn [_] @response_))
+        bytes (.getBytes "body" StandardCharsets/UTF_8)
+        buffer (doto (ByteBuffer/wrap (.getBytes "_body_" StandardCharsets/UTF_8))
+                 (.position 1)
+                 (.limit 5))]
+    (try
+      (doseq [[body expected] [[nil ""]
+                               ["body" "body"]
+                               [bytes "body"]
+                               [(byte-array 0) ""]
+                               [buffer "body"]
+                               [(ByteArrayInputStream. bytes) "body"]
+                               [(list "bo" "dy") "body"]
+                               [(reify ring-protocols/StreamableResponseBody
+                                  (write-body-to-stream [_ _ out]
+                                    (.write ^OutputStream out bytes))) "body"]]]
+        (reset! response_ {:status 200 :body body})
+        (is (= {:exit 0 :out expected}
+               (select-keys (util/curl :http :h1 port "/") [:exit :out]))))
+      (is (= [1 5] [(.position buffer) (.limit buffer)]))
+      (finally (busker/stop! server)))))
+
+(defrecord ExtendedEmitter [emitter])
+
+(extend-type ExtendedEmitter
+  protocols/ResponseEmitter
+  (open? [this] (protocols/open? (:emitter this)))
+  (committed? [this] (protocols/committed? (:emitter this)))
+  (emit!
+    ([this data] (protocols/emit! (:emitter this) data))
+    ([this data opts] (protocols/emit! (:emitter this) data opts)))
+  (flush! [this] (protocols/flush! (:emitter this)))
+  (close! [this] (protocols/close! (:emitter this)))
+  (on-close! [this callback] (protocols/on-close! (:emitter this) callback)))
+
+(deftest externally-extended-emitter-body-keeps-response-open
+  (with-emitter
+    {}
+    (fn [emitter client]
+      (let [body (->ExtendedEmitter emitter)]
+        (response/send-ring-response! emitter {:status 201 :body body})
+        (is (= [true true] [(protocols/open? body) (protocols/committed? body)]))
+        (protocols/emit! body "custom emitter" {:end? true})
+        (is (= {:exit 0 :out "custom emitter"}
+               (select-keys (await-result client) [:exit :out])))))))
 
 (deftest unified-emitter-results-and-defaults-test
   (with-emitter
@@ -479,30 +653,56 @@
         (when (= :running (:phase (busker/state server))) (busker/stop! server))))))
 
 (deftest stalled-response-reader-resumes-with-exact-bytes-test
-  (let [payload (byte-array (* 4 1024 1024) (byte 65))
-        started (promise)
-        completed (promise)
-        [server port] (start-server
-                       (fn [{emitter :ol.busker.request/emitter}]
-                         (Thread/startVirtualThread
-                          #(do (deliver started true)
-                               (deliver completed
-                                        (protocols/emit! emitter
-                                                         {:status 200
-                                                          :headers {"content-length" (str (alength payload))}
-                                                          :body payload}
-                                                         {:end? true}))))
-                         {:body emitter}))]
-    (try
-      (with-open [socket (connect port {:receive-buffer-size 1024})]
-        (request-stream! socket)
-        (is (true? (deref started 2000 false)))
-        (is (= ::stalled (deref completed 500 ::stalled)))
-        (let [{:keys [headers body]} (read-response! socket)]
-          (is (str/starts-with? headers "HTTP/1.1 200"))
-          (is (java.util.Arrays/equals ^bytes payload ^bytes body))
-          (is (= :accepted (:status (deref completed 10000 ::timeout))))))
-      (finally (busker/stop! server)))))
+  (doseq [tls-protocol [nil "TLSv1.2" "TLSv1.3"]
+          stop? [false true]]
+    (testing (str (or tls-protocol "TCP") ", stop while stalled: " stop?)
+      (let [payload (byte-array (* 4 1024 1024) (byte 65))
+            started (promise)
+            completed (promise)
+            closed (promise)
+            close-count (atom 0)
+            [server port] (start-server
+                           (fn [{:keys [uri] emitter :ol.busker.request/emitter}]
+                             (if (= "/fixed" uri)
+                               {:status 200 :body "fixed"}
+                               (do
+                                 (protocols/on-close! emitter
+                                                      #(do (swap! close-count inc)
+                                                           (deliver closed (.isVirtual (Thread/currentThread)))))
+                                 (Thread/startVirtualThread
+                                  #(do (deliver started true)
+                                       (deliver completed
+                                                (protocols/emit! emitter
+                                                                 {:status 200
+                                                                  :headers {"content-length" (str (alength payload))}
+                                                                  :body payload}
+                                                                 {:end? true}))))
+                                 {:body emitter})))
+                           {} tls-protocol)]
+        (try
+          (with-open [^Socket socket (connect port {:receive-buffer-size 1024 :tls-protocol tls-protocol})]
+            (let [out (.getOutputStream socket)]
+              (.write out (.getBytes "GET /fixed HTTP/1.1\r\nHost: localhost\r\n\r\n" StandardCharsets/US_ASCII))
+              (.flush out)
+              (let [{:keys [headers body]} (read-response! socket)]
+                (is (str/starts-with? headers "HTTP/1.1 200"))
+                (is (= "fixed" (String. ^bytes body StandardCharsets/US_ASCII)))))
+            (request-stream! socket)
+            (is (true? (deref started 2000 false)))
+            (is (= ::stalled (deref completed 500 ::stalled)))
+            (let [stopped (when stop? (on-virtual-thread #(busker/stop! server)))]
+              (when stop?
+                (is (= ::pending (deref stopped 100 ::pending)))
+                (is (not (realized? closed))))
+              (let [{:keys [headers body]} (read-response! socket)]
+                (is (str/starts-with? headers "HTTP/1.1 200"))
+                (is (java.util.Arrays/equals ^bytes payload ^bytes body))
+                (is (= :accepted (:status (deref completed 10000 ::timeout)))))
+              (is (= -1 (.read (.getInputStream socket))))
+              (is (true? (deref closed 5000 false)))
+              (when stop? (await-result stopped))))
+          (finally (busker/stop! server)))
+        (is (= 1 @close-count))))))
 
 (deftest stalled-request-upload-resumes-with-exact-bytes-test
   (let [payload (byte-array (* 4 1024 1024) (byte 66))

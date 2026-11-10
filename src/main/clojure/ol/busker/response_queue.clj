@@ -429,7 +429,7 @@
                     (prepare-record! st nil 0 nil (assoc opts :wait? true :body? true)
                                      receipt false true))
                   (catch Throwable t
-                    (when (open? st) (fail! st t)))
+                    (fail! st t {:if-open? true}))
                   (finally
                     (when-let [block @initial]
                       (bp/release! (:buffer-pool st) block)
@@ -458,18 +458,26 @@
 (defn fail!
   "Stops admission and settles pending receipts after failure.
   Discards queued records; an installed native send stays retained until a safe
-  non-final proceed or request cleanup. Private producers release on return."
-  [st cause]
-  (let [result (if cause {:status :failed :cause cause} {:status :closed})
-        changed? (locking (:lock st)
-                   (let [changed? (close-locked! st result)]
-                     (swap! (:state_ st) assoc :aborted? true :failure cause)
-                     changed?))]
-    (doseq [record (detach-pending! st)] (release-record! st record))
-    (bp/untrack-pressure! (:buffer-pool st) (:drain-state_ st))
-    (notify-capacity! st)
-    (signal! st)
-    (when changed? (terminal-callback! st))))
+  non-final proceed or request cleanup. Private producers release on return.
+
+  | Option | Default | Meaning |
+  |--------|---------|---------|
+  | `:if-open?` | `false` | Apply an application failure only if admission is still open. |
+
+  Transport failures use the default even after graceful closure."
+  ([st cause] (fail! st cause {}))
+  ([st cause {:keys [if-open?]}]
+   (let [result (if cause {:status :failed :cause cause} {:status :closed})]
+     (when-some [changed? (locking (:lock st)
+                            (when (or (not if-open?) (open? st))
+                              (let [changed? (boolean (close-locked! st result))]
+                                (swap! (:state_ st) assoc :aborted? true :failure cause)
+                                changed?)))]
+       (doseq [record (detach-pending! st)] (release-record! st record))
+       (bp/untrack-pressure! (:buffer-pool st) (:drain-state_ st))
+       (notify-capacity! st)
+       (signal! st)
+       (when changed? (terminal-callback! st))))))
 
 (defn on-stop [st reason]
   (fail! st (when (instance? Throwable reason) reason))

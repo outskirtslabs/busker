@@ -23,6 +23,14 @@ It must not block in native calls.
 Native callbacks copy or signal data, then dispatch application handling through the worker and callback-dispatch table.
 Lifecycle work uses platform threads because it can wait for threads and native resources to finish.
 
+### Native write completion
+
+Workers submit responses on the event-loop thread, including between calls to `h2o_evloop_run`, while preserving one active native send per response. This requires completion delivery to record socket-interest reconciliation before the next poll. Otherwise an earlier update can retain write interest for an immediately completed write whose callback is then cleared.
+
+`shim/build.zig` applies the local repair tracked in [H2O issue 3828](https://github.com/h2o/h2o/issues/3828): `run_socket` calls `link_to_statechanged(sock)` before `on_write_complete`. Recording the update before the callback permits rearm or close without accessing the socket afterwards. The build checks the pinned header's hash and a unique replacement site, generates a private header and `socket.c` copy, and substitutes that translation unit in the actual `h2o-evloop` artifact for every target and native test. Dependency sources and pins remain unchanged. The patch can be removed once the pinned H2O includes the repair. The exact between-loop submission phase is not yet an upstream-confirmed API contract.
+
+Normal shim builds run a Linux regression covering the stale-interest sequence, callback rearm, close and write errors. TCP/TLS stalled-reader tests check exact response bytes and backpressure. Cross-compilation does not establish kqueue runtime coverage; delayed zerocopy reclamation and asynchronous TLS paths require separate verification.
+
 ## Requests
 
 The shim calls Clojure request callbacks with native request context data.
@@ -71,6 +79,8 @@ One logical incremental write can publish a begin record, several data records a
 Flush and end requests occupy coalesced per-response state, not mailbox entries. Each captures an accepted sequence prefix. The worker waits until that prefix has arrived before applying the control, so a control cannot overtake an accepted but unpublished head. Empty body writes are ordered local receipt markers, not empty intermediate native sends. Pressure flushes previously accepted output; global pool pressure tracks responses with unflushed blocks rather than scanning all requests.
 
 Workers process bounded mailbox turns and one ready batch per selected response before polling native I/O. When H2O calls proceed during the send, so that the response is ready again at once, the worker sends up to 256 batches of that response in the same turn. Proceed can drain directly without another mailbox message, with reentrant callbacks handled by a trampoline. Unflushed output does not make the worker poll continuously. Close settles pending receipts immediately, independently of native storage release, and dispatches ordered callbacks on virtual threads.
+
+If sending a returned Ring response throws while its emitter is open, Busker creates the streaming writer if necessary and requests an error-final send. The worker supplies a minimal status-200 head if no final head has started; this is a transport failure, not a successful empty response. Application failure checks admission and requests abort in one queue-lock transition. If `close!` or an accepted `:end? true` wins first, the accepted bytes and normal final send remain intact, including while awaiting mailbox consumption or native proceed. This also applies to incremental body-source failures. Publication, worker and native-send failures still discard pending output after admission closes: the transport can no longer deliver that prefix safely. A native stop notification records that transport has stopped and suppresses further sends. Failure and stop settle pending receipts without changing earlier results or releasing storage still in native use.
 
 ## Lifecycle
 
