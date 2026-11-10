@@ -16,10 +16,11 @@
 
 (defn- controller [p commands]
   (queue/create-response-writer
-   {:config {:output-buffer-size (:block-size p) :buffer-pool p}
-    :reserve-command! (fn [_ cancelled?] (if (cancelled?) :closed (Object.)))
-    :publish-command! (fn [_ command] (swap! commands conj command) :accepted)
-    :release-command! (fn [_] nil)
+   {:config {:output-buffer-size (:block-size p)}
+    :worker {:stream-pool p
+             :reserve-command! (fn [_ _ cancelled?] (if (cancelled?) :closed (Object.)))
+             :publish-command! (fn [_ _ command] (swap! commands conj command) :accepted)
+             :release-command! (fn [_ _] nil)}
     :apply-head! (fn [_ _] nil)}))
 
 (defn- consume! [st commands]
@@ -158,7 +159,7 @@
     (let [p (pool/create-stream-pool 8)
           commands (atom [])
           st (controller p commands)
-          st (assoc-in st [:req :reserve-command!] (fn [_ _] :full))]
+          st (assoc-in st [:req :worker :reserve-command!] (fn [_ _ _] :full))]
       (try
         (is (= {:status :full}
                (queue/emit-bounded! st {:status 201} 8
@@ -170,12 +171,64 @@
 
 (defn- mailbox-controller [p m]
   (queue/create-response-writer
-   {:config {:output-buffer-size (:block-size p) :buffer-pool p}
-    :reserve-command! #(mailbox/reserve! m %1 %2)
-    :publish-command! #(mailbox/publish! m %1 %2)
-    :release-command! #(mailbox/release! m %)
-    :wake-command-waiters! #(mailbox/wake-waiters! m)
+   {:config {:output-buffer-size (:block-size p)}
+    :worker {:stream-pool p
+             :reserve-command! (fn [_ wait? cancelled?] (mailbox/reserve! m wait? cancelled?))
+             :publish-command! (fn [_ permit command] (mailbox/publish! m permit command))
+             :release-command! (fn [_ permit] (mailbox/release! m permit))
+             :wake-command-waiters! (fn [_] (mailbox/wake-waiters! m))}
     :apply-head! (fn [_ _] nil)}))
+
+(deftest streaming-uses-worker-services-with-original-worker
+  (doseq [failure-site [:head :send]]
+    (with-redefs [pi/wake (fn [_] nil)]
+      (let [p (pool/create-stream-pool 8)
+            m (mailbox/create)
+            calls (atom [])
+            failure (ex-info "Native failure" {})
+            worker {:stream-pool p
+                    :reserve-command! (fn [w wait? cancelled?]
+                                        (swap! calls conj [:reserve w wait? (cancelled?)])
+                                        (mailbox/reserve! m wait? cancelled?))
+                    :publish-command! (fn [w permit command]
+                                        (swap! calls conj [:publish w (take 3 command)])
+                                        (mailbox/publish! m permit command))
+                    :release-command! (fn [w permit]
+                                        (swap! calls conj [:release w])
+                                        (mailbox/release! m permit))
+                    :wake-command-waiters! (fn [w]
+                                             (swap! calls conj [:wake w])
+                                             (mailbox/wake-waiters! m))
+                    :on-native-failure! (fn [w t] (swap! calls conj [:failure w t]))}
+            req {:worker worker :config {:output-buffer-size 8}
+                 :dispatch-module-id 7 :dispatch-request-seq 11
+                 :apply-head! (fn [_ _] (when (= :head failure-site) (throw failure)))}
+            st (queue/create-response-writer req)]
+        (try
+          (is (identical? req (:req st)))
+          (is (identical? p (:buffer-pool st)))
+          (is (thrown? IllegalArgumentException
+                       (queue/emit-bounded! st nil 1
+                                            (fn [_] (throw (IllegalArgumentException.))) {})))
+          (let [result (queue/emit-bounded! st nil 0 nil {:wait? false :flush? true})
+                command (mailbox/poll! m)]
+            (queue/consume-record! st (peek command))
+            (when (= :send failure-site)
+              (queue/close! st)
+              (with-redefs [native/sendvec (fn [& _] (throw failure))]
+                (queue/send-vecs st)))
+            (is (= (if (= :head failure-site)
+                     {:status :failed :cause failure} {:status :closed})
+                   @(:progress result)))
+            (is (every? #(identical? worker (second %)) @calls))
+            (is (= [[:reserve true false] [:release] [:reserve false false]
+                    [:publish [:h2o/output 7 11]] [:failure failure]]
+                   (->> @calls
+                        (remove #(= :wake (first %)))
+                        (mapv #(into [(first %)] (drop 2 %))))))
+            (is (some #(= :wake (first %)) @calls))
+            (is (zero? (:used @(:state_ m)))))
+          (finally (queue/on-cleanup st) (pool/retire! p)))))))
 
 (defn- consume-mailbox! [st m]
   (loop []
@@ -394,8 +447,8 @@
     (let [p (pool/create-stream-pool 8)
           m (mailbox/create)
           st (mailbox-controller p m)
-          st (assoc-in st [:req :reserve-command!]
-                       (fn [_ _] (throw (IllegalStateException. "reservation failed"))))]
+          st (assoc-in st [:req :worker :reserve-command!]
+                       (fn [_ _ _] (throw (IllegalStateException. "reservation failed"))))]
       (try
         (is (thrown-with-msg? IllegalStateException #"reservation failed"
                               (queue/emit-incremental!

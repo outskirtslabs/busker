@@ -12,6 +12,8 @@ Application virtual threads produce response bytes while H2O consumes them async
 
 Each worker has 256 reusable blocks of B bytes, where B is the positive `:output-buffer-size` setting. A platform thread allocates the blocks in a shared FFM arena at startup. Total streaming payload storage is 256 * B bytes per worker, or 8 MiB at the default B=32768, separate from the 256 fixed-response slots.
 
+Streaming writers obtain the block pool directly from the request's worker. The request retains the generation configuration without adding a pool entry.
+
 A response permits one producer at a time, at most B pending bytes and at most 64 unsettled receipts. Pending bytes include private reservations and accepted output awaiting a native send. A nonempty bounded write initially uses one block even if it writes fewer than B bytes. Empty writes consume receipt capacity but retain no block.
 
 Application producers write through a temporary confined ByteBuffer view of a shared block. The callback runs synchronously on its calling virtual thread, uses its final position as the byte count and must not flip the buffer. Other threads cannot access that view. Closing its confined arena invalidates retained Java aliases before publication without freeing the backing allocation.

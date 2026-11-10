@@ -51,8 +51,9 @@
 (defn- notify-capacity! [st]
   (locking (:lock st) (.notifyAll ^Object (:lock st)))
   (bp/signal! (:buffer-pool st))
-  (when-let [f (-> st :req :wake-command-waiters!)]
-    (try (f) (catch Throwable _ nil))))
+  (let [worker (-> st :req :worker)]
+    (when-let [f (:wake-command-waiters! worker)]
+      (try (f worker) (catch Throwable _ nil)))))
 
 (defn- signal! [st]
   (locking (:lock st)
@@ -196,10 +197,12 @@
               (do (bp/await-change! pool observed #(not (open? st))) (recur)))))))))
 
 (defn- reserve-command! [st wait?]
-  ((:reserve-command! (:req st)) wait? #(not (open? st))))
+  (let [worker (-> st :req :worker)]
+    ((:reserve-command! worker) worker wait? #(not (open? st)))))
 
 (defn- release-command! [st permit]
-  ((:release-command! (:req st)) permit))
+  (let [worker (-> st :req :worker)]
+    ((:release-command! worker) worker permit)))
 
 (defn- release-record! [st record]
   (when (compare-and-set! (:resource_ record) :pending :released)
@@ -234,9 +237,10 @@
 
 (defn- publish! [st permit record end?]
   (try
-    ((:publish-command! (:req st)) permit
-                                   [:h2o/output (-> st :req :dispatch-module-id)
-                                    (-> st :req :dispatch-request-seq) st record])
+    (let [worker (-> st :req :worker)]
+      ((:publish-command! worker) worker permit
+                                  [:h2o/output (-> st :req :dispatch-module-id)
+                                   (-> st :req :dispatch-request-seq) st record]))
     (catch Throwable t
       ;; The accepted record remains reachable until this explicit discard.
       (try (release-command! st permit) (catch Throwable _ nil))
@@ -529,7 +533,8 @@
         (signal! st)
         (catch Throwable t
           (fail! st t)
-          (when-let [f (-> st :req :on-native-failure!)] (f t)))))))
+          (let [worker (-> st :req :worker)]
+            (when-let [f (:on-native-failure! worker)] (f worker t))))))))
 
 (defn- ready-prefix [s]
   (min (:consumed s) (:flush-prefix s)))
@@ -628,7 +633,8 @@
                 (catch Throwable t
                   ;; Entry may have reached native code: retain the installed send.
                   (fail! st t)
-                  (when-let [f (-> st :req :on-native-failure!)] (f t))))))
+                  (let [worker (-> st :req :worker)]
+                    (when-let [f (:on-native-failure! worker)] (f worker t)))))))
           ;; Only a synchronous proceed can remove this native flight here.
           ;; Locally settled markers consume this response's ordinary turn.
           (when (and (not= flight :local) (< turns 255) (runnable? st))
@@ -654,23 +660,14 @@
   (stop [this] (on-stop this nil)))
 
 (defn new-response-state [req]
-  (let [worker (:worker req)
-        req (reduce (fn [req key]
-                      (if (get req key)
-                        req
-                        (if-let [f (get worker key)]
-                          (assoc req key (fn [& args] (apply f worker args)))
-                          req)))
-                    req [:reserve-command! :publish-command! :release-command!
-                         :wake-command-waiters! :on-native-failure!])
-        lock (Object.)
+  (let [lock (Object.)
         size (-> req :config :output-buffer-size)]
     (->H2OResponseWriter
      req lock
      (atom {:open? true :producer nil :head nil :receipts #{} :reserved-receipts 0
             :accepted 0 :consumed 0 :flush-prefix 0 :end-prefix nil
             :unconsumed (sorted-map) :queued [] :in-flight nil})
-     (bbq/byte-budget size lock) (-> req :config :buffer-pool) size
+     (bbq/byte-budget size lock) (-> req :worker :stream-pool) size
      (Object.) (AtomicBoolean. false))))
 
 (defn create-response-writer [req]

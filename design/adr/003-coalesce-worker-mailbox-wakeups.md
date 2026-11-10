@@ -10,7 +10,7 @@ Application virtual threads publish commands for a platform worker. Commands mus
 
 ## Decision
 
-Each worker has one mailbox with capacity for 256 commands, including reserved, unpublished permits. All producers use the same accounting. Reserving a permit does not insert an empty FIFO position, so a slow producer cannot delay published commands. A valid permit permits publication without another capacity check. Preparation must either publish or release its permit.
+Each worker has one mailbox with capacity for 256 commands, including reserved, unpublished permits. Streaming writers call the worker's command services with that worker as the first argument; requests do not copy these services into capturing functions. All producers use the same accounting. Reserving a permit does not insert an empty FIFO position, so a slow producer cannot delay published commands. A valid permit permits publication without another capacity check. Preparation must either publish or release its permit.
 
 Nonblocking worker submission returns `:accepted`, `:overloaded` or `:closed`. Required submission waits interruptibly through Java synchronization and returns `:accepted` or `:closed`. Polling a command or releasing a permit wakes capacity waiters. Closing admission wakes them and rejects new reservations; valid permits and queued work remain accounted for until publication, execution or discard.
 

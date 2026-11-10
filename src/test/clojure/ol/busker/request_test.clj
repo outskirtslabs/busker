@@ -6,13 +6,14 @@
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.request :as request]
+   [ol.busker.response-queue :as queue]
    [ol.busker.worker-context :as worker-context])
   (:import
    [java.nio.charset StandardCharsets]
    [java.util.concurrent AbstractExecutorService]
    [java.util.concurrent.atomic AtomicReference]))
 
-(deftest request-construction-preserves-context-and-command-callbacks
+(deftest request-construction-preserves-context-and-worker-services
   (doseq [[method expected forced?] [[:post :post false] [nil :head true]]]
     (with-open [arena (ffi/shared-arena)]
       (let [dispatch (callback-dispatch/create arena)
@@ -26,7 +27,7 @@
                     :release-command! vector
                     :wake-command-waiters! vector
                     :on-native-failure! vector}
-            config {:buffer-pool :replaced :response-buffer-size 8192}
+            config {:output-buffer-size 64 :response-buffer-size 8192}
             ring-data (delay {:method "HEAD"})
             ctx {:has-body 0 :request-method method :ring-data ring-data}
             installed_ (atom nil)
@@ -44,26 +45,18 @@
           (let [[module-id request-seq] @installed_
                 [req _] (callback-dispatch/entry dispatch module-id request-seq)]
             (is (= {:worker worker
-                    :config (assoc config :buffer-pool pool)
+                    :config config
                     :req-ctx-ptr ffi/null :req-ctx ctx :write-req nil
                     :callback-pointers (callback-dispatch/callback-pointers dispatch)
                     :dispatch-module-id module-id :dispatch-request-seq request-seq
                     :request-method expected}
-                   (into {} (dissoc req :reserve-command! :publish-command!
-                                    :release-command! :wake-command-waiters!
-                                    :on-native-failure!))))
+                   (into {} req)))
             (is (identical? worker (:worker req)))
-            (is (identical? pool (get-in req [:config :buffer-pool])))
+            (is (identical? config (:config req)))
+            (is (identical? pool (:buffer-pool (queue/new-response-state req))))
             (is (nil? (meta req)))
             (is (= forced? (realized? ring-data)))
-            (is (= 1 (count @tasks_)))
-            (is (= [[worker :command :options] [worker :claim :command]
-                    [worker :claim] [worker] [worker :failure]]
-                   [((:reserve-command! req) :command :options)
-                    ((:publish-command! req) :claim :command)
-                    ((:release-command! req) :claim)
-                    ((:wake-command-waiters! req))
-                    ((:on-native-failure! req) :failure)]))))))))
+            (is (= 1 (count @tasks_)))))))))
 
 (deftest closed-required-proceed-fails-request-body-read
   (let [calls_ (atom [])]

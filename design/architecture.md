@@ -38,6 +38,7 @@ Busker copies request metadata into JVM memory before the native callback return
 The handler thread decodes that copy when it reads the request, so decoding does not depend on the native request remaining valid.
 Streaming request bodies use a `java.nio.channels.ReadableByteChannel` and native proceed callbacks.
 Callback-dispatch maps module and request sequence identifiers to live requests until cleanup.
+Each request retains the generation configuration unchanged and references its worker. Streaming writers read the block pool and command services from that worker, passing the worker explicitly to each service.
 
 ## Responses
 

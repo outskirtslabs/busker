@@ -14,11 +14,12 @@
         d {:streaming-work (ConcurrentHashMap.) :entries (HashMap.)}
         commands (atom [])
         st (queue/create-response-writer
-            {:worker {:callback-dispatch d}
-             :config {:buffer-pool p :output-buffer-size 64}
-             :reserve-command! (fn [_ cancelled?] (if (cancelled?) :closed (Object.)))
-             :publish-command! (fn [_ command] (swap! commands conj command) :accepted)
-             :release-command! (fn [_] nil)
+            {:worker {:callback-dispatch d
+                      :stream-pool p
+                      :reserve-command! (fn [_ _ cancelled?] (if (cancelled?) :closed (Object.)))
+                      :publish-command! (fn [_ _ command] (swap! commands conj command) :accepted)
+                      :release-command! (fn [_ _] nil)}
+             :config {:output-buffer-size 64}
              :apply-head! (fn [_ _] nil)})]
     (try
       (with-redefs [pi/wake (fn [_] nil)] (f d st commands))
