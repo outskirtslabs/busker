@@ -1,10 +1,69 @@
 (ns ol.busker.request-test
   (:require
+   [babashka.ffi :as ffi]
    [clojure.test :refer [deftest is testing]]
+   [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.internal.protocols :as pi]
-   [ol.busker.request :as request])
+   [ol.busker.native :as h2o]
+   [ol.busker.request :as request]
+   [ol.busker.worker-context :as worker-context])
   (:import
-   [java.nio.charset StandardCharsets]))
+   [java.nio.charset StandardCharsets]
+   [java.util.concurrent AbstractExecutorService]
+   [java.util.concurrent.atomic AtomicReference]))
+
+(deftest request-construction-preserves-context-and-command-callbacks
+  (doseq [[method expected forced?] [[:post :post false] [nil :head true]]]
+    (with-open [arena (ffi/shared-arena)]
+      (let [dispatch (callback-dispatch/create arena)
+            _ (callback-dispatch/bind-thread! dispatch (Thread/currentThread))
+            pool (Object.)
+            worker {:callback-dispatch dispatch
+                    :stream-pool pool
+                    :response-receiver_ (AtomicReference. ffi/null)
+                    :reserve-command! vector
+                    :publish-command! vector
+                    :release-command! vector
+                    :wake-command-waiters! vector
+                    :on-native-failure! vector}
+            config {:buffer-pool :replaced :response-buffer-size 8192}
+            ring-data (delay {:method "HEAD"})
+            ctx {:has-body 0 :request-method method :ring-data ring-data}
+            installed_ (atom nil)
+            tasks_ (atom [])
+            executor (proxy [AbstractExecutorService] []
+                       (execute [task] (swap! tasks_ conj task)))]
+        (with-redefs [pi/running? (constantly true)
+                      worker-context/get-current-worker (constantly worker)
+                      h2o/install-request-dispatch
+                      (fn [_ _ module-id request-seq _]
+                        (reset! installed_ [module-id request-seq])
+                        1)]
+          (is (= h2o/CLJ_HANDLER_OK
+                 (request/on-request executor identity config identity ffi/null ctx)))
+          (let [[module-id request-seq] @installed_
+                [req _] (callback-dispatch/entry dispatch module-id request-seq)]
+            (is (= {:worker worker
+                    :config (assoc config :buffer-pool pool)
+                    :req-ctx-ptr ffi/null :req-ctx ctx :write-req nil
+                    :callback-pointers (callback-dispatch/callback-pointers dispatch)
+                    :dispatch-module-id module-id :dispatch-request-seq request-seq
+                    :request-method expected}
+                   (into {} (dissoc req :reserve-command! :publish-command!
+                                    :release-command! :wake-command-waiters!
+                                    :on-native-failure!))))
+            (is (identical? worker (:worker req)))
+            (is (identical? pool (get-in req [:config :buffer-pool])))
+            (is (nil? (meta req)))
+            (is (= forced? (realized? ring-data)))
+            (is (= 1 (count @tasks_)))
+            (is (= [[worker :command :options] [worker :claim :command]
+                    [worker :claim] [worker] [worker :failure]]
+                   [((:reserve-command! req) :command :options)
+                    ((:publish-command! req) :claim :command)
+                    ((:release-command! req) :claim)
+                    ((:wake-command-waiters! req))
+                    ((:on-native-failure! req) :failure)]))))))))
 
 (deftest closed-required-proceed-fails-request-body-read
   (let [calls_ (atom [])]

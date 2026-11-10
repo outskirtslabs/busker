@@ -122,18 +122,19 @@
             has-body? (= 1 (:has-body req-ctx))
             write-req (when has-body?
                         (set-req-body-channel worker module-id request-seq))
-            req (assoc (Request. worker
-                                 (assoc config :buffer-pool (:stream-pool worker))
-                                 req-ctx-ptr req-ctx write-req
-                                 callback-pointers module-id request-seq)
-                       :request-method (or (:request-method req-ctx)
-                                           (keyword (str/lower-case
-                                                     (or (:method (force (:ring-data req-ctx))) "get"))))
-                       :reserve-command! #((:reserve-command! worker) worker %1 %2)
-                       :publish-command! #((:publish-command! worker) worker %1 %2)
-                       :release-command! #((:release-command! worker) worker %)
-                       :wake-command-waiters! #((:wake-command-waiters! worker) worker)
-                       :on-native-failure! #((:on-native-failure! worker) worker %))
+            req (Request. worker
+                          (assoc config :buffer-pool (:stream-pool worker))
+                          req-ctx-ptr req-ctx write-req
+                          callback-pointers module-id request-seq
+                          nil
+                          {:request-method (or (:request-method req-ctx)
+                                               (keyword (str/lower-case
+                                                         (or (:method (force (:ring-data req-ctx))) "get"))))
+                           :reserve-command! #((:reserve-command! worker) worker %1 %2)
+                           :publish-command! #((:publish-command! worker) worker %1 %2)
+                           :release-command! #((:release-command! worker) worker %)
+                           :wake-command-waiters! #((:wake-command-waiters! worker) worker)
+                           :on-native-failure! #((:on-native-failure! worker) worker %)})
             emitter (response/new-response-emitter req close-callback-dispatch)
             ring-request-data (:ring-data req-ctx)]
         (callback-dispatch/register! dispatch module-id request-seq req emitter)
