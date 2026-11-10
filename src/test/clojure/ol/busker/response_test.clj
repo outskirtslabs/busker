@@ -164,6 +164,17 @@
             (is (= (vec expected) (vec body))))))
       (finally (busker/stop! server)))))
 
+(deftest header-pairs-preserve-order-and-coercion
+  (doseq [[headers expected]
+          [[nil [[] 0 -1]]
+           [{} [[] 0 -1]]
+           [(array-map "X-Empty" [] "X-List" '(1 nil) "X-Key" :value
+                       "X-Lazy" (map str [2 3]) "CONTENT-LENGTH" 4)
+            [[["X-List" "1"] ["X-List" ""] ["X-Key" ":value"]
+              ["X-Lazy" "2"] ["X-Lazy" "3"]] 5 4]]
+           [{"X-Nested" [[1 2]]} [[["X-Nested" "[1 2]"]] 1 -1]]]]
+    (is (= expected (response/build-headers {:headers headers})))))
+
 (deftest ordinary-response-header-normalization
   (let [response_ (atom {})
         [server port] (start-server (fn [_] @response_))]

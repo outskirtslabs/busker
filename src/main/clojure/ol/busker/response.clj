@@ -44,12 +44,15 @@
 (defn- coerce-content-length [value]
   (if (number? value) (long value) (Long/parseLong value)))
 
-(defn- expand-header-values [headers]
-  (mapcat (fn [[name value]]
-            (if (sequential? value)
-              (map #(vector name %) value)
-              [[name value]]))
-          headers))
+(defn- header-pairs [headers]
+  (persistent!
+   (reduce (fn [pairs [name value]]
+             (let [name (str name)]
+               (if (sequential? value)
+                 (reduce (fn [pairs value] (conj! pairs [name (str value)])) pairs value)
+                 (conj! pairs [name (str value)]))))
+           (transient [])
+           headers)))
 
 (defn build-headers
   "Returns `[headers header-count content-length]` for a final response.
@@ -58,8 +61,7 @@
   [response]
   (let [length (second (hdr.util/find-header response "content-length"))
         headers (cond-> (:headers response) length (dissoc-header "content-length"))
-        pairs (mapv (fn [[name value]] [(str name) (str value)])
-                    (expand-header-values headers))]
+        pairs (header-pairs headers)]
     [pairs (count pairs) (if length (coerce-content-length length) -1)]))
 
 (defn build-headers2
