@@ -87,6 +87,8 @@ struct clj_mt_receiver_t {
   _Atomic size_t claim_cursor;
   _Atomic uint64_t claim_sequence;
   unsigned char *ring_storage;
+  _Atomic uint64_t *ready_words;
+  size_t ready_word_count;
   size_t ring_capacity;
   size_t ring_stride;
   size_t slot_payload_capacity;
@@ -1076,6 +1078,11 @@ int clj_h2o_response_publish(clj_mt_receiver_t *receiver,
     return 0;
   }
 
+  /* READY is not discoverable until this bit is published. The producer use
+     protects the receiver through publication, even if cleanup reuses the slot. */
+  size_t index = (claim_handle & CLJ_RESPONSE_HANDLE_INDEX_MASK) - 1;
+  atomic_fetch_or_explicit(&receiver->ready_words[index / 64],
+                           UINT64_C(1) << (index % 64), memory_order_release);
   atomic_fetch_sub_explicit(&receiver->ring_claimed, 1,
                             memory_order_release);
   return 1;
@@ -1133,32 +1140,40 @@ size_t clj_h2o_response_ring_drain(clj_mt_receiver_t *receiver) {
     return 0;
 
   size_t drained = 0;
-  for (size_t index = 0; index < receiver->ring_capacity; ++index) {
-    clj_response_slot_t *slot = response_slot_at(receiver, index);
-    uint32_t expected = CLJ_RESPONSE_SLOT_READY;
-    if (!atomic_compare_exchange_strong_explicit(
-            &slot->state, &expected, CLJ_RESPONSE_SLOT_IN_NATIVE,
-            memory_order_acquire, memory_order_relaxed))
-      continue;
+  for (size_t word = 0; word < receiver->ready_word_count; ++word) {
+    /* Detach before sending: synchronous cleanup can republish the same index.
+       Its new bit must remain in the receiver for the next drain. */
+    uint64_t ready = atomic_exchange_explicit(&receiver->ready_words[word], 0,
+                                               memory_order_acquire);
+    while (ready != 0) {
+      size_t index = word * 64 + (size_t)__builtin_ctzll(ready);
+      ready &= ready - 1;
+      clj_response_slot_t *slot = response_slot_at(receiver, index);
+      uint32_t expected = CLJ_RESPONSE_SLOT_READY;
+      if (!atomic_compare_exchange_strong_explicit(
+              &slot->state, &expected, CLJ_RESPONSE_SLOT_IN_NATIVE,
+              memory_order_acquire, memory_order_relaxed))
+        continue;
 
-    clj_fixed_response_slot_data_t *data = &slot->data;
-    clj_req_ctx_t *ctx = response_slot_data_valid(receiver, data)
-                            ? response_request(receiver, data->module_id,
-                                               data->request_seq)
-                            : NULL;
-    if (ctx != NULL && !ctx->response_started && ctx->fixed_slot == NULL) {
-      atomic_fetch_add_explicit(&receiver->ring_retained, 1,
-                                memory_order_release);
-      atomic_fetch_sub_explicit(&receiver->ring_ready, 1,
-                                memory_order_release);
-      ++drained;
-      send_retained_fixed(ctx, slot);
-    } else {
-      atomic_fetch_sub_explicit(&receiver->ring_ready, 1,
-                                memory_order_release);
-      atomic_store_explicit(&slot->state, CLJ_RESPONSE_SLOT_FREE,
-                            memory_order_release);
-      ++drained;
+      clj_fixed_response_slot_data_t *data = &slot->data;
+      clj_req_ctx_t *ctx = response_slot_data_valid(receiver, data)
+                              ? response_request(receiver, data->module_id,
+                                                 data->request_seq)
+                              : NULL;
+      if (ctx != NULL && !ctx->response_started && ctx->fixed_slot == NULL) {
+        atomic_fetch_add_explicit(&receiver->ring_retained, 1,
+                                  memory_order_release);
+        atomic_fetch_sub_explicit(&receiver->ring_ready, 1,
+                                  memory_order_release);
+        ++drained;
+        send_retained_fixed(ctx, slot);
+      } else {
+        atomic_fetch_sub_explicit(&receiver->ring_ready, 1,
+                                  memory_order_release);
+        atomic_store_explicit(&slot->state, CLJ_RESPONSE_SLOT_FREE,
+                              memory_order_release);
+        ++drained;
+      }
     }
   }
   return drained;
@@ -1211,13 +1226,20 @@ clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(
   receiver->request_buckets =
       calloc(receiver->request_capacity, sizeof(*receiver->request_buckets));
   receiver->ring_storage = calloc(ring_capacity, ring_stride);
-  if (receiver->request_buckets == NULL || receiver->ring_storage == NULL) {
+  receiver->ready_word_count = (ring_capacity + 63) / 64;
+  receiver->ready_words =
+      calloc(receiver->ready_word_count, sizeof(*receiver->ready_words));
+  if (receiver->request_buckets == NULL || receiver->ring_storage == NULL ||
+      receiver->ready_words == NULL) {
+    free(receiver->ready_words);
     free(receiver->ring_storage);
     free(receiver->request_buckets);
     free(receiver);
     return NULL;
   }
 
+  for (size_t word = 0; word < receiver->ready_word_count; ++word)
+    atomic_init(&receiver->ready_words[word], 0);
   receiver->ring_capacity = ring_capacity;
   receiver->ring_stride = ring_stride;
   receiver->slot_payload_capacity = slot_payload_capacity;
@@ -1236,7 +1258,8 @@ clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(
   atomic_init(&receiver->claim_cursor, 0);
   atomic_init(&receiver->claim_sequence, 0);
   clj_response_slot_t *first_slot = response_slot_at(receiver, 0);
-  if (!atomic_is_lock_free(&first_slot->state) ||
+  if (!atomic_is_lock_free(&receiver->ready_words[0]) ||
+      !atomic_is_lock_free(&first_slot->state) ||
       !atomic_is_lock_free(&first_slot->claim_token) ||
       !atomic_is_lock_free(&receiver->ring_retained) ||
       !atomic_is_lock_free(&receiver->producer_uses) ||
@@ -1245,6 +1268,7 @@ clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(
       !atomic_is_lock_free(&receiver->claim_cursor) ||
       !atomic_is_lock_free(&receiver->claim_sequence) ||
       !atomic_is_lock_free(&receiver->accepts_responses)) {
+    free(receiver->ready_words);
     free(receiver->ring_storage);
     free(receiver->request_buckets);
     free(receiver);
@@ -1274,7 +1298,11 @@ void clj_h2o_mt_destroy_response_receiver(clj_mt_receiver_t *receiver) {
   assert(atomic_load_explicit(&receiver->ring_retained, memory_order_acquire) == 0);
   assert(atomic_load_explicit(&receiver->producer_uses, memory_order_acquire) == 0);
   assert(receiver->request_size == 0);
+  for (size_t word = 0; word < receiver->ready_word_count; ++word)
+    assert(atomic_load_explicit(&receiver->ready_words[word],
+                                memory_order_acquire) == 0);
   h2o_multithread_unregister_receiver(receiver->queue, &receiver->receiver);
+  free(receiver->ready_words);
   free(receiver->ring_storage);
   free(receiver->request_buckets);
   free(receiver);

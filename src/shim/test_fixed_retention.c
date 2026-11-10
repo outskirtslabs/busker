@@ -18,6 +18,9 @@ typedef struct {
   int allows_body;
 } test_output_t;
 
+static uint64_t publish(clj_mt_receiver_t *receiver, uint64_t sequence,
+                        int status);
+
 static void final_send(h2o_ostream_t *stream, h2o_req_t *req,
                        h2o_sendvec_t *bufs, size_t count,
                        h2o_send_state_t state) {
@@ -36,7 +39,9 @@ static void final_send(h2o_ostream_t *stream, h2o_req_t *req,
   }
   if (output->reentrant) {
     cleanup_request(output->ctx);
-    output->replacement = clj_h2o_response_try_claim(output->receiver);
+    output->replacement = output->reentrant == 2
+                              ? publish(output->receiver, 99, 200)
+                              : clj_h2o_response_try_claim(output->receiver);
     CHECK(output->replacement != 0);
   }
 }
@@ -77,6 +82,7 @@ static void test_final(clj_mt_receiver_t *receiver, int reentrant,
                                          status != 304};
   req._ostr_top = &output.super;
   CHECK(register_response_request(receiver, &ctx, 1));
+  CHECK(clj_h2o_response_use_acquire(receiver) == 1);
   uint64_t claim = publish(receiver, 1, status);
   CHECK(clj_h2o_response_ring_drain(receiver) == 1);
   if (!reentrant) {
@@ -89,8 +95,18 @@ static void test_final(clj_mt_receiver_t *receiver, int reentrant,
   cleanup_request(&ctx);
   CHECK(clj_h2o_response_abort(receiver, claim) == 0);
   CHECK(clj_h2o_response_ring_retained(receiver) == 0);
-  CHECK(clj_h2o_response_ring_claimed(receiver) == 1);
-  CHECK(clj_h2o_response_abort(receiver, output.replacement) == 1);
+  if (reentrant == 2) {
+    CHECK(clj_h2o_response_ring_claimed(receiver) == 0);
+    CHECK(clj_h2o_response_ring_ready(receiver) == 1);
+    CHECK(clj_h2o_response_ring_drain(receiver) == 1);
+    CHECK(clj_h2o_response_ring_ready(receiver) == 0);
+    CHECK(clj_h2o_response_ring_drain(receiver) == 0);
+  } else {
+    CHECK(clj_h2o_response_ring_claimed(receiver) == 1);
+    CHECK(clj_h2o_response_abort(receiver, output.replacement) == 1);
+  }
+  CHECK(clj_h2o_mt_response_pending(receiver) == 1);
+  clj_h2o_response_use_release(receiver);
   CHECK(clj_h2o_mt_response_pending(receiver) == 0);
   h2o_mem_clear_pool(&req.pool);
 }
@@ -106,6 +122,9 @@ static void test_independent_release(h2o_context_t *context) {
     contexts[i].response_receiver = receiver;
     contexts[i].fixed_slot = slot;
     contexts[i].fixed_claim = claims[i];
+    /* Model the worker detaching discovery before retaining this slot. */
+    atomic_fetch_and(&receiver->ready_words[i / 64],
+                     ~(UINT64_C(1) << (i % 64)));
     atomic_store(&slot->state, CLJ_RESPONSE_SLOT_IN_NATIVE);
     atomic_fetch_add(&receiver->ring_retained, 1);
     atomic_fetch_sub(&receiver->ring_ready, 1);
@@ -132,6 +151,67 @@ static void test_independent_release(h2o_context_t *context) {
   clj_h2o_mt_destroy_response_receiver(receiver);
 }
 
+static void test_discovery(h2o_context_t *context, size_t capacity) {
+  clj_mt_receiver_t *receiver =
+      clj_h2o_mt_create_response_receiver(context, capacity, 3);
+  CHECK(receiver != NULL);
+  CHECK(receiver->ready_word_count == (capacity + 63) / 64);
+  CHECK(clj_h2o_response_use_acquire(receiver) == 1);
+  atomic_store(&receiver->claim_cursor, capacity - 1);
+  uint64_t last = publish(receiver, 99, 200);
+  CHECK((last & CLJ_RESPONSE_HANDLE_INDEX_MASK) == capacity);
+  CHECK(atomic_load(&receiver->ready_words[(capacity - 1) / 64]) ==
+        (UINT64_C(1) << ((capacity - 1) % 64)));
+  CHECK(clj_h2o_response_ring_drain(receiver) == 1);
+  CHECK(clj_h2o_response_abort(receiver, last) == 0);
+  CHECK(clj_h2o_response_ring_ready(receiver) == 0);
+  CHECK(clj_h2o_mt_response_pending(receiver) == 1);
+
+  /* Pause a publication after READY, before its discovery bit. No worker may
+     consume the slot early and leave a late bit referring to a recycled slot. */
+  uint64_t late = clj_h2o_response_try_claim(receiver);
+  clj_response_slot_t *slot = response_slot_from_handle(receiver, late);
+  CHECK(slot != NULL);
+  slot->data.module_id = 0; /* Invalid identity is discarded without native send. */
+  atomic_fetch_add_explicit(&receiver->ring_ready, 1, memory_order_release);
+  atomic_store_explicit(&slot->state, CLJ_RESPONSE_SLOT_READY, memory_order_release);
+  CHECK(clj_h2o_response_ring_drain(receiver) == 0);
+  CHECK(atomic_load(&slot->state) == CLJ_RESPONSE_SLOT_READY);
+  size_t index = (late & CLJ_RESPONSE_HANDLE_INDEX_MASK) - 1;
+  atomic_fetch_or_explicit(&receiver->ready_words[index / 64],
+                           UINT64_C(1) << (index % 64), memory_order_release);
+  atomic_fetch_sub_explicit(&receiver->ring_claimed, 1, memory_order_release);
+  atomic_store(&receiver->accepts_responses, false);
+  CHECK(clj_h2o_response_use_acquire(receiver) == 0);
+  CHECK(clj_h2o_response_ring_drain(receiver) == 1);
+  CHECK(clj_h2o_response_ring_drain(receiver) == 0);
+  CHECK(clj_h2o_mt_response_pending(receiver) == 1);
+  clj_h2o_response_use_release(receiver);
+  CHECK(clj_h2o_mt_response_pending(receiver) == 0);
+  clj_h2o_mt_destroy_response_receiver(receiver);
+}
+
+static void test_cancel_full(h2o_context_t *context) {
+  clj_mt_receiver_t *receiver = clj_h2o_mt_create_response_receiver(context, 2, 3);
+  CHECK(receiver != NULL);
+  CHECK(clj_h2o_response_use_acquire(receiver) == 1);
+  publish(receiver, 99, 200);
+  uint64_t private = clj_h2o_response_try_claim(receiver);
+  CHECK(private != 0);
+  CHECK(clj_h2o_response_try_claim(receiver) == 0);
+  CHECK(clj_h2o_response_ring_ready(receiver) == 1);
+  CHECK(clj_h2o_mt_response_pending(receiver) == 3);
+  atomic_store(&receiver->accepts_responses, false);
+  CHECK(clj_h2o_response_publish(receiver, private) == 0);
+  CHECK(clj_h2o_response_abort(receiver, private) == 1);
+  CHECK(clj_h2o_response_abort(receiver, private) == 0);
+  CHECK(clj_h2o_response_ring_drain(receiver) == 1);
+  CHECK(clj_h2o_mt_response_pending(receiver) == 1);
+  clj_h2o_response_use_release(receiver);
+  CHECK(clj_h2o_mt_response_pending(receiver) == 0);
+  clj_h2o_mt_destroy_response_receiver(receiver);
+}
+
 int main(void) {
   h2o_evloop_t *loop = h2o_evloop_create();
   h2o_context_t context = {.queue = h2o_multithread_create_queue(loop)};
@@ -142,6 +222,7 @@ int main(void) {
   clj_h2o_response_use_release(receiver);
   test_final(receiver, 0, "GET", 200);
   test_final(receiver, 1, "GET", 200);
+  test_final(receiver, 2, "GET", 200);
   test_final(receiver, 1, "HEAD", 200);
   test_final(receiver, 0, "GET", 204);
   test_final(receiver, 0, "GET", 205);
@@ -151,6 +232,9 @@ int main(void) {
   CHECK(clj_h2o_mt_response_pending(receiver) == 0);
   clj_h2o_mt_destroy_response_receiver(receiver);
   test_independent_release(&context);
+  test_discovery(&context, 65);
+  test_discovery(&context, UINT16_MAX);
+  test_cancel_full(&context);
   h2o_multithread_destroy_queue(context.queue);
   h2o_evloop_destroy(loop);
   return 0;

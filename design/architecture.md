@@ -59,7 +59,8 @@ The fixed-final path uses preallocated slots to reduce per-response allocation a
 The slots are `clj_response_slot_t` structs maintained in a ring-buffer in native memory.
 
 When a Ring handler returns a response, Busker claims a slot, copies the headers and body into it.
-It then publishes the slot and requests a worker wake.
+It publishes the slot state, then its index in a capacity-sized ready bitmap, and requests a worker wake.
+The worker detaches each bitmap word before processing its set bits, so publication during a drain remains discoverable without scanning every slot.
 The slot keeps those bytes valid until native request cleanup, including after a final send returns. H2O reads the body directly from the slot; only headers are copied into its request pool. Cleanup detaches the slot reference and checks its claim token before making the slot reusable. Slots being filled survive concurrent disconnects until their producers return.
 
 An `emit!` producer with `:end? true` on an emitter without earlier output also uses a slot, through a confined ByteBuffer view, when its capacity is at most 32768 bytes, the request method is not HEAD and the status is not 204, 205 or 304. Ring returns on this path use no streaming controller or receipt. Slot exhaustion parks a blocking caller or rejects a nonblocking operation; it does not select a second copying transport.
