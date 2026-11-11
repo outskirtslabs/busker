@@ -29,6 +29,12 @@ Before a native wait, the worker resets `wake-sent?_` to false and then sets `sl
 
 During context disposal the event-loop worker moves the endpoint from open to quiescing, waits for in-flight `wake-now!` calls, closes the endpoint, then unregisters and frees the receiver. A later `wake-now!` on the closed endpoint does not enter native code.
 
+## Poll before sleep
+
+A native wake costs an idle worker two thread wake-ups: the publisher's carrier and the worker. When the worker has live requests, a response is often only microseconds away, so the worker first polls instead of arming sleep. The poll reads the wake generation and the mailbox count in a spin loop and ends as soon as either changes; the worker then takes the normal work path. Whenever at least 5 microseconds have passed since the last native turn, the poll runs one zero-wait native turn so sockets keep being serviced. It does not drain the response ring: a published response moves the wake generation, which ends the poll. The poll uses primitive locals only and allocates nothing.
+
+The poll lasts at most `:worker-hot-poll-micros`, measured from its first iteration (default 50; 0 disables it). When the budget runs out, the worker arms sleep exactly as described above. A worker without live requests arms sleep at once, so an idle server does not spin.
+
 ## Required verification
 
 Tests show that:
@@ -40,7 +46,8 @@ Tests show that:
 - an unarmed worker records a wake without a native call;
 - several publications during one sleep produce one native wake, and a new sleep allows another;
 - a worker does not sleep when work appears during its arm-and-recheck sequence;
-- a response published from a virtual thread reaches an idle worker and is drained; and
+- a response published from a virtual thread reaches an idle worker and is drained;
+- a wake arriving during the poll is handled without arming sleep, and a zero budget or a worker without live requests arms sleep at once; and
 - full validation and the large-payload tests pass.
 
 ## Consequences

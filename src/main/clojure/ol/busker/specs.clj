@@ -422,6 +422,12 @@
    :default 2})
 (s/def ::n-workers pos-int?)
 
+(def worker-hot-poll-micros
+  {:key ::worker-hot-poll-micros
+   :doc "Longest time in microseconds that a worker with live requests polls for new work before it sleeps. Zero disables the poll."
+   :default 50})
+(s/def ::worker-hot-poll-micros nat-int?)
+
 (def max-connections
   {:key ::max-connections
    :doc "Maximum concurrent connections across all workers."
@@ -605,6 +611,7 @@
                    ::dispatch]
           :opt-un [::tls
                    ::n-workers
+                   ::worker-hot-poll-micros
                    ::max-connections
                    ::output-buffer-size
                    ::server-name
@@ -688,6 +695,7 @@
    clave-config
    managed-plan
    n-workers
+   worker-hot-poll-micros
    max-connections
    output-buffer-size
    server-name
@@ -727,6 +735,7 @@
    :entrypoints (:default entrypoints)
    :dispatch (:default dispatch)
    :n-workers (:default n-workers)
+   :worker-hot-poll-micros (:default worker-hot-poll-micros)
    :max-connections (:default max-connections)
    :output-buffer-size (:default output-buffer-size)
    :server-name (:default server-name)

@@ -111,6 +111,7 @@
                 {:mailbox (mailbox/create)
                  :response-slots []
                  :response-slot-payload-capacity 0
+                 :hot-poll-ns 0
                  :native-failure_ (AtomicReference.)
                  :response-slot-monitor (Object.)
                  :callback-dispatch nil})
@@ -144,6 +145,7 @@
                  :callback-dispatch nil
                  :response-slots []
                  :response-slot-payload-capacity 0
+                 :hot-poll-ns 0
                  :response-receiver_ (AtomicReference. receiver)
                  :native-failure_ (AtomicReference.)
                  :response-slot-monitor (Object.)})

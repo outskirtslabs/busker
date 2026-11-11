@@ -19,7 +19,7 @@
     :wake-endpoint (Object.)
     :mailbox (mailbox/create) :message-handler handler
     :wakeup-receiver_ (AtomicReference.) :requests (HashMap.)
-    :response-slot-payload-capacity 0}))
+    :response-slot-payload-capacity 0 :hot-poll-ns 0}))
 
 (defn- drain! [worker] (@#'evloop/drain-mailbox! worker))
 
@@ -120,3 +120,52 @@
         (is (false? (.isAlive thread)))
         (is (true? (::evloop/mailbox-work? (first @states_))))
         (finally (.countDown release) (.interrupt thread) (.join thread 5000))))))
+
+(defn- polling-worker
+  "Returns a worker with one live request, `hot-poll-micros` of poll budget and a
+  loop-fn that records each call and stops the worker. `on-zero-wait-turn` runs on each
+  zero-wait native turn."
+  [hot-poll-micros live-requests on-zero-wait-turn]
+  (let [calls_ (atom [])
+        turns_ (atom 0)
+        w (worker (fn [_ _]))
+        w (assoc w
+                 :hot-poll-ns (* 1000 (long hot-poll-micros))
+                 :zero-wait-turn! (fn []
+                                    (swap! turns_ inc)
+                                    (on-zero-wait-turn w)
+                                    0)
+                 :loop-fn (fn [w state]
+                            (swap! calls_ conj
+                                   {:mailbox-work? (::evloop/mailbox-work? state)
+                                    :armed? (.get ^AtomicBoolean (:sleep-armed?_ w))})
+                            (.set ^AtomicBoolean (:running?_ w) false)
+                            state))]
+    (dotimes [n live-requests]
+      (p/add-req w n ::request))
+    {:worker w :calls_ calls_ :turns_ turns_}))
+
+(deftest wake-during-hot-poll-is-handled-without-arming-sleep
+  (let [armed-during-turn_ (atom [])
+        {:keys [worker calls_ turns_]}
+        (polling-worker 10000000 1
+                        (fn [w]
+                          (swap! armed-during-turn_ conj
+                                 (.get ^AtomicBoolean (:sleep-armed?_ w)))
+                          (p/wake w)))]
+    (@#'evloop/run-evloop-on-thread! worker)
+    (is (= 1 @turns_))
+    (is (= [false] @armed-during-turn_))
+    (is (= [{:mailbox-work? true :armed? false}] @calls_))))
+
+(deftest zero-hot-poll-budget-arms-sleep-at-once
+  (let [{:keys [worker calls_ turns_]} (polling-worker 0 1 (fn [_]))]
+    (@#'evloop/run-evloop-on-thread! worker)
+    (is (zero? @turns_))
+    (is (= [{:mailbox-work? false :armed? true}] @calls_))))
+
+(deftest worker-without-live-requests-arms-sleep-at-once
+  (let [{:keys [worker calls_ turns_]} (polling-worker 10000000 0 (fn [_]))]
+    (@#'evloop/run-evloop-on-thread! worker)
+    (is (zero? @turns_))
+    (is (= [{:mailbox-work? false :armed? true}] @calls_))))

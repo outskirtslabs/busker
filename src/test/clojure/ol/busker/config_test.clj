@@ -92,6 +92,7 @@
 
   (testing "exposes config defaults used by the loader"
     (is (= 2 (:n-workers specs/default-config)))
+    (is (= 50 (:worker-hot-poll-micros specs/default-config)))
     (is (= 1024 (:max-connections specs/default-config)))
     (is (= 4
            (get-in specs/default-config
@@ -266,3 +267,15 @@
                :tls {:tls-compatibility-mode :modern
                      :http3? false}}]
              listeners)))))
+(deftest worker-hot-poll-micros-test
+  (let [base {:entrypoints {:http {:bind ":8080" :tls false}}
+              :dispatch [{}]}]
+    (testing "defaults to 50 microseconds"
+      (is (= 50 (:worker-hot-poll-micros (cfg/load! base)))))
+    (testing "accepts zero, which disables the poll"
+      (is (= 0 (:worker-hot-poll-micros (cfg/load! (assoc base :worker-hot-poll-micros 0))))))
+    (testing "rejects negative and non-integer values"
+      (is (some #(= ::cfg/config-spec-invalid (:error %))
+                (load-errors (assoc base :worker-hot-poll-micros -1))))
+      (is (some #(= ::cfg/config-spec-invalid (:error %))
+                (load-errors (assoc base :worker-hot-poll-micros 1.5)))))))

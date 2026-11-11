@@ -1034,13 +1034,14 @@
         (->> (assoc state ::listener-runtimes)))))
 
 (defn- init-worker-state
-  [{::keys [n-workers loops contexts listener-runtimes http3-worker-contexts
+  [{::keys [config n-workers loops contexts listener-runtimes http3-worker-contexts
             max-connections shutting-down? message-handler wakeup-receivers response-receivers
             response-slots response-slot-payload-capacity stream-pools
             arena stop-accepting-remaining_ stopped-accepting_
             active-connection-count_]
     :as state} cleanup-state_]
-  (let [workers
+  (let [hot-poll-ns (* 1000 (long (:worker-hot-poll-micros config)))
+        workers
         (vec
          (for [thread-idx (range n-workers)]
            (let [loop-ptr (nth loops thread-idx)
@@ -1075,7 +1076,9 @@
                            :response-receiver (nth response-receivers thread-idx)
                            :response-slots (nth response-slots thread-idx)
                            :response-slot-payload-capacity response-slot-payload-capacity
-                           :callback-dispatch callback-dispatch)]
+                           :callback-dispatch callback-dispatch
+                           :zero-wait-turn! (fn [] (h2o/evloop-run loop-ptr 0))
+                           :hot-poll-ns hot-poll-ns)]
                (vswap! cleanup-state_ update ::workers (fnil conj []) worker)
                worker))))]
     (assoc state ::workers workers)))

@@ -4,7 +4,8 @@
   [[Worker]] directly implements [[ol.busker.internal.protocols/WorkerThread]]. Key functions
   admit messages, request worker shutdown, drain mailboxes, and bind worker context for
   worker-affine response operations. Each platform worker processes at most 256
-  mailbox commands per turn before native polling. The 256-command capacity
+  mailbox commands per turn before native polling. A worker with live requests polls
+  for new work for up to `hot-poll-ns` before it arms sleep. The 256-command capacity
   includes unpublished permits; reservations do not occupy FIFO positions.
   Application virtual threads can wait for capacity through Java synchronization.
   Stop rejects new reservations and drains admitted work, including outstanding
@@ -126,6 +127,8 @@
             mailbox
             evloop
             loop-fn
+            zero-wait-turn!
+            ^long hot-poll-ns
             message-handler
             ^AtomicReference wakeup-receiver_
             ^AtomicReference response-receiver_
@@ -212,6 +215,37 @@
   [^Worker worker]
   (zero? (mailbox/queued (:mailbox worker))))
 
+(defn- hot-poll!
+  "Spins on the worker thread for at most `budget-ns` while no new work arrives.
+
+  Returns `true` once the wake generation differs from `wake-seen` or the mailbox
+  count changes, and `false` when the budget runs out. Whenever at least five
+  microseconds have passed since the last native turn, runs the worker's
+  `zero-wait-turn!` so sockets keep being serviced. The loop uses primitive locals
+  only and allocates nothing per iteration."
+  [^Worker worker ^long budget-ns ^long wake-seen]
+  (let [^AtomicLong wake-generation_ (.-wake-generation_ worker)
+        mailbox (.-mailbox worker)
+        zero-wait-turn! (.-zero-wait-turn! worker)
+        queued (long (mailbox/queued mailbox))
+        start (System/nanoTime)]
+    (loop [last-turn start]
+      (if (or (not (== wake-seen (.get wake-generation_)))
+              (not (== queued (long (mailbox/queued mailbox)))))
+        true
+        (let [now (System/nanoTime)]
+          (cond
+            (>= (- now start) budget-ns)
+            false
+
+            (>= (- now last-turn) 5000)
+            (do (zero-wait-turn!)
+                (recur (System/nanoTime)))
+
+            :else
+            (do (Thread/onSpinWait)
+                (recur last-turn))))))))
+
 (defn- run-evloop-on-thread!
   [^Worker worker]
   (.set worker-context/worker-context worker)
@@ -220,6 +254,8 @@
           ^AtomicLong wake-generation_ (:wake-generation_ worker)
           ^AtomicBoolean sleep-armed?_ (:sleep-armed?_ worker)
           ^AtomicBoolean wake-sent?_ (:wake-sent?_ worker)
+          ^HashMap requests (.-requests worker)
+          hot-poll-ns (.-hot-poll-ns worker)
           loop-fn (:loop-fn worker)]
       (loop [state {}
              wake-seen (long 0)]
@@ -229,9 +265,17 @@
           (let [mailbox-work? (drain-mailbox! worker)
                 wake-requested (.get wake-generation_)]
             (when (.get running?_)
-              (if (or mailbox-work? (not= wake-requested wake-seen))
+              (cond
+                (or mailbox-work? (not= wake-requested wake-seen))
                 (recur (loop-fn worker (assoc state ::mailbox-work? true))
                        wake-requested)
+
+                (and (pos? hot-poll-ns)
+                     (not (.isEmpty requests))
+                     (hot-poll! worker hot-poll-ns wake-seen))
+                (recur state wake-seen)
+
+                :else
                 (do
                   ;; Reset wake-sent?_ before arming sleep. A publisher's compare-and-set
                   ;; fails only when an earlier publisher won it after this reset, and that
@@ -282,14 +326,18 @@
    - :response-receiver - native complete-response receiver
    - :response-slots - generation-scoped native slot views
    - :response-slot-payload-capacity - writable bytes in one slot
+   - :zero-wait-turn! - no-argument function that runs one native loop turn without
+     waiting, called while the worker polls before sleep
+   - :hot-poll-ns - longest poll before sleep, in nanoseconds; 0 disables the poll
 
    Returns: worker"
 
   [loop-fn message-handler wakeup-receiver
    & {:keys [callback-dispatch response-receiver response-slots
              response-slot-payload-capacity thread-name-prefix stream-pool
-             on-native-failure! discard-command!]
-      :or {thread-name-prefix "h2o-evloop"}}]
+             on-native-failure! discard-command! zero-wait-turn! hot-poll-ns]
+      :or {thread-name-prefix "h2o-evloop"
+           hot-poll-ns 0}}]
   (when-not callback-dispatch
     (throw (ex-info "Worker requires a callback dispatcher" {})))
   (let [id (swap! next-id_ inc)
@@ -321,6 +369,8 @@
                              :termination-cause_ (AtomicReference.)
                              :evloop nil
                              :loop-fn loop-fn
+                             :zero-wait-turn! zero-wait-turn!
+                             :hot-poll-ns (long hot-poll-ns)
                              :message-handler message-handler
                              :wakeup-receiver_ receiver_
                              :response-receiver_ response-receiver_
