@@ -15,7 +15,7 @@
    [ol.busker.protocols :as protocols]
    [ol.busker.request :as request]
    [ol.busker.response-queue :as response-queue]
-   [ol.busker.wake-notifier :as wake-notifier]
+   [ol.busker.wake-endpoint :as wake-endpoint]
    [ol.busker.test-utils :as util])
   (:import
    [java.lang.foreign Arena]
@@ -179,7 +179,7 @@
                 :wakeup-receiver_ receiver_}]
     (.set worker-context/worker-context worker)
     (try
-      (with-redefs [wake-notifier/quiesce-endpoint!
+      (with-redefs [wake-endpoint/quiesce-endpoint!
                     (fn [endpoint]
                       (is (= ::endpoint endpoint))
                       (swap! events_ conj :quiesce))
@@ -777,7 +777,7 @@
     (generation/stop! instance)
     (is (thrown? IllegalStateException (mem/read slot :long)))))
 
-(deftest stale-ring-response-is-drained-after-a-platform-notifier-wake
+(deftest stale-ring-response-is-drained-after-a-direct-native-wake
   (let [port (util/free-port)
         instance (generation/start!
                   (config/load!
@@ -1185,47 +1185,6 @@
           (h2o/mt-response-abort receiver claim-handle))
         (fixed-final/notify-capacity! worker)
         (generation/stop! instance)))))
-
-(deftest worker-receiver-retirement-precedes-notifier-stop-test
-  (with-open [arena (mem/shared-arena)]
-    (let [events_ (atom [])
-          dispatch (callback-dispatch/create arena)
-          receiver (Object.)
-          notifier (Object.)
-          receiver_ (AtomicReference. receiver)
-          worker (retirement-worker
-                  dispatch receiver_ (Thread.)
-                  (fn [msg]
-                    (is (= [:h2o/retire-wakeup-receiver] msg))
-                    (swap! events_ conj :receiver-destroy)
-                    (.set receiver_ nil)
-                    :accepted))
-          phase (atom :running)
-          generation-state {::generation/phase phase
-                            ::generation/stop-lock (Object.)
-                            ::generation/workers [worker]
-                            ::generation/wake-notifier notifier
-                            ::generation/wakeup-receivers [receiver]
-                            ::generation/listener-runtimes []
-                            ::generation/listener-claims {}
-                            ::generation/config {}}]
-      (with-redefs [evloop/broadcast-wake!
-                    (fn [_]
-                      (when (.get receiver_)
-                        (p/send-required-msg worker [:h2o/retire-wakeup-receiver])))
-                    wake-notifier/stop-and-join! (fn [_]
-                                                   (is (nil? (.get receiver_)))
-                                                   (is (not (.isAlive ^Thread (:thread worker))))
-                                                   (swap! events_ conj :notifier-stop)
-                                                   true)]
-        (generation/stop! generation-state))
-      (bp/retire! (:stream-pool worker))
-      (is (= {:retirement-order [:receiver-destroy :notifier-stop]
-              :phase :stopped
-              :receiver nil}
-             {:retirement-order (filterv #{:notifier-stop :receiver-destroy :join} @events_)
-              :phase @phase
-              :receiver (.get receiver_)})))))
 
 (deftest failed-worker-retirement-retains-the-callback-arena-test
   (with-open [arena (mem/shared-arena)]

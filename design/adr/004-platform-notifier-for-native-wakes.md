@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-010](010-direct-native-wake-from-publishing-threads.md)
 
 ## Context
 

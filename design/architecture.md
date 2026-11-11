@@ -94,7 +94,7 @@ The previous generation stops accepting new connections but must still let its h
 Busker keeps its response queues and native memory available until that work finishes or the shutdown timeout is reached.
 Reaching the timeout does not make memory safe to free. Receiver admission closes first; previously entered producers and native requests retain their generation until publication, discard or cleanup. A producer that ignores interruption can delay release indefinitely. Failed retirement reports and retains the affected arenas and callback stubs instead of invalidating live addresses.
 
-During context disposal, the event-loop worker directly retires its wake receiver: it quiesces the notifier endpoint, waits for admitted notifier calls, closes the endpoint and unregisters the receiver before freeing it. Queued tokens for a closed endpoint perform no native work.
+Threads that publish a response or mailbox command call the native wake themselves, at most once per worker sleep. During context disposal, the event-loop worker directly retires its wake receiver: it quiesces the wake endpoint, waits for native wake calls in progress, closes the endpoint and unregisters the receiver before freeing it. A wake on a closed endpoint performs no native work.
 
 If startup fails partway through, Busker attempts to stop the partial generation and rethrows the original startup error. Contexts without workers also have their wake and response receivers unregistered before context disposal. Cleanup cannot continue through dependent native resources when their safe release is uncertain. Such resources must remain allocated; an error or timeout is not evidence that native callers have finished.
 
@@ -112,8 +112,8 @@ Native socketpair regression tests cover these rules and run during normal shim 
 - [ADR 001](adr/001-response-emitter-close-callbacks.md): virtual-thread close callbacks.
 - [ADR 002](adr/002-worker-affine-ffm-callback-dispatch.md): worker-affine callback identities and lifetime.
 - [ADR 003](adr/003-coalesce-worker-mailbox-wakeups.md): mailbox permits, ordered controls and wake coalescing.
-- [ADR 004](adr/004-platform-notifier-for-native-wakes.md): platform-thread native wake calls.
 - [ADR 006](adr/006-worker-side-response-head-staging.md): worker-side streaming header staging.
 - [ADR 007](adr/007-bounded-native-streaming-storage.md): bounded native streaming blocks.
 - [ADR 009](adr/009-preallocated-response-completion-ring.md): retained fixed-response slots.
+- [ADR 010](adr/010-direct-native-wake-from-publishing-threads.md): native wakes from publishing threads.
 

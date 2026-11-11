@@ -14,7 +14,7 @@ Each worker has one mailbox with capacity for 256 commands, including reserved, 
 
 Nonblocking worker submission returns `:accepted`, `:overloaded` or `:closed`. Required submission waits interruptibly through Java synchronization and returns `:accepted` or `:closed`. Polling a command or releasing a permit wakes capacity waiters. Closing admission wakes them and rejects new reservations; valid permits and queued work remain accounted for until publication, execution or discard.
 
-Each worker stores an atomic mailbox-signal generation. Even values mean no active signal; odd values identify a signal batch. Publication changes an even value to an odd token and requests a wake. Other producers that observe an odd token share that signal. The platform notifier performs native wake I/O.
+Each worker stores an atomic mailbox-signal generation. Even values mean no active signal; odd values identify a signal batch. Publication changes an even value to an odd token and requests a wake. Other producers that observe an odd token share that signal. The publishing thread performs the native wake I/O, at most once per worker sleep ([ADR-010](010-direct-native-wake-from-publishing-threads.md)).
 
 If notification throws, the producer resets only its exact odd token, acquires a fresh token and retries once. A second failure clears that retry token and logs the failure without changing acceptance. A later producer can request another wake.
 

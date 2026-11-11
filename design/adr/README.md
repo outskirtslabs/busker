@@ -10,7 +10,7 @@ See [Busker architecture](../architecture.md) for the execution, response-storag
 - [003 — Coalesce worker mailbox wakeups](003-coalesce-worker-mailbox-wakeups.md)
   - Combines wake requests while preserving mailbox order.
 - [004 — Platform notifier for native wakes](004-platform-notifier-for-native-wakes.md)
-  - Moves native worker wake calls off application virtual threads.
+  - Superseded by ADR-010.
 - [005 — Platform executor for lifecycle operations](005-platform-executor-for-lifecycle.md)
   - Runs start, reload, and stop work on platform threads.
 - [006 — Worker-side response head staging](006-worker-side-response-head-staging.md)
@@ -20,3 +20,5 @@ See [Busker architecture](../architecture.md) for the execution, response-storag
 - [008 — Apply complete fixed responses through H2O's event loop](008-native-fixed-response-exchange.md)
 - [009 — Publish complete responses through preallocated native slots](009-preallocated-response-completion-ring.md)
   - Sends fixed-response bodies directly from slots retained until native cleanup.
+- [010 — Direct native wake from publishing threads](010-direct-native-wake-from-publishing-threads.md)
+  - Publishing threads send at most one native wake per worker sleep.

@@ -3,7 +3,7 @@
    [clojure.test :refer [deftest is]]
    [ol.busker.evloop :as evloop]
    [ol.busker.internal.protocols :as p]
-   [ol.busker.wake-notifier :as notifier]
+   [ol.busker.wake-endpoint :as wake-endpoint]
    [ol.busker.worker-mailbox :as mailbox])
   (:import
    [java.util HashMap]
@@ -15,8 +15,8 @@
    {:id 1 :running?_ (AtomicBoolean. true) :accepting?_ (AtomicBoolean. true)
     :stop-requested?_ (AtomicBoolean. false) :termination-cause_ (AtomicReference.)
     :mailbox-signal_ (AtomicLong.) :wake-generation_ (AtomicLong.)
-    :sleep-armed?_ (AtomicBoolean. false)
-    :wake-notifier (Object.) :wake-endpoint (Object.)
+    :sleep-armed?_ (AtomicBoolean. false) :wake-sent?_ (AtomicBoolean. false)
+    :wake-endpoint (Object.)
     :mailbox (mailbox/create) :message-handler handler
     :wakeup-receiver_ (AtomicReference.) :requests (HashMap.)
     :response-slot-payload-capacity 0}))
@@ -37,20 +37,25 @@
     (@#'evloop/run-evloop-on-thread! w)
     (is (true? (::evloop/mailbox-work? @seen_)))))
 
-(deftest unarmed-worker-records-wake-without-notifier
+(deftest unarmed-worker-records-wake-without-native-wake
   (let [w (worker (fn [_ _]))]
-    (with-redefs [notifier/request! (fn [& _] (throw (AssertionError. "Unarmed notifier")))]
+    (with-redefs [wake-endpoint/wake-now! (fn [& _] (throw (AssertionError. "Unarmed wake")))]
       (p/wake w)
       (is (= 1 (.get ^AtomicLong (:wake-generation_ w)))))))
 
 (deftest producer-signal-is-coalesced-and-rearmed-after-drain
   (let [w (worker (fn [_ _])) calls_ (atom 0)]
     (.set ^AtomicBoolean (:sleep-armed?_ w) true)
-    (with-redefs [notifier/request! (fn [& _] (swap! calls_ inc))]
+    (with-redefs [wake-endpoint/wake-now! (fn [& _] (swap! calls_ inc))]
       (p/send-msg w [:one])
       (p/send-msg w [:two])
       (is (= 1 @calls_))
       (drain! w)
+      (p/send-msg w [:two-b])
+      (is (= 1 @calls_))
+      (drain! w)
+      (.set ^AtomicBoolean (:wake-sent?_ w) false)
+      (.set ^AtomicBoolean (:sleep-armed?_ w) true)
       (p/send-msg w [:three])
       (is (= 2 @calls_)))))
 
@@ -101,7 +106,7 @@
                    (.set ^AtomicBoolean (:running?_ w) false)
                    state))
         thread (Thread. #(@#'evloop/run-evloop-on-thread! w))]
-    (with-redefs [notifier/request! (fn [& _])
+    (with-redefs [wake-endpoint/wake-now! (fn [& _])
                   evloop/mailbox-empty? (fn [w]
                                           (.countDown checking)
                                           (.await release 5 TimeUnit/SECONDS)

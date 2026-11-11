@@ -13,11 +13,11 @@
   ## Related Namespaces
 
   - [[ol.busker.generation]] creates and stops workers.
-  - [[ol.busker.wake-notifier]] signals native event-loop wakes."
+  - [[ol.busker.wake-endpoint]] sends native event-loop wakes."
   (:require
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.internal.protocols :as p]
-   [ol.busker.wake-notifier :as notifier]
+   [ol.busker.wake-endpoint :as wake-endpoint]
    [ol.busker.worker-context :as worker-context]
    [ol.busker.worker-mailbox :as mailbox]
    [taoensso.trove :as trove])
@@ -121,7 +121,7 @@
             ^AtomicLong mailbox-signal_
             ^AtomicLong wake-generation_
             ^AtomicBoolean sleep-armed?_
-            wake-notifier
+            ^AtomicBoolean wake-sent?_
             wake-endpoint
             mailbox
             evloop
@@ -142,8 +142,9 @@
   (wake [_]
     (when (.get running?_)
       (.incrementAndGet wake-generation_)
-      (when (.get sleep-armed?_)
-        (notifier/request! wake-notifier wake-endpoint))))
+      (when (and (.get sleep-armed?_)
+                 (.compareAndSet wake-sent?_ false true))
+        (wake-endpoint/wake-now! wake-endpoint))))
   (send-msg [this msg]
     (if (= stop-msg msg)
       (request-stop! this)
@@ -218,6 +219,7 @@
     (let [^AtomicBoolean running?_ (:running?_ worker)
           ^AtomicLong wake-generation_ (:wake-generation_ worker)
           ^AtomicBoolean sleep-armed?_ (:sleep-armed?_ worker)
+          ^AtomicBoolean wake-sent?_ (:wake-sent?_ worker)
           loop-fn (:loop-fn worker)]
       (loop [state {}
              wake-seen (long 0)]
@@ -231,6 +233,12 @@
                 (recur (loop-fn worker (assoc state ::mailbox-work? true))
                        wake-requested)
                 (do
+                  ;; Reset wake-sent?_ before arming sleep. A publisher's compare-and-set
+                  ;; fails only when an earlier publisher won it after this reset, and that
+                  ;; publisher sent the native wake after the reset. That wake is either
+                  ;; consumed by a turn before the worker sleeps, which comes back here and
+                  ;; resets again, or it ends the sleep.
+                  (.set wake-sent?_ false)
                   (.set sleep-armed?_ true)
                   (if (or (not (mailbox-empty? worker))
                           (not= wake-requested (.get wake-generation_)))
@@ -271,7 +279,6 @@
    Options:
    - :thread-name-prefix - prefix for thread name (default 'h2o-evloop')
    - :callback-dispatch - worker-local native callback dispatcher
-   - :wake-notifier - shared runtime notifier for native event-loop wakes
    - :response-receiver - native complete-response receiver
    - :response-slots - generation-scoped native slot views
    - :response-slot-payload-capacity - writable bytes in one slot
@@ -279,18 +286,16 @@
    Returns: worker"
 
   [loop-fn message-handler wakeup-receiver
-   & {:keys [callback-dispatch wake-notifier response-receiver response-slots
+   & {:keys [callback-dispatch response-receiver response-slots
              response-slot-payload-capacity thread-name-prefix stream-pool
              on-native-failure! discard-command!]
       :or {thread-name-prefix "h2o-evloop"}}]
   (when-not callback-dispatch
     (throw (ex-info "Worker requires a callback dispatcher" {})))
-  (when-not wake-notifier
-    (throw (ex-info "Worker requires a wake notifier" {})))
   (let [id (swap! next-id_ inc)
         receiver_ (AtomicReference. wakeup-receiver)
         response-receiver_ (AtomicReference. response-receiver)
-        wake-endpoint (notifier/endpoint receiver_)
+        wake-endpoint (wake-endpoint/endpoint receiver_)
         worker (map->Worker {:id id
                              :thread nil
                              :callback-dispatch callback-dispatch
@@ -301,7 +306,7 @@
                              :mailbox-signal_ (AtomicLong.)
                              :wake-generation_ (AtomicLong.)
                              :sleep-armed?_ (AtomicBoolean. false)
-                             :wake-notifier wake-notifier
+                             :wake-sent?_ (AtomicBoolean. false)
                              :wake-endpoint wake-endpoint
                              :mailbox (mailbox/create)
                              :stream-pool stream-pool

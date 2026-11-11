@@ -39,7 +39,7 @@
    [ol.busker.response-queue :as rq]
    [ol.busker.worker-mailbox :as mailbox]
    [ol.busker.tickets :as tickets]
-   [ol.busker.wake-notifier :as wake-notifier]
+   [ol.busker.wake-endpoint :as wake-endpoint]
    [ol.clave.certificate :as clave-certificate]
    [taoensso.trove :as trove])
   (:import
@@ -105,7 +105,7 @@
   []
   (when-let [worker (worker-context/get-current-worker)]
     (when-let [endpoint (:wake-endpoint worker)]
-      (wake-notifier/quiesce-endpoint! endpoint))
+      (wake-endpoint/quiesce-endpoint! endpoint))
     (let [^AtomicReference receiver_ (:wakeup-receiver_ worker)
           receiver (.get receiver_)]
       (when (and receiver (not (mem/null? receiver)))
@@ -1037,7 +1037,7 @@
   [{::keys [n-workers loops contexts listener-runtimes http3-worker-contexts
             max-connections shutting-down? message-handler wakeup-receivers response-receivers
             response-slots response-slot-payload-capacity stream-pools
-            wake-notifier arena stop-accepting-remaining_ stopped-accepting_
+            arena stop-accepting-remaining_ stopped-accepting_
             active-connection-count_]
     :as state} cleanup-state_]
   (let [workers
@@ -1075,8 +1075,7 @@
                            :response-receiver (nth response-receivers thread-idx)
                            :response-slots (nth response-slots thread-idx)
                            :response-slot-payload-capacity response-slot-payload-capacity
-                           :callback-dispatch callback-dispatch
-                           :wake-notifier wake-notifier)]
+                           :callback-dispatch callback-dispatch)]
                (vswap! cleanup-state_ update ::workers (fnil conj []) worker)
                worker))))]
     (assoc state ::workers workers)))
@@ -1187,10 +1186,6 @@
                  (retain-failed-retirement! generation phase-atom failure)
                  (throw failure))
                (do
-                 (when (not= false (::wake-notifier-owned? generation))
-                   (when-let [notifier (::wake-notifier generation)]
-                     (when-not (wake-notifier/stop-and-join! notifier)
-                       (throw (ex-info "Wake notifier did not stop" {})))))
                  (doseq [worker (::workers generation)]
                    (callback-dispatch/finish! (:callback-dispatch worker)))
                  (when close-callback-executor
@@ -1233,20 +1228,12 @@
 
 (defn start!
   ([compiled-config cert-runtime]
-   (let [wake-notifier (wake-notifier/start!)]
-     (try
-       (start! compiled-config cert-runtime {:wake-notifier wake-notifier
-                                             :wake-notifier-owned? true})
-       (catch Throwable t
-         (wake-notifier/stop-and-join! wake-notifier)
-         (throw t)))))
+   (start! compiled-config cert-runtime {}))
   ([compiled-config cert-runtime {:keys [activate-http3-transports? generation-id listener-pool
-                                         memory-ticket-service wake-notifier wake-notifier-owned?]
+                                         memory-ticket-service]
                                   :or {activate-http3-transports? true
                                        generation-id 1
                                        listener-pool (listen/open-pool)}}]
-   (when-not wake-notifier
-     (throw (ex-info "Generation requires a shared wake notifier" {})))
    (let [compiled-config (config/config->listeners compiled-config)
          listeners (:listeners compiled-config)
          listener-claims (acquire-listener-claims! listener-pool listeners)
@@ -1260,8 +1247,6 @@
                                              memory-ticket-service)
              _ (vreset! cleanup-state_ state)
              state (assoc state
-                          ::wake-notifier wake-notifier
-                          ::wake-notifier-owned? (true? wake-notifier-owned?)
                           ::executor (new-request-executor)
                           ::close-callback-executor (new-close-callback-executor))
              _ (vreset! cleanup-state_ state)]
