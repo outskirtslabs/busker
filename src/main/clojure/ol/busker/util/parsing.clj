@@ -23,6 +23,8 @@
 ;; OTHER DEALINGS IN THE SOFTWARE.
 (ns ^:no-doc ol.busker.util.parsing)
 
+(set! *warn-on-reflection* true)
+
 (def ^{:doc "HTTP token: 1*<any CHAR except CTLs or tspecials>. See RFC2068"}
   re-token
   #"[!#$%&'*\-+.0-9A-Z\^_`a-z\|~]+")
@@ -39,8 +41,19 @@
   re-charset
   (re-pattern (str ";(?:.*\\s)?(?i:charset)=(?:" re-value ")\\s*(?:;|$)")))
 
+(defn- mentions-charset?
+  "Returns true when `s` contains `charset` in any letter case."
+  [^String s]
+  (let [last-start (- (.length s) 7)]
+    (loop [i 0]
+      (cond
+        (> i last-start) false
+        (.regionMatches s true i "charset" 0 7) true
+        :else (recur (inc i))))))
+
 (defn find-content-type-charset
   "Return the charset of a given a content-type string."
   [s]
-  (when-let [m (re-find re-charset s)]
-    (or (m 1) (m 2))))
+  (when (or (not (string? s)) (mentions-charset? s))
+    (when-let [m (re-find re-charset s)]
+      (or (m 1) (m 2)))))

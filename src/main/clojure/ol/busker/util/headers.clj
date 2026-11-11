@@ -28,15 +28,24 @@
   header updates. See the preserved upstream copyright notice."
   (:require
    [ol.busker.util.parsing :as parsing]
-   [taoensso.trove :as trove]))
+   [taoensso.trove :as trove])
+  (:import
+   [clojure.lang RT]
+   [java.util Iterator]))
+
+(set! *warn-on-reflection* true)
 
 (defn find-header
   "Looks up a header in a Ring response (or request) case insensitively,
-  returning the header map entry, or nil if not present."
+  returning the first matching header map entry, or nil if not present."
   [resp ^String header-name]
-  (->> (:headers resp)
-       (filter #(.equalsIgnoreCase header-name (key %)))
-       (first)))
+  (let [^Iterator entries (RT/iter (:headers resp))]
+    (loop []
+      (when (.hasNext entries)
+        (let [entry (.next entries)]
+          (if (.equalsIgnoreCase header-name (key entry))
+            entry
+            (recur)))))))
 
 (defn get-header
   "Looks up a header in a Ring response (or request) case insensitively,

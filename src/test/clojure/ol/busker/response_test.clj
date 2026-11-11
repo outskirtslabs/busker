@@ -4,6 +4,7 @@
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [ol.busker :as busker]
+   [ol.busker.native :as h2o]
    [ol.busker.protocols :as protocols]
    [ol.busker.response :as response]
    [ol.busker.test-utils :as util]
@@ -164,23 +165,139 @@
             (is (= (vec expected) (vec body))))))
       (finally (busker/stop! server)))))
 
+(def ^:private plan-request
+  {:dispatch-module-id 1 :dispatch-request-seq 1 :config {:output-buffer-size 32768}})
+
+(defn- head-fields [head]
+  (select-keys head [:status :headers :content-length :compress-hint]))
+
+(defn- fixed-head [response]
+  (some-> (#'response/ordinary-fixed-plan plan-request response) first head-fields))
+
 (deftest header-pairs-preserve-order-and-coercion
   (doseq [[headers expected]
-          [[nil [[] 0 -1]]
-           [{} [[] 0 -1]]
+          [[nil {:headers [] :content-length -1}]
+           [{} {:headers [] :content-length -1}]
            [(array-map "X-Empty" [] "X-List" '(1 nil) "X-Key" :value
                        "X-Lazy" (map str [2 3]) "CONTENT-LENGTH" 4)
-            [[["X-List" "1"] ["X-List" ""] ["X-Key" ":value"]
-              ["X-Lazy" "2"] ["X-Lazy" "3"]] 5 4]]
-           [{"X-Nested" [[1 2]]} [[["X-Nested" "[1 2]"]] 1 -1]]]]
-    (is (= expected (response/build-headers {:headers headers})))))
+            {:headers [["X-List" "1"] ["X-List" ""] ["X-Key" ":value"]
+                       ["X-Lazy" "2"] ["X-Lazy" "3"]]
+             :content-length 4}]
+           [{"X-Nested" [[1 2]]} {:headers [["X-Nested" "[1 2]"]] :content-length -1}]
+           [(array-map "X-Nil" nil "X-Number" 7 "X-Vector" ["a" :b 3])
+            {:headers [["X-Nil" ""] ["X-Number" "7"] ["X-Vector" "a"] ["X-Vector" ":b"]
+                       ["X-Vector" "3"]]
+             :content-length -1}]]]
+    (is (= expected
+           (select-keys (#'response/normalized-head {:headers headers} nil false)
+                        [:headers :content-length])))))
+
+(deftest fixed-head-content-length-from-header-or-body
+  (let [compress-hint (response/get-compress-hint {})]
+    (doseq [header-name ["content-length" "CONTENT-LENGTH" "Content-Length" "cOnTeNt-LeNgTh"]
+            [value expected] [["5" 5] [5 5] [5.9 5]]]
+      (testing (str header-name " " (pr-str value))
+        (is (= {:status 200
+                :headers [["content-type" "text/plain"] ["X-After" "1"]]
+                :content-length expected
+                :compress-hint compress-hint}
+               (fixed-head {:body "ok"
+                            :headers (array-map "content-type" "text/plain"
+                                                header-name value
+                                                "X-After" "1")})))))
+    (doseq [[body expected] [["ok" 2] ["é" 2] ["" 0]
+                             [(.getBytes "body" StandardCharsets/UTF_8) 4]
+                             [(byte-array 0) 0]]]
+      (is (= {:status 200 :headers [["content-type" "text/plain"]]
+              :content-length expected :compress-hint compress-hint}
+             (fixed-head {:body body :headers {"content-type" "text/plain"}}))))
+    (is (= {:status 200 :headers [] :content-length 2 :compress-hint compress-hint}
+           (fixed-head {:body "ok"})))
+    (is (= {:status 201 :headers [["X-Repeat" "first"] ["X-Repeat" "second"] ["X-Lazy" "1"]]
+            :content-length 2 :compress-hint compress-hint}
+           (fixed-head {:status 201 :body "ok"
+                        :headers (array-map "X-Repeat" ["first" "second"] "X-Lazy" (map str [1]))})))))
+
+(deftest fixed-head-status-rules
+  (is (= 200 (:status (fixed-head {:body "ok"}))))
+  (doseq [headers [{} {"Content-Length" "9"}]]
+    (is (= {:status 205 :headers [] :content-length 0}
+           (select-keys (fixed-head {:status 205 :body "cat" :headers headers})
+                        [:status :headers :content-length]))))
+  (doseq [status [204 304 101 103 "200"]]
+    (is (nil? (#'response/ordinary-fixed-plan plan-request {:status status :body "ok"})))))
+
+(deftest fixed-head-compress-hint
+  (let [request (assoc-in plan-request [:config :compress-min-size] 3)
+        hint (fn [response] (:compress-hint (first (#'response/ordinary-fixed-plan request response))))]
+    (is (= h2o/H2O_COMPRESS_HINT_ENABLE (hint {:body "okay"})))
+    (is (= h2o/H2O_COMPRESS_HINT_DISABLE (hint {:body "ok"})))
+    (is (= h2o/H2O_COMPRESS_HINT_ENABLE_BR
+           (hint {:body "ok" :h2o/compress-hint :h2o.compress/enable-br})))
+    (is (= h2o/H2O_COMPRESS_HINT_DISABLE
+           (hint {:body "okay" :h2o/compress-hint :h2o.compress/disable})))))
+
+(deftest fixed-head-rejects-non-string-header-names
+  (doseq [body ["ok" (.getBytes "ok" StandardCharsets/UTF_8)]
+          headers [{:x-key "v"} {'x-key "v"}]]
+    (is (thrown? ClassCastException
+                 (#'response/ordinary-fixed-plan plan-request {:body body :headers headers}))))
+  (is (thrown? ClassCastException
+               (#'response/normalized-head {:headers {:x-key "v"}} nil false))))
+
+(deftest fixed-head-header-storage-limits
+  (let [pairs (fn [n] (vec (repeat n "value")))]
+    (is (= 64 (count (:headers (fixed-head {:body "ok"
+                                            :headers (array-map "X-Repeat" (pairs 64)
+                                                                "Content-Length" "2")})))))
+    (doseq [[headers header-count] [[{"X-Repeat" (pairs 65)} 65]
+                                    [(array-map "X-Repeat" (pairs 63) "X-Other" ["a" "b"]) 65]
+                                    [{"X-Large" (apply str (repeat 16384 "x"))} 1]]
+            build [#(#'response/ordinary-fixed-plan plan-request {:body "ok" :headers headers})
+                   #(#'response/normalized-head {:body "ok" :headers headers} 2 false)
+                   #(#'response/normalized-head {:status 103 :headers headers} nil true)]]
+      (let [error (try (build) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (= "Response headers exceed bounded header storage" (ex-message error)))
+        (is (= {:header-count header-count} (ex-data error)))))))
+
+(deftest informational-head-lowercases-names-and-drops-content-length
+  (is (= {:status 103 :headers [["link" "</a.css>; rel=preload"] ["x-two" "1"] ["x-two" "2"]]
+          :content-length 3}
+         (select-keys (#'response/normalized-head
+                       {:status 103 :headers (array-map "Link" "</a.css>; rel=preload"
+                                                        "Content-Length" "3"
+                                                        "X-Two" [1 2])}
+                       nil true)
+                      [:status :headers :content-length]))))
+
+(deftest fixed-path-charset-selection
+  (doseq [[headers fixed?]
+          [[{} true]
+           [{"content-type" "text/plain"} true]
+           [{"content-type" "text/x-charset-free"} true]
+           [{"content-type" "text/plain; charset=utf-8"} true]
+           [{"Content-Type" "text/plain;CHARSET=UTF-8"} true]
+           [{"content-type" "text/plain; charset=\"utf-8\""} true]
+           [{"content-type" "text/plain; charset=not-a-charset"} true]
+           [{"content-type" "text/plain; charset=iso-8859-1"} false]
+           [{"CONTENT-TYPE" "text/plain; Charset=UTF-16"} false]
+           [{"content-type" "text/plain; charset=\"iso-8859-1\""} false]
+           [{"content-type" "text/plain; format=flowed; charset=us-ascii"} false]
+           [(array-map "Content-Type" "text/plain; charset=iso-8859-1"
+                       "content-type" "text/plain; charset=utf-8") true]
+           [(array-map "content-type" "text/plain; charset=iso-8859-1"
+                       "Content-Type" "text/plain; charset=utf-8") false]]]
+    (testing (pr-str headers)
+      (is (= fixed? (some? (fixed-head {:body "ok" :headers headers}))))
+      (is (some? (fixed-head {:body (.getBytes "ok" StandardCharsets/UTF_8) :headers headers}))))))
 
 (deftest ordinary-response-header-normalization
   (let [response_ (atom {})
         [server port] (start-server (fn [_] @response_))]
     (try
       (doseq [body ["é" (.getBytes "é" StandardCharsets/UTF_8)]
-              length-headers [{} {"CoNtEnT-LeNgTh" "2"} {"CONTENT-LENGTH" 2}]]
+              length-headers [{} {"content-length" "2"} {"CoNtEnT-LeNgTh" "2"}
+                              {"CONTENT-LENGTH" 2} {"Content-Length" 2}]]
         (reset! response_ {:body body
                            :headers (merge {"Content-Type" "text/plain; charset=invalid-charset"
                                             "X-Repeat" '("first" "second")}

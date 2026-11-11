@@ -30,46 +30,16 @@
    [java.io InputStream OutputStream]
    [java.nio ByteBuffer CharBuffer]
    [java.nio.charset Charset CharsetEncoder CodingErrorAction StandardCharsets]
+   [java.util Arrays Iterator]
+   [clojure.lang MapEntry RT]
    [ol.busker.internal.protocols Request]))
 
 (set! *warn-on-reflection* true)
 
 (def ^:private byte-array-class (Class/forName "[B"))
 
-(defn dissoc-header
-  "Removes all case variations of `header-name`."
-  [headers ^String header-name]
-  (into {} (remove (fn [[k _]] (.equalsIgnoreCase header-name (str k)))) headers))
-
 (defn- coerce-content-length [value]
   (if (number? value) (long value) (Long/parseLong value)))
-
-(defn- header-pairs [headers]
-  (persistent!
-   (reduce (fn [pairs [name value]]
-             (let [name (str name)]
-               (if (sequential? value)
-                 (reduce (fn [pairs value] (conj! pairs [name (str value)])) pairs value)
-                 (conj! pairs [name (str value)]))))
-           (transient [])
-           headers)))
-
-(defn build-headers
-  "Returns `[headers header-count content-length]` for a final response.
-  Expands sequential values into separate pairs and converts names and values to
-  strings. Removes content-length from the pairs; absent length is `-1`."
-  [response]
-  (let [length (second (hdr.util/find-header response "content-length"))
-        headers (cond-> (:headers response) length (dissoc-header "content-length"))
-        pairs (header-pairs headers)]
-    [pairs (count pairs) (if length (coerce-content-length length) -1)]))
-
-(defn build-headers2
-  "Returns `[response headers header-count content-length]` for an informational
-  response, with lowercase header names and the normalization of [[build-headers]]."
-  [response]
-  (let [[headers n length] (build-headers response)]
-    [response (mapv (fn [[name value]] [(str/lower-case name) value]) headers) n length]))
 
 (defn get-compress-hint [response]
   (get h2o/->compress-hint (:h2o/compress-hint response) h2o/H2O_COMPRESS_HINT_ENABLE))
@@ -213,21 +183,71 @@
 (defn- informational? [status]
   (and (<= 100 status 199) (not= 101 status)))
 
+(defn- with-capacity
+  "Returns `pairs`, or a larger copy when it has fewer than `needed` slots."
+  ^objects [^objects pairs ^long needed]
+  (if (<= needed (alength pairs))
+    pairs
+    (Arrays/copyOf pairs (int (max needed (* 2 (alength pairs)))))))
+
+(defn- put-header-pairs!
+  "Writes the pairs for `header-name` into `pairs` from index `n`, one per item
+  when `value` is sequential."
+  [^objects pairs ^long n header-name value]
+  (if (sequential? value)
+    (let [^Iterator values (RT/iter value)]
+      (loop [i n]
+        (when (.hasNext values)
+          (aset pairs i (MapEntry/create header-name (str (.next values))))
+          (recur (inc i)))))
+    (aset pairs n (MapEntry/create header-name (str value)))))
+
+(defn- build-head
+  "Returns the head of `response` from one pass over its headers.
+
+  Pairs keep header order. Names and values pass through `str`; each item of a
+  sequential value becomes its own pair; informational heads use lowercase names.
+  Content-length headers in any letter case stay out of the pairs. The first
+  one with a value gives the content length, otherwise `length` does for a final
+  head, otherwise it is `-1`. Status 205 always has content length 0.
+  `retain-response?` stores the response without its body under `:response`, for
+  later body operations that need its headers."
+  [response length informational? retain-response?]
+  (let [status (or (:status response) 200)
+        headers (:headers response)
+        ^Iterator entries (RT/iter headers)]
+    (loop [pairs (object-array (count headers))
+           n 0
+           header-length nil]
+      (if (.hasNext entries)
+        (let [entry (.next entries)
+              header-name (key entry)
+              value (val entry)]
+          (if (.equalsIgnoreCase "content-length" ^String header-name)
+            (recur pairs n (if (nil? header-length) value header-length))
+            (let [needed (+ n (if (sequential? value) (long (count value)) 1))
+                  pairs (with-capacity pairs needed)]
+              (put-header-pairs! pairs n
+                                 (if informational? (str/lower-case (str header-name)) (str header-name))
+                                 value)
+              (recur pairs needed header-length))))
+        (let [pairs (cond
+                      (zero? n) []
+                      (= n (alength pairs)) (vec pairs)
+                      :else (vec (Arrays/copyOf pairs (int n))))
+              content-length (cond
+                               (some? header-length) (coerce-content-length header-length)
+                               (and (some? length) (not informational?)) (long length)
+                               :else -1)]
+          (when (or (> n fixed-final/max-header-pairs)
+                    (> (fixed-final/header-staging-bytes pairs) fixed-final/max-header-staging-bytes))
+            (throw (ex-info "Response headers exceed bounded header storage" {:header-count n})))
+          {:status status :headers pairs :content-length (if (= 205 status) 0 content-length)
+           :compress-hint (get-compress-hint response)
+           :response (when retain-response? (-> response (assoc :status status) (dissoc :body)))})))))
+
 (defn- normalized-head [response length informational?]
-  (let [response (assoc response :status (or (:status response) 200))
-        response (if (and (some? length) (not informational?)
-                          (not (hdr.util/get-header response "content-length")))
-                   (hdr.util/header response "content-length" (str length))
-                   response)
-        [headers n content-length] (build-headers response)
-        headers (if informational?
-                  (mapv (fn [[name value]] [(str/lower-case name) value]) headers)
-                  headers)]
-    (when (or (> n fixed-final/max-header-pairs)
-              (> (fixed-final/header-staging-bytes headers) fixed-final/max-header-staging-bytes))
-      (throw (ex-info "Response headers exceed bounded header storage" {:header-count n})))
-    {:status (:status response) :headers headers :content-length (if (= 205 (:status response)) 0 content-length)
-     :compress-hint (get-compress-hint response) :response (dissoc response :body)}))
+  (build-head response length informational? true))
 
 (defn- apply-head! [req head informational?]
   (let [{:keys [status headers content-length compress-hint]} head
@@ -466,7 +486,8 @@
 (defn- ordinary-fixed-plan [req response]
   (let [body (:body response)
         status (or (:status response) 200)
-        b (get-in req [:config :output-buffer-size])]
+        config (:config req)
+        b (:output-buffer-size config)]
     (when (and (integer? status) (<= 200 status 999) (not (contains? #{204 304} status))
                (or (instance? byte-array-class body)
                    (and (string? body) (= StandardCharsets/UTF_8 (response-charset response)))))
@@ -474,9 +495,9 @@
                      (serialization/utf8-length body)
                      (alength ^bytes body))]
         (when (<= length (min b fixed-final/response-ring-max-body-bytes))
-          (let [head (normalized-head response length false)
+          (let [head (build-head response length false false)
                 head (if (and (= h2o/H2O_COMPRESS_HINT_ENABLE (:compress-hint head))
-                              (< length (or (get-in req [:config :compress-min-size]) 0)))
+                              (< length (or (:compress-min-size config) 0)))
                        (assoc head :compress-hint h2o/H2O_COMPRESS_HINT_DISABLE)
                        head)]
             [head (fixed-plan req head body length)]))))))
