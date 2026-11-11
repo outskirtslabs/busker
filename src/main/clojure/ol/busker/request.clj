@@ -116,18 +116,15 @@
     (try
       (let [worker (worker-context/get-current-worker)
             dispatch (:callback-dispatch worker)
-            [module-id request-seq] (callback-dispatch/allocate-identity! dispatch)
+            module-id (:module-id dispatch)
+            request-seq (callback-dispatch/allocate-identity! dispatch)
             callback-pointers (callback-dispatch/callback-pointers dispatch)
             has-body? (= 1 (:has-body req-ctx))
             write-req (when has-body?
                         (set-req-body-channel worker module-id request-seq))
             req (Request. worker config
                           req-ctx-ptr req-ctx write-req
-                          callback-pointers module-id request-seq
-                          nil
-                          ;; The copy has no method only when the request has
-                          ;; none; the Ring request then reads :get as well.
-                          {:request-method (or (:request-method req-ctx) :get)})
+                          callback-pointers module-id request-seq)
             emitter (response/new-response-emitter req close-callback-dispatch)]
         (callback-dispatch/register! dispatch module-id request-seq req emitter)
         (try

@@ -24,21 +24,21 @@
       (is (identical? pointers (callback-dispatch/callback-pointers dispatch)))
       (is (= #{:body :proceed :stop} (set (keys pointers))))
       (is (every? some? (vals pointers)))
-      (is (= (:module-id dispatch) (first first-identity) (first second-identity)))
-      (is (= [(inc (second first-identity))]
-             [(second second-identity)])))))
+      (is (pos? first-identity))
+      (is (= (inc first-identity) second-identity)))))
 
 (deftest empty-final-body-callback-preserves-null-and-empty-chunks-test
   (with-open [arena (ffi/shared-arena)]
     (let [dispatch (callback-dispatch/create arena)
           _ (callback-dispatch/bind-thread! dispatch (Thread/currentThread))
-          [module-id request-seq] (callback-dispatch/allocate-identity! dispatch)
+          module-id (:module-id dispatch)
+          request-seq (callback-dispatch/allocate-identity! dispatch)
           received (atom [])
           req {:write-req {:write-chunk (fn [chunk final?]
                                           (swap! received conj [chunk final?]))}}
           body (ffi/cfn (:body (callback-dispatch/callback-pointers dispatch))
                         [:long :long :pointer :long :int] :void)]
-      (callback-dispatch/register! dispatch module-id request-seq req nil)
+      (is (nil? (callback-dispatch/register! dispatch module-id request-seq req nil)))
       (body module-id request-seq ffi/null 0 1)
       (body module-id request-seq (ffi/alloc arena 1) 0 1)
       (is (= 2 (count @received)))
@@ -53,7 +53,8 @@
   (with-open [arena (ffi/shared-arena)]
     (let [dispatch (callback-dispatch/create arena)
           _ (callback-dispatch/bind-thread! dispatch (Thread/currentThread))
-          [module-id request-seq] (callback-dispatch/allocate-identity! dispatch)]
+          module-id (:module-id dispatch)
+          request-seq (callback-dispatch/allocate-identity! dispatch)]
       (callback-dispatch/register! dispatch module-id request-seq nil nil)
       (is (= [nil nil]
              (callback-dispatch/entry dispatch module-id request-seq)))
@@ -74,7 +75,8 @@
   (with-open [arena (ffi/shared-arena)]
     (let [dispatch (callback-dispatch/create arena)
           _ (callback-dispatch/bind-thread! dispatch (Thread/currentThread))
-          [module-id request-seq] (callback-dispatch/allocate-identity! dispatch)]
+          module-id (:module-id dispatch)
+          request-seq (callback-dispatch/allocate-identity! dispatch)]
       (callback-dispatch/register! dispatch module-id request-seq nil nil)
       (callback-dispatch/retire! dispatch module-id request-seq)
       (callback-dispatch/retire! dispatch module-id request-seq)

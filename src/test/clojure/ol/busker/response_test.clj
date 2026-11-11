@@ -611,6 +611,26 @@
           (is (= 1 @closed))
           (finally (deliver release true)))))))
 
+(deftest head-response-from-an-emitted-body-sends-no-body-test
+  (let [[server port] (start-server
+                       (fn [_]
+                         {:status 200
+                          :headers {"content-type" "text/plain"}
+                          :body (java.io.ByteArrayInputStream.
+                                 (.getBytes "hello" StandardCharsets/US_ASCII))}))]
+    (try
+      (with-open [^Socket socket (connect port)]
+        (let [out (.getOutputStream socket)]
+          (.write out (.getBytes (str "HEAD / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+                                      "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                                 StandardCharsets/US_ASCII))
+          (.flush out))
+        (let [response (String. (.readAllBytes (.getInputStream socket)) StandardCharsets/US_ASCII)]
+          (is (= 2 (count (re-seq #"HTTP/1\.1 200 OK" response))) response)
+          (is (= 1 (count (re-seq #"hello" response))) response)
+          (is (str/includes? response "text/plain\r\n\r\nHTTP/1.1 200 OK") response)))
+      (finally (busker/stop! server)))))
+
 (deftest stop-after-close-changes-nothing-test
   (let [emitter (response/new-response-emitter {} (fn [^Runnable task] (.run task)))
         lifecycle_ (.lifecycle_ ^ol.busker.response.H2OResponseEmitter emitter)

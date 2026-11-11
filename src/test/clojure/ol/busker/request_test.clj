@@ -14,7 +14,7 @@
    [java.util.concurrent.atomic AtomicReference]))
 
 (deftest request-construction-preserves-context-and-worker-services
-  (doseq [[method expected] [[:post :post] [nil :get]]]
+  (doseq [method [:post nil]]
     (with-open [arena (ffi/shared-arena)]
       (let [dispatch (callback-dispatch/create arena)
             _ (callback-dispatch/bind-thread! dispatch (Thread/currentThread))
@@ -47,8 +47,7 @@
                     :config config
                     :req-ctx-ptr ffi/null :req-ctx ctx :write-req nil
                     :callback-pointers (callback-dispatch/callback-pointers dispatch)
-                    :dispatch-module-id module-id :dispatch-request-seq request-seq
-                    :request-method expected}
+                    :dispatch-module-id module-id :dispatch-request-seq request-seq}
                    (into {} req)))
             (is (identical? worker (:worker req)))
             (is (identical? config (:config req)))

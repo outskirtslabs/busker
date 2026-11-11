@@ -388,13 +388,20 @@
     (wake-slot-waiters! (.req emitter))
     changed?))
 
+(def ^:private completed-callback-tail
+  "The callback tail of an emitter that has queued no close callbacks. Tails are
+  only dereferenced and replaced, never delivered again, so every emitter starts
+  from this one delivered promise."
+  (doto (promise) (deliver true)))
+
+(def ^:private open-lifecycle
+  {:phase :open :callbacks [] :producer nil})
+
 (defn new-response-emitter
   ([req] (new-response-emitter req Thread/startVirtualThread))
   ([req dispatch]
-   (let [tail (promise)]
-     (deliver tail true)
-     (H2OResponseEmitter. req (atom nil) (Object.)
-                          (atom {:phase :open :callbacks [] :producer nil}) dispatch (atom tail)))))
+   (H2OResponseEmitter. req (atom nil) (Object.) (atom open-lifecycle) dispatch
+                        (atom completed-callback-tail))))
 
 (defn stop-emitter
   "Stops admission and settles receipts without releasing native in-flight storage."
@@ -486,7 +493,7 @@
                        (normalized-head response (when (:end? opts) length) info?))
                 effective-head (or head committed (normalized-head response nil false))
                 opts (assoc opts :body? body? :informational? info?
-                            :suppress-body? (or (= :head (:request-method req))
+                            :suppress-body? (or (= :head (:request-method (:req-ctx req)))
                                                 (contains? #{204 205 304} (:status effective-head))))]
             (if (and (fn? body) (:end? opts) (nil? writer) (not info?)
                      (<= capacity fixed-final/response-ring-max-body-bytes)

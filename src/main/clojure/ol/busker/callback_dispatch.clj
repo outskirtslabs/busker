@@ -235,17 +235,17 @@
   (:callback-pointers dispatch))
 
 (defn allocate-identity!
-  "Allocates a nonrepeating dispatch identity for the current worker."
+  "Allocates a nonrepeating request sequence for the current worker. The request's
+  dispatch identity is the module id of `dispatch` and that sequence."
   [dispatch]
   (when-not (and (= :accepting (.get ^AtomicReference (:phase_ dispatch)))
                  (worker-thread? dispatch))
     (throw (ex-info "Callback dispatch module cannot allocate this request identity"
                     {:phase (.get ^AtomicReference (:phase_ dispatch))})))
-  [(:module-id dispatch)
-   (next-positive! ^AtomicLong (:next-request-seq_ dispatch) :request)])
+  (next-positive! ^AtomicLong (:next-request-seq_ dispatch) :request))
 
 (defn register!
-  "Registers `req` and `emitter` under `module-id` and `request-seq`."
+  "Registers `req` and `emitter` under `module-id` and `request-seq` and returns nil."
   [dispatch module-id request-seq req emitter]
   (when-not (and (= :accepting (.get ^AtomicReference (:phase_ dispatch)))
                  (worker-thread? dispatch)
@@ -261,7 +261,7 @@
       (throw (ex-info "Callback dispatch request identity collision"
                       {:module-id module-id
                        :request-seq request-seq})))
-    [module-id request-seq]))
+    nil))
 
 (defn retire!
   "Removes and closes the entry identified by `module-id` and `request-seq`."
