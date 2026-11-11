@@ -840,6 +840,43 @@
     443
     80))
 
+(defn- request-method-keyword
+  "Returns the Ring `:request-method` keyword for the request method string
+  `method`: the lower-cased method as a keyword, or `:get` when `method` is nil.
+  Common methods map to their keyword without building a new string."
+  [^String method]
+  (if (nil? method)
+    :get
+    (case method
+      ("GET" "get") :get
+      ("POST" "post") :post
+      ("PUT" "put") :put
+      ("DELETE" "delete") :delete
+      ("HEAD" "head") :head
+      ("OPTIONS" "options") :options
+      ("PATCH" "patch") :patch
+      (keyword (str/lower-case method)))))
+
+(defn- scheme-keyword
+  "Returns the Ring `:scheme` keyword for the scheme string `scheme`, or `:http`
+  when `scheme` is nil."
+  [^String scheme]
+  (case scheme
+    "http" :http
+    "https" :https
+    (keyword (or scheme "http"))))
+
+(defmacro ^:private ordered-array-map
+  "Expands to a `PersistentArrayMap` of the key and value forms `kvs`, in the order
+  given. The keys must be distinct. A map literal with more than eight entries
+  builds a hash map; this keeps the smaller array form for maps that are read
+  but rarely updated."
+  [& kvs]
+  (let [entries (gensym "entries")]
+    `(let [~entries (object-array ~(count kvs))]
+       ~@(map-indexed (fn [i form] `(aset ~entries ~i ~form)) kvs)
+       (clojure.lang.PersistentArrayMap. ~entries))))
+
 (defn- decode-request-snapshot
   [^bytes bytes ^longs ends http-version has-body early-data]
   (let [text (fn [i]
@@ -847,7 +884,8 @@
                      length (- (aget ends i) start)]
                  (when (pos? length)
                    (String. bytes (int start) (int length) "UTF-8"))))]
-    {:authority (text 0)
+    (ordered-array-map
+     :authority (text 0)
      :method (text 1)
      :path (text 2)
      :remote-addr (text 3)
@@ -862,7 +900,7 @@
                         {} (range 5 (alength ends) 2)))
      :http-version http-version
      :has-body has-body
-     :early-data early-data}))
+     :early-data early-data)))
 
 (defn ^:no-doc copy-request-context
   ([ctx-ptr]
@@ -907,8 +945,8 @@
       :request-method (let [start (aget ends 0)
                             length (- (aget ends 1) start)]
                         (when (pos? length)
-                          (keyword (str/lower-case
-                                    (String. bytes (int start) (int length) "UTF-8")))))
+                          (request-method-keyword
+                           (String. bytes (int start) (int length) "UTF-8"))))
       :ring-data (delay (decode-request-snapshot bytes ends http-version has-body early-data))})))
 
 (defn create-handler
@@ -942,21 +980,27 @@
   ^clojure.lang.IPersistentMap [^clojure.lang.Delay request_ overlay removed]
   (reduce dissoc (merge @request_ overlay) removed))
 
-(deftype OverlayLazyRingRequest [^clojure.lang.Delay request_ overlay removed metadata]
+;; `base-keys` contains every key that the map from `request_` can have. A
+;; lookup of any other key is answered from `overlay` and `removed` without
+;; realizing `request_`; operations over the whole map realize it.
+(deftype OverlayLazyRingRequest [^clojure.lang.Delay request_ base-keys overlay removed metadata]
   clojure.lang.IPersistentMap
   (assoc [_ key value]
-    (OverlayLazyRingRequest. request_ (assoc overlay key value) (disj removed key) metadata))
+    (OverlayLazyRingRequest. request_ base-keys (assoc overlay key value) (disj removed key)
+                             metadata))
   (assocEx [this key value]
     (if (.containsKey ^clojure.lang.Associative this key)
       (throw (RuntimeException. "Key already present"))
       (.assoc ^clojure.lang.Associative this key value)))
   (without [_ key]
-    (OverlayLazyRingRequest. request_ (dissoc overlay key) (conj removed key) metadata))
+    (OverlayLazyRingRequest. request_ base-keys (dissoc overlay key) (conj removed key)
+                             metadata))
 
   clojure.lang.Associative
   (containsKey [_ key]
     (and (not (contains? removed key))
-         (or (contains? overlay key) (contains? @request_ key))))
+         (or (contains? overlay key)
+             (and (contains? base-keys key) (contains? @request_ key)))))
   (entryAt [this key]
     (when (.containsKey ^clojure.lang.Associative this key)
       (clojure.lang.MapEntry/create key (.valAt ^clojure.lang.ILookup this key))))
@@ -966,12 +1010,14 @@
     (cond
       (contains? removed key) nil
       (contains? overlay key) (get overlay key)
-      :else (get @request_ key)))
+      (contains? base-keys key) (get @request_ key)
+      :else nil))
   (valAt [_ key not-found]
     (cond
       (contains? removed key) not-found
       (contains? overlay key) (get overlay key)
-      :else (get @request_ key not-found)))
+      (contains? base-keys key) (get @request_ key not-found)
+      :else not-found))
 
   clojure.lang.IPersistentCollection
   (count [_] (count (force-overlay-request request_ overlay removed)))
@@ -1017,7 +1063,7 @@
 
   clojure.lang.IObj
   (withMeta [_ new-metadata]
-    (OverlayLazyRingRequest. request_ overlay removed new-metadata))
+    (OverlayLazyRingRequest. request_ base-keys overlay removed new-metadata))
 
   Object
   (equals [_ other] (.equals ^Object (force-overlay-request request_ overlay removed) other))
@@ -1025,39 +1071,46 @@
   (toString [_] (.toString ^Object (force-overlay-request request_ overlay removed))))
 
 (defn ^:no-doc overlay-lazy-ring-request
-  [request-fn overlay]
-  (OverlayLazyRingRequest. (delay (request-fn)) overlay #{} nil))
+  "Returns a Ring request map that realizes `(request-fn)` on first use. Lookups
+  of keys outside the set `base-keys` read only `overlay` and later changes, so
+  they do not call `request-fn`."
+  [request-fn base-keys overlay]
+  (OverlayLazyRingRequest. (delay (request-fn)) base-keys overlay #{} nil))
+
+(def ^:no-doc assembled-request-keys
+  "The keys of every map that [[assemble-ring-request]] returns."
+  #{:protocol :remote-addr :headers :server-port :ol.busker/early-data? :uri
+    :server-name :query-string :body :scheme :request-method})
 
 (defn ^:no-doc assemble-ring-request
   [ring-data ^InputStream input-stream]
-  (let [{:keys [method path authority scheme remote-addr headers
+  (let [{:keys [method ^String path authority scheme remote-addr headers
                 http-version has-body early-data]} (force ring-data)
         default-port (default-server-port scheme)
         {:keys [server-name server-port]}
         (util/parse-authority authority default-port)
-        [uri query-string] (if path
-                             (let [idx (str/index-of path "?")]
-                               (if idx
-                                 [(subs path 0 idx) (subs path (inc idx))]
-                                 [path nil]))
-                             [nil nil])
+        query-index (if path (.indexOf path "?") -1)
         protocol (case (int http-version)
                    0x0101 "HTTP/1.1"
                    0x0200 "HTTP/2.0"
                    0x0300 "HTTP/3.0"
                    "HTTP/1.1")]
-    {:server-port server-port
-     :server-name server-name
-     :remote-addr (or remote-addr "")
-     :uri uri
-     :query-string query-string
-     :scheme (keyword (or scheme "http"))
-     :request-method (keyword (str/lower-case (or method "get")))
+    ;; The order matches the order in which a hash map of these keys lists them.
+    (ordered-array-map
      :protocol protocol
+     :remote-addr (or remote-addr "")
      :headers headers
+     :server-port server-port
+     ;; `if` yields a boxed Boolean, which `aset` on an Object array accepts
+     ;; without reflection.
+     :ol.busker/early-data? (if (= 1 early-data) true false)
+     :uri (if (neg? query-index) path (subs path 0 query-index))
+     :server-name server-name
+     :query-string (when-not (neg? query-index) (subs path (inc query-index)))
      :body (when (= 1 has-body)
              input-stream)
-     :ol.busker/early-data? (= 1 early-data)}))
+     :scheme (scheme-keyword scheme)
+     :request-method (request-method-keyword method))))
 
 (defcfn http3-create-ptls-ctx
   "Create picotls context for QUIC TLS 1.3.

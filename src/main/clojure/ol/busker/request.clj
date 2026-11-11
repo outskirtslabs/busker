@@ -5,7 +5,6 @@
   and coordinate callback completion with [[ol.busker.evloop]]."
   (:require
    [babashka.ffi :as mem]
-   [clojure.string :as str]
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.fixed-final :as fixed-final]
    [ol.busker.worker-context :as worker-context]
@@ -126,9 +125,9 @@
                           req-ctx-ptr req-ctx write-req
                           callback-pointers module-id request-seq
                           nil
-                          {:request-method (or (:request-method req-ctx)
-                                               (keyword (str/lower-case
-                                                         (or (:method (force (:ring-data req-ctx))) "get"))))})
+                          ;; The copy has no method only when the request has
+                          ;; none; the Ring request then reads :get as well.
+                          {:request-method (or (:request-method req-ctx) :get)})
             emitter (response/new-response-emitter req close-callback-dispatch)
             ring-request-data (:ring-data req-ctx)]
         (callback-dispatch/register! dispatch module-id request-seq req emitter)
@@ -145,6 +144,7 @@
                                     #(h2o/assemble-ring-request
                                       ring-request-data
                                       (:input-stream write-req))
+                                    h2o/assembled-request-keys
                                     {::emitter emitter})
                           ring-resp (run-handler ring-handler ring-req)]
                       (response/send-ring-response! emitter ring-resp)))]

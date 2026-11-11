@@ -304,6 +304,7 @@
   (let [realizations_ (atom 0)
         request (native/overlay-lazy-ring-request
                  #(do (swap! realizations_ inc) {:a 1 :remove-me 2})
+                 #{:a :remove-me}
                  {:emitter :emitter})
         overlaid (-> request
                      (assoc :ol.busker/entrypoint :http)
@@ -325,6 +326,149 @@
             :after-base @realizations_
             :map (into {} overlaid)
             :metadata (meta overlaid)}))))
+
+(def ^:private wrk-request-snapshot
+  {:method "GET"
+   :path "/"
+   :authority "localhost:8080"
+   :scheme "http"
+   :remote-addr "127.0.0.1"
+   :headers {"host" "localhost:8080"}
+   :http-version 0x0101
+   :has-body 0
+   :early-data 0})
+
+(defn- assembled-request
+  ([] (assembled-request {}))
+  ([snapshot-changes]
+   (native/assemble-ring-request (delay (merge wrk-request-snapshot snapshot-changes)) nil)))
+
+(deftest assemble-ring-request-builds-the-ring-request-test
+  (let [body (java.io.ByteArrayInputStream. (byte-array 0))]
+    (is (= {:server-port 8080
+            :server-name "localhost"
+            :remote-addr "127.0.0.1"
+            :uri "/things"
+            :query-string "q=1&r=2"
+            :scheme :https
+            :request-method :post
+            :protocol "HTTP/2.0"
+            :headers {"host" "localhost:8080"}
+            :body body
+            :ol.busker/early-data? true}
+           (native/assemble-ring-request
+            (delay (assoc wrk-request-snapshot
+                          :method "POST" :path "/things?q=1&r=2" :scheme "https"
+                          :http-version 0x0200 :has-body 1 :early-data 1))
+            body))))
+  (is (= {:server-port 443
+          :server-name "localhost"
+          :remote-addr ""
+          :uri nil
+          :query-string nil
+          :scheme :https
+          :request-method :get
+          :protocol "HTTP/1.1"
+          :headers nil
+          :body nil
+          :ol.busker/early-data? false}
+         (native/assemble-ring-request
+          (delay {:scheme "https" :http-version 0 :has-body 0 :early-data 0})
+          nil)))
+  (is (= [:protocol :remote-addr :headers :server-port :ol.busker/early-data? :uri
+          :server-name :query-string :body :scheme :request-method]
+         (vec (keys (assembled-request)))))
+  (is (= ["" ""] ((juxt :uri :query-string) (assembled-request {:path "?"}))))
+  (is (= ["/a" "b?c"] ((juxt :uri :query-string) (assembled-request {:path "/a?b?c"}))))
+  (is (= ["HTTP/1.1" "HTTP/3.0"]
+         [(:protocol (assembled-request {:http-version 0x0100}))
+          (:protocol (assembled-request {:http-version 0x0300}))]))
+  (is (= native/assembled-request-keys (set (keys (assembled-request)))))
+  (is (= clojure.lang.PersistentHashMap (type (assoc (assembled-request) :x 1))))
+  (is (= (assoc (into {} (assembled-request)) :x 1) (assoc (assembled-request) :x 1))))
+
+(deftest assemble-ring-request-method-and-scheme-keywords-test
+  (doseq [[method expected] [["GET" :get] ["get" :get] ["Get" :get] ["POST" :post]
+                             ["post" :post] ["PUT" :put] ["put" :put] ["DELETE" :delete]
+                             ["delete" :delete] ["HEAD" :head] ["head" :head]
+                             ["OPTIONS" :options] ["options" :options] ["PATCH" :patch]
+                             ["patch" :patch] ["PROPFIND" :propfind] ["M-SEARCH" :m-search]
+                             [nil :get]]]
+    (is (identical? expected (:request-method (assembled-request {:method method}))) method))
+  (doseq [[scheme expected] [["http" :http] ["https" :https] [nil :http] ["HTTP" :HTTP]]]
+    (is (identical? expected (:scheme (assembled-request {:scheme scheme}))) scheme)))
+
+(deftest overlay-lazy-ring-request-behaves-like-the-merged-map-test
+  (let [overlay {::emitter :emitter}
+        request (native/overlay-lazy-ring-request #(assembled-request)
+                                                  native/assembled-request-keys overlay)
+        expected (merge (assembled-request) overlay)
+        destructure (fn [{:keys [uri query-string missing] :or {missing :default query-string :q}}]
+                      [uri query-string missing])
+        observe (fn [m]
+                  {:get [(get m :uri) (get m :missing) (get m :missing ::none)
+                         (get m :query-string ::none) (get m ::emitter)]
+                   :invoke [(m :uri) (m :missing ::none) (:missing m ::none) (:headers m)]
+                   :contains [(contains? m :query-string) (contains? m :missing)
+                              (contains? m ::emitter)]
+                   :find [(find m :uri) (find m :missing) (find m :query-string)]
+                   :java [(.get ^java.util.Map m :uri) (.containsKey ^java.util.Map m :missing)
+                          (.size ^java.util.Map m) (.isEmpty ^java.util.Map m)]
+                   :count (count m)
+                   :seq (vec (seq m))
+                   :keys (vec (keys m))
+                   :vals (vec (vals m))
+                   :hash (hash m)
+                   :hash-code (.hashCode ^Object m)
+                   :string (str m)
+                   :merge (merge m {:a 1 :uri "/b"})
+                   :into (into {} m)
+                   :conj (conj m [:a 1])
+                   :select-keys (select-keys m [:uri :missing :headers :query-string])
+                   :destructure (destructure m)
+                   :assoc (assoc m :a 1)
+                   :assoc-existing (assoc m :uri "/b")
+                   :dissoc (dissoc m :uri)
+                   :dissoc-missing (dissoc m :missing)
+                   :dissoc-lookup (let [d (dissoc m :uri)]
+                                    [(get d :uri ::none) (contains? d :uri) (find d :uri)
+                                     (count d)])
+                   :reassoc (let [d (assoc (dissoc m :uri) :uri "/c")]
+                              [(get d :uri) (count d)])
+                   :empty (empty m)
+                   :meta (meta m)
+                   :with-meta (meta (with-meta m {:a 1}))})]
+    (is (= request expected))
+    (is (= expected request))
+    (is (.equals ^Object request expected))
+    (is (= (observe expected) (observe request)))
+    (is (= clojure.lang.PersistentHashMap
+           (type (into {} request))
+           (type (merge request {:a 1}))
+           (type (conj request [:a 1]))))))
+
+(deftest overlay-lazy-ring-request-answers-unknown-keys-without-assembly-test
+  (let [realizations_ (atom 0)
+        request (native/overlay-lazy-ring-request
+                 #(do (swap! realizations_ inc) (assembled-request))
+                 native/assembled-request-keys
+                 {::emitter :emitter})
+        dispatched (assoc request :ol.busker/entrypoint :http)]
+    (is (= {:unknown [nil ::none false nil nil ::none]
+            :overlay [:emitter true :http]
+            :removed [nil false]
+            :realizations-before-known-key 0
+            :known [8080 :http "/"]
+            :realizations 1}
+           {:unknown [(:ol.busker/entrypoint request) (get request :missing ::none)
+                      (contains? request :missing) (find request :missing)
+                      (request :missing) (request :missing ::none)]
+            :overlay [(::emitter request) (contains? request ::emitter)
+                      (:ol.busker/entrypoint dispatched)]
+            :removed [(:uri (dissoc request :uri)) (contains? (dissoc request :uri) :uri)]
+            :realizations-before-known-key @realizations_
+            :known [(:server-port dispatched) (:scheme dispatched) (:uri dispatched)]
+            :realizations @realizations_}))))
 
 (deftest response-slot-layout-matches-native
   (is (= 2120
@@ -457,7 +601,9 @@
               (is (not (realized? (:ring-data copied))))
               (:ring-data copied))))
         request (native/overlay-lazy-ring-request
-                 #(native/assemble-ring-request snapshot nil) {:extra true})]
+                 #(native/assemble-ring-request snapshot nil)
+                 native/assembled-request-keys
+                 {:extra true})]
     (is (:extra request))
     (is (not (realized? snapshot)))
     (is (= {"cookie" "a=1;b=2" "x-test" "café,"} (:headers request)))
@@ -466,6 +612,21 @@
     (is (= "q=1" (:query-string request)))
     (is (= "HTTP/2.0" (:protocol request)))
     (is (:ol.busker/early-data? request))))
+
+(deftest request-copy-method-keyword-test
+  (with-open [arena (ffi/shared-arena)]
+    (let [{:keys [pointer]} (copied-request-context arena)]
+      (doseq [[method expected] [["GET" :get] ["get" :get] ["Get" :get] ["POST" :post]
+                                 ["HEAD" :head] ["head" :head] ["PATCH" :patch]
+                                 ["OPTIONS" :options] ["PROPFIND" :propfind]
+                                 ["M-SEARCH" :m-search] ["" nil]]]
+        (ffi/write pointer (ffi/place native/ffi-clj-req-ctx-t [:meta :method])
+                   (ffi/string->ptr arena method))
+        (ffi/write pointer (ffi/place native/ffi-clj-req-ctx-t [:meta :method_len])
+                   (count method))
+        (let [copied (native/copy-request-context pointer arena)]
+          (is (identical? expected (:request-method copied)) method)
+          (is (= (not-empty method) (:method (force (:ring-data copied)))) method))))))
 
 (deftest default-request-copy-retains-an-implicit-scope-test
   (with-open [source-arena (ffi/shared-arena)]

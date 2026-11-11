@@ -14,7 +14,7 @@
    [java.util.concurrent.atomic AtomicReference]))
 
 (deftest request-construction-preserves-context-and-worker-services
-  (doseq [[method expected forced?] [[:post :post false] [nil :head true]]]
+  (doseq [[method expected] [[:post :post] [nil :get]]]
     (with-open [arena (ffi/shared-arena)]
       (let [dispatch (callback-dispatch/create arena)
             _ (callback-dispatch/bind-thread! dispatch (Thread/currentThread))
@@ -55,7 +55,7 @@
             (is (identical? config (:config req)))
             (is (identical? pool (:buffer-pool (queue/new-response-state req))))
             (is (nil? (meta req)))
-            (is (= forced? (realized? ring-data)))
+            (is (not (realized? ring-data)))
             (is (= 1 (count @tasks_)))))))))
 
 (deftest closed-required-proceed-fails-request-body-read
