@@ -47,7 +47,8 @@
    [java.security.cert CertificateFactory X509Certificate]
    [java.util Base64]
    [java.util.concurrent ExecutorService Executors TimeUnit]
-   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]
+   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicLongArray AtomicReference
+    AtomicReferenceArray]
    [java.util.concurrent.locks Lock ReentrantReadWriteLock]))
 
 (set! *warn-on-reflection* true)
@@ -133,26 +134,65 @@
         (rq/discard-record! st record)))
     nil))
 
+;; Connection spread. `counts` holds each worker's TCP and Unix socket
+;; connections; only that worker writes its slot, from its accept and close
+;; callbacks. A worker reads its listeners only while [[at-minimum?]] holds.
+;; It decides in every loop turn before it blocks, and an accept that raises the
+;; minimum wakes the others, so a worker that became eligible decides again.
+;; A worker stopping for the global limit sets `limit-waiting`, which a release
+;; clears with a wake. A failed worker's slot is Long/MAX_VALUE, and during
+;; shutdown no worker starts reading.
+
+(defn- at-minimum?
+  "Returns true when `own` is not above any count in `counts`."
+  [^long own ^AtomicLongArray counts]
+  (let [n (.length counts)]
+    (loop [i 0]
+      (cond
+        (== i n) true
+        (> own (.get counts (int i))) false
+        :else (recur (inc i))))))
+
+(defn- wake-other-workers!
+  "Wakes every started worker in `workers` except the one at `worker-idx`."
+  [^AtomicReferenceArray workers ^long worker-idx]
+  (let [n (.length workers)]
+    (loop [i 0]
+      (when (< i n)
+        (when-not (== i worker-idx)
+          (when-let [worker (.get workers i)]
+            (p/wake worker)))
+        (recur (inc i))))))
+
 (defn- create-connection-close-callback
-  [active-connection-count_]
-  (let [cb (fn [_]
+  [active-connection-count_ ^AtomicLongArray counts worker-idx]
+  (let [worker-idx (long worker-idx)
+        cb (fn [_]
              (.decrementAndGet ^AtomicLong active-connection-count_)
+             (.decrementAndGet counts (int worker-idx))
              (h2o/conn-limit-release))]
     {::connection-close-cb cb
      ::connection-close-cb-ptr (mem/callback (mem/auto-arena) cb [:pointer] :void)}))
 
 (defn- create-accept-callback
-  [accept-ctx-ptr on-close-callback active-connection-count_]
-  (let [accept-cb (fn [listener-ptr _err-ptr]
-                    (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
-                      (when-not (mem/null? sock-ptr)
-                        #_{:clj-kondo/ignore [:type-mismatch]}
-                        (if (pos? (h2o/conn-limit-try-acquire))
-                          (do
-                            (.incrementAndGet ^AtomicLong active-connection-count_)
-                            (h2o/socket-set-on-close sock-ptr on-close-callback mem/null)
-                            (h2o/h2o-accept accept-ctx-ptr sock-ptr))
-                          (h2o/socket-close sock-ptr)))))]
+  [accept-ctx-ptr on-close-callback active-connection-count_
+   ^AtomicLongArray counts workers worker-idx]
+  (let [worker-idx (long worker-idx)
+        accept-cb (fn [listener-ptr _err-ptr]
+                    (if-not (at-minimum? (.get counts (int worker-idx)) counts)
+                      (h2o/socket-read-stop listener-ptr)
+                      (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
+                        (when-not (mem/null? sock-ptr)
+                          #_{:clj-kondo/ignore [:type-mismatch]}
+                          (if (pos? (h2o/conn-limit-try-acquire))
+                            (do
+                              (.incrementAndGet ^AtomicLong active-connection-count_)
+                              (let [own (.incrementAndGet counts (int worker-idx))]
+                                (h2o/socket-set-on-close sock-ptr on-close-callback mem/null)
+                                (h2o/h2o-accept accept-ctx-ptr sock-ptr)
+                                (when (at-minimum? own counts)
+                                  (wake-other-workers! workers worker-idx))))
+                            (h2o/socket-close sock-ptr))))))]
     {::accept-cb accept-cb
      ::accept-cb-ptr (mem/callback (mem/auto-arena) accept-cb [:pointer :pointer] :void)}))
 
@@ -247,11 +287,22 @@
      ::handler handler}))
 
 (defn- update-listener-state!
-  [listener-socks accept-callbacks max-connections]
+  "Starts or stops reading this worker's listener sockets by the global
+  connection limit and the connection spread rule."
+  [{:keys [listener-socks accept-callbacks max-connections worker-connection-counts
+           worker-idx accepting-workers limit-waiting]}]
   #_{:clj-kondo/ignore [:type-mismatch]}
-  (let [current-conns (h2o/conn-limit-current)
-        should-accept? (or (zero? max-connections)
-                           (< current-conns max-connections))]
+  (let [^AtomicLongArray counts worker-connection-counts
+        ^AtomicBoolean limit-waiting limit-waiting
+        worker-idx (long worker-idx)
+        limit-allows? (or (zero? max-connections)
+                          (< (h2o/conn-limit-current) max-connections)
+                          (do (.set limit-waiting true)
+                              (< (h2o/conn-limit-current) max-connections)))
+        _ (when (and limit-allows? (.get limit-waiting) (.compareAndSet limit-waiting true false))
+            (wake-other-workers! accepting-workers worker-idx))
+        should-accept? (and limit-allows?
+                            (at-minimum? (.get counts (int worker-idx)) counts))]
     (doseq [listener-idx (range (count listener-socks))]
       (let [sock-ptr (nth listener-socks listener-idx)
             accept-callback (nth accept-callbacks listener-idx)]
@@ -394,7 +445,7 @@
 
 (defn- worker-loop
   [worker loop-state
-   {:keys [loop-ptr ctx-ptr listener-socks accept-callbacks max-connections] :as state}]
+   {:keys [loop-ptr ctx-ptr] :as state}]
   (when-let [failure (.get ^AtomicReference (:native-failure_ worker))]
     (throw failure))
   (let [mailbox-work? (true? (::evloop/mailbox-work? loop-state))
@@ -425,7 +476,7 @@
                       shutting? 10
                       :else base-wait)]
         (when-not shutting?
-          (update-listener-state! listener-socks accept-callbacks max-connections))
+          (update-listener-state! state))
         (h2o/evloop-run loop-ptr (if (pos? (p/count-msgs worker)) 0 wait-ms))))
     loop-state))
 
@@ -823,6 +874,9 @@
      ::message-handler evloop-msg-processor
      ::shutting-down? (AtomicBoolean. false)
      ::active-connection-count_ (AtomicLong. 0)
+     ::worker-connection-counts (AtomicLongArray. (int n-workers))
+     ::accepting-workers (AtomicReferenceArray. (int n-workers))
+     ::limit-waiting (AtomicBoolean. false)
      ::stop-accepting-remaining_ (AtomicLong. n-workers)
      ::stopped-accepting_ (promise)
      ::n-workers n-workers
@@ -854,7 +908,7 @@
 
 (defn- init-core-state
   [{::keys [ring-handler config executor close-callback-executor n-workers max-connections
-            active-connection-count_]
+            active-connection-count_ worker-connection-counts]
     :as state}]
   (let [arena (mem/shared-arena)
         _ (h2o/conn-limit-set-max max-connections)
@@ -896,7 +950,9 @@
                          arena))
                       (range fixed-final/response-ring-capacity)))
               response-receivers)
-        on-close-callback (create-connection-close-callback active-connection-count_)]
+        on-close-callbacks (mapv #(create-connection-close-callback
+                                   active-connection-count_ worker-connection-counts %)
+                                 (range n-workers))]
     (assoc state
            ::arena arena
            ::server-config server-config
@@ -908,7 +964,7 @@
            ::response-receivers response-receivers
            ::response-slots response-slots
            ::response-slot-payload-capacity response-slot-payload-capacity
-           ::on-close-callback on-close-callback)))
+           ::on-close-callbacks on-close-callbacks)))
 
 (defn- init-tls-http3-state
   [{::keys [generation-id listener-runtimes config config-ptr n-workers loops contexts
@@ -975,8 +1031,8 @@
              ::http3-worker-contexts http3-worker-contexts))))
 
 (defn- init-single-listener-state
-  [listener listener-claims n-workers loops contexts arena config-ptr on-close-callback
-   tls-lookup-callback-ptr active-connection-count_]
+  [listener listener-claims n-workers loops contexts arena config-ptr on-close-callbacks
+   tls-lookup-callback-ptr active-connection-count_ worker-connection-counts accepting-workers]
   (let [ssl-ctx-ptr (create-ssl-context listener tls-lookup-callback-ptr)
         listener-claim (or (get listener-claims (listen/listener-key listener))
                            (throw (ex-info "Missing TCP listener claim"
@@ -992,8 +1048,11 @@
                                                    ssl-ctx-ptr)
                  accept-callback (create-accept-callback
                                   accept-ctx
-                                  (::connection-close-cb-ptr on-close-callback)
-                                  active-connection-count_)
+                                  (::connection-close-cb-ptr (nth on-close-callbacks thread-idx))
+                                  active-connection-count_
+                                  worker-connection-counts
+                                  accepting-workers
+                                  thread-idx)
                  accept-callback-ptr (::accept-cb-ptr accept-callback)
                  sock-ptr (h2o/create-socket-for-loop
                            (nth loops thread-idx)
@@ -1011,10 +1070,10 @@
      :thread-states thread-states}))
 
 (defn- init-listener-state
-  [{::keys [n-workers loops contexts arena config-ptr on-close-callback
+  [{::keys [n-workers loops contexts arena config-ptr on-close-callbacks
             listener-claims
             tls-lookup-callback
-            active-connection-count_]
+            active-connection-count_ worker-connection-counts accepting-workers]
     :as state}]
   (let [tls-lookup-callback-ptr (:callback-ptr tls-lookup-callback)]
     (-> state
@@ -1028,9 +1087,11 @@
                                                 contexts
                                                 arena
                                                 config-ptr
-                                                on-close-callback
+                                                on-close-callbacks
                                                 tls-lookup-callback-ptr
-                                                active-connection-count_)))
+                                                active-connection-count_
+                                                worker-connection-counts
+                                                accepting-workers)))
         (->> (assoc state ::listener-runtimes)))))
 
 (defn- init-worker-state
@@ -1038,7 +1099,7 @@
             max-connections shutting-down? message-handler wakeup-receivers response-receivers
             response-slots response-slot-payload-capacity stream-pools
             arena stop-accepting-remaining_ stopped-accepting_
-            active-connection-count_]
+            active-connection-count_ worker-connection-counts accepting-workers limit-waiting]
     :as state} cleanup-state_]
   (let [hot-poll-ns (* 1000 (long (:worker-hot-poll-micros config)))
         workers
@@ -1064,12 +1125,23 @@
                                            :max-connections max-connections
                                            :shutting-down? shutting-down?
                                            :active-connection-count_ active-connection-count_
+                                           :worker-connection-counts worker-connection-counts
+                                           :worker-idx thread-idx
+                                           :accepting-workers accepting-workers
+                                           :limit-waiting limit-waiting
                                            ::stop-accepting-remaining_ stop-accepting-remaining_
                                            ::stopped-accepting_ stopped-accepting_}))
                            message-handler
                            (nth wakeup-receivers thread-idx)
                            :stream-pool (nth stream-pools thread-idx)
-                           :on-native-failure! worker-native-failure!
+                           :on-native-failure!
+                           (fn [worker cause]
+                             (try
+                               (worker-native-failure! worker cause)
+                               (finally
+                                 (.set ^AtomicLongArray worker-connection-counts
+                                       (int thread-idx) Long/MAX_VALUE)
+                                 (wake-other-workers! accepting-workers thread-idx))))
                            :discard-command! (fn [[op _ _ st record]]
                                                (when (= :h2o/output op)
                                                  (rq/discard-record! st record)))
@@ -1080,6 +1152,7 @@
                            :zero-wait-turn! (fn [] (h2o/evloop-run loop-ptr 0))
                            :hot-poll-ns hot-poll-ns)]
                (vswap! cleanup-state_ update ::workers (fnil conj []) worker)
+               (.set ^AtomicReferenceArray accepting-workers (int thread-idx) worker)
                worker))))]
     (assoc state ::workers workers)))
 

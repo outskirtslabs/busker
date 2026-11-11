@@ -332,7 +332,10 @@
         server (busker/start!
                 (util/with-handler
                   (constantly {:status 200 :body "generic"})
-                  {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                  ;; One worker: accepting on a worker wakes the others from its
+                  ;; event-loop thread, which the wake-thread assertions would see.
+                  {:n-workers 1
+                   :entrypoints {:http {:bind (str "127.0.0.1:" port)
                                         :http3? false
                                         :tls false}}}))]
     (util/wait-for-curl-ready! :http :h1 port "/" :max-time 2)
