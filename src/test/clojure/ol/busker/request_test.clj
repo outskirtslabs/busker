@@ -28,8 +28,7 @@
                     :wake-command-waiters! vector
                     :on-native-failure! vector}
             config {:output-buffer-size 64 :response-buffer-size 8192}
-            ring-data (delay {:method "HEAD"})
-            ctx {:has-body 0 :request-method method :ring-data ring-data}
+            ctx {:has-body 0 :request-method method}
             installed_ (atom nil)
             tasks_ (atom [])
             executor (proxy [AbstractExecutorService] []
@@ -55,7 +54,6 @@
             (is (identical? config (:config req)))
             (is (identical? pool (:buffer-pool (queue/new-response-state req))))
             (is (nil? (meta req)))
-            (is (not (realized? ring-data)))
             (is (= 1 (count @tasks_)))))))))
 
 (deftest closed-required-proceed-fails-request-body-read

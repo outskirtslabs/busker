@@ -27,7 +27,9 @@
    [taoensso.trove :as trove])
   (:import
    [java.io InputStream]
-   [java.lang.foreign Arena MemorySegment]))
+   [java.lang.foreign Arena MemorySegment ValueLayout]
+   [java.nio.charset StandardCharsets]
+   [java.util Arrays]))
 
 (set! *warn-on-reflection* true)
 
@@ -834,38 +836,6 @@
         {}
         (range headers-len))))))
 
-(defn- default-server-port
-  [scheme-str]
-  (if (= "https" scheme-str)
-    443
-    80))
-
-(defn- request-method-keyword
-  "Returns the Ring `:request-method` keyword for the request method string
-  `method`: the lower-cased method as a keyword, or `:get` when `method` is nil.
-  Common methods map to their keyword without building a new string."
-  [^String method]
-  (if (nil? method)
-    :get
-    (case method
-      ("GET" "get") :get
-      ("POST" "post") :post
-      ("PUT" "put") :put
-      ("DELETE" "delete") :delete
-      ("HEAD" "head") :head
-      ("OPTIONS" "options") :options
-      ("PATCH" "patch") :patch
-      (keyword (str/lower-case method)))))
-
-(defn- scheme-keyword
-  "Returns the Ring `:scheme` keyword for the scheme string `scheme`, or `:http`
-  when `scheme` is nil."
-  [^String scheme]
-  (case scheme
-    "http" :http
-    "https" :https
-    (keyword (or scheme "http"))))
-
 (defmacro ^:private ordered-array-map
   "Expands to a `PersistentArrayMap` of the key and value forms `kvs`, in the order
   given. The keys must be distinct. A map literal with more than eight entries
@@ -877,77 +847,143 @@
        ~@(map-indexed (fn [i form] `(aset ~entries ~i ~form)) kvs)
        (clojure.lang.PersistentArrayMap. ~entries))))
 
-(defn- decode-request-snapshot
-  [^bytes bytes ^longs ends http-version has-body early-data]
-  (let [text (fn [i]
-               (let [start (if (zero? i) 0 (aget ends (dec i)))
-                     length (- (aget ends i) start)]
-                 (when (pos? length)
-                   (String. bytes (int start) (int length) "UTF-8"))))]
-    (ordered-array-map
-     :authority (text 0)
-     :method (text 1)
-     :path (text 2)
-     :remote-addr (text 3)
-     :scheme (text 4)
-     :headers (when (> (alength ends) 5)
-                (reduce (fn [result i]
-                          (let [name (str/lower-case (text i))
-                                value (text (inc i))]
-                            (if (contains? result name)
-                              (update result name str (if (= "cookie" name) ";" ",") value)
-                              (assoc result name value))))
-                        {} (range 5 (alength ends) 2)))
-     :http-version http-version
-     :has-body has-body
-     :early-data early-data)))
+;; Byte offsets that copy-request-context reads. They follow ffi-clj-req-ctx-t,
+;; ffi-clj-req-meta-t and ffi-clj-header-t; layout tests check them against the
+;; shim. Text field i of the metadata (authority, method, path, remote address,
+;; scheme) has its pointer at 8i and its length at 48 + 8i.
+(def ^:no-doc ^:const req-ctx-req-offset 0)
+(def ^:no-doc ^:const req-ctx-meta-offset 8)
+(def ^:no-doc ^:const req-meta-text-offset 0)
+(def ^:no-doc ^:const req-meta-headers-offset 40)
+(def ^:no-doc ^:const req-meta-text-length-offset 48)
+(def ^:no-doc ^:const req-meta-headers-length-offset 88)
+(def ^:no-doc ^:const req-meta-http-version-offset 96)
+(def ^:no-doc ^:const req-meta-has-body-offset 100)
+(def ^:no-doc ^:const req-meta-early-data-offset 102)
+(def ^:no-doc ^:const header-size 32)
+(def ^:no-doc ^:const header-value-offset 16)
+(def ^:no-doc ^:const header-length-offset 8)
+
+;; One segment over the whole address space, so the request copy reads and
+;; copies native memory by address.
+;; It has no bounds and no lifetime check. Reading through it is valid only in
+;; the request callback on the worker thread: H2O allocates the request, its
+;; metadata strings and the header array in the request's memory pool, which
+;; stays allocated while the callback runs and which only the worker's event
+;; loop can free. After the callback returns, or from another thread, the same
+;; addresses may already be freed or reused.
+(def ^:private ^MemorySegment native-memory
+  (.reinterpret MemorySegment/NULL Long/MAX_VALUE))
+
+(defn- read-native-long
+  ^long [^long address]
+  (.get native-memory ValueLayout/JAVA_LONG_UNALIGNED address))
+
+(defn- copied-field-pointer-address
+  "Returns the address of the pointer to copied text field `i`: the five
+  metadata strings, then the name and value of each header."
+  ^long [^long meta ^long headers ^long i]
+  (if (< i 5)
+    (+ meta req-meta-text-offset (* 8 i))
+    (let [j (- i 5)]
+      (+ headers (* header-size (quot j 2)) (if (even? j) 0 header-value-offset)))))
+
+(defn- copied-field-length
+  "Returns the byte length of copied text field `i`, 0 for a null pointer."
+  ^long [^long meta ^long headers ^long i]
+  (let [pointer-address (copied-field-pointer-address meta headers i)]
+    (if (zero? (read-native-long pointer-address))
+      0
+      (max 0 (read-native-long
+              (+ pointer-address
+                 (if (< i 5)
+                   (- req-meta-text-length-offset req-meta-text-offset)
+                   header-length-offset)))))))
+
+(defn- bytes-of
+  ^bytes [^String s]
+  (.getBytes s StandardCharsets/US_ASCII))
+
+(def ^:private ^"[Ljava.lang.Object;" method-keywords
+  "Alternating method bytes and their Ring keyword, for the usual methods."
+  (object-array (mapcat (fn [[method k]] [(bytes-of method) k])
+                        [["GET" :get] ["get" :get] ["POST" :post] ["post" :post]
+                         ["PUT" :put] ["put" :put] ["DELETE" :delete] ["delete" :delete]
+                         ["HEAD" :head] ["head" :head] ["OPTIONS" :options]
+                         ["options" :options] ["PATCH" :patch] ["patch" :patch]])))
+
+(def ^:private ^bytes http-bytes (bytes-of "http"))
+(def ^:private ^bytes https-bytes (bytes-of "https"))
+
+(defn- region-equals?
+  [^bytes bytes ^long start ^long length ^bytes expected]
+  (and (= length (alength expected))
+       (Arrays/equals bytes (int start) (int (+ start length)) expected 0 (int length))))
+
+(defn- method-keyword-at
+  "Returns the Ring `:request-method` keyword for the `length` method bytes at
+  `start`: the lower-cased method as a keyword, or nil when there are none."
+  [^bytes bytes ^long start ^long length]
+  (when (pos? length)
+    (loop [i 0]
+      (if (< i (alength method-keywords))
+        (if (region-equals? bytes start length (aget method-keywords i))
+          (aget method-keywords (inc i))
+          (recur (+ i 2)))
+        (keyword (str/lower-case (String. bytes (int start) (int length) StandardCharsets/UTF_8)))))))
+
+(defn- scheme-keyword-at
+  "Returns the Ring `:scheme` keyword for the `length` scheme bytes at `start`,
+  or `:http` when there are none."
+  [^bytes bytes ^long start ^long length]
+  (cond
+    (zero? length) :http
+    (region-equals? bytes start length http-bytes) :http
+    (region-equals? bytes start length https-bytes) :https
+    :else (keyword (String. bytes (int start) (int length) StandardCharsets/UTF_8))))
 
 (defn ^:no-doc copy-request-context
-  ([ctx-ptr]
-   (copy-request-context ctx-ptr (ffi/auto-arena)))
-  ([ctx-ptr ^Arena arena]
-   (let [ctx (ffi/reinterpret ctx-ptr (ffi/sizeof ffi-clj-req-ctx-t) arena)
-         req (ffi/read ctx (ffi/place ffi-clj-req-ctx-t :req))
-         ;; Offsets follow ffi-clj-req-meta-t and ffi-clj-header-t; layout tests
-         ;; verify them against the shim. Only the copied bytes reach the delay.
-         meta-seg (ffi/slice ctx 8 104)
-         headers (ffi/read meta-seg :pointer 40)
-         header-count (if (ffi/null? headers) 0 (long (ffi/read meta-seg :long 88)))
-         header-seg (when (pos? header-count)
-                      (ffi/reinterpret headers (* header-count 32) arena))
-         n (+ 5 (* 2 header-count))
-         pointers (object-array n)
-         ends (long-array n)
-         total (loop [i 0 offset 0]
-                 (if (= i n)
-                   offset
-                   (let [seg (if (< i 5) meta-seg header-seg)
-                         ptr-offset (if (< i 5) (* i 8) (* (- i 5) 16))
-                         len-offset (if (< i 5) (+ 48 (* i 8)) (+ ptr-offset 8))
-                         ptr (ffi/read seg :pointer ptr-offset)
-                         len (if (ffi/null? ptr) 0 (max 0 (long (ffi/read seg :long len-offset))))
-                         end (+ offset len)]
-                     (aset pointers i ptr)
-                     (aset ends i end)
-                     (recur (inc i) end))))
-         bytes (byte-array total)
-         target (MemorySegment/ofArray bytes)
-         http-version (ffi/read meta-seg :int 96)
-         has-body (ffi/read meta-seg :int16 100)
-         early-data (ffi/read meta-seg :int16 102)]
-     (dotimes [i n]
-       (let [start (if (zero? i) 0 (aget ends (dec i)))
-             len (- (aget ends i) start)]
-         (when (pos? len)
-           (MemorySegment/copy (ffi/reinterpret (aget pointers i) len arena) 0 target start len))))
-     {:req req
-      :has-body has-body
-      :request-method (let [start (aget ends 0)
-                            length (- (aget ends 1) start)]
-                        (when (pos? length)
-                          (request-method-keyword
-                           (String. bytes (int start) (int length) "UTF-8"))))
-      :ring-data (delay (decode-request-snapshot bytes ends http-version has-body early-data))})))
+  "Copies the request metadata and headers of the native request context at
+  `ctx-ptr` into one byte array, on the worker thread inside the request
+  callback. Returns the native request pointer, `:has-body`, the
+  `:request-method` keyword (nil when the request has no method), and the bytes
+  and field end offsets that [[assemble-ring-request]] decodes. The copy does
+  not refer to native memory except through `:req`."
+  [^MemorySegment ctx-ptr]
+  (let [base (.address ctx-ptr)
+        meta (+ base req-ctx-meta-offset)
+        headers (read-native-long (+ meta req-meta-headers-offset))
+        header-count (if (zero? headers)
+                       0
+                       (read-native-long (+ meta req-meta-headers-length-offset)))
+        n (+ 5 (* 2 header-count))
+        ends (long-array n)
+        total (loop [i 0
+                     offset 0]
+                (if (= i n)
+                  offset
+                  (let [end (+ offset (copied-field-length meta headers i))]
+                    (aset ends i end)
+                    (recur (inc i) end))))
+        bytes (byte-array total)]
+    (dotimes [i n]
+      (let [start (if (zero? i) 0 (aget ends (dec i)))
+            length (- (aget ends i) start)]
+        (when (pos? length)
+          (MemorySegment/copy native-memory ValueLayout/JAVA_BYTE
+                              (read-native-long (copied-field-pointer-address meta headers i))
+                              bytes (int start) (int length)))))
+    {:req (MemorySegment/ofAddress (read-native-long (+ base req-ctx-req-offset)))
+     :has-body (long (.get native-memory ValueLayout/JAVA_SHORT_UNALIGNED
+                           (+ meta req-meta-has-body-offset)))
+     :early-data (long (.get native-memory ValueLayout/JAVA_SHORT_UNALIGNED
+                             (+ meta req-meta-early-data-offset)))
+     :http-version (long (.get native-memory ValueLayout/JAVA_INT_UNALIGNED
+                               (+ meta req-meta-http-version-offset)))
+     :request-method (let [start (aget ends 0)]
+                       (method-keyword-at bytes start (- (aget ends 1) start)))
+     :bytes bytes
+     :ends ends}))
 
 (defn create-handler
   "Creates and configures an H2O handler with its request and cleanup callbacks.
@@ -963,8 +999,7 @@
          (some? flat-config-ptr) (not (ffi/null? flat-config-ptr))
          (some? arena)]}
   (let [on-request-cb (fn on-request-cb [ctx-ptr]
-                        (int (on-req-callback ctx-ptr
-                                              (copy-request-context ctx-ptr arena))))
+                        (int (on-req-callback ctx-ptr (copy-request-context ctx-ptr))))
         on-request-cb-ptr (ffi/callback arena on-request-cb [:pointer] :int)
         on-request-cleanup-cb (fn on-request-cleanup-cb [module-id request-seq]
                                 (on-cleanup-callback module-id request-seq))
@@ -1082,15 +1117,45 @@
   #{:protocol :remote-addr :headers :server-port :ol.busker/early-data? :uri
     :server-name :query-string :body :scheme :request-method})
 
+(defn- copied-text
+  "Decodes copied text field `i` as UTF-8, or returns nil when it is empty."
+  [^bytes bytes ^longs ends ^long i]
+  (let [start (if (zero? i) 0 (aget ends (dec i)))
+        length (- (aget ends i) start)]
+    (when (pos? length)
+      (String. bytes (int start) (int length) StandardCharsets/UTF_8))))
+
+(defn- copied-headers
+  "Returns the Ring headers map of the copied header fields, or nil when the
+  request has none. Names are lower-cased; repeated headers are joined with `,`,
+  or with `;` for `cookie`."
+  [^bytes bytes ^longs ends]
+  (let [n (alength ends)]
+    (when (> n 5)
+      (loop [i 5
+             result {}]
+        (if (< i n)
+          (let [name (str/lower-case (copied-text bytes ends i))
+                value (copied-text bytes ends (inc i))]
+            (recur (+ i 2)
+                   (if (contains? result name)
+                     (update result name str (if (= "cookie" name) ";" ",") value)
+                     (assoc result name value))))
+          result)))))
+
 (defn ^:no-doc assemble-ring-request
-  [ring-data ^InputStream input-stream]
-  (let [{:keys [method ^String path authority scheme remote-addr headers
-                http-version has-body early-data]} (force ring-data)
-        default-port (default-server-port scheme)
+  "Decodes the request copy `req-ctx` from [[copy-request-context]] into the
+  Ring request map. `input-stream` becomes `:body` when the request has one."
+  [req-ctx ^InputStream input-stream]
+  (let [^bytes bytes (:bytes req-ctx)
+        ^longs ends (:ends req-ctx)
+        scheme-start (aget ends 3)
+        scheme (scheme-keyword-at bytes scheme-start (- (aget ends 4) scheme-start))
         {:keys [server-name server-port]}
-        (util/parse-authority authority default-port)
+        (util/parse-authority (copied-text bytes ends 0) (if (identical? :https scheme) 443 80))
+        ^String path (copied-text bytes ends 2)
         query-index (if path (.indexOf path "?") -1)
-        protocol (case (int http-version)
+        protocol (case (int (:http-version req-ctx))
                    0x0101 "HTTP/1.1"
                    0x0200 "HTTP/2.0"
                    0x0300 "HTTP/3.0"
@@ -1098,19 +1163,19 @@
     ;; The order matches the order in which a hash map of these keys lists them.
     (ordered-array-map
      :protocol protocol
-     :remote-addr (or remote-addr "")
-     :headers headers
+     :remote-addr (or (copied-text bytes ends 3) "")
+     :headers (copied-headers bytes ends)
      :server-port server-port
      ;; `if` yields a boxed Boolean, which `aset` on an Object array accepts
      ;; without reflection.
-     :ol.busker/early-data? (if (= 1 early-data) true false)
+     :ol.busker/early-data? (if (= 1 (:early-data req-ctx)) true false)
      :uri (if (neg? query-index) path (subs path 0 query-index))
      :server-name server-name
      :query-string (when-not (neg? query-index) (subs path (inc query-index)))
-     :body (when (= 1 has-body)
+     :body (when (= 1 (:has-body req-ctx))
              input-stream)
-     :scheme (scheme-keyword scheme)
-     :request-method (request-method-keyword method))))
+     :scheme scheme
+     :request-method (or (:request-method req-ctx) :get))))
 
 (defcfn http3-create-ptls-ctx
   "Create picotls context for QUIC TLS 1.3.

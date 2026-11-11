@@ -128,8 +128,7 @@
                           ;; The copy has no method only when the request has
                           ;; none; the Ring request then reads :get as well.
                           {:request-method (or (:request-method req-ctx) :get)})
-            emitter (response/new-response-emitter req close-callback-dispatch)
-            ring-request-data (:ring-data req-ctx)]
+            emitter (response/new-response-emitter req close-callback-dispatch)]
         (callback-dispatch/register! dispatch module-id request-seq req emitter)
         (try
           (let [receiver (.get ^AtomicReference (:response-receiver_ worker))]
@@ -142,7 +141,7 @@
           (letfn [(request-task []
                     (let [ring-req (h2o/overlay-lazy-ring-request
                                     #(h2o/assemble-ring-request
-                                      ring-request-data
+                                      req-ctx
                                       (:input-stream write-req))
                                     h2o/assembled-request-keys
                                     {::emitter emitter})

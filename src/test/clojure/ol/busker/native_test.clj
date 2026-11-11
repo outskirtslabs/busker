@@ -285,6 +285,40 @@
   {:proceed 0
    :stop    8})
 
+(deftest request-copy-offsets-match-the-layout-test
+  (let [pointer (ffi/segment 1)
+        meta native/req-ctx-meta-offset]
+    (is (= {:req native/req-ctx-req-offset
+            :meta meta
+            [:meta :authority] (+ meta native/req-meta-text-offset)
+            [:meta :scheme] (+ meta native/req-meta-text-offset 32)
+            [:meta :headers] (+ meta native/req-meta-headers-offset)
+            [:meta :authority_len] (+ meta native/req-meta-text-length-offset)
+            [:meta :scheme_len] (+ meta native/req-meta-text-length-offset 32)
+            [:meta :headers_len] (+ meta native/req-meta-headers-length-offset)
+            [:meta :http_version] (+ meta native/req-meta-http-version-offset)
+            [:meta :has_body] (+ meta native/req-meta-has-body-offset)
+            [:meta :is_early_data] (+ meta native/req-meta-early-data-offset)}
+           {:req (ffi-byte-offset native/ffi-clj-req-ctx-t :req pointer)
+            :meta (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :authority] pointer)
+            [:meta :authority] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :authority] pointer)
+            [:meta :scheme] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :scheme] pointer)
+            [:meta :headers] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :headers] pointer)
+            [:meta :authority_len] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :authority_len] 1)
+            [:meta :scheme_len] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :scheme_len] 1)
+            [:meta :headers_len] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :headers_len] 1)
+            [:meta :http_version] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :http_version] 1)
+            [:meta :has_body] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :has_body] 1)
+            [:meta :is_early_data] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :is_early_data] 1)}))
+    (is (= {:size native/header-size
+            :name-length native/header-length-offset
+            :value native/header-value-offset
+            :value-length (+ native/header-value-offset native/header-length-offset)}
+           {:size (ffi/sizeof native/ffi-clj-header-t)
+            :name-length (ffi-byte-offset native/ffi-clj-header-t :name_len 1)
+            :value (ffi-byte-offset native/ffi-clj-header-t :value pointer)
+            :value-length (ffi-byte-offset native/ffi-clj-header-t :value_len 1)}))))
+
 (deftest request-context-layout-test
   (is (= 232 (ffi/sizeof native/ffi-clj-req-ctx-t)))
   (doseq [[field expected-offset] request-context-reader-offsets]
@@ -338,10 +372,49 @@
    :has-body 0
    :early-data 0})
 
+(defn- copied-snapshot
+  "Writes a native request context for `snapshot` and returns its copy. The
+  native memory is freed before this returns. `:headers` is a map or a sequence
+  of name and value pairs."
+  [{:keys [authority method path remote-addr scheme headers http-version has-body early-data]}]
+  (with-open [arena (ffi/confined-arena)]
+    (let [text (fn [s]
+                 (if s
+                   [(ffi/string->ptr arena s) (alength (.getBytes ^String s "UTF-8"))]
+                   [ffi/null 0]))
+          [authority-ptr authority-len] (text authority)
+          [method-ptr method-len] (text method)
+          [path-ptr path-len] (text path)
+          [remote-ptr remote-len] (text remote-addr)
+          [scheme-ptr scheme-len] (text scheme)
+          header-count (count headers)
+          header-ptr (if (pos? header-count) (ffi/alloc arena (* 32 header-count)) ffi/null)
+          pointer (ffi/alloc arena native/ffi-clj-req-ctx-t)]
+      (doseq [[i [name value]] (map-indexed vector headers)]
+        (let [[name-ptr name-len] (text name)
+              [value-ptr value-len] (text value)]
+          (ffi/write (ffi/slice header-ptr (* i 32) 32) native/ffi-clj-header-t
+                     {:name name-ptr :name_len name-len :value value-ptr :value_len value-len})))
+      (ffi/write pointer native/ffi-clj-req-ctx-t
+                 (assoc (request-context-value arena)
+                        :meta {:authority authority-ptr :authority_len authority-len
+                               :method method-ptr :method_len method-len
+                               :path path-ptr :path_len path-len
+                               :remote_addr remote-ptr :remote_addr_len remote-len
+                               :scheme scheme-ptr :scheme_len scheme-len
+                               :headers header-ptr :headers_len header-count
+                               :http_version http-version :has_body has-body
+                               :is_early_data early-data}))
+      (native/copy-request-context pointer))))
+
+(defn- assembled-snapshot
+  [snapshot input-stream]
+  (native/assemble-ring-request (copied-snapshot snapshot) input-stream))
+
 (defn- assembled-request
   ([] (assembled-request {}))
   ([snapshot-changes]
-   (native/assemble-ring-request (delay (merge wrk-request-snapshot snapshot-changes)) nil)))
+   (assembled-snapshot (merge wrk-request-snapshot snapshot-changes) nil)))
 
 (deftest assemble-ring-request-builds-the-ring-request-test
   (let [body (java.io.ByteArrayInputStream. (byte-array 0))]
@@ -356,10 +429,10 @@
             :headers {"host" "localhost:8080"}
             :body body
             :ol.busker/early-data? true}
-           (native/assemble-ring-request
-            (delay (assoc wrk-request-snapshot
-                          :method "POST" :path "/things?q=1&r=2" :scheme "https"
-                          :http-version 0x0200 :has-body 1 :early-data 1))
+           (assembled-snapshot
+            (assoc wrk-request-snapshot
+                   :method "POST" :path "/things?q=1&r=2" :scheme "https"
+                   :http-version 0x0200 :has-body 1 :early-data 1)
             body))))
   (is (= {:server-port 443
           :server-name "localhost"
@@ -372,9 +445,8 @@
           :headers nil
           :body nil
           :ol.busker/early-data? false}
-         (native/assemble-ring-request
-          (delay {:scheme "https" :http-version 0 :has-body 0 :early-data 0})
-          nil)))
+         (assembled-snapshot {:scheme "https" :http-version 0 :has-body 0 :early-data 0}
+                             nil)))
   (is (= [:protocol :remote-addr :headers :server-port :ol.busker/early-data? :uri
           :server-name :query-string :body :scheme :request-method]
          (vec (keys (assembled-request)))))
@@ -386,6 +458,41 @@
   (is (= native/assembled-request-keys (set (keys (assembled-request)))))
   (is (= clojure.lang.PersistentHashMap (type (assoc (assembled-request) :x 1))))
   (is (= (assoc (into {} (assembled-request)) :x 1) (assoc (assembled-request) :x 1))))
+
+(deftest assemble-ring-request-from-a-copied-header-set-test
+  (let [many (for [i (range 50)] [(str "X-Header-" i) (str "value-" i)])
+        headers (concat [["Host" "example.test:8443"]
+                         ["Accept-Language" "日本語, fr-CH"]
+                         ["X-Name" "café ☕"]
+                         ["X-Empty" ""]
+                         ["X-Dup" "one"]
+                         ["Cookie" "a=1"]]
+                        many
+                        [["x-dup" "two"]
+                         ["COOKIE" "b=2"]
+                         ["X-Dup" "über"]])]
+    (is (= {:server-port 8443
+            :server-name "example.test"
+            :remote-addr "192.0.2.10"
+            :uri "/données"
+            :query-string "q=ü"
+            :scheme :https
+            :request-method :put
+            :protocol "HTTP/2.0"
+            :headers (into {"host" "example.test:8443"
+                            "accept-language" "日本語, fr-CH"
+                            "x-name" "café ☕"
+                            "x-empty" nil
+                            "x-dup" "one,two,über"
+                            "cookie" "a=1;b=2"}
+                           (for [i (range 50)] [(str "x-header-" i) (str "value-" i)]))
+            :body nil
+            :ol.busker/early-data? false}
+           (assembled-snapshot {:authority "example.test:8443" :method "PUT"
+                                :path "/données?q=ü" :remote-addr "192.0.2.10"
+                                :scheme "https" :headers headers :http-version 0x0200
+                                :has-body 0 :early-data 0}
+                               nil)))))
 
 (deftest assemble-ring-request-method-and-scheme-keywords-test
   (doseq [[method expected] [["GET" :get] ["get" :get] ["Get" :get] ["POST" :post]
@@ -522,22 +629,27 @@
     (ffi/write pointer native/ffi-clj-req-ctx-t context)
     {:pointer pointer :request request}))
 
-(defn- copied-request-values [{:keys [req has-body ring-data]}]
+(defn- copied-request-values [{:keys [req has-body request-method] :as copied}]
   {:request-address (.address ^java.lang.foreign.MemorySegment req)
    :has-body has-body
-   :ring-data (force ring-data)})
+   :request-method request-method
+   :ring-request (native/assemble-ring-request copied nil)})
 
 (def ^:private expected-copied-request-values
   {:has-body 1
-   :ring-data {:method "POST"
-               :path "/things?q=1"
-               :authority "example.test:8443"
-               :scheme "https"
-               :remote-addr "192.0.2.10"
-               :headers nil
-               :http-version 0x0200
-               :has-body 1
-               :early-data 1}})
+   :request-method :post
+   :ring-request {:server-port 8443
+                  :server-name "example.test"
+                  :remote-addr "192.0.2.10"
+                  :uri "/things"
+                  :query-string "q=1"
+                  :scheme :https
+                  :request-method :post
+                  :protocol "HTTP/2.0"
+                  :headers nil
+                  :body nil
+                  :ol.busker/early-data? true}})
+
 (defn- recording-arena [^java.lang.foreign.Arena arena scope-calls_ allocation-calls_]
   (reify java.lang.foreign.Arena
     (scope [_]
@@ -547,21 +659,6 @@
       (swap! allocation-calls_ inc)
       (.allocate arena bytes alignment))
     (close [_])))
-
-(deftest explicit-arena-request-copy-uses-supplied-arena-test
-  (with-open [arena (ffi/shared-arena)]
-    (let [{:keys [pointer request]} (copied-request-context arena)
-          scope-calls_ (atom 0)
-          allocation-calls_ (atom 0)
-          supplied-arena (recording-arena arena scope-calls_ allocation-calls_)
-          result (native/copy-request-context pointer supplied-arena)]
-      (is (= {:arena-scope-calls 6
-              :arena-allocation-calls 0
-              :request-values (assoc expected-copied-request-values
-                                     :request-address (.address ^java.lang.foreign.MemorySegment request))}
-             {:arena-scope-calls @scope-calls_
-              :arena-allocation-calls @allocation-calls_
-              :request-values (copied-request-values result)})))))
 
 (deftest explicit-arena-header-copy-uses-supplied-arena-test
   (with-open [arena (ffi/shared-arena)]
@@ -595,17 +692,15 @@
                           :value_len (alength (.getBytes ^String value "UTF-8"))}))
             (ffi/write pointer (ffi/place native/ffi-clj-req-ctx-t [:meta :headers]) headers)
             (ffi/write pointer (ffi/place native/ffi-clj-req-ctx-t [:meta :headers_len]) (count pairs))
-            (let [copied (native/copy-request-context pointer arena)]
+            (let [copied (native/copy-request-context pointer)]
               (is (= {:has-body 1 :request-method :post}
                      (select-keys copied [:has-body :request-method])))
-              (is (not (realized? (:ring-data copied))))
-              (:ring-data copied))))
+              copied)))
         request (native/overlay-lazy-ring-request
                  #(native/assemble-ring-request snapshot nil)
                  native/assembled-request-keys
                  {:extra true})]
     (is (:extra request))
-    (is (not (realized? snapshot)))
     (is (= {"cookie" "a=1;b=2" "x-test" "café,"} (:headers request)))
     (is (= :post (:request-method request)))
     (is (= "/things" (:uri request)))
@@ -624,11 +719,10 @@
                    (ffi/string->ptr arena method))
         (ffi/write pointer (ffi/place native/ffi-clj-req-ctx-t [:meta :method_len])
                    (count method))
-        (let [copied (native/copy-request-context pointer arena)]
-          (is (identical? expected (:request-method copied)) method)
-          (is (= (not-empty method) (:method (force (:ring-data copied)))) method))))))
+        (is (identical? expected (:request-method (native/copy-request-context pointer)))
+            method)))))
 
-(deftest default-request-copy-retains-an-implicit-scope-test
+(deftest request-copy-keeps-only-the-request-pointer-test
   (with-open [source-arena (ffi/shared-arena)]
     (let [{:keys [pointer request]} (copied-request-context source-arena)
           result (native/copy-request-context pointer)]

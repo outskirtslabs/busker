@@ -1277,20 +1277,16 @@
       (finally
         (generation/stop! instance)))))
 
-(deftest request-copy-uses-generation-arena-on-worker-test
+(deftest request-copy-runs-on-worker-test
   (let [port 18596
         observed_ (promise)
         copy-request-context h2o/copy-request-context]
     (with-redefs [h2o/copy-request-context
-                  (fn [ctx-ptr & [arena]]
+                  (fn [ctx-ptr]
                     (deliver observed_
-                             {:arena arena
-                              :active? (boolean (some-> ^Arena arena .scope .isAlive))
-                              :virtual? (.isVirtual (Thread/currentThread))
+                             {:virtual? (.isVirtual (Thread/currentThread))
                               :worker? (some? (worker-context/get-current-worker))})
-                    (if arena
-                      (copy-request-context ctx-ptr arena)
-                      (copy-request-context ctx-ptr)))]
+                    (copy-request-context ctx-ptr))]
       (let [instance
             (generation/start!
              (config/load!
@@ -1298,26 +1294,18 @@
                                     :tls false}}
                :dispatch [{:handler (fn [_]
                                       {:status 200
-                                       :body "generation-arena"})}]})
-             nil)
-            ^Arena generation-arena (::generation/arena instance)]
+                                       :body "copied-on-worker"})}]})
+             nil)]
         (try
           (let [response (util/curl :http nil port "/" :max-time 5)
                 observed (deref observed_ 5000 :timeout)]
-            (is (= {:response {:exit 0 :out "generation-arena"}
-                    :copy {:same-arena? true
-                           :active? true
-                           :virtual? false
+            (is (= {:response {:exit 0 :out "copied-on-worker"}
+                    :copy {:virtual? false
                            :worker? true}}
                    {:response (select-keys response [:exit :out])
-                    :copy (if (map? observed)
-                            (-> observed
-                                (assoc :same-arena? (identical? generation-arena (:arena observed)))
-                                (dissoc :arena))
-                            observed)})))
+                    :copy observed})))
           (finally
-            (generation/stop! instance)))
-        (is (false? (.isAlive (.scope generation-arena))))))))
+            (generation/stop! instance)))))))
 
 (deftest native-callback-lifecycle-runs-on-worker-in-order-test
   (let [port 18588
