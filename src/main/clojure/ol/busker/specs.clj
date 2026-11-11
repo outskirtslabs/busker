@@ -424,8 +424,8 @@
 
 (def worker-hot-poll-micros
   {:key ::worker-hot-poll-micros
-   :doc "Longest time in microseconds that a worker with live requests polls for new work before it sleeps. Zero disables the poll."
-   :default 50})
+   :doc "Longest time in microseconds that a worker with live requests polls for new work before it sleeps. Zero, the default, disables the poll; a positive value lowers response latency for handlers that finish inside it at the cost of up to that much worker CPU per idle gap."
+   :default 0})
 (s/def ::worker-hot-poll-micros nat-int?)
 
 (def max-connections

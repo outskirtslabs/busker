@@ -23,7 +23,7 @@ It must not block in native calls.
 Native callbacks copy or signal data, then dispatch application handling through the worker and callback-dispatch table.
 Lifecycle work uses platform threads because it can wait for threads and native resources to finish.
 
-When a worker finds no mailbox work and no new wake, it waits in three steps. If it has live requests, it first polls for up to `:worker-hot-poll-micros` (default 50, 0 disables the poll), spinning on its wake generation and mailbox count and running a zero-wait native turn every 5 microseconds so sockets keep being serviced. Work found by the poll is handled at once. When the budget runs out, or when the worker has no live requests, it arms sleep and rechecks for work, then sleeps in `h2o_evloop_run` until a native wake or I/O ends the sleep.
+When a worker finds no mailbox work and no new wake, it waits in three steps. If it has live requests and `:worker-hot-poll-micros` is positive (the default, 0, disables the poll), it first polls for up to that budget, spinning on its wake generation and mailbox count and running a zero-wait native turn every 5 microseconds so sockets keep being serviced. Work found by the poll is handled at once. When the budget runs out, when the poll is disabled, or when the worker has no live requests, it arms sleep and rechecks for work, then sleeps in `h2o_evloop_run` until a native wake or I/O ends the sleep.
 
 ### Native write completion
 

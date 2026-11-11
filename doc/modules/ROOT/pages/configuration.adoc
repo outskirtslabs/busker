@@ -73,7 +73,7 @@ either use their documented default or remain unset.
 | `:dispatch` | Ordered vector of dispatcher maps (see below).
 | `:tls` | Global TLS, certificate, ACME, and session ticket config (see below).
 | `:n-workers` | Positive integer event loop worker count, default `2`.
-| `:worker-hot-poll-micros` | Non-negative integer, default `50`. Longest time in microseconds that a worker with live requests polls for new work before it sleeps. `0` disables the poll.
+| `:worker-hot-poll-micros` | Non-negative integer, default `0`. Longest time in microseconds that a worker with live requests polls for new work before it sleeps. `0` disables the poll. A positive value such as `50` lowers response latency when handlers finish inside it, at the cost of up to that much worker CPU per idle gap.
 | `:max-connections` | Positive integer connection cap, default `1024`.
 | `:output-buffer-size` | Positive response byte budget and native streaming block size, default `32768`. Zero is invalid.
 | `:server-name` | Server header value, default `"ol.busker/dev"`.

@@ -33,7 +33,7 @@ During context disposal the event-loop worker moves the endpoint from open to qu
 
 A native wake costs an idle worker two thread wake-ups: the publisher's carrier and the worker. When the worker has live requests, a response is often only microseconds away, so the worker first polls instead of arming sleep. The poll reads the wake generation and the mailbox count in a spin loop and ends as soon as either changes; the worker then takes the normal work path. Whenever at least 5 microseconds have passed since the last native turn, the poll runs one zero-wait native turn so sockets keep being serviced. It does not drain the response ring: a published response moves the wake generation, which ends the poll. The poll uses primitive locals only and allocates nothing.
 
-The poll lasts at most `:worker-hot-poll-micros`, measured from its first iteration (default 50; 0 disables it). When the budget runs out, the worker arms sleep exactly as described above. A worker without live requests arms sleep at once, so an idle server does not spin.
+The poll lasts at most `:worker-hot-poll-micros`, measured from its first iteration. The default is 0, which disables the poll: a spinning worker spends up to the budget of CPU in every idle gap and competes with the carrier threads that run handlers when cores are shared, so the poll is a deployment choice for latency-sensitive services whose handlers finish inside the budget. When the budget runs out, the worker arms sleep exactly as described above. A worker without live requests arms sleep at once, so an idle server does not spin.
 
 ## Required verification
 
