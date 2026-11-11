@@ -552,6 +552,83 @@
           (finally (deliver release true)))
         (is (= {:status :closed} (await-result producer)))))))
 
+(defn- await-waiting! [^Thread thread]
+  (let [deadline (+ (System/currentTimeMillis) 5000)]
+    (while (not= Thread$State/WAITING (.getState thread))
+      (when (> (System/currentTimeMillis) deadline)
+        (throw (ex-info "Thread did not wait" {:state (.getState thread)})))
+      (Thread/sleep 1))))
+
+(defn- blocking-producer [entered release]
+  (fn [^ByteBuffer b]
+    (.put b (byte 65))
+    (deliver entered true)
+    @release
+    (.put b (byte 66))))
+
+(deftest second-emit-waits-for-fixed-producer-and-gets-closed-test
+  (with-emitter
+    {}
+    (fn [emitter client]
+      (let [entered (promise)
+            release (promise)
+            closed (atom 0)
+            first-result (on-virtual-thread
+                          #(protocols/emit! emitter {:status 200 :body (blocking-producer entered release)}
+                                            {:capacity 2 :end? true}))]
+        (protocols/on-close! emitter #(swap! closed inc))
+        (try
+          (is (true? (deref entered 5000 false)))
+          (let [second-result (promise)
+                waiter (Thread/startVirtualThread
+                        #(deliver second-result (protocols/emit! emitter "late")))]
+            (await-waiting! waiter)
+            (deliver release true)
+            (is (= :accepted (:status (await-result first-result))))
+            (is (= {:status :closed} (deref second-result 5000 ::timeout))))
+          (is (= {:exit 0 :out "AB"} (select-keys (await-result client) [:exit :out])))
+          (is (= 1 @closed))
+          (finally (deliver release true)))))))
+
+(deftest close-during-fixed-producer-publishes-nothing-test
+  (with-emitter
+    {}
+    (fn [emitter client]
+      (let [entered (promise)
+            release (promise)
+            closed (atom 0)
+            result (on-virtual-thread
+                    #(protocols/emit! emitter {:status 201 :body (blocking-producer entered release)}
+                                      {:capacity 2 :end? true}))]
+        (protocols/on-close! emitter #(swap! closed inc))
+        (try
+          (is (true? (deref entered 5000 false)))
+          (is (true? (protocols/close! emitter)))
+          (deliver release true)
+          (is (= {:status :closed} (await-result result)))
+          (is (false? (protocols/close! emitter)))
+          (is (= {:exit 0 :out ""} (select-keys (await-result client) [:exit :out])))
+          (is (= 1 @closed))
+          (finally (deliver release true)))))))
+
+(deftest stop-after-close-changes-nothing-test
+  (let [emitter (response/new-response-emitter {} (fn [^Runnable task] (.run task)))
+        lifecycle_ (.lifecycle_ ^ol.busker.response.H2OResponseEmitter emitter)
+        calls (atom [])]
+    (protocols/on-close! emitter #(swap! calls conj :registered))
+    (response/stop-emitter emitter)
+    (is (= [:registered] @calls))
+    (is (false? (protocols/open? emitter)))
+    (let [state @lifecycle_]
+      (is (= {:phase :closed :callbacks [] :producer nil} state))
+      (response/stop-emitter emitter)
+      (is (identical? state @lifecycle_))
+      (is (false? (protocols/close! emitter)))
+      (is (identical? state @lifecycle_)))
+    (is (= [:registered] @calls))
+    (protocols/on-close! emitter #(swap! calls conj :late))
+    (is (= [:registered :late] @calls))))
+
 (deftest mutable-input-is-copied-and-buffer-range-is-preserved-test
   (with-emitter
     {}
@@ -617,6 +694,21 @@
           (is (= (vec (range registrations)) (vec (sort @callbacks))))
           (is (true? (await-result closer))))
         (is (= 0 (:exit (await-result client))))))))
+
+(deftest ordinary-ring-close-callbacks-run-once-test
+  (let [calls (atom [])
+        delivered (promise)
+        [server port] (start-server
+                       (fn [{emitter :ol.busker.request/emitter}]
+                         (protocols/on-close! emitter #(swap! calls conj :first))
+                         (protocols/on-close! emitter #(do (swap! calls conj :second)
+                                                           (deliver delivered true)))
+                         {:status 200 :body "once"}))]
+    (try
+      (is (= "once" (:out (util/curl :http :h1 port "/"))))
+      (is (true? (deref delivered 5000 false)))
+      (finally (busker/stop! server)))
+    (is (= [:first :second] @calls))))
 
 (deftest ordinary-ring-final-headers-head-and-charset-test
   (let [closed (promise)

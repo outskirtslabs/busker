@@ -202,6 +202,9 @@
           (recur (inc i)))))
     (aset pairs n (MapEntry/create header-name (str value)))))
 
+;; A boxed constant, so comparing it with a boxed status allocates nothing.
+(def ^:private reset-content-status 205)
+
 (defn- build-head
   "Returns the head of `response` from one pass over its headers.
 
@@ -210,9 +213,10 @@
   Content-length headers in any letter case stay out of the pairs. The first
   one with a value gives the content length, otherwise `length` does for a final
   head, otherwise it is `-1`. Status 205 always has content length 0.
-  `retain-response?` stores the response without its body under `:response`, for
-  later body operations that need its headers."
-  [response length informational? retain-response?]
+  `compress-hint` is stored as given. `retain-response?` stores the response
+  without its body under `:response`, for later body operations that need its
+  headers."
+  [response length informational? retain-response? compress-hint]
   (let [status (or (:status response) 200)
         headers (:headers response)
         ^Iterator entries (RT/iter headers)]
@@ -242,12 +246,13 @@
           (when (or (> n fixed-final/max-header-pairs)
                     (> (fixed-final/header-staging-bytes pairs) fixed-final/max-header-staging-bytes))
             (throw (ex-info "Response headers exceed bounded header storage" {:header-count n})))
-          {:status status :headers pairs :content-length (if (= 205 status) 0 content-length)
-           :compress-hint (get-compress-hint response)
+          {:status status :headers pairs
+           :content-length (if (= reset-content-status status) 0 content-length)
+           :compress-hint compress-hint
            :response (when retain-response? (-> response (assoc :status status) (dissoc :body)))})))))
 
 (defn- normalized-head [response length informational?]
-  (build-head response length informational? true))
+  (build-head response length informational? true (get-compress-hint response)))
 
 (defn- apply-head! [req head informational?]
   (let [{:keys [status headers content-length compress-hint]} head
@@ -282,19 +287,28 @@
     (try (dispatch task)
          (catch Throwable _ (Thread/startVirtualThread task)))))
 
+(defn- close-lifecycle!
+  "Marks the lifecycle in `state_` closed under `lock`, settles the last receipt
+  and wakes lock waiters. Returns the reserved close-callback task, or nil when
+  there are no callbacks or the lifecycle was already closed.
+
+  Every write to `state_` happens under `lock`, so a read followed by `reset!`
+  cannot lose an update."
+  [lock state_ tail_]
+  (locking lock
+    (let [state @state_]
+      (when-not (= :closed (:phase state))
+        (let [callbacks (:callbacks state)
+              task (reserve-close-callbacks! tail_ callbacks)]
+          (reset! state_ (cond-> (assoc state :phase :closed)
+                           (seq callbacks) (assoc :callbacks [])))
+          (when-let [receipt (:last-receipt state)]
+            (deliver receipt {:status :closed}))
+          (.notifyAll ^Object lock)
+          task)))))
+
 (defn- terminal! [lock state_ tail_ dispatch]
-  (let [[changed? task]
-        (locking lock
-          (if (= :closed (:phase @state_))
-            [false nil]
-            (let [task (reserve-close-callbacks! tail_ (:callbacks @state_))]
-              (swap! state_ assoc :phase :closed :callbacks [])
-              (when-let [receipt (:last-receipt @state_)]
-                (deliver receipt {:status :closed}))
-              (.notifyAll ^Object lock)
-              [true task])))]
-    (dispatch-close-callback! dispatch task)
-    changed?))
+  (dispatch-close-callback! dispatch (close-lifecycle! lock state_ tail_)))
 
 (defn- acquire-producer! [lock state_ wait?]
   (locking lock
@@ -314,7 +328,7 @@
     (.notifyAll ^Object lock)))
 
 (defn- wake-slot-waiters! [req]
-  (when-let [monitor (get-in req [:worker :response-slot-monitor])]
+  (when-let [monitor (:response-slot-monitor (:worker req))]
     (locking monitor (.notifyAll ^Object monitor))))
 
 (declare emit-value! close-emitter!)
@@ -411,7 +425,10 @@
                   (locking lock
                     (if (p/open? emitter)
                       (do
-                        (swap! (.lifecycle_ emitter) assoc :committed head :last-receipt receipt)
+                        (reset! (.lifecycle_ emitter)
+                                (-> @(.lifecycle_ emitter)
+                                    (assoc :committed head)
+                                    (assoc :last-receipt receipt)))
                         (publish!)
                         (terminal! (.lifecycle-lock emitter) (.lifecycle_ emitter)
                                    (.callback-tail_ emitter) (.callback-dispatch emitter))
@@ -495,11 +512,12 @@
                      (serialization/utf8-length body)
                      (alength ^bytes body))]
         (when (<= length (min b fixed-final/response-ring-max-body-bytes))
-          (let [head (build-head response length false false)
-                head (if (and (= h2o/H2O_COMPRESS_HINT_ENABLE (:compress-hint head))
+          (let [hint (get-compress-hint response)
+                hint (if (and (= h2o/H2O_COMPRESS_HINT_ENABLE hint)
                               (< length (or (:compress-min-size config) 0)))
-                       (assoc head :compress-hint h2o/H2O_COMPRESS_HINT_DISABLE)
-                       head)]
+                       h2o/H2O_COMPRESS_HINT_DISABLE
+                       hint)
+                head (build-head response length false false hint)]
             [head (fixed-plan req head body length)]))))))
 
 (defn send-ring-response! [^H2OResponseEmitter emitter response]
