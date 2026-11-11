@@ -72,7 +72,7 @@ either use their documented default or remain unset.
 | `:entrypoints` | Map of entrypoint ids to entrypoint maps (see below).
 | `:dispatch` | Ordered vector of dispatcher maps (see below).
 | `:tls` | Global TLS, certificate, ACME, and session ticket config (see below).
-| `:n-workers` | Positive integer event loop worker count, default `2`.
+| `:n-workers` | Positive integer event loop worker count. The default is half the processors the JVM reports as available (`Runtime.availableProcessors`, which follows container CPU limits and CPU affinity), rounded down, at least `2` and at most `8`: up to 5 processors give `2`, 8 give `4`, 16 or more give `8`. Busker computes the default once when it loads and puts the resulting integer in the config snapshot.
 | `:worker-hot-poll-micros` | Non-negative integer, default `0`. Longest time in microseconds that a worker with live requests polls for new work before it sleeps. `0` disables the poll. A positive value such as `50` lowers response latency when handlers finish inside it, at the cost of up to that much worker CPU per idle gap.
 | `:max-connections` | Positive integer connection cap, default `1024`.
 | `:output-buffer-size` | Positive response byte budget and native streaming block size, default `32768`. Zero is invalid.
@@ -107,7 +107,7 @@ either use their documented default or remain unset.
 
 === Output storage and backpressure
 
-Each worker reserves 256 * `:output-buffer-size` bytes of native streaming storage at startup: 256 reusable blocks. At the default size of 32768 bytes, this is 8 MiB per worker or 16 MiB for two workers, separate from fixed-response slots. The size must be a positive integer no larger than `Integer/MAX_VALUE`. Busker manages the pools internally; `:buffer-pool` is not configurable.
+Each worker reserves 256 * `:output-buffer-size` bytes of native streaming storage at startup: 256 reusable blocks. At the default size of 32768 bytes, this is 8 MiB per worker or 64 MiB for eight workers, separate from fixed-response slots. The size must be a positive integer no larger than `Integer/MAX_VALUE`. Busker manages the pools internally; `:buffer-pool` is not configurable.
 
 Each worker also has 256 fixed-response slots. A fixed body must fit both `:output-buffer-size` and 32768 bytes. Supported bodies beyond those limits use streaming storage.
 

@@ -91,7 +91,8 @@
       (is (= false (get-in config [:entrypoints :http :http3?])))))
 
   (testing "exposes config defaults used by the loader"
-    (is (= 2 (:n-workers specs/default-config)))
+    (is (= (specs/default-n-workers (.availableProcessors (Runtime/getRuntime)))
+           (:n-workers specs/default-config)))
     (is (= 0 (:worker-hot-poll-micros specs/default-config)))
     (is (= 1024 (:max-connections specs/default-config)))
     (is (= 4
@@ -267,6 +268,34 @@
                :tls {:tls-compatibility-mode :modern
                      :http3? false}}]
              listeners)))))
+
+(deftest default-n-workers-test
+  (testing "uses half the processors, at least 2 and at most 8"
+    (are [processors workers] (= workers (specs/default-n-workers processors))
+      1 2
+      2 2
+      3 2
+      4 2
+      6 3
+      8 4
+      12 6
+      16 8
+      32 8
+      64 8
+      128 8)))
+
+(deftest n-workers-config-test
+  (let [base {:entrypoints {:http {:bind ":8080" :tls false}}
+              :dispatch [{}]}]
+    (testing "defaults to the count for the processors available to this JVM"
+      (is (= (specs/default-n-workers (.availableProcessors (Runtime/getRuntime)))
+             (:n-workers (cfg/load! base))
+             (:n-workers (cfg/normalized-snapshot base)))))
+    (testing "uses an explicit value as given"
+      (is (= 1 (:n-workers (cfg/load! (assoc base :n-workers 1)))))
+      (is (= 13 (:n-workers (cfg/load! (assoc base :n-workers 13)))))
+      (is (= 13 (:n-workers (cfg/normalized-snapshot (assoc base :n-workers 13))))))))
+
 (deftest worker-hot-poll-micros-test
   (let [base {:entrypoints {:http {:bind ":8080" :tls false}}
               :dispatch [{}]}]

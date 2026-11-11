@@ -416,10 +416,20 @@
   (s/keys :req-un [::subject-names
                    ::clave-config]))
 
+(defn default-n-workers
+  "Returns the default worker count for `processors` available processors.
+
+  The count is half of `processors`, rounded down, and never less than 2 or
+  more than 8: 1 to 5 processors give 2, 8 give 4, 16 or more give 8."
+  [processors]
+  (-> (quot (long processors) 2)
+      (max 2)
+      (min 8)))
+
 (def n-workers
   {:key ::n-workers
-   :doc "Event loop worker thread count."
-   :default 2})
+   :doc "Event loop worker thread count. Defaults to half the processors available to the JVM, at least 2 and at most 8."
+   :default (default-n-workers (.availableProcessors (Runtime/getRuntime)))})
 (s/def ::n-workers pos-int?)
 
 (def worker-hot-poll-micros
