@@ -7,6 +7,7 @@
    [ol.busker.worker-mailbox :as mailbox])
   (:import
    [java.util HashMap]
+   [ol.busker.evloop Worker]
    [java.util.concurrent CountDownLatch TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
 
@@ -22,6 +23,12 @@
     :response-slot-payload-capacity 0 :hot-poll-ns 0}))
 
 (defn- drain! [worker] (@#'evloop/drain-mailbox! worker))
+
+(deftest hot-worker-keys-are-record-fields-test
+  (is (every? (set (map keyword (Worker/getBasis)))
+              [:callback-dispatch :response-slot-monitor :response-slot-waiters :stream-pool
+               :native-failure_ :termination-cause_ :on-native-failure! :discard-command!
+               :reserve-command! :publish-command! :release-command! :wake-command-waiters!])))
 
 (deftest worker-directly-implements-worker-thread
   (is (instance? ol.busker.internal.protocols.WorkerThread (worker (fn [_ _])))))

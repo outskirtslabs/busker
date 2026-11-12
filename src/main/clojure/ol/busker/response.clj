@@ -328,8 +328,7 @@
     (.notifyAll ^Object lock)))
 
 (defn- wake-slot-waiters! [req]
-  (when-let [monitor (:response-slot-monitor (:worker req))]
-    (locking monitor (.notifyAll ^Object monitor))))
+  (fixed-final/notify-capacity! (:worker req)))
 
 (declare emit-value! close-emitter!)
 
@@ -403,8 +402,7 @@
    (H2OResponseEmitter. req (atom nil) (Object.) (atom open-lifecycle) dispatch
                         (atom completed-callback-tail))))
 
-(defn stop-emitter
-  "Stops admission and settles receipts without releasing native in-flight storage."
+(defn- stop-open-emitter
   [^H2OResponseEmitter emitter]
   (let [lock (.lifecycle-lock emitter)]
     (locking lock
@@ -413,6 +411,19 @@
       (terminal! (.lifecycle-lock emitter) (.lifecycle_ emitter)
                  (.callback-tail_ emitter) (.callback-dispatch emitter))))
   (wake-slot-waiters! (.req emitter)))
+
+(defn stop-emitter
+  "Stops admission and settles receipts without releasing native in-flight storage."
+  [^H2OResponseEmitter emitter]
+  ;; A closed emitter without a writer is left unchanged by the locked path:
+  ;; :closed is terminal, a writer is only created while the lifecycle is open,
+  ;; and closing a closed lifecycle does nothing. Its slot waiters were woken
+  ;; when it closed: stop-emitter and close-emitter! wake them, and a fixed
+  ;; publication closes it from its only producer, which has already claimed.
+  ;; So an unlocked read that sees both is final, and nothing is left to do.
+  (when-not (and (= :closed (:phase @(.lifecycle_ emitter)))
+                 (nil? @(.writer_ emitter)))
+    (stop-open-emitter emitter)))
 
 (defn- fixed-plan [req head body length]
   (fixed-final/direct-response-plan

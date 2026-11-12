@@ -631,6 +631,25 @@
           (is (str/includes? response "text/plain\r\n\r\nHTTP/1.1 200 OK") response)))
       (finally (busker/stop! server)))))
 
+(deftest stop-of-a-closed-emitter-does-not-take-its-lock-test
+  (let [emitter (response/new-response-emitter {} (fn [^Runnable task] (.run task)))
+        lock (.lifecycle-lock ^ol.busker.response.H2OResponseEmitter emitter)
+        held (java.util.concurrent.CountDownLatch. 1)
+        release (java.util.concurrent.CountDownLatch. 1)]
+    (response/stop-emitter emitter)
+    (let [holder (Thread/startVirtualThread
+                  #(locking lock
+                     (.countDown held)
+                     (.await release)))]
+      (try
+        (is (.await held 2 java.util.concurrent.TimeUnit/SECONDS))
+        (is (= :returned (deref (future (response/stop-emitter emitter) :returned)
+                                1000 :blocked)))
+        (is (false? (protocols/open? emitter)))
+        (finally
+          (.countDown release)
+          (.join holder 2000))))))
+
 (deftest stop-after-close-changes-nothing-test
   (let [emitter (response/new-response-emitter {} (fn [^Runnable task] (.run task)))
         lifecycle_ (.lifecycle_ ^ol.busker.response.H2OResponseEmitter emitter)

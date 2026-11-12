@@ -359,7 +359,7 @@
   [worker]
   (when-let [^AtomicBoolean receiver-open?_ (:response-receiver-open?_ worker)]
     (.set receiver-open?_ false))
-  (fixed-final/notify-capacity! worker))
+  (fixed-final/notify-all-capacity! worker))
 
 (defn- worker-native-failure! [worker cause]
   (.compareAndSet ^AtomicReference (:native-failure_ worker) nil cause)

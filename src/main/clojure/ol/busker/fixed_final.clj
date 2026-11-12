@@ -29,8 +29,9 @@
   (:import
    [java.lang System$Logger$Level]
    [java.lang.foreign Arena MemorySegment]
+   [java.lang.invoke VarHandle]
    [java.nio.charset StandardCharsets]
-   [java.util.concurrent.atomic AtomicBoolean AtomicReference]
+   [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicReference]
    [java.util.concurrent.locks Lock ReentrantReadWriteLock]))
 
 (set! *warn-on-reflection* true)
@@ -143,12 +144,32 @@
       (mem/write data response-slot-compress-hint compress-hint)
       data)))
 
-(defn notify-capacity!
-  "Wakes fixed-slot waiters after release or admission closure."
+;; Fixed-slot waiters. A thread waits on `:response-slot-monitor` only in
+;; claim-response!; under the monitor it increments `:response-slot-waiters`
+;; before its first check and rechecks before each wait. A notifier makes its
+;; change, issues a full fence, reads the count and takes the monitor for
+;; notifyAll only when the count is above zero. Either the notifier sees the
+;; count or the waiter's recheck sees the change; the monitor orders the first.
+;; Closing receiver admission also wakes waiters, through notify-all-capacity!,
+;; which does not read the count.
+
+(defn notify-all-capacity!
+  "Wakes every fixed-slot waiter of `worker` without reading the waiter count."
   [worker]
-  (let [monitor (:response-slot-monitor worker)]
+  (when-let [monitor (:response-slot-monitor worker)]
     (locking monitor
       (.notifyAll ^Object monitor))))
+
+(defn notify-capacity!
+  "Wakes fixed-slot waiters of `worker` after a slot is released or a response
+  that may wait for a slot is closed. Call it after that change; it takes the
+  monitor only when a thread is waiting or about to wait."
+  [worker]
+  (let [^AtomicInteger waiters (:response-slot-waiters worker)]
+    (when (or (nil? waiters)
+              (do (VarHandle/fullFence)
+                  (pos? (.get waiters))))
+      (notify-all-capacity! worker))))
 
 (defn- wake-published!
   [worker]
@@ -187,15 +208,20 @@
 
 (defn- claim-response!
   [worker wait? cancelled?]
-  (let [monitor (:response-slot-monitor worker)]
+  (let [monitor (:response-slot-monitor worker)
+        ^AtomicInteger waiters (when wait? (:response-slot-waiters worker))]
     (locking monitor
-      (loop []
-        (if (cancelled?)
-          :closed
-          (let [claim (claim-once! worker)]
-            (if (and wait? (= :overloaded claim))
-              (do (.wait ^Object monitor) (recur))
-              claim)))))))
+      (when waiters (.incrementAndGet waiters))
+      (try
+        (loop []
+          (if (cancelled?)
+            :closed
+            (let [claim (claim-once! worker)]
+              (if (and wait? (= :overloaded claim))
+                (do (.wait ^Object monitor) (recur))
+                claim))))
+        (finally
+          (when waiters (.decrementAndGet waiters)))))))
 
 (defn- prepare-and-publish!
   [worker claim cancelled? prepare! accept!]

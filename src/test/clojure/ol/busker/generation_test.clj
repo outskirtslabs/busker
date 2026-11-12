@@ -440,6 +440,7 @@
       (with-redefs [h2o/mt-response-use-acquire (fn [_] (swap! uses_ inc) 1)
                     h2o/mt-response-use-release (fn [_] (swap! uses_ dec))
                     fixed-final/notify-capacity! (constantly nil)
+                    fixed-final/notify-all-capacity! (constantly nil)
                     h2o/mt-response-try-claim claim-fn
                     h2o/mt-response-pending pending-fn
                     h2o/mt-destroy-response-receiver
@@ -510,6 +511,7 @@
       (with-redefs [h2o/mt-response-use-acquire (fn [_] (swap! uses_ inc) 1)
                     h2o/mt-response-use-release (fn [_] (swap! uses_ dec))
                     fixed-final/notify-capacity! (constantly nil)
+                    fixed-final/notify-all-capacity! (constantly nil)
                     h2o/mt-response-try-claim claim-fn
                     h2o/mt-response-pending pending-fn
                     h2o/mt-response-publish publish-fn

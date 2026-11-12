@@ -25,7 +25,7 @@
   (:import
    [java.util HashMap]
    [java.util.concurrent.locks ReentrantReadWriteLock]
-   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicLong AtomicReference]))
 
 (set! *warn-on-reflection* true)
 
@@ -138,7 +138,20 @@
             ^long response-slot-payload-capacity
             callback-dispatch
             ^HashMap requests
-            args]
+            args
+            stream-pool
+            reserve-command!
+            publish-command!
+            release-command!
+            wake-command-waiters!
+            on-native-failure!
+            discard-command!
+            response-slot-monitor
+            ;; The number of threads waiting or about to wait on
+            ;; response-slot-monitor; see ol.busker.fixed-final.
+            ^AtomicInteger response-slot-waiters
+            ^AtomicReference native-failure_
+            ^AtomicReference termination-cause_]
   p/WorkerThread
   (running? [_]
     (and (.get running?_) (.get accepting?_)))
@@ -365,6 +378,7 @@
                              :on-native-failure! on-native-failure!
                              :discard-command! discard-command!
                              :response-slot-monitor (Object.)
+                             :response-slot-waiters (AtomicInteger.)
                              :native-failure_ (AtomicReference.)
                              :termination-cause_ (AtomicReference.)
                              :evloop nil
