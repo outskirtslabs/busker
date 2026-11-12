@@ -48,8 +48,6 @@ _Static_assert(offsetof(clj_req_ctx_t, on_response_generator_proceed) == 176,
 _Static_assert(offsetof(clj_req_ctx_t, on_response_generator_stop) == 184,
                "FFM stop callback offset");
 
-#define REQ_ERROR "request error\n"
-
 /* Global connection limit counter and maximum.
    Process-global, shared across all workers and listeners in the same JVM.
    TODO: refactor connection limit accounting to be per-server rather than
@@ -95,44 +93,10 @@ struct clj_mt_receiver_t {
   _Atomic bool accepts_responses;
 };
 
-typedef enum {
-  OK = 200,
-  INTERNAL_SERVER_ERROR = 500,
-  BAD_GATEWAY = 502,
-  SERVICE_UNAVAILABLE = 503,
-  GATEWAY_TIMEOUT = 504
-} http_status_code_t;
-
 typedef struct {
   clj_tls_lookup_cb cb;
   void *user_ctx;
 } clj_tls_lookup_binding_t;
-
-static const char *status_code_to_string(http_status_code_t status_code) {
-  const char *ret;
-
-  switch (status_code) {
-  case BAD_GATEWAY:
-    ret = "Bad Gateway";
-    break;
-  case GATEWAY_TIMEOUT:
-    ret = "Gateway Timeout";
-    break;
-  case INTERNAL_SERVER_ERROR:
-    ret = "Internal Server Error";
-    break;
-  case OK:
-    ret = "OK";
-    break;
-  case SERVICE_UNAVAILABLE:
-    ret = "Service Unavailable";
-    break;
-  default:
-    ret = "";
-  }
-
-  return ret;
-}
 
 void *clj_h2o_tls_memdup(const void *value, size_t value_len) {
   if (value == NULL || value_len == 0)
@@ -144,11 +108,6 @@ void *clj_h2o_tls_memdup(const void *value, size_t value_len) {
 
   memcpy(dup, value, value_len);
   return dup;
-}
-void send_error(http_status_code_t status_code, const char *body,
-                h2o_req_t *req) {
-  h2o_send_error_generic(req, status_code, status_code_to_string(status_code),
-                         body, 0);
 }
 
 static int clj_set_fd_cloexec(int fd) {
@@ -765,12 +724,10 @@ static int request_handler(h2o_handler_t *self, h2o_req_t *req) {
     return 0;
   }
 
-  // Allocate ctx from pool so it's auto-freed with request
+  // Allocate ctx from pool so it's auto-freed with request; H2O aborts the
+  // process if the allocation fails, so ctx is never NULL.
   clj_req_ctx_t *const ctx =
       h2o_mem_alloc_shared(&req->pool, sizeof(*ctx), cleanup_request);
-  if (!ctx) {
-    send_error(INTERNAL_SERVER_ERROR, REQ_ERROR, req);
-  }
   memset(ctx, 0, sizeof(*ctx));
   ctx->req = req;
 
