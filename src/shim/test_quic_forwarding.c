@@ -125,7 +125,34 @@ static void test_other_datagrams(void) {
   CHECK(vec.iov_base == buffer && vec.iov_len == len && ttl == 4);
 }
 
+static void test_worker_ctx_send_offload(void) {
+  h2o_globalconf_t conf;
+  h2o_config_init(&conf);
+  h2o_context_t h2o_ctx = {.globalconf = &conf};
+  h2o_evloop_t *loop = h2o_evloop_create();
+  ptls_cipher_suite_t *no_ciphers[] = {NULL};
+  ptls_context_t tls = {.cipher_suites = no_ciphers};
+  quicly_context_t quic = quicly_spec_context;
+  quic.tls = &tls;
+  h2o_http3_server_amend_quicly_context(&conf, &quic);
+  h2o_hostconf_t *hosts[] = {NULL};
+
+  for (int pass = 0; pass < 2; ++pass) {
+    int fd = clj_h2o_http3_open_udp_fd("127.0.0.1", 0);
+    CHECK(fd != -1);
+    clj_http3_ctx_t *ctx = clj_h2o_http3_create_worker_ctx_from_fd(
+        &h2o_ctx, loop, &quic, hosts, fd, 1, 0);
+    CHECK(ctx != NULL);
+    CHECK(ctx->h3_ctx.super.use_gso == conf.http3.use_gso);
+    CHECK(ctx->h3_ctx.super.use_gso == (pass == 0));
+    clj_h2o_http3_dispose_worker_ctx(ctx);
+    conf.http3.use_gso = 0;
+  }
+  h2o_config_dispose(&conf);
+}
+
 int main(void) {
+  test_worker_ctx_send_offload();
   for (int unknown_initial = 0; unknown_initial <= 1; ++unknown_initial) {
     test_forward(0, unknown_initial);
     test_forward(1, unknown_initial);

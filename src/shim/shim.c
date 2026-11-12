@@ -2668,7 +2668,7 @@ clj_h2o_http3_create_worker_ctx_from_fd(h2o_context_t *h2o_ctx,
 
   h2o_http3_server_init_context(h2o_ctx, &ctx->h3_ctx.super, loop, ctx->udp_sock,
                                 NULL, quic_ctx, &ctx->next_cid, NULL,
-                                NULL, 0);
+                                NULL, h2o_ctx->globalconf->http3.use_gso);
 
   ctx->h3_ctx.accept_ctx = &ctx->accept_ctx;
 
