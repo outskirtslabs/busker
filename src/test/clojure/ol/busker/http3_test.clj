@@ -263,6 +263,53 @@
         (finally
           (busker/stop! server))))))
 
+(defn- start-sized-body-server
+  "Starts an HTTP/3 server whose response body is `(:size query)` bytes."
+  [port]
+  (busker/start!
+   (util/with-static-tls
+     (util/with-handler
+       (fn [{:keys [query-string]}]
+         {:status 200
+          :body (apply str (repeat (parse-long (subs query-string 5)) "x"))})
+       {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                            :http3? true
+                            :tls {:tls-compatibility-mode :modern}}}}))))
+
+(deftest http3-large-response-test
+  (testing "One HTTP/3 response larger than four initial congestion windows"
+    (let [port (util/free-port)
+          server (start-sized-body-server port)]
+      (try
+        (let [result (util/wait-for-curl-ready!
+                      :https :h3 port "/?size=262144" :max-time 5
+                      :args ["-o" "/dev/null" "-w" "%{http_code} %{size_download}"])]
+          (is (= {:exit 0 :out "200 262144"} (select-keys result [:exit :out]))
+              (str "stderr: " (:err result))))
+        (finally
+          (busker/stop! server))))))
+
+(deftest http3-many-responses-on-one-connection-test
+  (testing "Small HTTP/3 responses on one connection adding up to more than 100 KB"
+    (let [port (util/free-port)
+          server (start-sized-body-server port)
+          n 64
+          url (str "https://" tls-sni-host ":" port "/?size=2048")]
+      (try
+        (util/wait-for-curl-ready! :https :h3 port "/?size=1" :max-time 5)
+        (let [extra (mapcat (fn [_] ["-o" "/dev/null" url]) (range (dec n)))
+              result (util/curl :https :h3 port "/?size=2048" :max-time 10
+                                :args (concat ["-w" "%{http_code} %{size_download} %{num_connects}\n"]
+                                              extra
+                                              ["-o" "/dev/null"]))
+              lines (str/split-lines (:out result))]
+          (is (= 0 (:exit result)) (str "stderr: " (:err result)))
+          (is (= (repeat n "200 2048") (map #(subs % 0 (str/last-index-of % " ")) lines)))
+          (is (= 1 (reduce + (map #(parse-long (subs % (inc (str/last-index-of % " ")))) lines)))
+              "curl reuses one connection for every URL"))
+        (finally
+          (busker/stop! server))))))
+
 (deftest ipv6-http2-and-http3-request-response-test
   (testing "A TLS IPv6 entrypoint serves both HTTP/2 and HTTP/3 traffic"
     (let [port (util/free-port)

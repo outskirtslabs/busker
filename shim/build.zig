@@ -163,26 +163,51 @@ fn patchedH2o(b: *std.Build, dep: *std.Build.Dependency, patched: *std.AutoHashM
     const contents = b.fmt("{s}        link_to_statechanged(sock);\n{s}", .{ original[0..pos], original[pos..] });
     const files = b.addWriteFiles();
     _ = files.add("socket/evloop.c.h", contents);
-    const socket = files.addCopyFile(h2o.path("lib/common/socket.c"), "socket.c");
+    substituteSource(lib, h2o, "lib/common/socket.c", files.addCopyFile(h2o.path("lib/common/socket.c"), "socket.c"));
 
+    // The HTTP/3 scheduler asks quicly for a resumption token without checking that the QUIC context has the optional
+    // generator, which the shim's context does not set. Remove this patch when the pinned H2O checks it.
+    const server_path = "lib/http3/server.c";
+    b.dependOnFileContents(h2o.path(server_path));
+    const server = source_dir.readFileAlloc(b.graph.io, server_path, b.allocator, .limited(1024 * 1024)) catch
+        @panic("cannot read H2O HTTP/3 server source");
+    std.crypto.hash.sha2.Sha256.hash(server, &digest, .{});
+    if (!std.mem.eql(u8, &std.fmt.bytesToHex(digest, .lower), "d027db17058bf09441fd0e960a1898b3cd20671fa1008730091244f494b73749"))
+        @panic("H2O HTTP/3 server source changed; review the resumption token patch");
+    const token_site = "        if (max_data_sent >= conn->skip_jumpstart_token_until) {";
+    const token_pos = std.mem.indexOf(u8, server, token_site) orelse @panic("H2O resumption token patch site missing");
+    if (std.mem.indexOfPos(u8, server, token_pos + token_site.len, token_site) != null)
+        @panic("H2O resumption token patch site is not unique");
+    const server_contents = b.fmt("{s}{s}{s}", .{
+        server[0..token_pos],
+        "        if (max_data_sent >= conn->skip_jumpstart_token_until &&\n" ++
+            "            quicly_get_context(conn->h3.super.quic)->generate_resumption_token != NULL) {",
+        server[token_pos + token_site.len ..],
+    });
+    substituteSource(lib, h2o, server_path, files.add("http3/server.c", server_contents));
+
+    // Relative includes other than the patched header still use the pinned source tree.
+    lib.root_module.addIncludePath(h2o.path("lib/common"));
+    lib.root_module.addIncludePath(h2o.path("lib/common/socket"));
+    lib.root_module.addIncludePath(h2o.path("lib/http3"));
+    lib.step.dependOn(&files.step);
+    return lib;
+}
+
+fn substituteSource(lib: *std.Build.Step.Compile, h2o: *std.Build.Dependency, sub_path: []const u8, file: std.Build.LazyPath) void {
     var matches: usize = 0;
     for (lib.root_module.link_objects.items) |object| {
         if (object == .c_source_file) {
             const source = object.c_source_file;
             if (source.file == .dependency and source.file.dependency.dependency == h2o and
-                std.mem.eql(u8, source.file.dependency.sub_path, "lib/common/socket.c"))
+                std.mem.eql(u8, source.file.dependency.sub_path, sub_path))
             {
-                source.file = socket;
+                source.file = file;
                 matches += 1;
             }
         }
     }
-    if (matches != 1) @panic("expected exactly one H2O socket translation unit");
-    // Relative includes other than the patched header still use the pinned source tree.
-    lib.root_module.addIncludePath(h2o.path("lib/common"));
-    lib.root_module.addIncludePath(h2o.path("lib/common/socket"));
-    lib.step.dependOn(&files.step);
-    return lib;
+    if (matches != 1) @panic("expected exactly one matching H2O translation unit");
 }
 
 fn buildShimForTarget(b: *std.Build, target_config: TargetConfig, optimize: std.builtin.OptimizeMode, patched: *std.AutoHashMap(*std.Build.Step.Compile, void)) void {
