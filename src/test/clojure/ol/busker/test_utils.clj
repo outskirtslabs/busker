@@ -213,19 +213,24 @@
         false))))
 
 (defn free-port
-  []
-  (let [ipv4-loopback (InetAddress/getByName "127.0.0.1")
-        ipv6-loopback (InetAddress/getByName "::1")]
-    (loop [attempt 0]
-      (when (>= attempt 32)
-        (throw (ex-info "Unable to allocate a free test port"
-                        {:attempts attempt})))
-      (let [candidate (+ 20000 (rand-int (- 32767 20000)))
-            available? (and (loopback-port-available? ipv4-loopback candidate)
-                            (loopback-port-available? ipv6-loopback candidate))]
-        (if available?
-          candidate
-          (recur (inc attempt)))))))
+  "Returns a port that is free for TCP and UDP on the IPv4 and IPv6 loopback
+  addresses, picked at random from `low` (inclusive) to `high` (exclusive),
+  20000 to 32767 by default."
+  ([]
+   (free-port 20000 32767))
+  ([low high]
+   (let [ipv4-loopback (InetAddress/getByName "127.0.0.1")
+         ipv6-loopback (InetAddress/getByName "::1")]
+     (loop [attempt 0]
+       (when (>= attempt 32)
+         (throw (ex-info "Unable to allocate a free test port"
+                         {:attempts attempt :low low :high high})))
+       (let [candidate (+ low (rand-int (- high low)))
+             available? (and (loopback-port-available? ipv4-loopback candidate)
+                             (loopback-port-available? ipv6-loopback candidate))]
+         (if available?
+           candidate
+           (recur (inc attempt))))))))
 
 (defn submap?
   "Is m1 a subset of m2?"

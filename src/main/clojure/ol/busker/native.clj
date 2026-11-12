@@ -1218,9 +1218,10 @@
 (defcfn http3-open-udp-transport
   "Open a pooled UDP transport reservation for HTTP/3.
    The returned handle retains the pooled transport metadata and any reservation
-   socket until [[http3-release-udp-transport]] is called."
+   socket until [[http3-release-udp-transport]] is called. `port` is 0 to 65535;
+   the shim takes it as `uint16_t`."
   "clj_h2o_http3_open_udp_transport"
-  [:string :int16] :pointer)
+  [:string :uint16] :pointer)
 
 (defcfn http3-attach-udp-transport
   "Attach an HTTP/3 worker context to a pooled UDP transport.

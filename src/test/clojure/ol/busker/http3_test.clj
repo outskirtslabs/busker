@@ -186,7 +186,7 @@
           release-listener (requiring-resolve 'ol.busker.native/http3-release-udp-transport)]
       (is (datagram-bindable? port)
           "Port should be available before pooled UDP ownership is acquired")
-      (let [listener (open-listener "127.0.0.1" (short port))]
+      (let [listener (open-listener "127.0.0.1" port)]
         (try
           (is (some? listener)
               "Opening the pooled UDP listener should return a handle")
@@ -207,7 +207,7 @@
           release-transport (requiring-resolve 'ol.busker.native/http3-release-udp-transport)]
       (is (datagram-bindable? "::1" port)
           "IPv6 UDP port should be available before pooled transport ownership is acquired")
-      (let [transport (open-transport "::1" (short port))]
+      (let [transport (open-transport "::1" port)]
         (try
           (is (some? transport)
               "Opening a pooled HTTP/3 transport with an IPv6 host should return a handle")
@@ -239,6 +239,27 @@
               (str "HTTP/3 curl request should succeed. stderr: " (:err result)))
           (is (= "hello http3" (:out result))
               "HTTP/3 response body should match expected"))
+        (finally
+          (busker/stop! server))))))
+
+(deftest http3-request-response-on-a-port-above-32767-test
+  (testing "An HTTP/3 entrypoint binds and answers on a port that does not fit a signed short"
+    (let [port (util/free-port 40000 60000)
+          server (busker/start!
+                  (util/with-static-tls
+                    (util/with-handler
+                      (fn [_] {:status 200 :body "hello high port"})
+                      {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                           :http3? true
+                                           :tls {:tls-compatibility-mode
+                                                 :modern}}}})))]
+      (try
+        (is (udp-port-bound? port)
+            (str "UDP socket should be bound on port " port " for HTTP/3"))
+        (let [result (util/wait-for-curl-ready! :https :h3 port "/" :max-time 5)]
+          (is (= {:exit 0 :out "hello high port"}
+                 (select-keys result [:exit :out]))
+              (str "HTTP/3 request should succeed. stderr: " (:err result))))
         (finally
           (busker/stop! server))))))
 

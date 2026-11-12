@@ -57,7 +57,7 @@
       (= transport :udp)
       ;; TODO(ipv6): Remove this HTTP/3-only transport open path when H1/H2/H3
       ;; share one family-aware listener implementation.
-      (let [transport (h2o/http3-open-udp-transport host (short port))]
+      (let [transport (h2o/http3-open-udp-transport host port)]
         (when (or (nil? transport) (mem/null? transport))
           (throw (ex-info "Failed to open pooled HTTP/3 UDP transport"
                           {:listener-key key})))
