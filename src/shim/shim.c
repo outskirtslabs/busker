@@ -1763,6 +1763,7 @@ struct clj_http3_ctx_t {
   uint32_t thread_id;
   int forward_fd;
   int fd;
+  int reading_forwarded;
 };
 
 typedef struct {
@@ -2764,7 +2765,10 @@ static int clj_rewrite_forwarded_quic_datagram(h2o_quic_ctx_t *h3ctx,
     size_t offset;
   } encapsulated;
 
-  if (msg->msg_iovlen != 1)
+  /* Datagrams from the public socket keep their real sender. */
+  if (!H2O_STRUCT_FROM_MEMBER(clj_http3_ctx_t, h3_ctx.super, h3ctx)
+           ->reading_forwarded ||
+      msg->msg_iovlen != 1)
     return 1;
 
   encapsulated.offset =
@@ -2814,7 +2818,9 @@ static void clj_forwarded_quic_socket_on_read(h2o_socket_t *sock,
   if (err != NULL)
     return;
 
+  ctx->reading_forwarded = 1;
   h2o_quic_read_socket(&ctx->h3_ctx.super, sock);
+  ctx->reading_forwarded = 0;
 }
 
 static int clj_h2o_http3_open_udp_fd(const char *host, uint16_t port) {
