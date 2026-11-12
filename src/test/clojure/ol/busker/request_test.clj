@@ -154,3 +154,78 @@
             (pr-str header-lines)))
       (finally
         (busker/stop! server)))))
+
+(defn- finishes-within?
+  "Runs `f` on a daemon platform thread and returns true when it returns or
+  throws within `timeout-ms`."
+  [timeout-ms f]
+  (let [thread (doto (Thread. (fn [] (try (f) (catch Throwable _ nil))))
+                 (.setDaemon true)
+                 (.start))]
+    (.join thread (long timeout-ms))
+    (not (.isAlive thread))))
+
+(deftest write-chunk-does-not-block-when-the-body-queue-is-full-test
+  (let [{:keys [write-chunk]} (request/create-write-req-channel (fn [] nil))]
+    (write-chunk (byte-array [(byte 1)]) false)
+    (is (finishes-within? 1000 #(write-chunk (byte-array [(byte 2)]) true))
+        "A chunk delivered without the previous one being read must not block the worker")))
+
+(deftest write-chunk-after-close-is-dropped-test
+  (let [{:keys [channel write-chunk]} (request/create-write-req-channel (fn [] nil))]
+    (.close ^java.nio.channels.Channel channel)
+    (is (finishes-within? 1000 #(write-chunk (byte-array [(byte 1)]) true)))
+    (is (thrown? java.nio.channels.ClosedChannelException
+                 (.read ^java.nio.channels.ReadableByteChannel channel
+                        (java.nio.ByteBuffer/allocate 8))))))
+
+(deftest close-racing-a-final-chunk-does-not-block-the-writer-test
+  (let [blocked (atom 0)]
+    (dotimes [_ 2000]
+      (let [{:keys [channel write-chunk]} (request/create-write-req-channel (fn [] nil))
+            barrier (java.util.concurrent.CyclicBarrier. 2)
+            writer (doto (Thread. (fn []
+                                    (.await barrier)
+                                    (write-chunk (byte-array 8) true)))
+                     (.setDaemon true)
+                     (.start))]
+        (.await barrier)
+        (.close ^java.nio.channels.Channel channel)
+        (.join writer 200)
+        (when (.isAlive writer)
+          (swap! blocked inc))))
+    (is (zero? @blocked)
+        "Closing the body while the worker enqueues the final chunk must not block the worker")))
+
+(deftest handler-closing-the-request-body-early-leaves-the-worker-serving-test
+  (let [port (util/free-port)
+        upload (doto (java.io.File/createTempFile "busker-upload" ".bin") (.deleteOnExit))
+        read-counts (atom [])
+        server (busker/start!
+                (util/with-handler
+                  (fn [request]
+                    (if-let [^java.io.InputStream body (:body request)]
+                      (let [buffer (byte-array 4096)
+                            n (.read body buffer)]
+                        (.close body)
+                        (swap! read-counts conj n)
+                        {:status 200 :body "closed early"})
+                      {:status 200 :body "no body"}))
+                  {:n-workers 1
+                   :entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                        :http3? false :tls false}}}))]
+    (try
+      (with-open [out (java.io.FileOutputStream. upload)]
+        (.write out (byte-array (* 8 1024 1024) (byte 120))))
+      (util/wait-for-curl-ready! :http :h1 port "/" :max-time 2)
+      (dotimes [_ 3]
+        (let [result (util/curl :http :h1 port "/upload" :max-time 10
+                                :args ["--data-binary" (str "@" upload)])]
+          (is (= "closed early" (:out result)) (:err result))))
+      (is (= {:exit 0 :out "no body"}
+             (select-keys (util/curl :http :h1 port "/" :max-time 5) [:exit :out]))
+          "The worker keeps serving after handlers closed request bodies early")
+      (is (= 3 (count @read-counts)))
+      (is (every? pos? @read-counts))
+      (finally
+        (busker/stop! server)))))

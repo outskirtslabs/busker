@@ -23,10 +23,16 @@
 
 (defn create-write-req-channel
   "Creates a ReadableByteChannel + RequestBody for streaming request body.
-   proceed-callback is called after each chunk is fully consumed."
+   proceed-callback is called after each chunk is fully consumed.
+
+   `:write-chunk` runs on the event-loop worker and never blocks. H2O delivers
+   the next chunk only after proceed, so the queue holds at most one chunk and
+   the EOF marker; `:write-chunk` and `close` take `admission` only to check
+   closure and enqueue, so close cannot slip in between and fill the queue."
   [proceed-callback]
   (let [queue (LinkedBlockingQueue. 2)
         eof-marker ::eof
+        admission (Object.)
         closed? (volatile! false)
         current-buf (volatile! nil)
         body-channel
@@ -68,18 +74,24 @@
             (not @closed?))
 
           (close [_]
-            (vreset! closed? true)
-            (.clear queue)
-            (.offer queue eof-marker)
+            (locking admission
+              (vreset! closed? true)
+              (.clear queue)
+              (.offer queue eof-marker))
             (vreset! current-buf nil)))]
 
     {:channel body-channel
      :write-chunk (fn [chunk is-last]
-                    (when-not @closed?
-                      (when (and chunk (pos? (alength ^bytes chunk)))
-                        (.put queue chunk))
-                      (when is-last
-                        (.put queue eof-marker))))
+                    (locking admission
+                      (when-not @closed?
+                        (when (and chunk
+                                   (pos? (alength ^bytes chunk))
+                                   (not (.offer queue chunk)))
+                          (throw (IllegalStateException.
+                                  "Request body chunk delivered before the previous one was read")))
+                        (when (and is-last (not (.offer queue eof-marker)))
+                          (throw (IllegalStateException.
+                                  "Request body end delivered before the previous chunk was read"))))))
      :input-stream (Channels/newInputStream body-channel)}))
 
 (defn set-req-body-channel
