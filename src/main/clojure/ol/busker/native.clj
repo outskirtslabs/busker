@@ -827,29 +827,6 @@
      (String. ^bytes (ffi/read-array (ffi/reinterpret ptr len arena) :byte len)
               "UTF-8"))))
 
-(defn build-ring-headers-map
-  ([headers headers-len]
-   (when (and (not (ffi/null? headers)) (pos? headers-len))
-     (build-ring-headers-map headers headers-len (ffi/auto-arena))))
-  ([headers headers-len ^Arena arena]
-   (when (and (not (ffi/null? headers)) (pos? headers-len))
-     (let [header-size (ffi/sizeof ffi-clj-header-t)
-           total-size (* headers-len header-size)
-           sized-headers (ffi/reinterpret headers total-size arena)]
-       (reduce
-        (fn [result i]
-          (let [header-seg (ffi/slice sized-headers (* i header-size) header-size)
-                {:keys [name name_len value value_len]}
-                (ffi/read header-seg ffi-clj-header-t)
-                name-str (str/lower-case (->string name name_len arena))
-                value-str (->string value value_len arena)
-                delimiter (if (= "cookie" name-str) ";" ",")]
-            (if (contains? result name-str)
-              (update result name-str str delimiter value-str)
-              (assoc result name-str value-str))))
-        {}
-        (range headers-len))))))
-
 (defmacro ^:private ordered-array-map
   "Expands to a `PersistentArrayMap` of the key and value forms `kvs`, in the order
   given. The keys must be distinct. A map literal with more than eight entries
@@ -1147,8 +1124,9 @@
 
 (defn- copied-headers
   "Returns the Ring headers map of the copied header fields, or nil when the
-  request has none. Names are lower-cased; repeated headers are joined with `,`,
-  or with `;` for `cookie`."
+  request has none. Names are lower-cased; an empty value is the empty string;
+  repeated headers are joined with `,`, or with `;` for `cookie`, keeping empty
+  occurrences."
   [^bytes bytes ^longs ends]
   (let [n (alength ends)]
     (when (> n 5)
@@ -1156,7 +1134,7 @@
              result {}]
         (if (< i n)
           (let [name (str/lower-case (copied-text bytes ends i))
-                value (copied-text bytes ends (inc i))]
+                value (or (copied-text bytes ends (inc i)) "")]
             (recur (+ i 2)
                    (if (contains? result name)
                      (update result name str (if (= "cookie" name) ";" ",") value)

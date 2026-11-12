@@ -1,14 +1,19 @@
 (ns ol.busker.request-test
   (:require
    [babashka.ffi :as ffi]
+   [clojure.edn :as edn]
+   [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
+   [ol.busker :as busker]
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.request :as request]
    [ol.busker.response-queue :as queue]
+   [ol.busker.test-utils :as util]
    [ol.busker.worker-context :as worker-context])
   (:import
+   [java.net Socket]
    [java.nio.charset StandardCharsets]
    [java.util.concurrent AbstractExecutorService]
    [java.util.concurrent.atomic AtomicReference]))
@@ -109,3 +114,43 @@
                          :done)]
       (is (= :done (deref write-result 1000 :blocked)))
       (is (= -1 (.read input-stream))))))
+
+(defn- raw-request-headers
+  "Sends a GET with the extra `header-lines` to `port` and returns the response body."
+  [port header-lines]
+  (with-open [socket (Socket. "127.0.0.1" (int port))]
+    (let [out (.getOutputStream socket)]
+      (.write out (.getBytes (str "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                                  (apply str (map #(str % "\r\n") header-lines))
+                                  "Connection: close\r\n\r\n")
+                             StandardCharsets/ISO_8859_1))
+      (.flush out)
+      (let [response (String. (.readAllBytes (.getInputStream socket)) StandardCharsets/UTF_8)]
+        (subs response (+ 4 (str/index-of response "\r\n\r\n")))))))
+
+(deftest empty-request-header-values-reach-the-handler-as-strings-test
+  (let [port (util/free-port)
+        server (busker/start!
+                (util/with-handler
+                  (fn [request]
+                    {:status 200
+                     :headers {"content-type" "text/plain"}
+                     :body (pr-str (select-keys (:headers request) ["x-empty" "cookie"]))})
+                  {:n-workers 1
+                   :entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                        :http3? false :tls false}}}))]
+    (try
+      (util/wait-for-curl-ready! :http :h1 port "/" :max-time 2)
+      (doseq [[header-lines expected]
+              [[["X-Empty:"] {"x-empty" ""}]
+               [["X-Empty:    "] {"x-empty" ""}]
+               [["X-Empty:\t"] {"x-empty" ""}]
+               [["X-Empty:" "X-Empty: b"] {"x-empty" ",b"}]
+               [["X-Empty: a" "X-Empty:"] {"x-empty" "a,"}]
+               [["X-Empty: a" "X-Empty:" "X-Empty: c"] {"x-empty" "a,,c"}]
+               [["Cookie:" "Cookie: b=2"] {"cookie" ";b=2"}]
+               [[] {}]]]
+        (is (= expected (edn/read-string (raw-request-headers port header-lines)))
+            (pr-str header-lines)))
+      (finally
+        (busker/stop! server)))))

@@ -500,7 +500,7 @@
             :headers (into {"host" "example.test:8443"
                             "accept-language" "日本語, fr-CH"
                             "x-name" "café ☕"
-                            "x-empty" nil
+                            "x-empty" ""
                             "x-dup" "one,two,über"
                             "cookie" "a=1;b=2"}
                            (for [i (range 50)] [(str "x-header-" i) (str "value-" i)]))
@@ -511,6 +511,19 @@
                                 :scheme "https" :headers headers :http-version 0x0200
                                 :has-body 0 :early-data 0}
                                nil)))))
+
+(deftest assemble-ring-request-keeps-empty-header-values-test
+  (doseq [[headers expected]
+          [[[["X-Empty" ""]] {"x-empty" ""}]
+           [[["X-Empty" ""] ["X-Empty" "b"]] {"x-empty" ",b"}]
+           [[["X-Empty" "a"] ["X-Empty" ""]] {"x-empty" "a,"}]
+           [[["X-Empty" "a"] ["X-Empty" ""] ["X-Empty" "c"]] {"x-empty" "a,,c"}]
+           [[["X-Empty" ""] ["x-empty" ""]] {"x-empty" ","}]
+           [[["Cookie" ""] ["Cookie" "b=2"]] {"cookie" ";b=2"}]
+           [[["X-Other" "1"]] {"x-other" "1"}]]]
+    (is (= expected (:headers (assembled-request {:headers headers}))) (pr-str headers)))
+  (is (= {:headers nil :query-string nil}
+         (select-keys (assembled-request {:headers nil :path "/"}) [:headers :query-string]))))
 
 (deftest assemble-ring-request-treats-an-overlong-authority-port-as-invalid-test
   (doseq [authority ["localhost:99999" "localhost:9999999999999999999"
@@ -676,33 +689,6 @@
                   :headers nil
                   :body nil
                   :ol.busker/early-data? true}})
-
-(defn- recording-arena [^java.lang.foreign.Arena arena scope-calls_ allocation-calls_]
-  (reify java.lang.foreign.Arena
-    (scope [_]
-      (swap! scope-calls_ inc)
-      (.scope arena))
-    (^java.lang.foreign.MemorySegment allocate [_ ^long bytes ^long alignment]
-      (swap! allocation-calls_ inc)
-      (.allocate arena bytes alignment))
-    (close [_])))
-
-(deftest explicit-arena-header-copy-uses-supplied-arena-test
-  (with-open [arena (ffi/shared-arena)]
-    (let [name (ffi/string->ptr arena "X-Test")
-          value (ffi/string->ptr arena "value")
-          header (ffi/alloc arena native/ffi-clj-header-t)
-          _ (ffi/write header native/ffi-clj-header-t
-                       {:name name :name_len 6 :value value :value_len 5})
-          scope-calls_ (atom 0)
-          allocation-calls_ (atom 0)
-          supplied-arena (recording-arena arena scope-calls_ allocation-calls_)]
-      (is (= {:headers {"x-test" "value"}
-              :arena-scope-calls 3
-              :arena-allocation-calls 0}
-             {:headers (native/build-ring-headers-map header 1 supplied-arena)
-              :arena-scope-calls @scope-calls_
-              :arena-allocation-calls @allocation-calls_})))))
 
 (deftest request-snapshot-realizes-after-native-cleanup
   (let [snapshot
