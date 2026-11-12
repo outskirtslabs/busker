@@ -1224,10 +1224,11 @@
 (defcfn http3-attach-udp-transport
   "Attach an HTTP/3 worker context to a pooled UDP transport.
    The worker attachment starts non-accepting until the transport activates
-   the generation identified by `node-id`."
+   the generation identified by `node-id`. Address tokens use keys derived
+   from the session ticket keys of `ticket-mgr`, which may be null."
   "clj_h2o_http3_attach_udp_transport"
   [:pointer :pointer :pointer :pointer
-   :pointer :long :int] :pointer)
+   :pointer :pointer :long :int] :pointer)
 
 (defcfn http3-activate-udp-transport-generation
   "Mark `node-id` as the active acceptor on a pooled UDP transport.

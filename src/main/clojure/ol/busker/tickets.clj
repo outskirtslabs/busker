@@ -255,6 +255,24 @@
           age (- now-ms (:not-before newest))]
       (>= age rotation-threshold))))
 
+(defn- key-id
+  [key]
+  (aget ^bytes (:name key) 0))
+
+(defn- remove-colliding-keys
+  "Drops every key whose first name byte a later (older) key shares, as h2o's
+  `update_tickets` does: QUIC address tokens name their key by that byte."
+  [keys]
+  (loop [kept [] [key & older :as remaining] keys]
+    (cond
+      (empty? remaining) kept
+      (some #(= (key-id key) (key-id %)) older) (recur kept older)
+      :else (recur (conj kept key) older))))
+
+(defn- colliding-keys?
+  [keys]
+  (not= (count keys) (count (distinct (map key-id keys)))))
+
 (defn- snapshot-needs-rotation?
   [snapshot now-ms lifetime-ms]
   (let [keys (-> snapshot :keys (or []) vec)
@@ -263,26 +281,45 @@
       (not-any? #(active-key? % now-ms) valid-keys)
       true
 
+      (colliding-keys? valid-keys)
+      true
+
       (integer? (:next-rotation-ms snapshot))
       (>= now-ms (:next-rotation-ms snapshot))
 
       :else
       (needs-new-key? valid-keys now-ms lifetime-ms))))
 
+(defn- with-unique-key-id
+  "Returns `key` with the first byte of its name changed, as h2o does, so that
+  no key in `keys` shares it. QUIC address tokens name their key by that byte.
+  With 256 or more keys a shared byte is unavoidable and `key` keeps it."
+  [key keys]
+  (let [taken (into #{} (map key-id) keys)
+        ^bytes name (aclone ^bytes (:name key))]
+    (loop [attempt 0]
+      (if (and (contains? taken (aget name 0)) (< attempt 255))
+        (do (aset-byte name 0 (unchecked-byte (inc (aget name 0))))
+            (recur (inc attempt)))
+        (assoc key :name name)))))
+
 (defn rotate-keys
   "Perform key rotation if needed.
 
   Returns updated keys ordered newest-first."
   [keys now-ms lifetime-ms max-keys]
-  ;; Rotation keeps all non-expired keys and prepends one fresh key when the
-  ;; newest active key reaches 1/4 of its lifetime. The retained set is capped
-  ;; at `max-keys`. New keys become active immediately so encryption always has
-  ;; a currently valid key even when operators configure `:max-keys 1`.
+  ;; Rotation keeps the non-expired keys without first-byte collisions and
+  ;; prepends one fresh key when none is active or the newest reaches 1/4 of
+  ;; its lifetime. The retained set is capped at `max-keys`. New keys become
+  ;; active immediately so encryption always has a currently valid key even
+  ;; when operators configure `:max-keys 1`.
   (let [valid-keys (-> keys
                        (prune-expired-keys now-ms)
+                       remove-colliding-keys
                        (retain-max-keys max-keys))]
-    (if (needs-new-key? valid-keys now-ms lifetime-ms)
-      (let [new-key (generate-key now-ms lifetime-ms)
+    (if (or (not-any? #(active-key? % now-ms) valid-keys)
+            (needs-new-key? valid-keys now-ms lifetime-ms))
+      (let [new-key (with-unique-key-id (generate-key now-ms lifetime-ms) valid-keys)
             next-keys (into [new-key] valid-keys)]
         (retain-max-keys next-keys max-keys))
       valid-keys)))

@@ -463,6 +463,8 @@ void clj_h2o_free_ptls_ctx(ptls_context_t *ctx);
  * Starts from quicly_spec_context and configures:
  *   - TLS context from ptls_ctx
  *   - CID encryptor with random key
+ *   - resumption token generator using the address token keys of the
+ *     accepting worker
  *   - HTTP/3 transport parameters via h2o_http3_server_amend_quicly_context
  * Parameters:
  *   ptls_ctx: picotls context from clj_h2o_create_ptls_ctx
@@ -486,12 +488,15 @@ clj_http3_udp_transport_t *clj_h2o_http3_open_udp_transport(const char *host,
 /* Attach an HTTP/3 worker context to a pooled UDP transport.
  * The worker attachment joins the transport under (node_id, thread_id) but
  * starts non-accepting until the transport activates that generation.
+ * Address tokens use keys derived from ticket_mgr's session ticket keys; with
+ * a NULL ticket_mgr presented tokens are ignored.
  */
 clj_http3_ctx_t *
 clj_h2o_http3_attach_udp_transport(h2o_context_t *h2o_ctx, h2o_evloop_t *loop,
                                    quicly_context_t *quic_ctx,
                                    h2o_hostconf_t **hosts,
                                    clj_http3_udp_transport_t *transport,
+                                   clj_ticket_manager_t *ticket_mgr,
                                    uint64_t node_id, uint32_t thread_id);
 
 /* Mark one generation as the active acceptor for a pooled UDP transport.

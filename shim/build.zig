@@ -83,7 +83,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }), &patched);
     const test_step = b.step("test", "Test native callbacks and fixed-slot lifetime");
-    const native_tests = [_][]const u8{ "quic_forwarding", "fixed_retention", "socket_write_completion" };
+    const native_tests = [_][]const u8{ "quic_forwarding", "address_tokens", "fixed_retention", "socket_write_completion" };
     for (native_tests) |test_name| {
         const forwarding_test = b.addExecutable(.{
             .name = b.fmt("test-{s}", .{test_name}),
@@ -103,6 +103,10 @@ pub fn build(b: *std.Build) void {
         forwarding_test.root_module.linkSystemLibrary("dl", .{});
         forwarding_test.root_module.linkSystemLibrary("m", .{});
         const run_forwarding_test = b.addRunArtifact(forwarding_test);
+        if (std.mem.eql(u8, test_name, "address_tokens")) {
+            run_forwarding_test.addFileArg(b.path("../src/test/fixtures/server.crt"));
+            run_forwarding_test.addFileArg(b.path("../src/test/fixtures/server.key"));
+        }
         test_step.dependOn(&run_forwarding_test.step);
         b.getInstallStep().dependOn(&run_forwarding_test.step);
     }
@@ -165,31 +169,9 @@ fn patchedH2o(b: *std.Build, dep: *std.Build.Dependency, patched: *std.AutoHashM
     _ = files.add("socket/evloop.c.h", contents);
     substituteSource(lib, h2o, "lib/common/socket.c", files.addCopyFile(h2o.path("lib/common/socket.c"), "socket.c"));
 
-    // The HTTP/3 scheduler asks quicly for a resumption token without checking that the QUIC context has the optional
-    // generator, which the shim's context does not set. Remove this patch when the pinned H2O checks it.
-    const server_path = "lib/http3/server.c";
-    b.dependOnFileContents(h2o.path(server_path));
-    const server = source_dir.readFileAlloc(b.graph.io, server_path, b.allocator, .limited(1024 * 1024)) catch
-        @panic("cannot read H2O HTTP/3 server source");
-    std.crypto.hash.sha2.Sha256.hash(server, &digest, .{});
-    if (!std.mem.eql(u8, &std.fmt.bytesToHex(digest, .lower), "d027db17058bf09441fd0e960a1898b3cd20671fa1008730091244f494b73749"))
-        @panic("H2O HTTP/3 server source changed; review the resumption token patch");
-    const token_site = "        if (max_data_sent >= conn->skip_jumpstart_token_until) {";
-    const token_pos = std.mem.indexOf(u8, server, token_site) orelse @panic("H2O resumption token patch site missing");
-    if (std.mem.indexOfPos(u8, server, token_pos + token_site.len, token_site) != null)
-        @panic("H2O resumption token patch site is not unique");
-    const server_contents = b.fmt("{s}{s}{s}", .{
-        server[0..token_pos],
-        "        if (max_data_sent >= conn->skip_jumpstart_token_until &&\n" ++
-            "            quicly_get_context(conn->h3.super.quic)->generate_resumption_token != NULL) {",
-        server[token_pos + token_site.len ..],
-    });
-    substituteSource(lib, h2o, server_path, files.add("http3/server.c", server_contents));
-
     // Relative includes other than the patched header still use the pinned source tree.
     lib.root_module.addIncludePath(h2o.path("lib/common"));
     lib.root_module.addIncludePath(h2o.path("lib/common/socket"));
-    lib.root_module.addIncludePath(h2o.path("lib/http3"));
     lib.step.dependOn(&files.step);
     return lib;
 }

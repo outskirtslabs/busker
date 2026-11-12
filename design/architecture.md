@@ -117,6 +117,12 @@ On receipt, the shim caps TTL at the context's configured default and rejects en
 These checks are performed by Busker's callbacks, as required by the current libh2o callback contract.
 Native socketpair regression tests cover these rules and run during normal shim builds.
 
+### QUIC address tokens
+
+Address tokens are built as in h2o's server, from the session ticket keys. Each ticket key yields an AES-128-GCM token key: the SHA-256 digest of its cipher and HMAC keys, expanded with the HKDF label `address-token`. The first byte of the ticket key's name prefixes each token. Whenever the ticket key service loads, reseeds or rotates its key set, it drops the newer key of any two that share a first byte and creates a key if none is left active, and it gives every new key a first byte that no retained key uses. New tokens use the newest ticket key; a presented token is decrypted with the retained key its first byte names. Token keys therefore rotate, expire and survive reloads (or, with storage persistence, restarts) exactly as ticket keys do. Each HTTP/3 worker keeps a separate set of cipher contexts for every ticket key, used only on its loop, and rebuilds them when the ticket manager's key generation changes.
+
+Busker sends NEW_TOKEN frames when quicly and libh2o ask for them. On accept, a resumption token from the same IP address and at most ten minutes old validates the client's address; an older token, or one from another address, leaves the address unvalidated, and a token that no retained key decrypts is ignored. A Retry-type token whose first byte names a retained key but that does not decrypt is answered with INVALID_TOKEN; with any other first byte, or on a worker without token keys, it is ignored. Busker never sends Retry, as h2o does not by default. When session tickets are disabled, workers have no token keys: presented tokens are ignored and NEW_TOKEN frames carry random bytes of a real token's length, which no server accepts, because quicly offers no way to skip a requested token.
+
 ## Related decisions
 
 - [ADR 001](adr/001-response-emitter-close-callbacks.md): virtual-thread close callbacks.

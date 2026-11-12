@@ -26,21 +26,61 @@
    :not-before not-before
    :not-after not-after})
 
-(deftest rotate-keys-preserves-distinct-full-ticket-names-test
-  (testing "rotation keeps keys whose 16-byte names differ even if the first byte matches"
+(deftest rotate-keys-drops-newer-key-of-first-byte-collision-test
+  (testing "a loaded set with two keys sharing a first name byte keeps the older one, as h2o does"
     (let [now-ms 1000000
           lifetime-ms 86400000
-          key-a (key-with-name
-                 (concat [42] (repeat 15 1))
-                 (- now-ms 10000)
-                 (+ now-ms 10000))
-          key-b (key-with-name
-                 (concat [42] (repeat 15 2))
-                 (- now-ms 20000)
-                 (+ now-ms 20000))
-          rotated (tickets/rotate-keys [key-a key-b] now-ms lifetime-ms 4)]
-      (is (= (key-set->edn [key-a key-b])
+          key-a (key-with-name (concat [42] (repeat 15 1)) (- now-ms 10000) (+ now-ms 10000))
+          key-b (key-with-name (concat [42] (repeat 15 2)) (- now-ms 20000) (+ now-ms 20000))
+          key-c (key-with-name (concat [43] (repeat 15 3)) (- now-ms 30000) (+ now-ms 30000))
+          rotated (tickets/rotate-keys [key-a key-b key-c] now-ms lifetime-ms 4)]
+      (is (= (key-set->edn [key-b key-c])
              (key-set->edn rotated))))))
+
+(deftest rotate-keys-creates-key-when-collision-leaves-none-active-test
+  (testing "when the key left after a collision is not active, a fresh key with an unused first byte is created"
+    (let [now-ms 1000000
+          lifetime-ms 86400000
+          active (key-with-name (concat [42] (repeat 15 1)) (- now-ms 10000) (+ now-ms 10000))
+          not-yet (key-with-name (concat [42] (repeat 15 2)) (+ now-ms 10000) (+ now-ms 20000))
+          [new-key & kept] (tickets/rotate-keys [active not-yet] now-ms lifetime-ms 4)]
+      (is (= (key-set->edn [not-yet]) (key-set->edn kept)))
+      (is (= now-ms (:not-before new-key)))
+      (is (not= 42 (aget ^bytes (:name new-key) 0))))))
+
+(deftest rotate-keys-leaves-set-without-collisions-untouched-test
+  (testing "a set whose first name bytes differ and whose newest key is young is kept as it is"
+    (let [now-ms 1000000
+          lifetime-ms 86400000
+          keys [(key-with-name (concat [1] (repeat 15 1)) (- now-ms 10000) (+ now-ms 10000))
+                (key-with-name (concat [2] (repeat 15 1)) (- now-ms 20000) (+ now-ms 20000))]]
+      (is (= (key-set->edn keys)
+             (key-set->edn (tickets/rotate-keys keys now-ms lifetime-ms 4)))))))
+
+(deftest memory-ticket-service-removes-collision-from-loaded-snapshot-test
+  (testing "a reseeded snapshot holding a collision reaches the native manager without it"
+    (let [now-ms (System/currentTimeMillis)
+          newer (key-with-name (concat [7] (repeat 15 1)) (- now-ms 1000) (+ now-ms 3600000))
+          older (key-with-name (concat [7] (repeat 15 2)) (- now-ms 2000) (+ now-ms 3600000))
+          service (tickets/create-memory-ticket-service {:lifetime-seconds 86400}
+                                                        {:keys [newer older]
+                                                         :last-rotation-ms now-ms})]
+      (is (= (key-set->edn [older])
+             (key-set->edn (:keys @(:snapshot-atom service))))))))
+
+(deftest rotate-keys-gives-new-key-an-unused-first-name-byte-test
+  (testing "a new key's first name byte, which names QUIC address token keys, differs from every retained key"
+    (let [now-ms 1000000
+          lifetime-ms 400000
+          retained (for [b (range 256) :when (not= b 7)]
+                     {:name (byte-array (cons (unchecked-byte b) (repeat 15 0)))
+                      :aes-key (byte-array 32)
+                      :hmac-key (byte-array 64)
+                      :not-before (- now-ms 300000)
+                      :not-after (+ now-ms 100000)})
+          [new-key & kept] (tickets/rotate-keys (vec retained) now-ms lifetime-ms 256)]
+      (is (= 255 (count kept)))
+      (is (= 7 (aget ^bytes (:name new-key) 0))))))
 
 (deftest rotate-keys-trims-retained-set-to-max-keys-test
   (testing "rotation keeps only the newest max-keys valid entries"

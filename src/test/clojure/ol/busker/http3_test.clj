@@ -263,29 +263,55 @@
         (finally
           (busker/stop! server))))))
 
-(defn- start-sized-body-server
-  "Starts an HTTP/3 server whose response body is `(:size query)` bytes."
-  [port]
-  (busker/start!
+(defn- sized-body-config
+  "Config for an HTTP/3 server whose response body is `(:size query)` bytes."
+  ([port]
+   (sized-body-config port {}))
+  ([port tls]
    (util/with-static-tls
      (util/with-handler
        (fn [{:keys [query-string]}]
          {:status 200
           :body (apply str (repeat (parse-long (subs query-string 5)) "x"))})
-       {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
+       {:tls tls
+        :entrypoints {:tls {:bind (str "127.0.0.1:" port)
                             :http3? true
                             :tls {:tls-compatibility-mode :modern}}}}))))
+
+(defn- start-sized-body-server
+  [port]
+  (busker/start! (sized-body-config port)))
+
+(defn- large-http3-response
+  [port]
+  (util/wait-for-curl-ready!
+   :https :h3 port "/?size=262144" :max-time 5
+   :args ["-o" "/dev/null" "-w" "%{http_code} %{size_download}"]))
 
 (deftest http3-large-response-test
   (testing "One HTTP/3 response larger than four initial congestion windows"
     (let [port (util/free-port)
           server (start-sized-body-server port)]
       (try
-        (let [result (util/wait-for-curl-ready!
-                      :https :h3 port "/?size=262144" :max-time 5
-                      :args ["-o" "/dev/null" "-w" "%{http_code} %{size_download}"])]
+        (let [result (large-http3-response port)]
           (is (= {:exit 0 :out "200 262144"} (select-keys result [:exit :out]))
               (str "stderr: " (:err result))))
+        (finally
+          (busker/stop! server))))))
+
+(deftest http3-large-response-without-session-tickets-test
+  (testing "Without ticket keys, large HTTP/3 responses are served before and after a reload"
+    (let [port (util/free-port)
+          config (sized-body-config port {:session-tickets {:disabled? true}})
+          server (busker/start! config)]
+      (try
+        (let [result (large-http3-response port)]
+          (is (= {:exit 0 :out "200 262144"} (select-keys result [:exit :out]))
+              (str "stderr: " (:err result))))
+        (is (= :activated (busker/reload! server config {:force? true})))
+        (let [result (large-http3-response port)]
+          (is (= {:exit 0 :out "200 262144"} (select-keys result [:exit :out]))
+              (str "stderr after reload: " (:err result))))
         (finally
           (busker/stop! server))))))
 

@@ -1718,6 +1718,38 @@ void clj_h2o_free_ssl_ctx(SSL_CTX *ssl_ctx) {
   }
 }
 
+/* Thread-safe key manager structure */
+struct clj_ticket_manager {
+    pthread_rwlock_t rwlock;
+    clj_session_ticket_t *keys;
+    size_t num_keys;
+    size_t capacity;
+    uint32_t ticket_lifetime_seconds;
+    /* Changes after each key replacement; workers rebuild QUIC keys when it differs */
+    _Atomic uint64_t generation;
+
+    /* QUIC transport params hash for 0-RTT validation */
+    uint8_t quic_tp_tag[8];
+    int quic_tp_tag_valid;
+};
+
+/* Address token keys derived from one session ticket key (h2o src/ssl.c
+   st_quic_keyset_t, without the CID encryptor). */
+typedef struct {
+  uint8_t name;
+  ptls_aead_context_t *enc;
+  ptls_aead_context_t *dec;
+} clj_quic_keyset_t;
+
+/* A picotls AEAD context is not safe to use from two threads, so each worker
+   keeps keysets for all ticket keys, as h2o keeps them per thread (quic_keys). */
+typedef struct {
+  clj_ticket_manager_t *mgr;
+  uint64_t generation;
+  clj_quic_keyset_t *keys;
+  size_t num_keys;
+} clj_address_token_keys_t;
+
 /* HTTP/3 (QUIC) context structure holding all resources for one worker */
 struct clj_http3_ctx_t {
   h2o_http3_server_ctx_t h3_ctx;
@@ -1726,6 +1758,7 @@ struct clj_http3_ctx_t {
   h2o_socket_t *forwarded_sock;
   quicly_cid_plaintext_t next_cid;
   struct clj_http3_udp_transport_t *transport;
+  clj_address_token_keys_t address_token;
   uint64_t node_id;
   uint32_t thread_id;
   int forward_fd;
@@ -2076,6 +2109,220 @@ void clj_h2o_free_ptls_ctx(ptls_context_t *ctx) {
   free(wrapper);
 }
 
+/* Address tokens follow h2o's server: init_quic_keyset, update_quic_keys,
+   quic_decrypt_address_token and generate_resumption_token in src/ssl.c, and
+   validate_token and on_http3_accept in src/main.c. */
+static int clj_init_quic_keyset(clj_quic_keyset_t *keyset,
+                                const clj_session_ticket_t *ticket) {
+  uint8_t master[CLJ_TICKET_AES_KEY_LEN + CLJ_TICKET_HMAC_KEY_LEN],
+      master_digest[PTLS_SHA256_DIGEST_SIZE], keybuf[PTLS_SHA256_DIGEST_SIZE];
+  memcpy(master, ticket->aes_key, CLJ_TICKET_AES_KEY_LEN);
+  memcpy(master + CLJ_TICKET_AES_KEY_LEN, ticket->hmac_key,
+         CLJ_TICKET_HMAC_KEY_LEN);
+
+  *keyset = (clj_quic_keyset_t){.name = ticket->name[0]};
+  if (ptls_calc_hash(&ptls_openssl_sha256, master_digest, master,
+                     sizeof(master)) == 0 &&
+      ptls_hkdf_expand_label(&ptls_openssl_sha256, keybuf, sizeof(keybuf),
+                             ptls_iovec_init(master_digest,
+                                             sizeof(master_digest)),
+                             "address-token", ptls_iovec_init(NULL, 0),
+                             "") == 0) {
+    keyset->enc = ptls_aead_new(&ptls_openssl_aes128gcm, &ptls_openssl_sha256,
+                                1, keybuf, "");
+    keyset->dec = ptls_aead_new(&ptls_openssl_aes128gcm, &ptls_openssl_sha256,
+                                0, keybuf, "");
+  }
+
+  ptls_clear_memory(master, sizeof(master));
+  ptls_clear_memory(master_digest, sizeof(master_digest));
+  ptls_clear_memory(keybuf, sizeof(keybuf));
+  return keyset->enc != NULL && keyset->dec != NULL;
+}
+
+static void clj_dispose_quic_keyset(clj_quic_keyset_t *keyset) {
+  if (keyset->enc != NULL)
+    ptls_aead_free(keyset->enc);
+  if (keyset->dec != NULL)
+    ptls_aead_free(keyset->dec);
+  *keyset = (clj_quic_keyset_t){0};
+}
+
+static void clj_address_token_keys_clear(clj_address_token_keys_t *keys) {
+  while (keys->num_keys != 0)
+    clj_dispose_quic_keyset(keys->keys + --keys->num_keys);
+  free(keys->keys);
+  keys->keys = NULL;
+}
+
+static void clj_address_token_keys_dispose(clj_address_token_keys_t *keys) {
+  clj_address_token_keys_clear(keys);
+  *keys = (clj_address_token_keys_t){0};
+}
+
+/* Returns the active keyset (the newest ticket key), or NULL when the worker
+   has no ticket keys. h2o aborts where this returns NULL; the JVM must not. */
+static clj_quic_keyset_t *
+clj_update_quic_keys(clj_address_token_keys_t *keys) {
+  clj_ticket_manager_t *mgr = keys->mgr;
+  uint64_t new_generation;
+
+  if (mgr == NULL)
+    return NULL;
+  while ((new_generation = atomic_load(&mgr->generation)) != keys->generation) {
+    clj_address_token_keys_clear(keys);
+
+    pthread_rwlock_rdlock(&mgr->rwlock);
+    if (mgr->num_keys != 0 &&
+        (keys->keys = calloc(mgr->num_keys, sizeof(*keys->keys))) == NULL) {
+      pthread_rwlock_unlock(&mgr->rwlock);
+      return NULL;
+    }
+    for (; keys->num_keys != mgr->num_keys; ++keys->num_keys) {
+      if (!clj_init_quic_keyset(keys->keys + keys->num_keys,
+                                mgr->keys + keys->num_keys)) {
+        clj_dispose_quic_keyset(keys->keys + keys->num_keys);
+        pthread_rwlock_unlock(&mgr->rwlock);
+        clj_address_token_keys_clear(keys);
+        return NULL;
+      }
+    }
+    pthread_rwlock_unlock(&mgr->rwlock);
+
+    keys->generation = new_generation;
+  }
+
+  return keys->num_keys != 0 ? keys->keys : NULL;
+}
+
+static clj_quic_keyset_t *
+clj_find_quic_keyset(clj_address_token_keys_t *keys, uint8_t key_id) {
+  for (size_t i = 0; i != keys->num_keys; ++i) {
+    if (keys->keys[i].name == key_id)
+      return keys->keys + i;
+  }
+  return NULL;
+}
+
+/* No generator error only skips the token: quicly returns it from
+   quicly_send, where h2o_quic_send aborts the process for most codes,
+   STATE_EXHAUSTION and FREE_CONNECTION destroy the connection, and
+   SENDBUF_FULL leaves NEW_TOKEN pending ahead of stream data, stalling it. A
+   worker without keys therefore sends random bytes of a real token's length
+   (quicly_encrypt_address_token) with the resumption type, which no server
+   decrypts or answers with INVALID_TOKEN. */
+static quicly_error_t
+clj_random_address_token(ptls_buffer_t *buf,
+                         const quicly_address_token_plaintext_t *token) {
+  size_t address_len = token->remote.sa.sa_family == AF_INET6 ? 16 + 4 : 4;
+  size_t len = 1 + 1 + PTLS_AESGCM_IV_SIZE + 8 + 1 + address_len + 2 + 1 +
+               token->resumption.len + 1 + token->appdata.len +
+               PTLS_AESGCM_TAG_SIZE;
+  int ret;
+  if ((ret = ptls_buffer_reserve(buf, len)) != 0)
+    return ret;
+  ptls_openssl_random_bytes(buf->base + buf->off, len);
+  buf->base[buf->off + 1] = QUICLY_ADDRESS_TOKEN_TYPE_RESUMPTION;
+  buf->off += len;
+  return 0;
+}
+
+static quicly_error_t
+clj_encrypt_address_token(clj_address_token_keys_t *keys, ptls_buffer_t *buf,
+                          const quicly_address_token_plaintext_t *token) {
+  clj_quic_keyset_t *keyset = clj_update_quic_keys(keys);
+  int ret;
+
+  if (keyset == NULL)
+    return clj_random_address_token(buf, token);
+
+  if ((ret = ptls_buffer_reserve(buf, 1)) != 0)
+    return ret;
+  buf->base[buf->off++] = keyset->name;
+  return quicly_encrypt_address_token(ptls_openssl_random_bytes, keyset->enc,
+                                      buf, buf->off - 1, token);
+}
+
+static quicly_error_t
+clj_decrypt_address_token(clj_address_token_keys_t *keys,
+                          quicly_address_token_plaintext_t *pt,
+                          ptls_iovec_t input, const char **err_desc) {
+  clj_quic_keyset_t *keyset;
+
+  clj_update_quic_keys(keys);
+
+  if ((keyset = clj_find_quic_keyset(keys, input.base[0])) == NULL)
+    return PTLS_ERROR_INCOMPATIBLE_KEY;
+  return quicly_decrypt_address_token(keyset->dec, pt, input.base, input.len, 1,
+                                      err_desc);
+}
+
+/* Runs on the worker loop of the connection, so the worker's keys are safe to use */
+static quicly_error_t
+clj_generate_resumption_token(quicly_generate_resumption_token_t *self,
+                              quicly_conn_t *conn, ptls_buffer_t *buf,
+                              quicly_address_token_plaintext_t *token) {
+  (void)self;
+  h2o_quic_conn_t *qconn = *quicly_get_data(conn);
+  clj_http3_ctx_t *ctx =
+      H2O_STRUCT_FROM_MEMBER(clj_http3_ctx_t, h3_ctx.super, qconn->ctx);
+  return clj_encrypt_address_token(&ctx->address_token, buf, token);
+}
+
+static quicly_generate_resumption_token_t clj_resumption_token_generator = {
+    clj_generate_resumption_token};
+
+static int clj_validate_address_token(quicly_context_t *quic,
+                                      struct sockaddr *remote,
+                                      ptls_iovec_t client_cid,
+                                      ptls_iovec_t server_cid,
+                                      quicly_address_token_plaintext_t *token) {
+  int64_t age = quic->now->cb(quic->now) - (int64_t)token->issued_at;
+  if (age < 0)
+    age = 0;
+
+  token->address_mismatch =
+      h2o_socket_compare_address(remote, &token->remote.sa,
+                                 token->type == QUICLY_ADDRESS_TOKEN_TYPE_RETRY) != 0;
+
+  switch (token->type) {
+  case QUICLY_ADDRESS_TOKEN_TYPE_RETRY:
+    return !token->address_mismatch && age <= 30 * 1000 &&
+           quicly_cid_is_equal(&token->retry.client_cid, client_cid) &&
+           quicly_cid_is_equal(&token->retry.server_cid, server_cid);
+  case QUICLY_ADDRESS_TOKEN_TYPE_RESUMPTION:
+    if (age > 10 * 60 * 1000)
+      token->address_mismatch = 1;
+    return 1;
+  }
+  return 0;
+}
+
+/* Sets *token to the token quicly_accept should use, or NULL to accept as if
+   the Initial carried none. QUICLY_TRANSPORT_ERROR_INVALID_TOKEN means the
+   packet carried a damaged Retry token and must be answered with
+   INVALID_TOKEN instead of a connection. */
+static quicly_error_t clj_read_address_token(
+    clj_address_token_keys_t *keys, quicly_context_t *quic,
+    struct sockaddr *remote,
+    quicly_decoded_packet_t *packet, quicly_address_token_plaintext_t *buf,
+    quicly_address_token_plaintext_t **token, const char **err_desc) {
+  *token = NULL;
+  *err_desc = NULL;
+  if (packet->token.len == 0)
+    return 0;
+  quicly_error_t ret =
+      clj_decrypt_address_token(keys, buf, packet->token, err_desc);
+  if (ret == 0) {
+    if (clj_validate_address_token(quic, remote, packet->cid.src,
+                                   packet->cid.dest.encrypted, buf))
+      *token = buf;
+  } else if (ret == QUICLY_TRANSPORT_ERROR_INVALID_TOKEN) {
+    return ret;
+  }
+  return 0;
+}
+
 /* Internal structure to hold quicly context and its CID encryptor */
 typedef struct {
   quicly_context_t ctx;
@@ -2134,6 +2381,7 @@ quicly_context_t *clj_h2o_create_quicly_ctx(ptls_context_t *ptls_ctx,
   }
 
   wrapper->ctx.cid_encryptor = wrapper->cid_encryptor;
+  wrapper->ctx.generate_resumption_token = &clj_resumption_token_generator;
 
   quicly_amend_ptls_context(ptls_ctx);
   h2o_http3_server_amend_quicly_context(globalconf, &wrapper->ctx);
@@ -2179,17 +2427,34 @@ static void clj_init_http3_conn_callbacks(void) {
 static h2o_quic_conn_t *
 clj_on_http3_accept(h2o_quic_ctx_t *quic_ctx, quicly_address_t *destaddr,
                     quicly_address_t *srcaddr, quicly_decoded_packet_t *packet) {
-  h2o_http3_server_ctx_t *h3ctx =
-      H2O_STRUCT_FROM_MEMBER(h2o_http3_server_ctx_t, super, quic_ctx);
+  clj_http3_ctx_t *ctx =
+      H2O_STRUCT_FROM_MEMBER(clj_http3_ctx_t, h3_ctx.super, quic_ctx);
 
   /* Enforce global connection limit before accepting */
   if (!clj_h2o_conn_limit_try_acquire())
     return NULL;
 
+  quicly_address_token_plaintext_t token_buf, *token;
+  const char *err_desc;
+  if (clj_read_address_token(&ctx->address_token, quic_ctx->quic,
+                             &srcaddr->sa, packet, &token_buf, &token,
+                             &err_desc) != 0) {
+    uint8_t payload[QUICLY_MIN_CLIENT_INITIAL_SIZE];
+    size_t payload_size = quicly_send_close_invalid_token(
+        quic_ctx->quic, packet->version, packet->cid.src,
+        packet->cid.dest.encrypted, err_desc, payload);
+    if (payload_size != SIZE_MAX) {
+      struct iovec vec = {.iov_base = payload, .iov_len = payload_size};
+      h2o_quic_send_datagrams(quic_ctx, srcaddr, destaddr, &vec, 1, 0);
+    }
+    clj_h2o_conn_limit_release();
+    return NULL;
+  }
+
   clj_init_http3_conn_callbacks();
 
   h2o_http3_conn_t *conn = h2o_http3_server_accept(
-      h3ctx, destaddr, srcaddr, packet, NULL, &clj_http3_conn_callbacks);
+      &ctx->h3_ctx, destaddr, srcaddr, packet, token, &clj_http3_conn_callbacks);
 
   /* Release if accept failed without creating a connection */
   if (!conn) {
@@ -2711,6 +2976,7 @@ clj_h2o_http3_attach_udp_transport(h2o_context_t *h2o_ctx, h2o_evloop_t *loop,
                                    quicly_context_t *quic_ctx,
                                    h2o_hostconf_t **hosts,
                                    clj_http3_udp_transport_t *transport,
+                                   clj_ticket_manager_t *ticket_mgr,
                                    uint64_t node_id, uint32_t thread_id) {
   clj_http3_ctx_t *ctx;
   int fds[2];
@@ -2751,7 +3017,10 @@ clj_h2o_http3_attach_udp_transport(h2o_context_t *h2o_ctx, h2o_evloop_t *loop,
   if (ctx == NULL)
     return NULL;
 
+  ctx->address_token.mgr = ticket_mgr;
+
   if (socketpair(AF_UNIX, SOCK_DGRAM, 0, fds) != 0) {
+    clj_address_token_keys_dispose(&ctx->address_token);
     h2o_quic_dispose_context(&ctx->h3_ctx.super);
     free(ctx);
     return NULL;
@@ -2761,6 +3030,7 @@ clj_h2o_http3_attach_udp_transport(h2o_context_t *h2o_ctx, h2o_evloop_t *loop,
       clj_set_fd_nonblock(fds[1]) != 0) {
     close(fds[0]);
     close(fds[1]);
+    clj_address_token_keys_dispose(&ctx->address_token);
     h2o_quic_dispose_context(&ctx->h3_ctx.super);
     free(ctx);
     return NULL;
@@ -2779,6 +3049,7 @@ clj_h2o_http3_attach_udp_transport(h2o_context_t *h2o_ctx, h2o_evloop_t *loop,
     if (ctx->forwarded_sock != NULL)
       h2o_socket_close(ctx->forwarded_sock);
     close(ctx->forward_fd);
+    clj_address_token_keys_dispose(&ctx->address_token);
     h2o_quic_dispose_context(&ctx->h3_ctx.super);
     free(ctx);
     return NULL;
@@ -2856,6 +3127,7 @@ void clj_h2o_http3_dispose_worker_ctx(clj_http3_ctx_t *ctx) {
 
   /* h2o_quic_dispose_context closes the socket internally */
   h2o_quic_dispose_context(&ctx->h3_ctx.super);
+  clj_address_token_keys_dispose(&ctx->address_token);
 
   free(ctx);
 }
@@ -2897,19 +3169,6 @@ void clj_h2o_conn_limit_release(void) {
   atomic_fetch_sub(&clj_conn_count, 1);
 }
 
-/* Thread-safe key manager structure */
-struct clj_ticket_manager {
-    pthread_rwlock_t rwlock;
-    clj_session_ticket_t *keys;
-    size_t num_keys;
-    size_t capacity;
-    uint32_t ticket_lifetime_seconds;
-
-    /* QUIC transport params hash for 0-RTT validation */
-    uint8_t quic_tp_tag[8];
-    int quic_tp_tag_valid;
-};
-
 /* Wrapper for ptls encrypt_ticket callback */
 struct clj_encrypt_ticket {
     ptls_encrypt_ticket_t super;  /* Must be first (callback interface) */
@@ -2948,6 +3207,7 @@ clj_ticket_manager_t *clj_ticket_manager_create(uint32_t ticket_lifetime_seconds
 
     mgr->ticket_lifetime_seconds = ticket_lifetime_seconds;
     mgr->quic_tp_tag_valid = 0;
+    atomic_init(&mgr->generation, 1);
 
     /* Generate initial key so server is ready immediately */
     clj_session_ticket_t initial_key;
@@ -3012,6 +3272,7 @@ int clj_ticket_manager_set_keys(
     mgr->num_keys = num_keys;
     mgr->capacity = num_keys;
     pthread_rwlock_unlock(&mgr->rwlock);
+    atomic_fetch_add(&mgr->generation, 1);
 
     /* Secure erase and free old keys after unlock */
     if (old) {

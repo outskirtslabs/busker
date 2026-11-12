@@ -796,7 +796,8 @@
                           t)))))
 
 (defn- create-http3-worker-contexts
-  [generation-id n-workers listeners loops contexts entrypoint-hosts http3-contexts listener-claims]
+  [generation-id n-workers listeners loops contexts entrypoint-hosts http3-contexts listener-claims
+   ticket-mgr-ptr]
   (vec
    (for [thread-idx (range n-workers)]
      (vec
@@ -817,6 +818,7 @@
                              quicly-ctx
                              (get entrypoint-hosts (:entrypoint listener))
                              (listen/resource listener-claim)
+                             (or ticket-mgr-ptr mem/null)
                              generation-id
                              (int thread-idx))]
               (when (or (nil? http3-ctx) (mem/null? http3-ctx))
@@ -1043,7 +1045,8 @@
                                                               contexts
                                                               entrypoint-hosts
                                                               http3-contexts
-                                                              listener-claims)]
+                                                              listener-claims
+                                                              native-ticket-mgr)]
       (assoc state
              ::ticket-store standalone-ticket-store
              ::native-ticket-mgr native-ticket-mgr
