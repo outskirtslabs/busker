@@ -251,6 +251,18 @@
      :compress_args_brotli_quality (num-val :compress-brotli-level)
      :compress_args_zstd_quality (num-val :compress-zstd-level)}))
 
+(defn- create-entrypoint-hosts
+  "Allocates the native hosts record of the entrypoint at `index` and returns the
+  hosts array for the accept contexts of its listeners. Connections keep that
+  pointer, and the request callback reads the entrypoint index back from it."
+  [arena config-ptr index]
+  (let [record (mem/alloc arena (h2o/entrypoint-hosts-size))
+        hosts (h2o/entrypoint-hosts-init record config-ptr (int index))]
+    (when (or (nil? hosts) (mem/null? hosts))
+      (throw (ex-info "Could not create the native hosts array of an entrypoint"
+                      {:index index})))
+    hosts))
+
 (defn- create-server-config
   [arena executor close-callback-executor ring-handler config]
   (let [config-ptr (mem/alloc arena (h2o/globalconf-size))
@@ -266,6 +278,11 @@
                        (h2o/config-register-host config-ptr
                                                  (h2o/str->iovec "default" arena2)
                                                  65535))
+        entrypoint-hosts (into {}
+                               (map-indexed (fn [index id]
+                                              [id (create-entrypoint-hosts
+                                                   arena config-ptr index)]))
+                               (config/entrypoint-ids config))
         close-callback-dispatch (close-callback-dispatcher close-callback-executor)
         on-request-cb (fn [req-ctx-ptr req-ctx]
                         (request/on-request executor
@@ -282,6 +299,7 @@
                                     arena)]
     {::config-ptr config-ptr
      ::hostconf-ptr hostconf-ptr
+     ::entrypoint-hosts entrypoint-hosts
      ::on-request-cb on-request-cb
      ::on-request-cleanup-cb on-request-cleanup-cb
      ::handler handler}))
@@ -775,36 +793,35 @@
                           t)))))
 
 (defn- create-http3-worker-contexts
-  [generation-id n-workers listeners loops contexts config-ptr http3-contexts listener-claims]
-  (let [hosts-ptr (h2o/globalconf-get-hosts config-ptr)]
-    (vec
-     (for [thread-idx (range n-workers)]
-       (vec
-        (for [listener-idx (range (count listeners))]
-          (let [listener (nth listeners listener-idx)]
-            (when (http3-enabled? listener)
-              (let [{:keys [quicly-ctx]} (get http3-contexts listener-idx)
-                    listener-claim (or (get listener-claims
-                                            (listen/listener-key
-                                             (assoc listener :transport :udp)))
-                                       (throw (ex-info "Missing UDP listener claim"
-                                                       {:listener listener})))
-                    loop-ptr (nth loops thread-idx)
-                    ctx-ptr (nth contexts thread-idx)
-                    http3-ctx (h2o/http3-attach-udp-transport
-                               ctx-ptr
-                               loop-ptr
-                               quicly-ctx
-                               hosts-ptr
-                               (listen/resource listener-claim)
-                               generation-id
-                               (int thread-idx))]
-                (when (or (nil? http3-ctx) (mem/null? http3-ctx))
-                  (throw (ex-info "Failed to create HTTP/3 worker context"
-                                  {:listener-index listener-idx
-                                   :thread-idx thread-idx
-                                   :port (:port listener)})))
-                http3-ctx)))))))))
+  [generation-id n-workers listeners loops contexts entrypoint-hosts http3-contexts listener-claims]
+  (vec
+   (for [thread-idx (range n-workers)]
+     (vec
+      (for [listener-idx (range (count listeners))]
+        (let [listener (nth listeners listener-idx)]
+          (when (http3-enabled? listener)
+            (let [{:keys [quicly-ctx]} (get http3-contexts listener-idx)
+                  listener-claim (or (get listener-claims
+                                          (listen/listener-key
+                                           (assoc listener :transport :udp)))
+                                     (throw (ex-info "Missing UDP listener claim"
+                                                     {:listener listener})))
+                  loop-ptr (nth loops thread-idx)
+                  ctx-ptr (nth contexts thread-idx)
+                  http3-ctx (h2o/http3-attach-udp-transport
+                             ctx-ptr
+                             loop-ptr
+                             quicly-ctx
+                             (get entrypoint-hosts (:entrypoint listener))
+                             (listen/resource listener-claim)
+                             generation-id
+                             (int thread-idx))]
+              (when (or (nil? http3-ctx) (mem/null? http3-ctx))
+                (throw (ex-info "Failed to create HTTP/3 worker context"
+                                {:listener-index listener-idx
+                                 :thread-idx thread-idx
+                                 :port (:port listener)})))
+              http3-ctx))))))))
 
 (defn- free-http3-contexts
   [http3-contexts]
@@ -957,6 +974,7 @@
            ::arena arena
            ::server-config server-config
            ::config-ptr config-ptr
+           ::entrypoint-hosts (::entrypoint-hosts server-config)
            ::handler (::handler server-config)
            ::loops loops
            ::contexts contexts
@@ -967,8 +985,8 @@
            ::on-close-callbacks on-close-callbacks)))
 
 (defn- init-tls-http3-state
-  [{::keys [generation-id listener-runtimes config config-ptr n-workers loops contexts
-            tls-lookup-callback listener-claims memory-ticket-service]
+  [{::keys [generation-id listener-runtimes config config-ptr entrypoint-hosts n-workers
+            loops contexts tls-lookup-callback listener-claims memory-ticket-service]
     :as state}]
   (let [listeners (mapv :listener listener-runtimes)
         ssl-ctx-ptrs (mapv :ssl-ctx-ptr listener-runtimes)
@@ -1020,7 +1038,7 @@
                                                               listeners
                                                               loops
                                                               contexts
-                                                              config-ptr
+                                                              entrypoint-hosts
                                                               http3-contexts
                                                               listener-claims)]
       (assoc state
@@ -1031,7 +1049,7 @@
              ::http3-worker-contexts http3-worker-contexts))))
 
 (defn- init-single-listener-state
-  [listener listener-claims n-workers loops contexts arena config-ptr on-close-callbacks
+  [listener listener-claims n-workers loops contexts arena entrypoint-hosts on-close-callbacks
    tls-lookup-callback-ptr active-connection-count_ worker-connection-counts accepting-workers]
   (let [ssl-ctx-ptr (create-ssl-context listener tls-lookup-callback-ptr)
         listener-claim (or (get listener-claims (listen/listener-key listener))
@@ -1044,7 +1062,8 @@
          (for [thread-idx (range n-workers)]
            (let [accept-ctx (h2o/create-accept-ctx arena
                                                    (nth contexts thread-idx)
-                                                   config-ptr
+                                                   (get entrypoint-hosts
+                                                        (:entrypoint listener))
                                                    ssl-ctx-ptr)
                  accept-callback (create-accept-callback
                                   accept-ctx
@@ -1070,7 +1089,7 @@
      :thread-states thread-states}))
 
 (defn- init-listener-state
-  [{::keys [n-workers loops contexts arena config-ptr on-close-callbacks
+  [{::keys [n-workers loops contexts arena entrypoint-hosts on-close-callbacks
             listener-claims
             tls-lookup-callback
             active-connection-count_ worker-connection-counts accepting-workers]
@@ -1086,7 +1105,7 @@
                                                 loops
                                                 contexts
                                                 arena
-                                                config-ptr
+                                                entrypoint-hosts
                                                 on-close-callbacks
                                                 tls-lookup-callback-ptr
                                                 active-connection-count_

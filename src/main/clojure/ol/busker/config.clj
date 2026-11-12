@@ -606,38 +606,27 @@
          value))
      config)))
 
-(defn- entrypoint-scheme
-  [[_ entrypoint]]
-  (if (map? (:tls entrypoint))
-    :https
-    :http))
+(def ^:private entrypoint-ids-key
+  ::entrypoint-ids)
+
+(defn entrypoint-ids
+  "Returns the vector of entrypoint ids of `config`. The shim reports the
+  entrypoint of a request as an index into this vector."
+  [config]
+  (or (get config entrypoint-ids-key)
+      (vec (keys (:entrypoints config)))))
 
 (defn- build-entrypoint-resolver
+  "Returns a function of a request that gives its `:ol.busker/entrypoint`.
+  Requests from a listener already carry the entrypoint of the listener that
+  accepted their connection. A request without one, made by hand in a test or
+  passed straight to the dispatch handler, gets the first entrypoint."
   [entrypoints]
-  (let [listeners (into [] (mapcat entrypoint->listeners) entrypoints)
-        by-port (into {}
-                      (keep (fn [{:keys [entrypoint port]}]
-                              (when port
-                                [port entrypoint])))
-                      listeners)
-        by-scheme (reduce (fn [acc pair]
-                            (update acc (entrypoint-scheme pair)
-                                    (fnil conj [])
-                                    (first pair)))
-                          {}
-                          entrypoints)
-        singletons (into {}
-                         (keep (fn [[scheme ids]]
-                                 (when (= 1 (count ids))
-                                   [scheme (first ids)])))
-                         by-scheme)
-        fallback (ffirst entrypoints)]
+  (let [fallback (ffirst entrypoints)]
     (if (= 1 (count entrypoints))
       (constantly fallback)
       (fn [req]
         (or (:ol.busker/entrypoint req)
-            (get by-port (:server-port req))
-            (get singletons (:scheme req))
             fallback)))))
 
 (defn- build-dispatch-handler
@@ -693,7 +682,9 @@
                                        #(when % (resolve-function-ref % :config-fn))))
                            tls)))
         handler (build-dispatch-handler config)]
-    (assoc config dispatch-handler-key handler)))
+    (assoc config
+           dispatch-handler-key handler
+           entrypoint-ids-key (vec (keys (:entrypoints config))))))
 
 (defn load!
   [user-config]

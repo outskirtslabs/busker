@@ -39,13 +39,15 @@
 #define explicit_bzero(s, n) OPENSSL_cleanse(s, n)
 #endif
 
-_Static_assert(sizeof(clj_req_ctx_t) == 232, "FFM request context size");
-_Static_assert(offsetof(clj_req_ctx_t, fixed_slot) == 144, "FFM fixed slot offset");
-_Static_assert(offsetof(clj_req_ctx_t, fixed_claim) == 152, "FFM fixed claim offset");
-_Static_assert(offsetof(clj_req_ctx_t, generator) == 160, "FFM generator offset");
-_Static_assert(offsetof(clj_req_ctx_t, on_response_generator_proceed) == 176,
+_Static_assert(sizeof(clj_req_ctx_t) == 240, "FFM request context size");
+_Static_assert(offsetof(clj_req_meta_t, entrypoint) == 104,
+               "FFM request entrypoint offset");
+_Static_assert(offsetof(clj_req_ctx_t, fixed_slot) == 152, "FFM fixed slot offset");
+_Static_assert(offsetof(clj_req_ctx_t, fixed_claim) == 160, "FFM fixed claim offset");
+_Static_assert(offsetof(clj_req_ctx_t, generator) == 168, "FFM generator offset");
+_Static_assert(offsetof(clj_req_ctx_t, on_response_generator_proceed) == 184,
                "FFM proceed callback offset");
-_Static_assert(offsetof(clj_req_ctx_t, on_response_generator_stop) == 184,
+_Static_assert(offsetof(clj_req_ctx_t, on_response_generator_stop) == 192,
                "FFM stop callback offset");
 
 /* Global connection limit counter and maximum.
@@ -336,8 +338,33 @@ size_t clj_h2o_globalconf_size(void) { return sizeof(h2o_globalconf_t); }
 
 size_t clj_h2o_accept_ctx_size(void) { return sizeof(h2o_accept_ctx_t); }
 
-h2o_hostconf_t **clj_h2o_globalconf_get_hosts(h2o_globalconf_t *globalconf) {
-  return globalconf->hosts;
+size_t clj_h2o_entrypoint_hosts_size(void) {
+  return sizeof(clj_entrypoint_hosts_t);
+}
+
+h2o_hostconf_t **clj_h2o_entrypoint_hosts_init(clj_entrypoint_hosts_t *record,
+                                               h2o_globalconf_t *globalconf,
+                                               uint32_t entrypoint) {
+  if (record == NULL || globalconf == NULL ||
+      entrypoint == CLJ_ENTRYPOINT_UNKNOWN || globalconf->hosts[0] == NULL ||
+      globalconf->hosts[1] != NULL)
+    return NULL;
+  record->hosts[0] = globalconf->hosts[0];
+  record->hosts[1] = NULL;
+  record->self = record;
+  record->entrypoint = entrypoint;
+  return record->hosts;
+}
+
+/* Returns the entrypoint index of the listener that accepted the request's
+ * connection, from the hosts array H2O kept for the connection. */
+static uint32_t clj_request_entrypoint(h2o_req_t *req) {
+  h2o_hostconf_t **hosts = req->conn->hosts;
+  if (hosts == NULL || hosts == req->conn->ctx->globalconf->hosts)
+    return CLJ_ENTRYPOINT_UNKNOWN;
+  clj_entrypoint_hosts_t *record =
+      H2O_STRUCT_FROM_MEMBER(clj_entrypoint_hosts_t, hosts, hosts);
+  return record->self == record ? record->entrypoint : CLJ_ENTRYPOINT_UNKNOWN;
 }
 
 void clj_handler_set_on_req(h2o_handler_t *handler,
@@ -509,6 +536,10 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
 
   meta->has_body = clj_h2o_req_has_body(req);
   meta->is_early_data = h2o_conn_is_early_data(req->conn) ? 1 : 0;
+  meta->entrypoint = clj_request_entrypoint(req);
+#if CLJ_DEBUG
+  assert(meta->entrypoint != CLJ_ENTRYPOINT_UNKNOWN);
+#endif
 
   if (req->scheme) {
     meta->scheme = (const uint8_t *)req->scheme->name.base;
@@ -751,6 +782,10 @@ static int request_handler(h2o_handler_t *self, h2o_req_t *req) {
     return 0;
   } else if (ret == CLJ_HANDLER_DECLINED) {
     return -1;
+  } else if (ret == CLJ_HANDLER_ERROR) {
+    h2o_send_error_500(req, "Internal Server Error", "Internal Server Error",
+                       H2O_SEND_ERROR_HTTP1_CLOSE_CONNECTION);
+    return 0;
   }
 
   if (ctx->meta.has_body && ctx->on_request_body_chunk != NULL) {

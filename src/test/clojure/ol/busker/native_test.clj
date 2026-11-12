@@ -151,7 +151,8 @@
           :sendvec         32
           :h2o-header      40
           :generator       16
-          :request-meta    104
+          :request-meta    112
+          :entrypoint-hosts (native/entrypoint-hosts-size)
           :request-context (native/req-ctx-size)
           :globalconf      328
           :ticket          128}
@@ -163,6 +164,7 @@
           :h2o-header      (ffi/sizeof native/ffi-h2o-header-t)
           :generator       (ffi/sizeof native/ffi-h2o-generator-t)
           :request-meta    (ffi/sizeof native/ffi-clj-req-meta-t)
+          :entrypoint-hosts 32
           :request-context (ffi/sizeof native/ffi-clj-req-ctx-t)
           :globalconf      (ffi/sizeof native/ffi-clj-h2o-flat-globalconf-t)
           :ticket          (ffi/sizeof native/ffi-clj-session-ticket-t)})))
@@ -186,11 +188,13 @@
                    [native/ffi-h2o-header-t :flags 1 32]
                    [native/ffi-h2o-generator-t :stop pointer 8]
                    [native/ffi-clj-req-meta-t :is_early_data 1 102]
+                   [native/ffi-clj-req-meta-t :entrypoint 1 104]
                    [native/ffi-clj-req-ctx-t [:meta :headers_len] 1 96]
-                   [native/ffi-clj-req-ctx-t :fixed-slot pointer 144]
-                   [native/ffi-clj-req-ctx-t :fixed-claim 1 152]
-                   [native/ffi-clj-req-ctx-t :on-response-generator-proceed pointer 176]
-                   [native/ffi-clj-req-ctx-t :on-response-generator-stop pointer 184]
+                   [native/ffi-clj-req-ctx-t [:meta :entrypoint] 1 112]
+                   [native/ffi-clj-req-ctx-t :fixed-slot pointer 152]
+                   [native/ffi-clj-req-ctx-t :fixed-claim 1 160]
+                   [native/ffi-clj-req-ctx-t :on-response-generator-proceed pointer 184]
+                   [native/ffi-clj-req-ctx-t :on-response-generator-stop pointer 192]
                    [native/ffi-clj-h2o-flat-globalconf-t :compress_args_zstd_quality 1 320]
                    [native/ffi-clj-session-ticket-t :not_after 1 120]]]
     (doseq [[layout path value expected] positions]
@@ -227,7 +231,8 @@
                                      :headers_len     2
                                      :http_version    0x101
                                      :has_body        1
-                                     :is_early_data   0}
+                                     :is_early_data   0
+                                     :entrypoint      3}
      :on-cleanup                    (pointer)
      :on-request-body-chunk         (pointer)
      :response-receiver             (pointer)
@@ -248,21 +253,21 @@
 (def ^:private request-context-reader-offsets
   {:req                          0
    :meta                         8
-   :on-cleanup                   112
-   :on-request-body-chunk        120
-   :response-receiver             128
-   :response-hash-next            136
-   :fixed-slot                    144
-   :fixed-claim                   152
-   :generator                     160
-   :on-response-generator-proceed 176
-   :on-response-generator-stop    184
-   :preferred-chunk-size          192
-   :dispatch-module-id            200
-   :dispatch-request-seq          208
-   :cleanup                       216
-   :closing                       220
-   :response_started              224})
+   :on-cleanup                   120
+   :on-request-body-chunk        128
+   :response-receiver             136
+   :response-hash-next            144
+   :fixed-slot                    152
+   :fixed-claim                   160
+   :generator                     168
+   :on-response-generator-proceed 184
+   :on-response-generator-stop    192
+   :preferred-chunk-size          200
+   :dispatch-module-id            208
+   :dispatch-request-seq          216
+   :cleanup                       224
+   :closing                       228
+   :response_started              232})
 
 (def ^:private request-metadata-reader-offsets
   {:authority       0
@@ -279,7 +284,8 @@
    :headers_len     88
    :http_version    96
    :has_body        100
-   :is_early_data   102})
+   :is_early_data   102
+   :entrypoint      104})
 
 (def ^:private generator-reader-offsets
   {:proceed 0
@@ -298,7 +304,8 @@
             [:meta :headers_len] (+ meta native/req-meta-headers-length-offset)
             [:meta :http_version] (+ meta native/req-meta-http-version-offset)
             [:meta :has_body] (+ meta native/req-meta-has-body-offset)
-            [:meta :is_early_data] (+ meta native/req-meta-early-data-offset)}
+            [:meta :is_early_data] (+ meta native/req-meta-early-data-offset)
+            [:meta :entrypoint] (+ meta native/req-meta-entrypoint-offset)}
            {:req (ffi-byte-offset native/ffi-clj-req-ctx-t :req pointer)
             :meta (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :authority] pointer)
             [:meta :authority] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :authority] pointer)
@@ -309,7 +316,8 @@
             [:meta :headers_len] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :headers_len] 1)
             [:meta :http_version] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :http_version] 1)
             [:meta :has_body] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :has_body] 1)
-            [:meta :is_early_data] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :is_early_data] 1)}))
+            [:meta :is_early_data] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :is_early_data] 1)
+            [:meta :entrypoint] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :entrypoint] 1)}))
     (is (= {:size native/header-size
             :name-length native/header-length-offset
             :value native/header-value-offset
@@ -320,7 +328,7 @@
             :value-length (ffi-byte-offset native/ffi-clj-header-t :value_len 1)}))))
 
 (deftest request-context-layout-test
-  (is (= 232 (ffi/sizeof native/ffi-clj-req-ctx-t)))
+  (is (= 240 (ffi/sizeof native/ffi-clj-req-ctx-t)))
   (doseq [[field expected-offset] request-context-reader-offsets]
     (let [path (case field :meta [:meta :authority] :generator [:generator :proceed] field)
           value (if (contains? #{:preferred-chunk-size :dispatch-module-id :dispatch-request-seq
@@ -376,7 +384,9 @@
   "Writes a native request context for `snapshot` and returns its copy. The
   native memory is freed before this returns. `:headers` is a map or a sequence
   of name and value pairs."
-  [{:keys [authority method path remote-addr scheme headers http-version has-body early-data]}]
+  [{:keys [authority method path remote-addr scheme headers http-version has-body early-data
+           entrypoint]
+    :or {entrypoint 0}}]
   (with-open [arena (ffi/confined-arena)]
     (let [text (fn [s]
                  (if s
@@ -404,8 +414,16 @@
                                :scheme scheme-ptr :scheme_len scheme-len
                                :headers header-ptr :headers_len header-count
                                :http_version http-version :has_body has-body
-                               :is_early_data early-data}))
+                               :is_early_data early-data :entrypoint entrypoint}))
       (native/copy-request-context pointer))))
+
+(deftest copy-request-context-reads-the-entrypoint-index-test
+  (is (= 3 (:entrypoint (copied-snapshot (assoc wrk-request-snapshot :entrypoint 3)))))
+  (is (= native/CLJ_ENTRYPOINT_UNKNOWN
+         (:entrypoint (copied-snapshot (assoc wrk-request-snapshot
+                                              :entrypoint (unchecked-int 0xFFFFFFFF))))))
+  (is (not (contains? native/assembled-request-keys :ol.busker/entrypoint))
+      "the entrypoint comes from the overlay, so reading it does not decode the request"))
 
 (defn- assembled-snapshot
   [snapshot input-stream]
@@ -624,7 +642,8 @@
                             :headers_len 0
                             :http_version 0x0200
                             :has_body 1
-                            :is_early_data 1}))
+                            :is_early_data 1
+                            :entrypoint 0}))
         pointer (ffi/alloc arena native/ffi-clj-req-ctx-t)]
     (ffi/write pointer native/ffi-clj-req-ctx-t context)
     {:pointer pointer :request request}))

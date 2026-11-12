@@ -48,14 +48,22 @@
       (is (= {:status 200
               :trace nil
               :body :https-api}
-             (handler {:scheme :https
+             (handler {:ol.busker/entrypoint :https
+                       :scheme :https
                        :server-port 8443
                        :uri "/api"})))
       (is (= {:status 200
               :body :fallback}
-             (handler {:scheme :http
+             (handler {:ol.busker/entrypoint :http
+                       :scheme :http
                        :server-port 8080
-                       :uri "/api"})))))
+                       :uri "/api"})))
+      (is (= {:status 200
+              :body :fallback}
+             (handler {:scheme :https
+                       :server-port 8443
+                       :uri "/api"}))
+          "a request without an entrypoint gets the first one, whatever its port")))
 
   (testing "honors mutually exclusive groups and terminal dispatchers"
     (let [config (cfg/load!

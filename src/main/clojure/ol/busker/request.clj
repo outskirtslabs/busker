@@ -6,6 +6,7 @@
   (:require
    [babashka.ffi :as mem]
    [ol.busker.callback-dispatch :as callback-dispatch]
+   [ol.busker.config :as cfg]
    [ol.busker.fixed-final :as fixed-final]
    [ol.busker.worker-context :as worker-context]
    [ol.busker.internal.protocols :as pi]
@@ -109,58 +110,79 @@
        :headers {"content-type" "text/plain; charset=utf-8"}
        :body "Page Not Found"}))
 
+(defn- request-entrypoint
+  "Returns the entrypoint id for the shim's entrypoint `index`, or nil when the
+  index names no entrypoint of `config`."
+  [config index]
+  (let [ids (cfg/entrypoint-ids config)]
+    (when (and (int? index) (< -1 (long index) (count ids)))
+      (nth ids index))))
+
 (defn on-request
   [^ExecutorService executor close-callback-dispatch config ring-handler req-ctx-ptr req-ctx]
-  (if-not (pi/running? (worker-context/get-current-worker))
-    h2o/CLJ_HANDLER_SHUTTING_DOWN
-    (try
-      (let [worker (worker-context/get-current-worker)
-            dispatch (:callback-dispatch worker)
-            module-id (:module-id dispatch)
-            request-seq (callback-dispatch/allocate-identity! dispatch)
-            callback-pointers (callback-dispatch/callback-pointers dispatch)
-            has-body? (= 1 (:has-body req-ctx))
-            write-req (when has-body?
-                        (set-req-body-channel worker module-id request-seq))
-            req (Request. worker config
-                          req-ctx-ptr req-ctx write-req
-                          callback-pointers module-id request-seq)
-            emitter (response/new-response-emitter req close-callback-dispatch)]
-        (callback-dispatch/register! dispatch module-id request-seq req emitter)
-        (try
-          (let [receiver (.get ^AtomicReference (:response-receiver_ worker))]
-            (when-not (= 1 (h2o/install-request-dispatch
-                            req-ctx-ptr receiver module-id request-seq
-                            (if has-body? (:body callback-pointers) mem/null)))
-              (throw (ex-info "Could not install native request dispatch"
-                              {:module-id module-id
-                               :request-seq request-seq}))))
-          (letfn [(request-task []
-                    (let [ring-req (h2o/overlay-lazy-ring-request
-                                    #(h2o/assemble-ring-request
-                                      req-ctx
-                                      (:input-stream write-req))
-                                    h2o/assembled-request-keys
-                                    {::emitter emitter})
-                          ring-resp (run-handler ring-handler ring-req)]
-                      (response/send-ring-response! emitter ring-resp)))]
-            (.execute executor request-task))
-          h2o/CLJ_HANDLER_OK
-          (catch RejectedExecutionException _
-            (callback-dispatch/retire! dispatch module-id request-seq)
-            h2o/CLJ_HANDLER_SHUTTING_DOWN)
-          (catch Throwable t
-            (callback-dispatch/retire! dispatch module-id request-seq)
-            (throw t))))
-      (catch InterruptedException _
-        (.interrupt (Thread/currentThread))
-        h2o/CLJ_HANDLER_SHUTTING_DOWN)
-      (catch Exception e
-        (h2o/report-almost-fatal-error "The request handler errored with" e)
-        h2o/CLJ_HANDLER_OVERLOADED)
-      (catch Throwable t
-        (h2o/report-almost-fatal-error "The request bridge errored with" t)
-        h2o/CLJ_HANDLER_OVERLOADED))))
+  (let [entrypoint (request-entrypoint config (:entrypoint req-ctx))]
+    (cond
+      (not (pi/running? (worker-context/get-current-worker)))
+      h2o/CLJ_HANDLER_SHUTTING_DOWN
+
+      (nil? entrypoint)
+      (do
+        (h2o/report-almost-fatal-error
+         (str "Rejected a request whose listener has no known entrypoint"
+              " [:ol.busker/unknown-entrypoint index=" (:entrypoint req-ctx) "]")
+         nil)
+        h2o/CLJ_HANDLER_ERROR)
+
+      :else
+      (try
+        (let [worker (worker-context/get-current-worker)
+              dispatch (:callback-dispatch worker)
+              module-id (:module-id dispatch)
+              request-seq (callback-dispatch/allocate-identity! dispatch)
+              callback-pointers (callback-dispatch/callback-pointers dispatch)
+              has-body? (= 1 (:has-body req-ctx))
+              write-req (when has-body?
+                          (set-req-body-channel worker module-id request-seq))
+              req (Request. worker config
+                            req-ctx-ptr req-ctx write-req
+                            callback-pointers module-id request-seq)
+              emitter (response/new-response-emitter req close-callback-dispatch)]
+          (callback-dispatch/register! dispatch module-id request-seq req emitter)
+          (try
+            (let [receiver (.get ^AtomicReference (:response-receiver_ worker))]
+              (when-not (= 1 (h2o/install-request-dispatch
+                              req-ctx-ptr receiver module-id request-seq
+                              (if has-body? (:body callback-pointers) mem/null)))
+                (throw (ex-info "Could not install native request dispatch"
+                                {:module-id module-id
+                                 :request-seq request-seq}))))
+            (letfn [(request-task []
+                      (let [ring-req (h2o/overlay-lazy-ring-request
+                                      #(h2o/assemble-ring-request
+                                        req-ctx
+                                        (:input-stream write-req))
+                                      h2o/assembled-request-keys
+                                      {::emitter emitter
+                                       :ol.busker/entrypoint entrypoint})
+                            ring-resp (run-handler ring-handler ring-req)]
+                        (response/send-ring-response! emitter ring-resp)))]
+              (.execute executor request-task))
+            h2o/CLJ_HANDLER_OK
+            (catch RejectedExecutionException _
+              (callback-dispatch/retire! dispatch module-id request-seq)
+              h2o/CLJ_HANDLER_SHUTTING_DOWN)
+            (catch Throwable t
+              (callback-dispatch/retire! dispatch module-id request-seq)
+              (throw t))))
+        (catch InterruptedException _
+          (.interrupt (Thread/currentThread))
+          h2o/CLJ_HANDLER_SHUTTING_DOWN)
+        (catch Exception e
+          (h2o/report-almost-fatal-error "The request handler errored with" e)
+          h2o/CLJ_HANDLER_OVERLOADED)
+        (catch Throwable t
+          (h2o/report-almost-fatal-error "The request bridge errored with" t)
+          h2o/CLJ_HANDLER_OVERLOADED)))))
 
 (defn on-request-cleanup
   "Retires request state using the scalar dispatch identity from native cleanup."

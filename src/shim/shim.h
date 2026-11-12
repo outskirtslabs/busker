@@ -37,7 +37,8 @@ typedef enum {
   CLJ_HANDLER_OK = 0,        /* Handler accepted and will process the request */
   CLJ_HANDLER_DECLINED = -1, /* Handler declined; h2o should try next handler */
   CLJ_HANDLER_OVERLOADED = -2,   /* System overloaded; send 503 immediately */
-  CLJ_HANDLER_SHUTTING_DOWN = -3 /* System is shutting down */
+  CLJ_HANDLER_SHUTTING_DOWN = -3, /* System is shutting down */
+  CLJ_HANDLER_ERROR = -4 /* Request cannot be dispatched; send 500 immediately */
 } clj_handler_status_t;
 
 typedef struct {
@@ -82,7 +83,24 @@ typedef struct {
   int http_version;
   short int has_body;
   short int is_early_data;  /* 1 if request arrived via 0-RTT */
+  /* Index of the entrypoint whose listener accepted the connection, or
+     CLJ_ENTRYPOINT_UNKNOWN. */
+  uint32_t entrypoint;
 } clj_req_meta_t;
+
+#define CLJ_ENTRYPOINT_UNKNOWN UINT32_MAX
+
+/* The hosts array given to the accept contexts of one entrypoint's listeners.
+ * H2O keeps that pointer in every connection it accepts (conn->hosts, for
+ * HTTP/1, HTTP/2 including h2c, and HTTP/3), so the request callback finds
+ * the record, and the entrypoint index, from req->conn->hosts. All records
+ * point at the one hostconf of the global configuration. */
+typedef struct clj_entrypoint_hosts_t clj_entrypoint_hosts_t;
+struct clj_entrypoint_hosts_t {
+  h2o_hostconf_t *hosts[2]; /* the hostconf, then NULL */
+  const clj_entrypoint_hosts_t *self;
+  uint32_t entrypoint;
+};
 
 typedef struct clj_req_ctx_t clj_req_ctx_t;
 typedef struct clj_mt_receiver_t clj_mt_receiver_t;
@@ -234,8 +252,17 @@ size_t clj_h2o_globalconf_size(void);
 /* Return size of h2o_accept_ctx_t for FFI allocation */
 size_t clj_h2o_accept_ctx_size(void);
 
-/* Get hosts pointer from h2o_globalconf_t */
-h2o_hostconf_t **clj_h2o_globalconf_get_hosts(h2o_globalconf_t *globalconf);
+/* Return size of clj_entrypoint_hosts_t for FFI allocation */
+size_t clj_h2o_entrypoint_hosts_size(void);
+
+/* Fill `record` for entrypoint index `entrypoint` with the single hostconf of
+ * `globalconf`. Returns the hosts array to put in the accept contexts of the
+ * entrypoint's listeners, or NULL if `globalconf` does not have exactly one
+ * hostconf or `entrypoint` is CLJ_ENTRYPOINT_UNKNOWN. `record` must stay
+ * allocated as long as the global configuration. */
+h2o_hostconf_t **clj_h2o_entrypoint_hosts_init(clj_entrypoint_hosts_t *record,
+                                               h2o_globalconf_t *globalconf,
+                                               uint32_t entrypoint);
 
 /* Set on_req callback for handler */
 void clj_handler_set_on_req(h2o_handler_t *handler,

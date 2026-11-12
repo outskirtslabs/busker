@@ -43,6 +43,12 @@
 (def ^:const CLJ_HANDLER_DECLINED -1)
 (def ^:const CLJ_HANDLER_OVERLOADED -2)
 (def ^:const CLJ_HANDLER_SHUTTING_DOWN -3)
+(def ^:const CLJ_HANDLER_ERROR -4)
+
+(def ^:const CLJ_ENTRYPOINT_UNKNOWN
+  "The entrypoint index the shim reports when the listener of a request's
+  connection is not known."
+  0xFFFFFFFF)
 
 (def ^{:const true :doc "Let h2o negotiate compression based on the configuration"}
   H2O_COMPRESS_HINT_AUTO 0)
@@ -129,7 +135,8 @@
             [:headers_len :long]
             [:http_version :int]
             [:has_body :int16]
-            [:is_early_data :int16]]])
+            [:is_early_data :int16]
+            [:entrypoint :uint32]]])
 
 (def ffi-clj-req-ctx-t
   [:struct [[:req :pointer]
@@ -257,10 +264,17 @@
   "clj_h2o_accept_ctx_size"
   [] :long)
 
-(defcfn globalconf-get-hosts
-  "Get hosts pointer (h2o_hostconf_t**) from h2o_globalconf_t"
-  "clj_h2o_globalconf_get_hosts"
-  [:pointer] :pointer)
+(defcfn entrypoint-hosts-size
+  "Gets the native size of `clj_entrypoint_hosts_t`."
+  "clj_h2o_entrypoint_hosts_size"
+  [] :long)
+
+(defcfn entrypoint-hosts-init
+  "Fills the `clj_entrypoint_hosts_t` at `record` for entrypoint index
+  `entrypoint` and returns the hosts array for that entrypoint's accept
+  contexts, or NULL."
+  "clj_h2o_entrypoint_hosts_init"
+  [:pointer :pointer :uint32] :pointer)
 
 (ffi/defcfn config-register-host
   "Register a virtual host with the h2o configuration. Returns its native pointer."
@@ -780,16 +794,16 @@
    Parameters:
    - arena: memory arena for allocation
    - ctx-ptr: pointer to h2o_context_t
-   - config-ptr: pointer to h2o_globalconf_t
+   - hosts-ptr: the hosts array of the listener's entrypoint, from
+     [[entrypoint-hosts-init]]
    - ssl-ctx-ptr: pointer to SSL_CTX for TLS, or nil/NULL for plaintext
 
    Returns: pointer to h2o_accept_ctx_t"
-  [arena ctx-ptr config-ptr ssl-ctx-ptr]
+  [arena ctx-ptr hosts-ptr ssl-ctx-ptr]
   {:pre [(some? arena)
          (some? ctx-ptr) (not (ffi/null? ctx-ptr))
-         (some? config-ptr) (not (ffi/null? config-ptr))]}
-  (let [hosts-ptr (globalconf-get-hosts config-ptr)
-        ssl-ctx (if (and ssl-ctx-ptr (not (ffi/null? ssl-ctx-ptr)))
+         (some? hosts-ptr) (not (ffi/null? hosts-ptr))]}
+  (let [ssl-ctx (if (and ssl-ctx-ptr (not (ffi/null? ssl-ctx-ptr)))
                   ssl-ctx-ptr
                   ffi/null)
         accept-ctx-data {:ctx ctx-ptr
@@ -860,6 +874,7 @@
 (def ^:no-doc ^:const req-meta-http-version-offset 96)
 (def ^:no-doc ^:const req-meta-has-body-offset 100)
 (def ^:no-doc ^:const req-meta-early-data-offset 102)
+(def ^:no-doc ^:const req-meta-entrypoint-offset 104)
 (def ^:no-doc ^:const header-size 32)
 (def ^:no-doc ^:const header-value-offset 16)
 (def ^:no-doc ^:const header-length-offset 8)
@@ -946,7 +961,9 @@
   "Copies the request metadata and headers of the native request context at
   `ctx-ptr` into one byte array, on the worker thread inside the request
   callback. Returns the native request pointer, `:has-body`, the
-  `:request-method` keyword (nil when the request has no method), and the bytes
+  `:request-method` keyword (nil when the request has no method), the
+  `:entrypoint` index of the listener that accepted the connection
+  ([[CLJ_ENTRYPOINT_UNKNOWN]] when the shim does not know it), and the bytes
   and field end offsets that [[assemble-ring-request]] decodes. The copy does
   not refer to native memory except through `:req`."
   [^MemorySegment ctx-ptr]
@@ -980,6 +997,9 @@
                              (+ meta req-meta-early-data-offset)))
      :http-version (long (.get native-memory ValueLayout/JAVA_INT_UNALIGNED
                                (+ meta req-meta-http-version-offset)))
+     :entrypoint (Integer/toUnsignedLong
+                  (.get native-memory ValueLayout/JAVA_INT_UNALIGNED
+                        (+ meta req-meta-entrypoint-offset)))
      :request-method (let [start (aget ends 0)]
                        (method-keyword-at bytes start (- (aget ends 1) start)))
      :bytes bytes

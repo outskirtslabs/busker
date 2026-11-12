@@ -43,13 +43,14 @@ It uses the ASCII comma delimiter for ordinary fields and the ASCII semicolon de
 [cols="1,2,3",options="header"]
 |===
 | Key | Value | Meaning
-| `:ol.busker/entrypoint` | `Keyword` | The inferred xref:configuration.adoc[entrypoint], a named listener group.
+| `:ol.busker/entrypoint` | `Keyword` | The xref:configuration.adoc[entrypoint], a named listener group, whose listener accepted the connection.
 | `:ol.busker/early-data?` | `Boolean` | True when TLS accepted the request as 0-RTT early data.
 | `:ol.busker.request/emitter` | xref:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter`] | The response stream for this request.
 |===
 
-Busker infers `:ol.busker/entrypoint` by server port, then by a sole entrypoint for the request scheme, and finally by the first configured entrypoint.
-This value can be wrong when listeners cannot be distinguished by port, such as multiple Unix sockets.
+`:ol.busker/entrypoint` names the entrypoint of the listener that accepted the request's connection, for TCP and Unix socket listeners and for HTTP/1.1, HTTP/2 and HTTP/3 alike.
+The `Host` header and the HTTP/2 or HTTP/3 `:authority` do not change it, so a client cannot reach a dispatcher restricted to another entrypoint by naming that entrypoint's port.
+A request map built by hand without this key, for example in a test that calls the dispatch handler directly, is treated as a request to the first configured entrypoint.
 
 The early-data flag is always present, including on ordinary requests where its value is false.
 Busker's xref:api/ol-busker-middleware.adoc#wrap-reject-early-data[`wrap-reject-early-data`] middleware can reject unsafe methods received through 0-RTT.

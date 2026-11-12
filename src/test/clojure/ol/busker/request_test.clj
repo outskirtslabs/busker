@@ -27,8 +27,9 @@
                     :release-command! vector
                     :wake-command-waiters! vector
                     :on-native-failure! vector}
-            config {:output-buffer-size 64 :response-buffer-size 8192}
-            ctx {:has-body 0 :request-method method}
+            config {:output-buffer-size 64
+                    :entrypoints {:http {}}}
+            ctx {:has-body 0 :request-method method :entrypoint 0}
             installed_ (atom nil)
             tasks_ (atom [])
             executor (proxy [AbstractExecutorService] []
@@ -54,6 +55,24 @@
             (is (identical? pool (:buffer-pool (queue/new-response-state req))))
             (is (nil? (meta req)))
             (is (= 1 (count @tasks_)))))))))
+
+(deftest request-without-a-known-entrypoint-is-not-dispatched
+  (doseq [index [h2o/CLJ_ENTRYPOINT_UNKNOWN 2 nil]]
+    (let [executed_ (atom 0)
+          installed_ (atom 0)
+          executor (proxy [AbstractExecutorService] []
+                     (execute [_] (swap! executed_ inc)))]
+      (with-redefs [pi/running? (constantly true)
+                    worker-context/get-current-worker (constantly {})
+                    h2o/install-request-dispatch (fn [& _] (swap! installed_ inc) 1)]
+        (is (= h2o/CLJ_HANDLER_ERROR
+               (binding [*err* (java.io.StringWriter.)]
+                 (request/on-request executor identity
+                                     {:entrypoints {:http {} :admin {}}}
+                                     identity ffi/null
+                                     {:has-body 0 :entrypoint index})))
+            (str "index " index))
+        (is (= [0 0] [@executed_ @installed_]))))))
 
 (deftest closed-required-proceed-fails-request-body-read
   (let [calls_ (atom [])]
