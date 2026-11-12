@@ -26,9 +26,11 @@
   #"(?i)^v[0-9A-F]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+$")
 
 (defn parse-port
+  "Returns the port number of the ASCII digit string `port-str` when it is 0 to
+  65535, or nil. A digit string too large for a long is out of range as well."
   [port-str]
   (when (re-matches #"\d+" port-str)
-    (let [port (parse-long port-str)]
+    (when-let [port (parse-long port-str)]
       (when (<= 0 port 65535)
         port))))
 

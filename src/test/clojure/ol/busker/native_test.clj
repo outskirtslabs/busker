@@ -512,6 +512,14 @@
                                 :has-body 0 :early-data 0}
                                nil)))))
 
+(deftest assemble-ring-request-treats-an-overlong-authority-port-as-invalid-test
+  (doseq [authority ["localhost:99999" "localhost:9999999999999999999"
+                     "[::1]:99999" "[::1]:9999999999999999999"]]
+    (is (= {:server-name authority :server-port 80}
+           (select-keys (assembled-request {:authority authority})
+                        [:server-name :server-port]))
+        authority)))
+
 (deftest assemble-ring-request-method-and-scheme-keywords-test
   (doseq [[method expected] [["GET" :get] ["get" :get] ["Get" :get] ["POST" :post]
                              ["post" :post] ["PUT" :put] ["put" :put] ["DELETE" :delete]
