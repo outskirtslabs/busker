@@ -16,16 +16,12 @@
    [babashka.ffi :as ffi]
    [ol.busker.native :as h2o])
   (:import
-   [java.lang.foreign MemorySegment]
+   [java.lang.foreign MemorySegment ValueLayout]
    [java.nio.charset StandardCharsets]))
 
 (set! *warn-on-reflection* true)
 
 (def ^:private clj-header-size (ffi/sizeof h2o/ffi-clj-header-t))
-(def ^:private clj-header-name (ffi/place h2o/ffi-clj-header-t :name))
-(def ^:private clj-header-name-len (ffi/place h2o/ffi-clj-header-t :name_len))
-(def ^:private clj-header-value (ffi/place h2o/ffi-clj-header-t :value))
-(def ^:private clj-header-value-len (ffi/place h2o/ffi-clj-header-t :value_len))
 
 (defn utf8-length
   "Returns the number of UTF-8 bytes required for `value`."
@@ -62,43 +58,61 @@
           0
           headers))
 
+(defn staging-bytes
+  "Returns the descriptor and C-string budget of `pair-count` header pairs whose
+  names and values take `header-bytes` UTF-8 bytes."
+  ^long [^long pair-count ^long header-bytes]
+  (+ (* pair-count clj-header-size)
+     header-bytes
+     (* 2 pair-count)))
+
 (defn header-staging-bytes
   "Returns the established descriptor and C-string budget for `headers`."
   ^long [headers]
-  (+ (* (count headers) clj-header-size)
-     (header-bytes headers)
-     (* 2 (count headers))))
+  (staging-bytes (count headers) (header-bytes headers)))
 
 (defn descriptor-bytes
   "Returns bytes occupied by `clj_header_t` descriptors for `headers`."
   ^long [headers]
   (* (count headers) clj-header-size))
 
-(defn- write-utf8!
-  ^long [^MemorySegment payload ^long offset ^String value ^long length]
-  (.setString payload offset value StandardCharsets/UTF_8)
+(defn write-utf8!
+  "Writes `value` as UTF-8 into `segment` at `offset`, followed by one zero byte,
+  and returns `offset` plus `length`, the UTF-8 byte count of `value`."
+  ^long [^MemorySegment segment ^long offset ^String value ^long length]
+  (.setString segment offset value StandardCharsets/UTF_8)
   (+ offset length))
+
+(defn stage-headers-at!
+  "Writes `headers` as `clj_header_t` descriptors into `descriptors` from byte
+  `descriptors-offset`, and their names and values into `payload` from offset
+  0, returning UTF-8 byte use.
+
+  Both segments must remain valid until native code has copied the descriptors."
+  ^long [^MemorySegment descriptors ^long descriptors-offset ^MemorySegment payload headers]
+  (let [base (.address payload)
+        n (count headers)]
+    (loop [index (long 0)
+           cursor (long 0)]
+      (if (< index n)
+        (let [[^String name ^String value] (nth headers index)
+              value-offset (write-utf8! payload cursor name (utf8-length name))
+              next-cursor (write-utf8! payload value-offset value (utf8-length value))
+              descriptor (+ descriptors-offset (* index h2o/header-size))]
+          (.set descriptors ValueLayout/JAVA_LONG_UNALIGNED descriptor (+ base cursor))
+          (.set descriptors ValueLayout/JAVA_LONG_UNALIGNED
+                (+ descriptor h2o/header-length-offset) (- value-offset cursor))
+          (.set descriptors ValueLayout/JAVA_LONG_UNALIGNED
+                (+ descriptor h2o/header-value-offset) (+ base value-offset))
+          (.set descriptors ValueLayout/JAVA_LONG_UNALIGNED
+                (+ descriptor h2o/header-value-offset h2o/header-length-offset)
+                (- next-cursor value-offset))
+          (recur (unchecked-inc index) next-cursor))
+        cursor))))
 
 (defn stage-headers!
   "Writes `headers` into `descriptors` and `payload`, returning UTF-8 byte use.
 
   Both segments must remain valid until native code has copied the descriptors."
   ^long [^MemorySegment descriptors ^MemorySegment payload headers]
-  (loop [index (long 0)
-         cursor (long 0)]
-    (if (< index (count headers))
-      (let [[^String name ^String value] (nth headers index)
-            name-offset cursor
-            name-length (utf8-length name)
-            value-offset (write-utf8! payload name-offset name name-length)
-            value-length (utf8-length value)
-            next-cursor (write-utf8! payload value-offset value value-length)
-            descriptor (ffi/slice descriptors (* index clj-header-size) clj-header-size)
-            name-segment (ffi/slice payload name-offset (max 1 name-length))
-            value-segment (ffi/slice payload value-offset (max 1 value-length))]
-        (ffi/write descriptor clj-header-name name-segment)
-        (ffi/write descriptor clj-header-name-len name-length)
-        (ffi/write descriptor clj-header-value value-segment)
-        (ffi/write descriptor clj-header-value-len value-length)
-        (recur (unchecked-inc index) next-cursor))
-      cursor)))
+  (stage-headers-at! descriptors 0 payload headers))

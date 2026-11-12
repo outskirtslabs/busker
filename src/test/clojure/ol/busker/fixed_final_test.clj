@@ -8,9 +8,11 @@
    [ol.busker.generation :as generation]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
+   [ol.busker.response :as response]
    [ol.busker.test-utils :as util])
   (:import
-   [java.lang.foreign MemorySegment]
+   [java.lang.foreign MemorySegment ValueLayout]
+   [java.security MessageDigest]
    [java.net InetSocketAddress Socket]
    [java.nio ByteBuffer]
    [java.nio.charset StandardCharsets]
@@ -46,6 +48,343 @@
   (proxy [clojure.lang.AFn clojure.lang.IFn$OLL] []
     (invokePrim [receiver claim-handle] (long (f receiver claim-handle)))
     (invoke [receiver claim-handle] (f receiver claim-handle))))
+
+;; Slot contents that write-direct-response-slot! produces for these responses,
+;; saved as literals. The slot is filled with 0xAA
+;; first, so every byte the write touches shows. Descriptor pointers are offsets
+;; from the payload start; the payload window ends two bytes after the payload.
+(def ^:private pinned-data-size (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t))
+(def ^:private pinned-headers-offset (- pinned-data-size (* 64 32)))
+(def ^:private pinned-capacity (+ fixed-final/max-header-staging-bytes fixed-final/response-ring-max-body-bytes))
+
+(defn- sha256 [^bytes bs]
+  (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest (MessageDigest/getInstance "SHA-256") bs))))
+
+(defn- slot-capture [response]
+  (with-open [arena (mem/confined-arena)]
+    (let [[head plan] (#'response/ordinary-fixed-plan
+                       {:dispatch-module-id 7 :dispatch-request-seq 11
+                        :config {:output-buffer-size 32768}}
+                       response)
+          ^MemorySegment slot (mem/alloc arena (+ pinned-data-size pinned-capacity 1))
+          _ (.fill slot (unchecked-byte 0xAA))
+          _ (fixed-final/write-direct-response-slot! slot pinned-capacity plan)
+          payload-base (+ (.address slot) pinned-data-size)
+          i64 #(.get slot ValueLayout/JAVA_LONG_UNALIGNED (long %))
+          i32 #(.get slot ValueLayout/JAVA_INT_UNALIGNED (long %))
+          n (i64 24)
+          payload-len (i64 56)
+          relative #(let [p (i64 %)] (if (zero? p) 0 (- p payload-base)))
+          used (mapv (fn [i]
+                       (let [d (+ pinned-headers-offset (* 32 i))]
+                         [(relative d) (i64 (+ d 8)) (relative (+ d 16)) (i64 (+ d 24))]))
+                     (range n))
+          unused (.toArray (.asSlice slot (+ pinned-headers-offset (* 32 n)) (* 32 (- 64 n)))
+                           ValueLayout/JAVA_BYTE)
+          window (+ payload-len 2)
+          payload (.toArray (.asSlice slot pinned-data-size window) ValueLayout/JAVA_BYTE)]
+      {:head (select-keys head [:status :content-length :compress-hint])
+       :fields {:claim-token (i64 0) :module-id (i64 8) :request-seq (i64 16)
+                :headers-len n :content-length (i64 32) :body-offset (i64 40)
+                :body-len (i64 48) :payload-len payload-len
+                :status (i32 64) :compress-hint (i32 68)}
+       :descriptors used
+       :unused-descriptors-sha256 (sha256 unused)
+       :payload-window window
+       :payload-sha256 (sha256 payload)})))
+
+(def ^:private pinned-responses
+  [[:benchmark {:status 200 :headers {"content-type" "text/plain"} :body "Hello, World!"}]
+   [:twelve-headers {:status 200
+                     :headers (apply array-map
+                                     (concat (mapcat (fn [i] [(str "x-header-" i) (str "value number " i)])
+                                                     (range 11))
+                                             ["content-type" "text/plain"]))
+                     :body (apply str (repeat 2048 "a"))}]
+   [:byte-array {:status 201 :headers {"content-type" "application/octet-stream"}
+                 :body (byte-array (range -128 128))}]
+   [:non-ascii {:status 200 :headers {"x-name" "café ☕"}
+                :body (str "héllo 漢字 😀 " (char 0xd800) "x" (char 0xdc00) " end")}]
+   [:empty-body {:status 200 :headers {"x-a" "b"} :body ""}]
+   [:reset-content {:status 205 :headers {"x-a" "b"} :body ""}]
+   [:sequential {:status 200 :headers {"x-multi" ["a" "b" "c"] "x-one" "1"} :body "s"}]
+   [:pair-limit {:status 200 :headers {"x-repeat" (repeat 64 "v")} :body "p"}]
+   [:staging-limit {:status 200 :headers {"x-large" (apply str (repeat 16343 "x"))} :body "ok"}]])
+
+(def ^:private pinned-slot-contents
+  {:benchmark
+   {:head {:status 200, :content-length 13, :compress-hint 2},
+    :fields
+    {:payload-len 35,
+     :module-id 7,
+     :headers-len 1,
+     :content-length 13,
+     :status 200,
+     :request-seq 11,
+     :compress-hint 2,
+     :body-len 13,
+     :body-offset 22,
+     :claim-token -6148914691236517206},
+    :descriptors [[0 12 12 10]],
+    :unused-descriptors-sha256
+    "bab34e6c6d17c9914821a70b04e88ecb889669ac9ba99549d3c446eaf39534b2",
+    :payload-window 37,
+    :payload-sha256
+    "b4bf75407b1c4a895bec3cc01df0e49f4f187071c7f4107bf7dff6710398a7f9"},
+   :byte-array
+   {:head {:status 201, :content-length 256, :compress-hint 2},
+    :fields
+    {:payload-len 292,
+     :module-id 7,
+     :headers-len 1,
+     :content-length 256,
+     :status 201,
+     :request-seq 11,
+     :compress-hint 2,
+     :body-len 256,
+     :body-offset 36,
+     :claim-token -6148914691236517206},
+    :descriptors [[0 12 12 24]],
+    :unused-descriptors-sha256
+    "bab34e6c6d17c9914821a70b04e88ecb889669ac9ba99549d3c446eaf39534b2",
+    :payload-window 294,
+    :payload-sha256
+    "57c95116884b45498fb9c638b1fca6dfffb550e0ac53e065c73723830f0a7c3d"},
+   :empty-body
+   {:head {:status 200, :content-length 0, :compress-hint 2},
+    :fields
+    {:payload-len 4,
+     :module-id 7,
+     :headers-len 1,
+     :content-length 0,
+     :status 200,
+     :request-seq 11,
+     :compress-hint 2,
+     :body-len 0,
+     :body-offset 4,
+     :claim-token -6148914691236517206},
+    :descriptors [[0 3 3 1]],
+    :unused-descriptors-sha256
+    "bab34e6c6d17c9914821a70b04e88ecb889669ac9ba99549d3c446eaf39534b2",
+    :payload-window 6,
+    :payload-sha256
+    "6ce9c7a44fb0817d707490147762918079d04fb920452ad720cb7625995f4953"},
+   :non-ascii
+   {:head {:status 200, :content-length 26, :compress-hint 2},
+    :fields
+    {:payload-len 41,
+     :module-id 7,
+     :headers-len 1,
+     :content-length 26,
+     :status 200,
+     :request-seq 11,
+     :compress-hint 2,
+     :body-len 26,
+     :body-offset 15,
+     :claim-token -6148914691236517206},
+    :descriptors [[0 6 6 9]],
+    :unused-descriptors-sha256
+    "bab34e6c6d17c9914821a70b04e88ecb889669ac9ba99549d3c446eaf39534b2",
+    :payload-window 43,
+    :payload-sha256
+    "17c34e44fe4ac8d78aef0e69e223b31b3d8a3152d8a828e74e1265b44d13932f"},
+   :pair-limit
+   {:head {:status 200, :content-length 1, :compress-hint 2},
+    :fields
+    {:payload-len 577,
+     :module-id 7,
+     :headers-len 64,
+     :content-length 1,
+     :status 200,
+     :request-seq 11,
+     :compress-hint 2,
+     :body-len 1,
+     :body-offset 576,
+     :claim-token -6148914691236517206},
+    :descriptors
+    [[0 8 8 1]
+     [9 8 17 1]
+     [18 8 26 1]
+     [27 8 35 1]
+     [36 8 44 1]
+     [45 8 53 1]
+     [54 8 62 1]
+     [63 8 71 1]
+     [72 8 80 1]
+     [81 8 89 1]
+     [90 8 98 1]
+     [99 8 107 1]
+     [108 8 116 1]
+     [117 8 125 1]
+     [126 8 134 1]
+     [135 8 143 1]
+     [144 8 152 1]
+     [153 8 161 1]
+     [162 8 170 1]
+     [171 8 179 1]
+     [180 8 188 1]
+     [189 8 197 1]
+     [198 8 206 1]
+     [207 8 215 1]
+     [216 8 224 1]
+     [225 8 233 1]
+     [234 8 242 1]
+     [243 8 251 1]
+     [252 8 260 1]
+     [261 8 269 1]
+     [270 8 278 1]
+     [279 8 287 1]
+     [288 8 296 1]
+     [297 8 305 1]
+     [306 8 314 1]
+     [315 8 323 1]
+     [324 8 332 1]
+     [333 8 341 1]
+     [342 8 350 1]
+     [351 8 359 1]
+     [360 8 368 1]
+     [369 8 377 1]
+     [378 8 386 1]
+     [387 8 395 1]
+     [396 8 404 1]
+     [405 8 413 1]
+     [414 8 422 1]
+     [423 8 431 1]
+     [432 8 440 1]
+     [441 8 449 1]
+     [450 8 458 1]
+     [459 8 467 1]
+     [468 8 476 1]
+     [477 8 485 1]
+     [486 8 494 1]
+     [495 8 503 1]
+     [504 8 512 1]
+     [513 8 521 1]
+     [522 8 530 1]
+     [531 8 539 1]
+     [540 8 548 1]
+     [549 8 557 1]
+     [558 8 566 1]
+     [567 8 575 1]],
+    :unused-descriptors-sha256
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    :payload-window 579,
+    :payload-sha256
+    "3c5b39c5b53a00a441178a10f683a3b86e7025195c7e27f916725878b6a99e64"},
+   :reset-content
+   {:head {:status 205, :content-length 0, :compress-hint 2},
+    :fields
+    {:payload-len 4,
+     :module-id 7,
+     :headers-len 1,
+     :content-length 0,
+     :status 205,
+     :request-seq 11,
+     :compress-hint 2,
+     :body-len 0,
+     :body-offset 4,
+     :claim-token -6148914691236517206},
+    :descriptors [[0 3 3 1]],
+    :unused-descriptors-sha256
+    "bab34e6c6d17c9914821a70b04e88ecb889669ac9ba99549d3c446eaf39534b2",
+    :payload-window 6,
+    :payload-sha256
+    "6ce9c7a44fb0817d707490147762918079d04fb920452ad720cb7625995f4953"},
+   :sequential
+   {:head {:status 200, :content-length 1, :compress-hint 2},
+    :fields
+    {:payload-len 31,
+     :module-id 7,
+     :headers-len 4,
+     :content-length 1,
+     :status 200,
+     :request-seq 11,
+     :compress-hint 2,
+     :body-len 1,
+     :body-offset 30,
+     :claim-token -6148914691236517206},
+    :descriptors [[0 7 7 1] [8 7 15 1] [16 7 23 1] [24 5 29 1]],
+    :unused-descriptors-sha256
+    "3f15590ce1d67c8f24e08a1a0374398d90790586663c7b741470ff761a3d5b68",
+    :payload-window 33,
+    :payload-sha256
+    "65bcbd24721572160453de282741dad18d567deead4ec5c570be1004f61a11a7"},
+   :staging-limit
+   {:head {:status 200, :content-length 2, :compress-hint 2},
+    :fields
+    {:payload-len 16352,
+     :module-id 7,
+     :headers-len 1,
+     :content-length 2,
+     :status 200,
+     :request-seq 11,
+     :compress-hint 2,
+     :body-len 2,
+     :body-offset 16350,
+     :claim-token -6148914691236517206},
+    :descriptors [[0 7 7 16343]],
+    :unused-descriptors-sha256
+    "bab34e6c6d17c9914821a70b04e88ecb889669ac9ba99549d3c446eaf39534b2",
+    :payload-window 16354,
+    :payload-sha256
+    "8975dfecc5e147892952a023c33d708b2aa73815863cf98b73b5ea1de64f9cb0"},
+   :twelve-headers
+   {:head {:status 200, :content-length 2048, :compress-hint 2},
+    :fields
+    {:payload-len 2336,
+     :module-id 7,
+     :headers-len 12,
+     :content-length 2048,
+     :status 200,
+     :request-seq 11,
+     :compress-hint 2,
+     :body-len 2048,
+     :body-offset 288,
+     :claim-token -6148914691236517206},
+    :descriptors
+    [[0 10 10 14]
+     [24 10 34 14]
+     [48 10 58 14]
+     [72 10 82 14]
+     [96 10 106 14]
+     [120 10 130 14]
+     [144 10 154 14]
+     [168 10 178 14]
+     [192 10 202 14]
+     [216 10 226 14]
+     [240 11 251 15]
+     [266 12 278 10]],
+    :unused-descriptors-sha256
+    "693b529d984a7d206f416d6ed14c4d17cba0559782adc4e31f5d3adc8f95d0e2",
+    :payload-window 2338,
+    :payload-sha256
+    "695b631fc7603d0e560f568c88dc255caaf659fa2461fa358536f0c9695a7580"}})
+
+(deftest slot-field-offsets-match-the-layout-test
+  (with-open [arena (mem/confined-arena)]
+    (let [layout h2o/ffi-clj-fixed-response-slot-data-t
+          slot (mem/alloc arena (mem/sizeof layout))
+          offset-of (fn [field]
+                      (.fill ^MemorySegment slot (byte 0))
+                      (mem/write slot (mem/place layout field) 1)
+                      (first (keep-indexed (fn [i b] (when-not (zero? b) i))
+                                           (mem/read-array slot :byte (mem/sizeof layout)))))]
+      (is (= {:module-id fixed-final/slot-module-id-offset
+              :request-seq fixed-final/slot-request-seq-offset
+              :headers-len fixed-final/slot-headers-len-offset
+              :content-length fixed-final/slot-content-length-offset
+              :body-offset fixed-final/slot-body-offset-offset
+              :body-len fixed-final/slot-body-len-offset
+              :payload-len fixed-final/slot-payload-len-offset
+              :status fixed-final/slot-status-offset
+              :compress-hint fixed-final/slot-compress-hint-offset}
+             (into {} (map (juxt identity offset-of))
+                   [:module-id :request-seq :headers-len :content-length :body-offset
+                    :body-len :payload-len :status :compress-hint]))))))
+
+(deftest fixed-response-slot-contents-are-pinned-test
+  (doseq [[k response] pinned-responses]
+    (is (= (get pinned-slot-contents k) (slot-capture response)) (name k))))
 
 (deftest response-slot-contains-packed-metadata-headers-and-body
   (with-open [arena (mem/confined-arena)]

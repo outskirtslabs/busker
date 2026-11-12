@@ -28,9 +28,8 @@
    [ol.busker.response-serialization :as serialization])
   (:import
    [java.lang System$Logger$Level]
-   [java.lang.foreign Arena MemorySegment]
+   [java.lang.foreign Arena MemorySegment ValueLayout]
    [java.lang.invoke VarHandle]
-   [java.nio.charset StandardCharsets]
    [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicReference]
    [java.util.concurrent.locks Lock ReentrantReadWriteLock]))
 
@@ -46,15 +45,17 @@
 ;; 64 descriptors and 2120 bytes of metadata before its payload.
 
 (def ^:private response-slot-data-size (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t))
-(def ^:private response-slot-module-id (mem/place h2o/ffi-clj-fixed-response-slot-data-t :module-id))
-(def ^:private response-slot-request-seq (mem/place h2o/ffi-clj-fixed-response-slot-data-t :request-seq))
-(def ^:private response-slot-headers-len (mem/place h2o/ffi-clj-fixed-response-slot-data-t :headers-len))
-(def ^:private response-slot-content-length (mem/place h2o/ffi-clj-fixed-response-slot-data-t :content-length))
-(def ^:private response-slot-body-offset (mem/place h2o/ffi-clj-fixed-response-slot-data-t :body-offset))
-(def ^:private response-slot-body-len (mem/place h2o/ffi-clj-fixed-response-slot-data-t :body-len))
-(def ^:private response-slot-payload-len (mem/place h2o/ffi-clj-fixed-response-slot-data-t :payload-len))
-(def ^:private response-slot-status (mem/place h2o/ffi-clj-fixed-response-slot-data-t :status))
-(def ^:private response-slot-compress-hint (mem/place h2o/ffi-clj-fixed-response-slot-data-t :compress-hint))
+;; Byte offsets of the slot fields that write-direct-response-slot! writes,
+;; following ffi-clj-fixed-response-slot-data-t; layout tests check them.
+(def ^:no-doc ^:const slot-module-id-offset 8)
+(def ^:no-doc ^:const slot-request-seq-offset 16)
+(def ^:no-doc ^:const slot-headers-len-offset 24)
+(def ^:no-doc ^:const slot-content-length-offset 32)
+(def ^:no-doc ^:const slot-body-offset-offset 40)
+(def ^:no-doc ^:const slot-body-len-offset 48)
+(def ^:no-doc ^:const slot-payload-len-offset 56)
+(def ^:no-doc ^:const slot-status-offset 64)
+(def ^:no-doc ^:const slot-compress-hint-offset 68)
 ;; The final field is the header array; its alignment equals the enclosing struct's.
 (def ^:private response-slot-headers-offset
   (- response-slot-data-size (mem/sizeof [:array h2o/ffi-clj-header-t max-header-pairs])))
@@ -90,10 +91,13 @@
 
 (def ^:private byte-array-class (Class/forName "[B"))
 
-(defn- write-utf8!
-  ^long [^MemorySegment segment ^long offset ^String value ^long length]
-  (.setString segment offset value StandardCharsets/UTF_8)
-  (+ offset length))
+(defn- put-slot-long!
+  [^MemorySegment slot ^long offset ^long value]
+  (.set slot ValueLayout/JAVA_LONG_UNALIGNED offset value))
+
+(defn- put-slot-int!
+  [^MemorySegment slot ^long offset ^long value]
+  (.set slot ValueLayout/JAVA_INT_UNALIGNED offset (unchecked-int value)))
 
 (defn ^:no-doc write-direct-response-slot!
   "Packs original response strings and body directly into claimed `slot` storage."
@@ -114,34 +118,35 @@
                       {:header-count (count headers)
                        :payload-bytes payload-length
                        :payload-capacity payload-capacity})))
-    (let [data slot
-          payload (mem/slice data response-slot-data-size (inc payload-capacity))
-          descriptors (mem/slice data response-slot-headers-offset
-                                 (serialization/descriptor-bytes headers))
-          body-offset (serialization/stage-headers! descriptors payload headers)]
+    (let [^MemorySegment data slot
+          ;; The payload view ends one byte after the capacity, for the zero
+          ;; byte that follows the last string written.
+          payload (.asSlice data (long response-slot-data-size) (inc payload-capacity))
+          body-offset (serialization/stage-headers-at! data response-slot-headers-offset
+                                                       payload headers)]
       (when-not (= header-bytes body-offset)
         (throw (ex-info "Fixed response header size changed while packing"
                         {:expected header-bytes :actual body-offset})))
       (cond
         (zero? body-length) nil
-        (string? body) (let [end (write-utf8! payload body-offset body body-length)]
+        (string? body) (let [end (serialization/write-utf8! payload body-offset body body-length)]
                          (when-not (= payload-length end)
                            (throw (ex-info "Fixed response body size changed while packing"
                                            {:expected body-length
                                             :actual (- end body-offset)}))))
         (instance? byte-array-class body)
-        (MemorySegment/copy (MemorySegment/ofArray ^bytes body) 0 ^MemorySegment payload body-offset body-length)
+        (MemorySegment/copy ^bytes body 0 payload ValueLayout/JAVA_BYTE body-offset (int body-length))
         :else
         (throw (ex-info "Unsupported direct fixed response body" {:type (class body)})))
-      (mem/write data response-slot-module-id module-id)
-      (mem/write data response-slot-request-seq request-seq)
-      (mem/write data response-slot-headers-len (count headers))
-      (mem/write data response-slot-content-length content-length)
-      (mem/write data response-slot-body-offset body-offset)
-      (mem/write data response-slot-body-len body-length)
-      (mem/write data response-slot-payload-len payload-length)
-      (mem/write data response-slot-status status)
-      (mem/write data response-slot-compress-hint compress-hint)
+      (put-slot-long! data slot-module-id-offset module-id)
+      (put-slot-long! data slot-request-seq-offset request-seq)
+      (put-slot-long! data slot-headers-len-offset (count headers))
+      (put-slot-long! data slot-content-length-offset content-length)
+      (put-slot-long! data slot-body-offset-offset body-offset)
+      (put-slot-long! data slot-body-len-offset body-length)
+      (put-slot-long! data slot-payload-len-offset payload-length)
+      (put-slot-int! data slot-status-offset status)
+      (put-slot-int! data slot-compress-hint-offset compress-hint)
       data)))
 
 ;; Fixed-slot waiters. A thread waits on `:response-slot-monitor` only in
@@ -284,10 +289,10 @@
                        buffer (.asByteBuffer view)]
                    (producer buffer)
                    (.position buffer)))]
-    (mem/write slot response-slot-body-len length)
-    (mem/write slot response-slot-payload-len (+ body-offset length))
+    (put-slot-long! slot slot-body-len-offset length)
+    (put-slot-long! slot slot-payload-len-offset (+ body-offset length))
     (when (= -1 (.-content-length plan))
-      (mem/write slot response-slot-content-length length))))
+      (put-slot-long! slot slot-content-length-offset length))))
 
 (defn publish-direct-producer!
   "Fills a claimed fixed slot with a synchronous confined native producer.

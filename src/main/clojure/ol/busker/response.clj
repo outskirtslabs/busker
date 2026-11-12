@@ -213,6 +213,7 @@
   Content-length headers in any letter case stay out of the pairs. The first
   one with a value gives the content length, otherwise `length` does for a final
   head, otherwise it is `-1`. Status 205 always has content length 0.
+  `:header-bytes` is the UTF-8 byte count of the pair names and values.
   `compress-hint` is stored as given. `retain-response?` stores the response
   without its body under `:response`, for later body operations that need its
   headers."
@@ -242,11 +243,14 @@
               content-length (cond
                                (some? header-length) (coerce-content-length header-length)
                                (and (some? length) (not informational?)) (long length)
-                               :else -1)]
-          (when (or (> n fixed-final/max-header-pairs)
-                    (> (fixed-final/header-staging-bytes pairs) fixed-final/max-header-staging-bytes))
+                               :else -1)
+              header-bytes (when-not (> n fixed-final/max-header-pairs)
+                             (serialization/header-bytes pairs))]
+          (when (or (nil? header-bytes)
+                    (> (serialization/staging-bytes n header-bytes)
+                       fixed-final/max-header-staging-bytes))
             (throw (ex-info "Response headers exceed bounded header storage" {:header-count n})))
-          {:status status :headers pairs
+          {:status status :headers pairs :header-bytes header-bytes
            :content-length (if (= reset-content-status status) 0 content-length)
            :compress-hint compress-hint
            :response (when retain-response? (-> response (assoc :status status) (dissoc :body)))})))))
@@ -429,7 +433,7 @@
   (fixed-final/direct-response-plan
    (long (:dispatch-module-id req)) (long (:dispatch-request-seq req))
    (long (:status head)) (:headers head)
-   (long (fixed-final/header-utf8-bytes (:headers head))) body (long length)
+   (long (:header-bytes head)) body (long length)
    (long (:content-length head)) (long (:compress-hint head))))
 
 (defn- fixed-producer! [^H2OResponseEmitter emitter head producer capacity opts]
