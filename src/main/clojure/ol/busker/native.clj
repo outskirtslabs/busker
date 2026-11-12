@@ -1255,6 +1255,12 @@
   "clj_h2o_http3_stop_accepting"
   [:pointer] :void)
 
+(defcfn http3-withdraw-worker
+  "Stop sending new HTTP/3 connections from other workers to this worker.
+   Safe to call from any thread."
+  "clj_h2o_http3_withdraw_worker"
+  [:pointer] :void)
+
 (defcfn http3-num-connections
   "Get the number of active HTTP/3 connections on this context."
   "clj_h2o_http3_num_connections"

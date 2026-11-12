@@ -23,6 +23,7 @@
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -1750,6 +1751,47 @@ typedef struct {
   size_t num_keys;
 } clj_address_token_keys_t;
 
+/* QUIC load of one worker of a transport. The transport frees it on release,
+   so other workers may still read it after the worker's context is gone.
+   `conns` changes only on the worker's thread; `pending` counts new flows
+   forwarded to the worker that it has not read yet. `forward_fd` is the
+   write end of the worker's forwarding channel, -1 while no context is
+   attached; `writers` counts forwards using it, so detaching waits for them
+   before the descriptor can be closed. */
+typedef struct clj_http3_worker_load_t {
+  uint64_t node_id;
+  uint32_t thread_id;
+  _Atomic uint32_t conns;
+  _Atomic uint32_t pending;
+  _Atomic int accepting;
+  _Atomic int withdrawn;
+  _Atomic int forward_fd;
+  _Atomic uint32_t writers;
+  struct clj_http3_worker_load_t *next;
+} clj_http3_worker_load_t;
+
+/* The attached workers of a transport, for lookups without the mutex. A set
+   is replaced, never changed; the transport frees replaced sets on release. */
+typedef struct clj_http3_worker_set_t {
+  struct clj_http3_worker_set_t *replaced;
+  uint64_t active_node_id;
+  size_t num_loads;
+  clj_http3_worker_load_t *loads[];
+} clj_http3_worker_set_t;
+
+/* A new flow seen by this worker, so its later Initial and 0-RTT datagrams
+   follow its first one */
+typedef struct {
+  uint64_t expires_at;
+  quicly_address_t srcaddr;
+  clj_http3_worker_load_t *target;
+  uint8_t dcid_len;
+  uint8_t dcid[QUICLY_MAX_CID_LEN_V1];
+} clj_http3_new_flow_t;
+
+#define CLJ_HTTP3_NEW_FLOWS 64
+#define CLJ_HTTP3_NEW_FLOW_MILLIS 3000
+
 /* HTTP/3 (QUIC) context structure holding all resources for one worker */
 struct clj_http3_ctx_t {
   h2o_http3_server_ctx_t h3_ctx;
@@ -1759,11 +1801,17 @@ struct clj_http3_ctx_t {
   quicly_cid_plaintext_t next_cid;
   struct clj_http3_udp_transport_t *transport;
   clj_address_token_keys_t address_token;
+  clj_http3_worker_load_t *load;
   uint64_t node_id;
   uint32_t thread_id;
   int forward_fd;
   int fd;
   int reading_forwarded;
+  /* Flows this worker kept for itself in the loop turn `kept_at` (the loop's
+     time); their accepts follow after the whole receive batch */
+  uint64_t kept_at;
+  uint32_t kept;
+  clj_http3_new_flow_t new_flows[CLJ_HTTP3_NEW_FLOWS];
 };
 
 typedef struct {
@@ -1771,6 +1819,7 @@ typedef struct {
   uint32_t thread_id;
   int forward_fd;
   struct clj_http3_ctx_t *ctx;
+  clj_http3_worker_load_t *load;
 } clj_http3_transport_attachment_t;
 
 struct clj_http3_udp_transport_t {
@@ -1784,6 +1833,9 @@ struct clj_http3_udp_transport_t {
   size_t num_attachments;
   size_t attachments_capacity;
   uint64_t active_node_id;
+  clj_http3_worker_load_t *loads;
+  _Atomic(clj_http3_worker_set_t *) workers;
+  _Atomic uint32_t spread_cursor;
 };
 
 typedef struct clj_ptls_identity_cache_entry {
@@ -2403,8 +2455,34 @@ void clj_h2o_free_quicly_ctx(quicly_context_t *ctx) {
   free(wrapper);
 }
 
+static void clj_http3_take_pending(clj_http3_worker_load_t *load) {
+  uint32_t pending = atomic_load(&load->pending);
+  while (pending != 0 &&
+         !atomic_compare_exchange_weak(&load->pending, &pending, pending - 1))
+    ;
+}
+
+static void clj_http3_count_accept(h2o_quic_ctx_t *quic_ctx) {
+  clj_http3_worker_load_t *load =
+      H2O_STRUCT_FROM_MEMBER(clj_http3_ctx_t, h3_ctx.super, quic_ctx)->load;
+  if (load != NULL)
+    atomic_fetch_add(&load->conns, 1);
+}
+
+static void clj_http3_count_close(h2o_quic_ctx_t *quic_ctx) {
+  clj_http3_worker_load_t *load =
+      H2O_STRUCT_FROM_MEMBER(clj_http3_ctx_t, h3_ctx.super, quic_ctx)->load;
+  if (load == NULL)
+    return;
+  uint32_t conns = atomic_load(&load->conns);
+  while (conns != 0 &&
+         !atomic_compare_exchange_weak(&load->conns, &conns, conns - 1))
+    ;
+}
+
 /* HTTP/3 connection destroy wrapper - releases connection limit slot */
 static void clj_on_http3_conn_destroy(h2o_quic_conn_t *conn) {
+  clj_http3_count_close(conn->ctx);
   clj_h2o_conn_limit_release();
   H2O_HTTP3_CONN_CALLBACKS.super.destroy_connection(conn);
 }
@@ -2454,15 +2532,20 @@ clj_on_http3_accept(h2o_quic_ctx_t *quic_ctx, quicly_address_t *destaddr,
 
   clj_init_http3_conn_callbacks();
 
+  clj_http3_count_accept(quic_ctx);
   h2o_http3_conn_t *conn = h2o_http3_server_accept(
       &ctx->h3_ctx, destaddr, srcaddr, packet, token, &clj_http3_conn_callbacks);
 
   /* Release if accept failed without creating a connection */
   if (!conn) {
+    clj_http3_count_close(quic_ctx);
     clj_h2o_conn_limit_release();
     return NULL;
   }
+  /* Not H2O's decryption-failed result: H2O would forward the Initial, whose
+     header, packet number and payload the failed decryption has overwritten */
   if (&conn->super == &h2o_quic_accept_conn_decryption_failed) {
+    clj_http3_count_close(quic_ctx);
     clj_h2o_conn_limit_release();
     return NULL;
   }
@@ -2497,6 +2580,8 @@ static int clj_set_fd_nonblock(int fd) {
 
 #define CLJ_QUIC_FORWARDED_HEADER_MAX_SIZE (1 + 4 + (1 + 16 + 2) * 2 + 1)
 #define CLJ_QUIC_FORWARDED_VERSION 0x91c17000
+/* The first datagram of a new flow sent to the worker chosen for it */
+#define CLJ_QUIC_FORWARDED_NEW_FLOW_VERSION 0x91c17001
 
 static uint8_t *clj_encode_quic_address(uint8_t *dst, quicly_address_t *addr) {
   switch (addr->sa.sa_family) {
@@ -2563,11 +2648,12 @@ static int clj_decode_quic_address(quicly_address_t *addr, const uint8_t **src,
 static size_t clj_encode_quic_forwarded_header(void *buf,
                                                quicly_address_t *destaddr,
                                                quicly_address_t *srcaddr,
-                                               uint8_t ttl) {
+                                               uint8_t ttl, int new_flow) {
   uint8_t *dst = buf;
 
   *dst++ = 0x80;
-  dst = quicly_encode32(dst, CLJ_QUIC_FORWARDED_VERSION);
+  dst = quicly_encode32(dst, new_flow ? CLJ_QUIC_FORWARDED_NEW_FLOW_VERSION
+                                      : CLJ_QUIC_FORWARDED_VERSION);
   dst = clj_encode_quic_address(dst, destaddr);
   if (dst == NULL)
     return SIZE_MAX;
@@ -2581,7 +2667,7 @@ static size_t clj_encode_quic_forwarded_header(void *buf,
 
 static size_t clj_decode_quic_forwarded_header(quicly_address_t *destaddr,
                                                quicly_address_t *srcaddr,
-                                               uint8_t *ttl,
+                                               uint8_t *ttl, int *new_flow,
                                                h2o_iovec_t octets) {
   const uint8_t *src = (const uint8_t *)octets.base, *end = src + octets.len;
 
@@ -2589,8 +2675,12 @@ static size_t clj_decode_quic_forwarded_header(quicly_address_t *destaddr,
     goto NotForwarded;
   if (*src++ != 0x80)
     goto NotForwarded;
-  if (quicly_decode32(&src) != CLJ_QUIC_FORWARDED_VERSION)
+  uint32_t version = quicly_decode32(&src);
+  if (version != CLJ_QUIC_FORWARDED_VERSION &&
+      version != CLJ_QUIC_FORWARDED_NEW_FLOW_VERSION)
     goto NotForwarded;
+  if (new_flow != NULL)
+    *new_flow = version == CLJ_QUIC_FORWARDED_NEW_FLOW_VERSION;
   if (!clj_decode_quic_address(destaddr, &src, end))
     goto NotForwarded;
   if (!clj_decode_quic_address(srcaddr, &src, end))
@@ -2605,11 +2695,74 @@ NotForwarded:
   return SIZE_MAX;
 }
 
+/* Call with the transport mutex held. The attached workers, plus `extra`
+   unless it is NULL, for lookups without the mutex; NULL when allocation
+   fails. */
+static clj_http3_worker_set_t *
+clj_http3_build_workers(clj_http3_udp_transport_t *transport,
+                        clj_http3_worker_load_t *extra) {
+  clj_http3_worker_set_t *set =
+      calloc(1, sizeof(*set) + (transport->num_attachments + 1) *
+                                   sizeof(clj_http3_worker_load_t *));
+  if (set == NULL)
+    return NULL;
+  set->active_node_id = transport->active_node_id;
+  for (size_t idx = 0; idx < transport->num_attachments; ++idx) {
+    if (transport->attachments[idx].load != NULL)
+      set->loads[set->num_loads++] = transport->attachments[idx].load;
+  }
+  if (extra != NULL)
+    set->loads[set->num_loads++] = extra;
+  return set;
+}
+
+/* Call with the transport mutex held */
+static void clj_http3_publish_workers(clj_http3_udp_transport_t *transport,
+                                      clj_http3_worker_set_t *set) {
+  set->replaced = atomic_exchange(&transport->workers, set);
+}
+
+/* Call with the transport mutex held */
+static clj_http3_worker_load_t *
+clj_http3_transport_load(clj_http3_udp_transport_t *transport,
+                         uint64_t node_id, uint32_t thread_id) {
+  clj_http3_worker_load_t *load;
+  for (load = transport->loads; load != NULL; load = load->next) {
+    if (load->node_id == node_id && load->thread_id == thread_id)
+      return load;
+  }
+  load = calloc(1, sizeof(*load));
+  if (load == NULL)
+    return NULL;
+  load->node_id = node_id;
+  load->thread_id = thread_id;
+  atomic_init(&load->forward_fd, -1);
+  load->next = transport->loads;
+  transport->loads = load;
+  return load;
+}
+
+/* Waits until no forward still uses the worker's descriptor. Senders check
+   the descriptor before they count themselves, so once it is -1 no new
+   sender starts, and the wait ends when the few already counted finish. */
+static void clj_http3_detach_load(clj_http3_worker_load_t *load) {
+  atomic_store(&load->forward_fd, -1);
+  while (atomic_load(&load->writers) != 0)
+    sched_yield();
+}
+
 static int clj_http3_transport_register_attachment(
     clj_http3_udp_transport_t *transport, uint64_t node_id, uint32_t thread_id,
     int forward_fd, clj_http3_ctx_t *ctx) {
   if (pthread_mutex_lock(&transport->mutex) != 0)
     return 0;
+
+  clj_http3_worker_load_t *load =
+      clj_http3_transport_load(transport, node_id, thread_id);
+  if (load == NULL) {
+    pthread_mutex_unlock(&transport->mutex);
+    return 0;
+  }
 
   size_t slot = transport->num_attachments;
   for (size_t idx = 0; idx < transport->num_attachments; ++idx) {
@@ -2620,62 +2773,56 @@ static int clj_http3_transport_register_attachment(
     }
   }
 
-  if (slot == transport->num_attachments) {
-    if (transport->num_attachments == transport->attachments_capacity) {
-      size_t new_capacity =
-          transport->attachments_capacity == 0 ? 8 : transport->attachments_capacity * 2;
-      clj_http3_transport_attachment_t *new_attachments =
-          realloc(transport->attachments,
-                  new_capacity * sizeof(*new_attachments));
-      if (new_attachments == NULL) {
-        pthread_mutex_unlock(&transport->mutex);
-        return 0;
-      }
-      transport->attachments = new_attachments;
-      transport->attachments_capacity = new_capacity;
+  int new_slot = slot == transport->num_attachments;
+  if (new_slot && transport->num_attachments == transport->attachments_capacity) {
+    size_t new_capacity =
+        transport->attachments_capacity == 0 ? 8 : transport->attachments_capacity * 2;
+    clj_http3_transport_attachment_t *new_attachments =
+        realloc(transport->attachments,
+                new_capacity * sizeof(*new_attachments));
+    if (new_attachments == NULL) {
+      pthread_mutex_unlock(&transport->mutex);
+      return 0;
     }
-    transport->num_attachments++;
+    transport->attachments = new_attachments;
+    transport->attachments_capacity = new_capacity;
   }
+  /* Built before anything changes, so a failure leaves no trace */
+  clj_http3_worker_set_t *set =
+      clj_http3_build_workers(transport, new_slot ? load : NULL);
+  if (set == NULL) {
+    pthread_mutex_unlock(&transport->mutex);
+    return 0;
+  }
+  if (new_slot)
+    transport->num_attachments++;
 
+  /* A generation id is reused after a failed start; nothing carries over */
+  clj_http3_detach_load(load);
+  atomic_store(&load->conns, 0);
+  atomic_store(&load->pending, 0);
+  atomic_store(&load->accepting, 0);
+  atomic_store(&load->withdrawn, 0);
+  atomic_store(&load->forward_fd, forward_fd);
   transport->attachments[slot] = (clj_http3_transport_attachment_t){
       .node_id = node_id,
       .thread_id = thread_id,
       .forward_fd = forward_fd,
       .ctx = ctx,
+      .load = load,
   };
+  if (ctx != NULL)
+    ctx->load = load;
+  clj_http3_publish_workers(transport, set);
   pthread_mutex_unlock(&transport->mutex);
   return 1;
 }
 
-static int clj_http3_transport_get_forward_fd(
-    clj_http3_udp_transport_t *transport, uint64_t node_id, uint32_t thread_id,
-    int allow_thread_fallback) {
-  int fd = -1;
-  int fallback_fd = -1;
-
-  if (pthread_mutex_lock(&transport->mutex) != 0)
-    return -1;
-  for (size_t idx = 0; idx < transport->num_attachments; ++idx) {
-    clj_http3_transport_attachment_t *attachment = transport->attachments + idx;
-    if (attachment->node_id == node_id) {
-      if (allow_thread_fallback && fallback_fd == -1)
-        fallback_fd = attachment->forward_fd;
-      if (attachment->thread_id == thread_id) {
-        fd = attachment->forward_fd;
-        break;
-      }
-    }
-  }
-  pthread_mutex_unlock(&transport->mutex);
-
-  if (fd != -1)
-    return fd;
-  return fallback_fd;
-}
-
+/* Returns once no other worker can still write to `forward_fd` */
 static void clj_http3_transport_unregister_attachment(
     clj_http3_udp_transport_t *transport, uint64_t node_id, uint32_t thread_id,
     int forward_fd) {
+  clj_http3_worker_load_t *load = NULL;
   if (pthread_mutex_lock(&transport->mutex) != 0)
     return;
 
@@ -2683,17 +2830,76 @@ static void clj_http3_transport_unregister_attachment(
     clj_http3_transport_attachment_t *attachment = transport->attachments + idx;
     if (attachment->node_id == node_id && attachment->thread_id == thread_id &&
         attachment->forward_fd == forward_fd) {
+      load = attachment->load;
       if (idx + 1 < transport->num_attachments) {
         memmove(attachment, attachment + 1,
                 (transport->num_attachments - idx - 1) *
                     sizeof(*attachment));
       }
       transport->num_attachments--;
+      /* Without a new set the old one still names the worker; its
+         descriptor is -1 below, so it is neither chosen nor written to */
+      clj_http3_worker_set_t *set = clj_http3_build_workers(transport, NULL);
+      if (set != NULL)
+        clj_http3_publish_workers(transport, set);
       break;
     }
   }
 
   pthread_mutex_unlock(&transport->mutex);
+  if (load != NULL)
+    clj_http3_detach_load(load);
+}
+
+static clj_http3_worker_load_t *
+clj_http3_find_worker(clj_http3_worker_set_t *set, uint64_t node_id,
+                      uint32_t thread_id) {
+  if (set == NULL)
+    return NULL;
+  for (size_t idx = 0; idx < set->num_loads; ++idx) {
+    if (set->loads[idx]->node_id == node_id &&
+        set->loads[idx]->thread_id == thread_id)
+      return set->loads[idx];
+  }
+  return NULL;
+}
+
+enum { CLJ_HTTP3_SENT = 1, CLJ_HTTP3_CHANNEL_FULL = 0, CLJ_HTTP3_GONE = -1 };
+
+/* Writes an envelope and a datagram to the worker's forwarding channel */
+static int clj_http3_send_to_worker(clj_http3_worker_load_t *target,
+                                    quicly_address_t *destaddr,
+                                    quicly_address_t *srcaddr, uint8_t ttl,
+                                    int new_flow, const uint8_t *datagram,
+                                    size_t len) {
+  char header_buf[CLJ_QUIC_FORWARDED_HEADER_MAX_SIZE];
+  if (ttl == 0)
+    return CLJ_HTTP3_GONE;
+  size_t header_len = clj_encode_quic_forwarded_header(
+      header_buf, destaddr, srcaddr, ttl - 1, new_flow);
+  if (header_len == SIZE_MAX)
+    return CLJ_HTTP3_GONE;
+  struct iovec vec[2] = {{header_buf, header_len}, {(uint8_t *)datagram, len}};
+
+  if (atomic_load(&target->forward_fd) == -1)
+    return CLJ_HTTP3_GONE;
+  atomic_fetch_add(&target->writers, 1);
+  int fd = atomic_load(&target->forward_fd);
+  ssize_t written = fd == -1 ? -1 : writev(fd, vec, 2);
+  int saved_errno = errno;
+  atomic_fetch_sub(&target->writers, 1);
+  if (written >= 0)
+    return CLJ_HTTP3_SENT;
+  if (fd != -1 && (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK))
+    return CLJ_HTTP3_CHANNEL_FULL;
+  return CLJ_HTTP3_GONE;
+}
+
+static int clj_http3_may_choose(clj_http3_worker_set_t *set,
+                                clj_http3_worker_load_t *load) {
+  return load != NULL && load->node_id == set->active_node_id &&
+         atomic_load(&load->accepting) && !atomic_load(&load->withdrawn) &&
+         atomic_load(&load->forward_fd) != -1;
 }
 
 static int clj_forward_quic_packets(h2o_quic_ctx_t *h3ctx,
@@ -2705,52 +2911,224 @@ static int clj_forward_quic_packets(h2o_quic_ctx_t *h3ctx,
                                     size_t num_packets) {
   clj_http3_ctx_t *ctx = H2O_STRUCT_FROM_MEMBER(clj_http3_ctx_t, h3_ctx.super,
                                                 h3ctx);
-  uint64_t target_node_id;
-  int allow_thread_fallback = 0;
-  int fd;
+  clj_http3_worker_set_t *set = atomic_load(&ctx->transport->workers);
+  clj_http3_worker_load_t *target;
 
-  if (ttl == 0)
+  if (ttl == 0 || set == NULL)
     return 0;
 
   if (node_id != NULL) {
-    target_node_id = *node_id;
-    if (target_node_id == ctx->node_id && thread_id == ctx->thread_id)
+    if (*node_id == ctx->node_id && thread_id == ctx->thread_id)
       return 0;
+    target = clj_http3_find_worker(set, *node_id, thread_id);
   } else {
-    if (pthread_mutex_lock(&ctx->transport->mutex) != 0)
+    /* An Initial or 0-RTT packet this worker does not accept goes to the
+       active generation; the thread matters only once a CID names it */
+    if (ctx->load == NULL || atomic_load(&ctx->load->accepting))
       return 0;
-    target_node_id = ctx->transport->active_node_id;
-    pthread_mutex_unlock(&ctx->transport->mutex);
-    if (target_node_id == 0)
+    target = clj_http3_find_worker(set, set->active_node_id, thread_id);
+    for (size_t idx = 0;
+         !clj_http3_may_choose(set, target) && idx < set->num_loads; ++idx)
+      target = set->loads[idx];
+    if (!clj_http3_may_choose(set, target) || target == ctx->load)
       return 0;
-    if (target_node_id == ctx->node_id && thread_id == ctx->thread_id)
-      return 0;
-    if (h3ctx->acceptor != NULL)
-      return 0;
-    /* Unknown Initials can target any active worker; exact thread match matters
-       only after CID routing pins the connection to a specific worker. */
-    allow_thread_fallback = 1;
   }
-
-  fd = clj_http3_transport_get_forward_fd(ctx->transport, target_node_id,
-                                          thread_id,
-                                          allow_thread_fallback);
-  if (fd == -1)
+  if (target == NULL)
     return 0;
 
-  char header_buf[CLJ_QUIC_FORWARDED_HEADER_MAX_SIZE];
-  size_t header_len =
-      clj_encode_quic_forwarded_header(header_buf, destaddr, srcaddr, ttl - 1);
-  if (header_len == SIZE_MAX)
-    return 0;
-
+  int all_sent = 1;
   for (size_t idx = 0; idx != num_packets; ++idx) {
-    struct iovec vec[2] = {{header_buf, header_len},
-                           {packets[idx].octets.base, packets[idx].octets.len}};
-    if (writev(fd, vec, 2) < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
-      return 0;
+    if (clj_http3_send_to_worker(target, destaddr, srcaddr, ttl, 0,
+                                 packets[idx].octets.base,
+                                 packets[idx].octets.len) != CLJ_HTTP3_SENT)
+      all_sent = 0;
   }
 
+  return all_sent;
+}
+
+static uint64_t clj_http3_load_of(clj_http3_worker_load_t *load) {
+  return (uint64_t)atomic_load(&load->conns) + atomic_load(&load->pending);
+}
+
+/* The accepting worker of the active generation with the fewest QUIC
+   connections and pending flows takes a new flow. The deciding worker wins a
+   tie; otherwise a cursor shared by the transport's workers spreads ties. */
+static clj_http3_worker_load_t *clj_http3_choose_worker(clj_http3_ctx_t *ctx,
+                                                       uint64_t turn) {
+  clj_http3_worker_set_t *set = atomic_load(&ctx->transport->workers);
+  clj_http3_worker_load_t *chosen = NULL;
+  uint64_t min_load = UINT64_MAX,
+           own_kept = ctx->kept_at == turn ? ctx->kept : 0;
+  size_t num_min = 0;
+
+  if (set == NULL)
+    return NULL;
+  for (size_t idx = 0; idx < set->num_loads; ++idx) {
+    clj_http3_worker_load_t *load = set->loads[idx];
+    if (!clj_http3_may_choose(set, load))
+      continue;
+    uint64_t load_now =
+        clj_http3_load_of(load) + (load == ctx->load ? own_kept : 0);
+    if (load_now < min_load) {
+      min_load = load_now;
+      num_min = 0;
+      chosen = load;
+    }
+    if (load_now == min_load)
+      ++num_min;
+  }
+  if (clj_http3_may_choose(set, ctx->load) &&
+      clj_http3_load_of(ctx->load) + own_kept <= min_load)
+    return ctx->load;
+  if (num_min > 1) {
+    size_t skip = atomic_fetch_add(&ctx->transport->spread_cursor, 1) % num_min;
+    for (size_t idx = 0; idx < set->num_loads; ++idx) {
+      clj_http3_worker_load_t *load = set->loads[idx];
+      if (load != ctx->load && clj_http3_may_choose(set, load) &&
+          clj_http3_load_of(load) <= min_load && skip-- == 0)
+        return load;
+    }
+  }
+  return chosen;
+}
+
+/* Flow table ages; wall-clock steps must not keep entries alive */
+static uint64_t clj_monotonic_millis(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+static clj_http3_new_flow_t *
+clj_http3_find_new_flow(clj_http3_ctx_t *ctx, uint64_t now,
+                        quicly_address_t *srcaddr, const uint8_t *dcid,
+                        size_t dcid_len) {
+  for (size_t idx = 0; idx < CLJ_HTTP3_NEW_FLOWS; ++idx) {
+    clj_http3_new_flow_t *flow = ctx->new_flows + idx;
+    if (flow->expires_at > now && flow->dcid_len == dcid_len &&
+        memcmp(flow->dcid, dcid, dcid_len) == 0 &&
+        h2o_socket_compare_address(&flow->srcaddr.sa, &srcaddr->sa, 1) == 0)
+      return flow;
+  }
+  return NULL;
+}
+
+/* An expired entry, or NULL while every entry is live */
+static clj_http3_new_flow_t *clj_http3_free_flow(clj_http3_ctx_t *ctx,
+                                                 uint64_t now) {
+  for (size_t idx = 0; idx < CLJ_HTTP3_NEW_FLOWS; ++idx) {
+    if (ctx->new_flows[idx].expires_at <= now)
+      return ctx->new_flows + idx;
+  }
+  return NULL;
+}
+
+/* The worker that issued `dcid`, in any generation attached to the transport */
+static clj_http3_worker_load_t *clj_http3_cid_worker(clj_http3_ctx_t *ctx,
+                                                     const uint8_t *dcid,
+                                                     size_t dcid_len) {
+  quicly_cid_encryptor_t *encryptor = ctx->h3_ctx.super.quic->cid_encryptor;
+  quicly_cid_plaintext_t plaintext;
+  if (encryptor == NULL || dcid_len == 0 ||
+      encryptor->decrypt_cid(encryptor, &plaintext, dcid, dcid_len) == SIZE_MAX)
+    return NULL;
+  return clj_http3_find_worker(atomic_load(&ctx->transport->workers),
+                               plaintext.node_id, plaintext.thread_id);
+}
+
+static void clj_http3_keep_flow(clj_http3_ctx_t *ctx, uint64_t turn) {
+  if (ctx->kept_at != turn) {
+    ctx->kept_at = turn;
+    ctx->kept = 0;
+  }
+  ++ctx->kept;
+}
+
+/* Sends the first Initial of a new flow to the chosen worker, and the flow's
+   later Initial and 0-RTT datagrams after it. Returns 0 when the datagram
+   went to another worker or is to be dropped. */
+static int clj_http3_steer_new_flow(clj_http3_ctx_t *ctx,
+                                    struct iovec *datagram,
+                                    quicly_address_t *destaddr,
+                                    quicly_address_t *srcaddr, uint8_t ttl) {
+  const uint8_t *bytes = datagram->iov_base;
+  size_t len = datagram->iov_len;
+  if (len < 7)
+    return 1;
+  uint8_t type = bytes[0] & QUICLY_PACKET_TYPE_BITMASK;
+  if (type != QUICLY_PACKET_TYPE_INITIAL && type != QUICLY_PACKET_TYPE_0RTT)
+    return 1;
+  if (ctx->load == NULL)
+    return 1;
+  const uint8_t *src = bytes + 1;
+  if (!quicly_is_supported_version(quicly_decode32(&src)))
+    return 1;
+  size_t dcid_len = *src++;
+  if (dcid_len > QUICLY_MAX_CID_LEN_V1 || 6 + dcid_len > len)
+    return 1;
+  const uint8_t *dcid = src;
+
+  uint64_t now = clj_monotonic_millis();
+  clj_http3_new_flow_t *flow =
+      clj_http3_find_new_flow(ctx, now, srcaddr, dcid, dcid_len);
+  if (flow != NULL) {
+    if (flow->target == ctx->load)
+      return 1;
+    switch (clj_http3_send_to_worker(flow->target, destaddr, srcaddr, ttl, 0,
+                                     bytes, len)) {
+    case CLJ_HTTP3_GONE:
+      /* The worker is gone, and its connections with it */
+      flow->target = ctx->load;
+      return 1;
+    default:
+      /* Sent, or dropped while the channel is full; the client sends it
+         again and the channel drains as the worker reads */
+      return 0;
+    }
+  }
+
+  /* Initial and 0-RTT datagrams that carry a server CID go to the worker
+     that issued it. H2O drops such 0-RTT packets, and forwards such Initials
+     only after a failed decryption has removed their header protection in
+     place, so the receiving worker cannot decrypt them either. */
+  clj_http3_worker_load_t *issuer = clj_http3_cid_worker(ctx, dcid, dcid_len);
+  if (issuer != NULL)
+    return issuer == ctx->load ||
+           clj_http3_send_to_worker(issuer, destaddr, srcaddr, ttl, 0, bytes,
+                                    len) != CLJ_HTTP3_SENT;
+
+  /* Choose only for datagrams quicly_accept takes */
+  if (type != QUICLY_PACKET_TYPE_INITIAL ||
+      len < QUICLY_MIN_CLIENT_INITIAL_SIZE ||
+      dcid_len < QUICLY_MIN_INITIAL_DCID_LEN || 7 + dcid_len > len ||
+      dcid[dcid_len] > QUICLY_MAX_CID_LEN_V1)
+    return 1;
+  if (!atomic_load(&ctx->load->accepting) ||
+      (flow = clj_http3_free_flow(ctx, now)) == NULL)
+    return 1;
+  /* The loop's time changes only between loop turns, so it marks the receive
+     batch whose accepts are still to come */
+  uint64_t turn = h2o_now(ctx->h3_ctx.super.loop);
+  clj_http3_worker_load_t *target = clj_http3_choose_worker(ctx, turn);
+  if (target == NULL)
+    return 1;
+  *flow = (clj_http3_new_flow_t){.expires_at = now + CLJ_HTTP3_NEW_FLOW_MILLIS,
+                                 .srcaddr = *srcaddr,
+                                 .target = target,
+                                 .dcid_len = (uint8_t)dcid_len};
+  memcpy(flow->dcid, dcid, dcid_len);
+  if (target != ctx->load) {
+    /* Added before the write, since the target takes it back on reading */
+    atomic_fetch_add(&target->pending, 1);
+    if (clj_http3_send_to_worker(target, destaddr, srcaddr, ttl, 1, bytes,
+                                 len) == CLJ_HTTP3_SENT)
+      return 0;
+    /* The channel is full or gone: accept here */
+    clj_http3_take_pending(target);
+    flow->target = ctx->load;
+  }
+  clj_http3_keep_flow(ctx, turn);
   return 1;
 }
 
@@ -2763,22 +3141,34 @@ static int clj_rewrite_forwarded_quic_datagram(h2o_quic_ctx_t *h3ctx,
     quicly_address_t destaddr, srcaddr;
     uint8_t ttl;
     size_t offset;
+    int new_flow;
   } encapsulated;
+  clj_http3_ctx_t *ctx =
+      H2O_STRUCT_FROM_MEMBER(clj_http3_ctx_t, h3_ctx.super, h3ctx);
 
-  /* Datagrams from the public socket keep their real sender. */
-  if (!H2O_STRUCT_FROM_MEMBER(clj_http3_ctx_t, h3_ctx.super, h3ctx)
-           ->reading_forwarded ||
-      msg->msg_iovlen != 1)
+  if (msg->msg_iovlen != 1)
     return 1;
+  /* Datagrams from the public socket keep their real sender. */
+  if (!ctx->reading_forwarded) {
+    /* A datagram sent to another worker is cut to one byte, which H2O fails
+       to decode and skips. Returning 0 would make H2O process the datagrams
+       grouped before it in the batch with its addresses. */
+    if (!clj_http3_steer_new_flow(ctx, msg->msg_iov, destaddr, srcaddr, *ttl))
+      msg->msg_iov[0].iov_len = 1;
+    return 1;
+  }
 
   encapsulated.offset =
       clj_decode_quic_forwarded_header(&encapsulated.destaddr,
                                        &encapsulated.srcaddr,
                                        &encapsulated.ttl,
+                                       &encapsulated.new_flow,
                                        h2o_iovec_init(msg->msg_iov[0].iov_base,
                                                       msg->msg_iov[0].iov_len));
   if (encapsulated.offset == SIZE_MAX)
     return 1;
+  if (encapsulated.new_flow && ctx->load != NULL)
+    clj_http3_take_pending(ctx->load);
 
   if (encapsulated.srcaddr.sa.sa_family != AF_INET &&
       encapsulated.srcaddr.sa.sa_family != AF_INET6)
@@ -3085,7 +3475,14 @@ void clj_h2o_http3_activate_udp_transport_generation(
       attachment->ctx->h3_ctx.super.acceptor =
           attachment->node_id == node_id ? clj_on_http3_accept : NULL;
     }
+    if (attachment->load != NULL)
+      atomic_store(&attachment->load->accepting, attachment->node_id == node_id);
   }
+  /* Without a new set no worker is eligible for new flows: the old set names
+     the previous generation, which no longer accepts */
+  clj_http3_worker_set_t *set = clj_http3_build_workers(transport, NULL);
+  if (set != NULL)
+    clj_http3_publish_workers(transport, set);
 
   pthread_mutex_unlock(&transport->mutex);
 }
@@ -3096,6 +3493,17 @@ void clj_h2o_http3_release_udp_transport(clj_http3_udp_transport_t *transport) {
 
   if (transport->reservation_fd != -1)
     close(transport->reservation_fd);
+  while (transport->loads != NULL) {
+    clj_http3_worker_load_t *next = transport->loads->next;
+    free(transport->loads);
+    transport->loads = next;
+  }
+  for (clj_http3_worker_set_t *set = atomic_load(&transport->workers);
+       set != NULL;) {
+    clj_http3_worker_set_t *replaced = set->replaced;
+    free(set);
+    set = replaced;
+  }
   free(transport->host);
   free(transport->attachments);
   pthread_mutex_destroy(&transport->mutex);
@@ -3111,6 +3519,13 @@ void clj_h2o_http3_stop_accepting(clj_http3_ctx_t *ctx) {
      with version negotiation. Existing connections (including handshakes in
      progress) continue to completion. */
   ctx->h3_ctx.super.acceptor = NULL;
+  if (ctx->load != NULL)
+    atomic_store(&ctx->load->accepting, 0);
+}
+
+void clj_h2o_http3_withdraw_worker(clj_http3_ctx_t *ctx) {
+  if (ctx != NULL && ctx->load != NULL)
+    atomic_store(&ctx->load->withdrawn, 1);
 }
 
 size_t clj_h2o_http3_num_connections(clj_http3_ctx_t *ctx) {

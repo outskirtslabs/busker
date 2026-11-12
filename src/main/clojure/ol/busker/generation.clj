@@ -443,16 +443,35 @@
     :else
     loop-state))
 
+(defn- http3-ctxs-guard
+  "The lock and flag that keep [[withdraw-http3-worker!]] from reaching a
+  worker's HTTP/3 contexts after [[dispose-context-if-ready]] freed them."
+  []
+  {:lock (Object.) :disposed? (AtomicBoolean. false)})
+
+(defn- withdraw-http3-worker!
+  "Stops other workers from sending new HTTP/3 connections to this worker,
+  unless its contexts are already freed. Safe from any thread."
+  [{:keys [lock ^AtomicBoolean disposed?]} http3-ctxs]
+  (locking lock
+    (when-not (.get disposed?)
+      (doseq [http3-ctx http3-ctxs]
+        (when (and http3-ctx (not (mem/null? http3-ctx)))
+          (h2o/http3-withdraw-worker http3-ctx))))))
+
 (defn- dispose-context-if-ready
-  [loop-state worker {:keys [ctx-ptr http3-ctxs] :as state}]
+  [loop-state worker {:keys [ctx-ptr http3-ctxs http3-ctxs-guard] :as state}]
   (if (and (ready-to-dispose? loop-state state worker)
            (destroy-response-receiver! worker)
            (bp/retire! (:stream-pool worker)))
     (do
       (retire-current-wakeup-receiver!)
-      (doseq [http3-ctx http3-ctxs]
-        (when (and http3-ctx (not (mem/null? http3-ctx)))
-          (h2o/http3-free-worker-ctx http3-ctx)))
+      (let [{:keys [lock ^AtomicBoolean disposed?]} http3-ctxs-guard]
+        (locking lock
+          (.set disposed? true)
+          (doseq [http3-ctx http3-ctxs]
+            (when (and http3-ctx (not (mem/null? http3-ctx)))
+              (h2o/http3-free-worker-ctx http3-ctx)))))
       (h2o/context-dispose ctx-ptr)
       (case (p/send-msg worker evloop/stop-msg)
         :accepted nil
@@ -1137,7 +1156,8 @@
                  (mapv #(nth (:thread-states %) thread-idx) listener-runtimes)
                  listener-socks-for-thread (mapv :socket thread-listener-states)
                  accept-callbacks-for-thread (mapv :accept-callback-ptr thread-listener-states)
-                 http3-ctxs-for-thread (nth http3-worker-contexts thread-idx)]
+                 http3-ctxs-for-thread (nth http3-worker-contexts thread-idx)
+                 http3-ctxs-guard (http3-ctxs-guard)]
              (let [worker (evloop/start-worker!
                            (fn [worker loop-state]
                              (worker-loop worker
@@ -1147,6 +1167,7 @@
                                            :loop-ptr loop-ptr
                                            :ctx-ptr ctx-ptr
                                            :http3-ctxs http3-ctxs-for-thread
+                                           :http3-ctxs-guard http3-ctxs-guard
                                            :max-connections max-connections
                                            :shutting-down? shutting-down?
                                            :active-connection-count_ active-connection-count_
@@ -1166,6 +1187,8 @@
                                (finally
                                  (.set ^AtomicLongArray worker-connection-counts
                                        (int thread-idx) Long/MAX_VALUE)
+                                 (withdraw-http3-worker! http3-ctxs-guard
+                                                         http3-ctxs-for-thread)
                                  (wake-other-workers! accepting-workers thread-idx))))
                            :discard-command! (fn [[op _ _ st record]]
                                                (when (= :h2o/output op)

@@ -520,6 +520,10 @@ void clj_h2o_http3_release_udp_transport(clj_http3_udp_transport_t *transport);
    Call this before requesting shutdown to prevent new connection attempts. */
 void clj_h2o_http3_stop_accepting(clj_http3_ctx_t *ctx);
 
+/* Stop sending new QUIC connections from other workers to this worker, for
+   example after its thread failed. Safe to call from any thread. */
+void clj_h2o_http3_withdraw_worker(clj_http3_ctx_t *ctx);
+
 /* Get the number of active HTTP/3 connections on this context */
 size_t clj_h2o_http3_num_connections(clj_http3_ctx_t *ctx);
 
