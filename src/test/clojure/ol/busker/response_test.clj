@@ -988,3 +988,35 @@
             (is (= "ok" (String. ^bytes (:body (read-response! socket)) StandardCharsets/US_ASCII)))
             (is (java.util.Arrays/equals ^bytes payload ^bytes (deref received 10000 nil))))))
       (finally (deliver release true) (busker/stop! server)))))
+(deftest streamed-chunks-on-an-idle-server-do-not-wait-for-the-poll-timeout-test
+  ;; The idle poll waits for the cleanup timer, about 1000 ms.
+  (let [timings_ (atom [])
+        [server port]
+        (start-server
+         (fn [{emitter :ol.busker.request/emitter}]
+           (Thread/startVirtualThread
+            (fn []
+              (try
+                (protocols/emit! emitter {:status 200
+                                          :headers {"content-type" "application/octet-stream"}})
+                (dotimes [_ 8]
+                  (let [{:keys [progress]} (protocols/emit! emitter (byte-array 1000 (byte 97)))
+                        _ (Thread/sleep 20)
+                        start (System/nanoTime)
+                        _ (protocols/flush! emitter)
+                        result (deref progress 5000 :timeout)]
+                    (swap! timings_ conj [(:status result result)
+                                          (quot (- (System/nanoTime) start) 1000000)])))
+                (finally
+                  (protocols/close! emitter)))))
+           {:body emitter}))]
+    (try
+      (Thread/sleep 200)
+      (let [result (util/curl :http :h1 port "/stream" :max-time 30
+                              :args ["-N" "-o" "/dev/null" "-w" "%{size_download}"])]
+        (is (= {:exit 0 :out "8000"} (select-keys result [:exit :out]))))
+      (is (= 8 (count @timings_)))
+      (is (every? (fn [[status ms]] (and (= :proceeded status) (< ms 500))) @timings_)
+          (pr-str @timings_))
+      (finally
+        (busker/stop! server)))))

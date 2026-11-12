@@ -4,8 +4,10 @@
    [ol.busker.buffer-pool :as pool]
    [ol.busker.callback-dispatch :as dispatch]
    [ol.busker.internal.protocols :as pi]
+   [ol.busker.native :as native]
    [ol.busker.response-queue :as queue])
   (:import
+   [java.nio ByteBuffer]
    [java.util HashMap]
    [java.util.concurrent ConcurrentHashMap]))
 
@@ -69,3 +71,18 @@
       (.put ^HashMap (:entries d) 1 [nil (delay (throw (AssertionError.)))])
       (with-redefs [queue/pending-work? (fn [_] (throw (AssertionError.)))]
         (is (false? (dispatch/pending-response-work? d)))))))
+
+(deftest drain-reports-whether-output-reached-native-code
+  (with-controller
+    (fn [d st commands]
+      (let [sends (atom 0)]
+        (with-redefs [native/sendvec (fn [& _] (swap! sends inc) nil)]
+          (is (false? (dispatch/drain-responses! d)) "nothing tracked")
+          (queue/emit-bounded! st nil 0 nil {:flush? true})
+          (queue/consume-record! st (peek (first @commands)))
+          (is (false? (dispatch/drain-responses! d)) "a locally settled marker sends nothing")
+          (queue/emit-bounded! st nil 1 (fn [^ByteBuffer b] (.put b (byte 1))) {:flush? true})
+          (queue/consume-record! st (peek (second @commands)))
+          (is (true? (dispatch/drain-responses! d)) "a data record is handed to native code")
+          (is (= 1 @sends))
+          (is (false? (dispatch/drain-responses! d)) "a send in flight is not sent again"))))))

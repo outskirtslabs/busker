@@ -608,37 +608,42 @@
   "Sends ready output on the request's platform worker.
   Installs the in-flight record before native entry because proceed or cleanup
   may run synchronously. Reentrant proceed uses a bounded, nonrecursive loop.
-  Uncertain native-entry failure retains the send and reports worker failure."
+  Uncertain native-entry failure retains the send and reports worker failure.
+  Returns true when it handed output to H2O."
   [st]
   (when (.compareAndSet ^AtomicBoolean (:sending?_ st) false true)
     (try
-      (loop [turns 0]
-        (when-let [flight (next-flight! st)]
-          (when-not (= flight :local)
-            (let [arena (Arena/ofConfined)]
-              (locking (:lock st)
-                (swap! (:state_ st) assoc-in [:in-flight :arena] arena))
-              (try
-                (let [{:keys [seg veccnt]} (package-chunks (:records flight) arena)]
-                  (when-not (:started? @(:state_ st))
-                    ((:apply-head! (:req st))
-                     {:status 200 :headers [] :content-length -1 :compress-hint 0} false)
-                    (locking (:lock st)
-                      (swap! (:state_ st) assoc :started? true)))
-                  (when-not (:cleaned? @(:state_ st))
-                    (h2o/sendvec (-> st :req :req-ctx :req) seg veccnt
-                                 (cond (:error? flight) h2o/H2O_SEND_STATE_ERROR
-                                       (:final? flight) h2o/H2O_SEND_STATE_FINAL
-                                       :else h2o/H2O_SEND_STATE_IN_PROGRESS))))
-                (catch Throwable t
-                  ;; Entry may have reached native code: retain the installed send.
-                  (fail! st t)
-                  (let [worker (-> st :req :worker)]
-                    (when-let [f (:on-native-failure! worker)] (f worker t)))))))
-          ;; Only a synchronous proceed can remove this native flight here.
-          ;; Locally settled markers consume this response's ordinary turn.
-          (when (and (not= flight :local) (< turns 255) (runnable? st))
-            (recur (inc turns)))))
+      (loop [turns 0
+             sent? false]
+        (if-let [flight (next-flight! st)]
+          (let [local? (= flight :local)]
+            (when-not local?
+              (let [arena (Arena/ofConfined)]
+                (locking (:lock st)
+                  (swap! (:state_ st) assoc-in [:in-flight :arena] arena))
+                (try
+                  (let [{:keys [seg veccnt]} (package-chunks (:records flight) arena)]
+                    (when-not (:started? @(:state_ st))
+                      ((:apply-head! (:req st))
+                       {:status 200 :headers [] :content-length -1 :compress-hint 0} false)
+                      (locking (:lock st)
+                        (swap! (:state_ st) assoc :started? true)))
+                    (when-not (:cleaned? @(:state_ st))
+                      (h2o/sendvec (-> st :req :req-ctx :req) seg veccnt
+                                   (cond (:error? flight) h2o/H2O_SEND_STATE_ERROR
+                                         (:final? flight) h2o/H2O_SEND_STATE_FINAL
+                                         :else h2o/H2O_SEND_STATE_IN_PROGRESS))))
+                  (catch Throwable t
+                    ;; Entry may have reached native code: retain the installed send.
+                    (fail! st t)
+                    (let [worker (-> st :req :worker)]
+                      (when-let [f (:on-native-failure! worker)] (f worker t)))))))
+            ;; Only a synchronous proceed can remove this native flight here.
+            ;; Locally settled markers consume this response's ordinary turn.
+            (if (and (not local?) (< turns 255) (runnable? st))
+              (recur (inc turns) true)
+              (or sent? (not local?))))
+          sent?))
       (finally
         (.set ^AtomicBoolean (:sending?_ st) false)
         (update-pressure! st)

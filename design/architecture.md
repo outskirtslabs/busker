@@ -33,6 +33,8 @@ Every worker reads its own duplicate of each TCP or Unix socket listener, and th
 
 Workers submit responses on the event-loop thread, including between calls to `h2o_evloop_run`, while preserving one active native send per response. This requires completion delivery to record socket-interest reconciliation before the next poll. Otherwise an earlier update can retain write interest for an immediately completed write whose callback is then cleared.
 
+The worker polls without waiting after a turn in which it handed output to H2O between event-loop runs, because H2O's poll wait does not account for completion callbacks already pending.
+
 `shim/build.zig` applies the local repair tracked in [H2O issue 3828](https://github.com/h2o/h2o/issues/3828): `run_socket` calls `link_to_statechanged(sock)` before `on_write_complete`. Recording the update before the callback permits rearm or close without accessing the socket afterwards. The build checks the pinned header's hash and a unique replacement site, generates a private header and `socket.c` copy, and substitutes that translation unit in the actual `h2o-evloop` artifact for every target and native test. Dependency sources and pins remain unchanged. The patch can be removed once the pinned H2O includes the repair. The exact between-loop submission phase is not yet an upstream-confirmed API contract.
 
 Normal shim builds run a Linux regression covering the stale-interest sequence, callback rearm, close and write errors. TCP/TLS stalled-reader tests check exact response bytes and backpressure. Cross-compilation does not establish kqueue runtime coverage; delayed zerocopy reclamation and asynchronous TLS paths require separate verification.

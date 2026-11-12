@@ -478,9 +478,9 @@
                         receiver
                         (not (mem/null? receiver))
                         (pos? (h2o/mt-response-ring-drain receiver)))
-        _ (when-not disposed?
-            (when ring-work? (fixed-final/notify-capacity! worker))
-            (callback-dispatch/drain-responses! (:callback-dispatch worker)))
+        sent? (when-not disposed?
+                (when ring-work? (fixed-final/notify-capacity! worker))
+                (callback-dispatch/drain-responses! (:callback-dispatch worker)))
         shutting? (true? (:shutdown-initiated? loop-state))]
     (if disposed?
       (h2o/evloop-run loop-ptr 0)
@@ -489,6 +489,9 @@
             wait-ms (cond
                       ring-work? 0
                       mailbox-work? 0
+                      ;; A write that completes at once leaves its callback on
+                      ;; H2O's pending list, and the poll's wait ignores that list.
+                      sent? 0
                       (callback-dispatch/pending-response-work?
                        (:callback-dispatch worker)) 0
                       shutting? 10

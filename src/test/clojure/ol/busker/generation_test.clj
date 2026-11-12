@@ -173,6 +173,37 @@
       #(let [result (#'generation/worker-loop worker {} native-state)]
          (is (= 0 @wait-ms_))
          (is (= {} result))))))
+(deftest output-sent-between-turns-forces-a-nonblocking-native-iteration
+  (doseq [[sent? expected-wait] [[true 0] [false 1000]]]
+    (let [wait-ms_ (atom nil)
+          worker (evloop/map->Worker
+                  {:mailbox (mailbox/create)
+                   :callback-dispatch nil
+                   :response-slots []
+                   :response-slot-payload-capacity 0
+                   :hot-poll-ns 0
+                   :native-failure_ (AtomicReference.)
+                   :response-slot-monitor (Object.)})
+          native-state {:loop-ptr :loop
+                        :ctx-ptr :context
+                        :listener-socks []
+                        :accept-callbacks []
+                        :max-connections 0}]
+      (with-redefs-fn
+        {#'generation/check-and-initiate-shutdown! (fn [state _] state)
+         #'generation/update-receiver-destruction (fn [state _] state)
+         #'generation/dispose-context-if-ready (fn [state _ _] state)
+         #'callback-dispatch/pending-response-work? (constantly false)
+         #'callback-dispatch/drain-responses! (constantly sent?)
+         #'generation/update-listener-state! (fn [& _])
+         #'h2o/evloop-now (constantly 0)
+         #'h2o/cleanup-thread (constantly 1000)
+         #'h2o/evloop-run (fn [_ wait-ms]
+                            (reset! wait-ms_ wait-ms)
+                            0)}
+        #(#'generation/worker-loop worker {::evloop/mailbox-work? false} native-state))
+      (is (= expected-wait @wait-ms_) (str "sent? " sent?)))))
+
 (deftest wake-receiver-retires-on-event-loop-worker-test
   (let [events_ (atom [])
         receiver (mem/segment 1)

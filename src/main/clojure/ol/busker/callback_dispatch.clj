@@ -287,10 +287,12 @@
                  (.values ^ConcurrentHashMap (:streaming-work dispatch)))))
 
 (defn drain-responses!
-  "Visits tracked responses once; native wait and unflushed data do not poll."
+  "Visits tracked responses once; native wait and unflushed data do not poll.
+  Returns true when any response handed output to H2O."
   [dispatch]
-  (doseq [writer (.values ^ConcurrentHashMap (:streaming-work dispatch))]
-    (response-queue/send-vecs writer)))
+  (reduce (fn [sent? writer] (or (true? (response-queue/send-vecs writer)) sent?))
+          false
+          (.values ^ConcurrentHashMap (:streaming-work dispatch))))
 
 (defn finish!
   "Closes any unexpected entries after the worker has stopped."
