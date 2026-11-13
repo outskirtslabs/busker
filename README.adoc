@@ -61,10 +61,10 @@ Native builds from this checkout statically link the following dependencies.
 | Upstream date
 
 | https://github.com/h2o/h2o[libh2o]
-| https://github.com/h2o/h2o/commit/7a5ede4baec1bb7f2c6bf4efdcb3eebd1bc2aaa7[2026-10-20 (7a5ede4)]
+| https://github.com/h2o/h2o/commit/d19f742b00a4bb71207524f2eed99464854d24cd[2026-11-11 (d19f742)]
 
 | https://github.com/google/boringssl[BoringSSL]
-| https://github.com/Ramblurr/boringssl/commit/3663bc2f8e2ef4bd77ea2aae6b3259d248ebca62[0.20260929.0 (3663bc2)]
+| https://github.com/Ramblurr/boringssl/commit/37355b67728e80e48d11803cbf9d7c3a8ab82b9a[0.20261105.0 (37355b6)]
 |===
 
 == Examples

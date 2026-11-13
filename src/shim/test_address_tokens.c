@@ -21,9 +21,9 @@ static uint8_t client_cid[8] = {0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8};
 static uint8_t server_cid[8] = {0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58};
 
 static int64_t clock_ms = NOW;
-static int64_t test_now(quicly_now_t *self) {
+static void test_now(quicly_now_t *self, double *now) {
   (void)self;
-  return clock_ms;
+  *now = clock_ms;
 }
 static quicly_now_t test_clock = {test_now};
 static quicly_context_t clock_ctx = {.now = &test_clock};
@@ -208,10 +208,6 @@ static void test_validation(void) {
   token[len - 1] ^= 1;
   CHECK(ignored(&other, token, len));
 
-  /* quicly decodes an IPv6 token's scope ID from the first four bytes of the
-     address (deps/quicly/lib/quicly.c:8171-8172 does not advance past the
-     address), so only addresses starting with four zero bytes, such as ::1,
-     match; h2o's server behaves the same. */
   quicly_address_t loopback6 = address6(1, 40000);
   memset(loopback6.sin6.sin6_addr.s6_addr, 0, 15);
   len = issue(&issuer, resumption_from(loopback6, NOW), token);
@@ -225,6 +221,8 @@ static void test_validation(void) {
   CHECK(r.ret == 0 && r.token != NULL && r.token->address_mismatch);
   len = issue(&issuer, resumption_from(address6(1, 40000), NOW), token);
   r = present(&other, token, len, address6(1, 40000), NOW + 1000);
+  CHECK(r.ret == 0 && r.token != NULL && !r.token->address_mismatch);
+  r = present(&other, token, len, loopback6, NOW + 1000);
   CHECK(r.ret == 0 && r.token != NULL && r.token->address_mismatch);
 
   len = issue(&issuer, retry(NOW), token);
@@ -467,8 +465,10 @@ static void test_accept(const char *cert, const char *key) {
   uint8_t token[256];
   ptls_buffer_t buf;
   ptls_buffer_init(&buf, token, sizeof(token));
+  double now;
+  quic->now->cb(quic->now, &now);
   quicly_address_token_plaintext_t plaintext =
-      resumption_from(f.client_addr, quic->now->cb(quic->now));
+      resumption_from(f.client_addr, (int64_t)now);
   CHECK(quic->generate_resumption_token->cb(quic->generate_resumption_token,
                                             conn->quic, &buf, &plaintext) == 0);
   CHECK(!buf.is_allocated && token[0] == 0x66);

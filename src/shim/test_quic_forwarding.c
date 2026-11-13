@@ -469,7 +469,7 @@ static void test_forward(uint8_t ttl, int unknown_initial) {
   spread_add(&f, 2, 2);
   spread_activate(&f, 2);
   quicly_address_t dest = address(AF_INET, 443), src = address(AF_INET, 12345);
-  char payload[] = "quic packet";
+  uint8_t payload[] = "quic packet";
   quicly_decoded_packet_t packet = {.octets = {payload, sizeof(payload)}};
   uint64_t target_node = 2;
   /* From worker 0 of generation 1, to worker 1 of generation 2 by CID, or as
@@ -990,7 +990,7 @@ static void test_fallback_skips_unavailable_workers(void) {
   spread_add(&f, 2, 2);
   spread_activate(&f, 2);
   quicly_address_t dest = address(AF_INET, 443), src = address(AF_INET, 5000);
-  char payload[] = "initial";
+  uint8_t payload[] = "initial";
   quicly_decoded_packet_t packet = {.octets = {payload, sizeof(payload)}};
   h2o_quic_ctx_t *old = &f.workers[1]->h3_ctx.super;
 

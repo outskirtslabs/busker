@@ -2299,8 +2299,7 @@ clj_find_quic_keyset(clj_address_token_keys_t *keys, uint8_t key_id) {
 }
 
 /* No generator error only skips the token: quicly returns it from
-   quicly_send, where h2o_quic_send aborts the process for most codes,
-   STATE_EXHAUSTION and FREE_CONNECTION destroy the connection, and
+   quicly_send, where h2o_quic_send destroys the connection for most codes and
    SENDBUF_FULL leaves NEW_TOKEN pending ahead of stream data, stalling it. A
    worker without keys therefore sends random bytes of a real token's length
    (quicly_encrypt_address_token) with the resumption type, which no server
@@ -2371,8 +2370,9 @@ static int clj_validate_address_token(quicly_context_t *quic,
                                       ptls_iovec_t client_cid,
                                       ptls_iovec_t server_cid,
                                       quicly_address_token_plaintext_t *token) {
-  int64_t age = quic->now->cb(quic->now) - (int64_t)token->issued_at;
-  if (age < 0)
+  double now, age;
+  quic->now->cb(quic->now, &now);
+  if ((age = now - token->issued_at) < 0)
     age = 0;
 
   token->address_mismatch =
@@ -2463,7 +2463,6 @@ quicly_context_t *clj_h2o_create_quicly_ctx(ptls_context_t *ptls_ctx,
   wrapper->ctx = quicly_spec_context;
   wrapper->ctx.tls = ptls_ctx;
   wrapper->ctx.now = &quicly_default_now;
-  wrapper->ctx.init_cc = &quicly_default_init_cc;
   wrapper->ctx.crypto_engine = &quicly_default_crypto_engine;
 
   wrapper->cid_encryptor = quicly_new_default_cid_encryptor(

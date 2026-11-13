@@ -1,28 +1,28 @@
 {
-  "h2o-0.0.1-7Fp7SrxWAAD2HHE5BJ5OoZ5TWeOluQqlKB4qhryigWIu": {
+  "h2o-0.0.1-7Fp7SvZ8AACHF3exmJa6X6ZuMKr0vYLUhh2YruqI6EnH": {
     "name": "h2o-zig",
-    "url": "git+https://github.com/outskirtslabs/h2o-zig.git#945db7d1f2f5d1e5b60cdd1c76608fb9b11d3585",
-    "hash": "sha256-jQkJZw4r707D03kyF8B+o6DvZT0dDTsD8zvWqpfvvVM="
+    "url": "git+https://github.com/outskirtslabs/h2o-zig.git#9ca8c1d2aec0a726539b582625cb447c477b4bbf",
+    "hash": "sha256-T2TUY4Hd6rBgb0Z1DPWk4vuXgd2mDgMnxsUG982NxtY="
   },
-  "N-V-__8AAMZmoQEcaTA0JFZ27s2QpGRir0f6pqMkaL2WqiG-": {
+  "N-V-__8AAE2nqQH6vL-o2tZMK2oEe2g-BJC5H2f8XL85R1BJ": {
     "name": "h2o",
-    "url": "git+https://github.com/h2o/h2o.git?ref=master#7a5ede4baec1bb7f2c6bf4efdcb3eebd1bc2aaa7",
-    "hash": "sha256-7aHTQvxHijGZ8D8rr9zLQVcYwEefcYQp5KDb2gQVunM="
+    "url": "git+https://github.com/h2o/h2o.git?ref=master#d19f742b00a4bb71207524f2eed99464854d24cd",
+    "hash": "sha256-Q8Gpz66uOA7reTJEGEAsey59k1uI11d3m782wtGbXyM="
   },
   "N-V-__8AADdLBADNETOk9pvYZ-k7F8a08-U43YCrYSlxu621": {
     "name": "wslay",
     "url": "https://github.com/tatsuhiro-t/wslay/archive/refs/tags/release-1.1.1.tar.gz",
     "hash": "sha256-Mo2s1qC7NXiFnXu2rZpr2R3Tux5+fj8dPbPSgoV8OHQ="
   },
-  "zlib-1.3.1-ZZQ7lc8NAABUbHzDe_cSWboCqMbrLkVwvFkKnojgeiT2": {
+  "zlib-2.1.0+1.4-ZZQ7lf0NAAB3lIFZVRncab_ac6SxbCOXie12TRPZzppi": {
     "name": "zlib",
-    "url": "git+https://github.com/allyourcodebase/zlib.git#3599c16d41dbe749ae51b0ff7ab864c61adc779a",
-    "hash": "sha256-KrmMnqYJwMIe1YP49jHc21d9ghq4j5zGH2Xo+m0UUe0="
+    "url": "git+https://github.com/Ramblurr/zlib.git?ref=update/zlib-1.4#fbea45afd7d7f0dbc93226e6f9f80b2c9ba0be6c",
+    "hash": "sha256-42TOfkURtQCHnspYcCyiqAi9HJs/IId0aYIULY2Gn8g="
   },
-  "N-V-__8AAB0eQwD-0MdOEBmz7intriBReIsIDNlukNVoNu6o": {
+  "N-V-__8AADeSNwCAtCXEaVDOpYKVEwzI_t4kH_e8MqWuSIdE": {
     "name": "zlib",
-    "url": "https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz",
-    "hash": "sha256-r+38IdpUhv5xJKjejPSW+RLa+43nQ8ndkhmB0IR0gek="
+    "url": "https://github.com/madler/zlib/archive/99623ef7097352da7993ba614161fd6a311e046e.tar.gz",
+    "hash": "sha256-8//y1MdeMPYztlicPVey/jjQZ2mc9BeKS8FIMUttl8U="
   },
   "zstd-1.5.7-2-KEItkAMwAADNhCbGaImKrjXjnSA51jcqEbGCA3RasVZ9": {
     "name": "zstd",
@@ -34,15 +34,15 @@
     "url": "git+https://github.com/facebook/zstd.git?ref=v1.5.7#f8745da6ff1ad1e7bab384bd1f9d742439278e99",
     "hash": "sha256-h35u+KqPsc9xZQ7xJu15M4etPnBIM33NUVG4NKzMZHw="
   },
-  "boringssl-0.20260929.0-EhtkNek6AABBiix4LyIvy0DTfEBPcX2pHOQRy5pSdjHt": {
+  "boringssl-0.20261105.0-EhtkNTQ1AADKx8ZO75HAt0GTksOmAT4-Shqwg7HjfofM": {
     "name": "boringssl",
-    "url": "git+https://github.com/Ramblurr/boringssl.git?ref=h2o-zig/boringssl-0.20260929.0-pic#3663bc2f8e2ef4bd77ea2aae6b3259d248ebca62",
-    "hash": "sha256-DSNuArQV0LYYqWJDUdp4pQA2dl+L/8QwMkIF6kNCN9g="
+    "url": "git+https://github.com/Ramblurr/boringssl.git?ref=h2o-zig/boringssl-0.20261105.0-pic#37355b67728e80e48d11803cbf9d7c3a8ab82b9a",
+    "hash": "sha256-Wu6yup74FfWA/8R8gly4GedPAaV1XedSDQy1aB69y/w="
   },
-  "N-V-__8AAMfBdQ4auND0ndV9UNczDiuUi8ej0PzNKo3jNUSP": {
+  "N-V-__8AAOmbgA5EZOl7Ab5SwaV3OYkpkxc8qGL5-G75QWBM": {
     "name": "boringssl",
-    "url": "https://github.com/google/boringssl/archive/427ec40cc8edc545253289232e885708c409e5ea.tar.gz",
-    "hash": "sha256-k7jO2vn9qDKgL12nj3Gb0yFuCDtvaJal0vYIQWwDgR8="
+    "url": "https://github.com/google/boringssl/archive/3dc4b63808921e914a3fb1fa61869abc3938781b.tar.gz",
+    "hash": "sha256-ns4yfVn4PV5gU12y6re1RE5T5tamp9RQuHJ/Me9Pa0A="
   },
   "nasm-3.0.1-B_NnpSJUAABp8P_x6B1dPmYEcBVlfF06ZpyWcCvl461C": {
     "name": "nasm",
@@ -59,15 +59,10 @@
     "url": "git+https://github.com/allyourcodebase/zlib.git#c5115f4b69ef660f72a835c6638f80508ef284c7",
     "hash": "sha256-LXTzZptvs9dHFNndYCV+PjlTtmTn8O7BtLLJQ6Ul18c="
   },
-  "patch-2.6.1-po1jOedqAADkiQDv3hXHuQBDzGLVhCfrp38vXHB6xZ1W": {
-    "name": "patch",
-    "url": "git+https://github.com/akunaakwei/zig-patch#918b45387bb0e8afe629984faf2353fab0efab21",
-    "hash": "sha256-PWCXh1SRg3C+NWFNBW8rt8EG+afQ6ZZZRrVgRnu7INk="
-  },
-  "N-V-__8AAJPSEgDcozcxiSvegfkjtNmn6GcEB8wT_c3xq86P": {
-    "name": "patch",
-    "url": "https://mirrors.kernel.org/gnu/patch/patch-2.6.1.tar.gz",
-    "hash": "sha256-Z/gqNmUwjlTxaa3dmYQG59AiJp2hFMe5Yl4gOhQva0k="
+  "N-V-__8AAB0eQwD-0MdOEBmz7intriBReIsIDNlukNVoNu6o": {
+    "name": "zlib",
+    "url": "https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz",
+    "hash": "sha256-r+38IdpUhv5xJKjejPSW+RLa+43nQ8ndkhmB0IR0gek="
   },
   "googletest-1.15.2-vLU55pAVAADd_J-vQKNwzEvPw695vo8YgmJmZyUkA0zX": {
     "name": "googletest",
@@ -79,19 +74,19 @@
     "url": "https://github.com/google/googletest/archive/refs/tags/v1.17.0.tar.gz",
     "hash": "sha256-1lPv+qJRRDsc7CnNWxKiWMXQBN6VLCp5X3NfWEB3k6w="
   },
-  "brotli_build-0.0.0-KJ9D2-EUAAAp9OIspI6azXuVp2z48K2Uyz9nPuWbkDWz": {
+  "brotli_build-0.0.0-KJ9D29oUAADRGePP9bPJlwRxtvoHIFHOPJi8MuC7vuTN": {
     "name": "brotli_build",
-    "url": "git+https://github.com/Ramblurr/brotli.zig.git?ref=h2o-zig/zig-0.17-compat#be89999e6feed4d69072dd9f2aa89760a4aa82b3",
-    "hash": "sha256-brRjflMjtj4pFn+yLZiukbabO2QrkzheXWk0S2F7Nlc="
+    "url": "git+https://github.com/Ramblurr/brotli.zig.git?ref=h2o-zig/brotli-1.2.1#d61beace81284ee7ffa6a908b571f4b4ea75b88c",
+    "hash": "sha256-1shs9pqIitQeaMOpJzlldpjbFMn2URH4tAmHmg17Eak="
   },
-  "N-V-__8AAI2b6QPVus14oqoaXFGvvUMDwBA0vE-y0XaApMDn": {
+  "N-V-__8AAJ5n8QMUF3N9loc3jLuVNcPJuWEqOVr2ZqQy_CsF": {
     "name": "brotli",
-    "url": "git+https://github.com/google/brotli?ref=master#440e03642b891968a76b6d088d70f01f06e0c349",
-    "hash": "sha256-0K3/ubewFP8PyyeCyKo6/NyrWmuLvbNPRsOeeG3fDwM="
+    "url": "git+https://github.com/google/brotli?ref=v1.2.1#db24a98aed38a16de78cc05ca15cdd8dc2a0d92d",
+    "hash": "sha256-/VxrwdOiv9iNbncw48HSyDXCtXO3b+tGlwyfDhv+/Rs="
   },
-  "aegis-0.9.1-wT2IxXLgBwAiIFRReUw-ir8qU5aCUYAgYfaVDd8OFrtg": {
+  "aegis-0.10.7-wT2Ixa3SDgC2u3lpvV6KLuxlFaGkblRd62kxaU63HxiN": {
     "name": "libaegis",
-    "url": "git+https://github.com/aegis-aead/libaegis.git?ref=0.9.1#fb173f3ea32e16c1c93c43035804ba6daf3adc59",
-    "hash": "sha256-MInbrHsVLdVsDzUn7k5J6NSHFNXSd+MtQLshoCrjOXw="
+    "url": "git+https://github.com/Ramblurr/libaegis.git?ref=h2o-zig/libaegis-0.10.7-pic#2eb36bb0614d33710224d7bfb4d2b776ce9c30d7",
+    "hash": "sha256-1tISfIYgsvQ+L2vlaWMtLVBM4pMD6g/iqJMmwvPVwD8="
   }
 }

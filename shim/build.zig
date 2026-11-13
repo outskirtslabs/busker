@@ -10,7 +10,6 @@ pub fn build(b: *std.Build) void {
     const all_targets = b.option(bool, "all-targets", "Build for all supported platforms") orelse true;
     const optimize = b.standardOptimizeOption(.{});
     const native_target = b.standardTargetOptions(.{});
-    var patched = std.AutoHashMap(*std.Build.Step.Compile, void).init(b.allocator);
 
     const all_target_configs = [_]TargetConfig{
         .{
@@ -49,9 +48,9 @@ pub fn build(b: *std.Build) void {
                     .dir_name = target_config.dir_name,
                     .lib_name = target_config.lib_name,
                 };
-                buildShimForTarget(b, native_config, optimize, &patched);
+                buildShimForTarget(b, native_config, optimize);
             } else {
-                buildShimForTarget(b, target_config, optimize, &patched);
+                buildShimForTarget(b, target_config, optimize);
             }
         }
     } else {
@@ -75,13 +74,13 @@ pub fn build(b: *std.Build) void {
             @panic("Unsupported native platform - add it to all_target_configs");
         };
 
-        buildShimForTarget(b, native_config, optimize, &patched);
+        buildShimForTarget(b, native_config, optimize);
     }
 
-    const test_h2o = patchedH2o(b, b.dependency("h2o-zig", .{
+    const test_h2o = b.dependency("h2o-zig", .{
         .target = b.graph.host,
         .optimize = optimize,
-    }), &patched);
+    }).artifact("h2o-evloop");
     const test_step = b.step("test", "Test native callbacks and fixed-slot lifetime");
     const native_tests = [_][]const u8{ "quic_forwarding", "address_tokens", "fixed_retention", "socket_write_completion" };
     for (native_tests) |test_name| {
@@ -142,57 +141,7 @@ pub fn build(b: *std.Build) void {
     compile_flags_step.dependOn(&compile_flags_cmd.step);
 }
 
-// Reconcile write interest before completion callbacks: https://github.com/h2o/h2o/issues/3828
-// Remove this patch when the pinned H2O includes the repair.
-fn patchedH2o(b: *std.Build, dep: *std.Build.Dependency, patched: *std.AutoHashMap(*std.Build.Step.Compile, void)) *std.Build.Step.Compile {
-    const lib = dep.artifact("h2o-evloop");
-    const entry = patched.getOrPut(lib) catch @panic("OOM");
-    if (entry.found_existing) return lib;
-
-    const h2o = dep.builder.dependency("h2o", .{});
-    const header_path = "lib/common/socket/evloop.c.h";
-    b.dependOnFileContents(h2o.path(header_path));
-    var source_dir = h2o.builder.root.openDir(b.graph.io, ".", .{}) catch @panic("cannot open H2O source directory");
-    defer source_dir.close(b.graph.io);
-    const original = source_dir.readFileAlloc(b.graph.io, header_path, b.allocator, .limited(1024 * 1024)) catch
-        @panic("cannot read H2O event-loop header");
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(original, &digest, .{});
-    if (!std.mem.eql(u8, &std.fmt.bytesToHex(digest, .lower), "cdb91cd4d4f6d4c95a1815e79343bf922898cbf6ca8715d8d4bd2b4d088d64f3"))
-        @panic("H2O event-loop header changed; review the write-completion patch");
-    const before = "        on_write_complete(&sock->super, err);";
-    const pos = std.mem.indexOf(u8, original, before) orelse @panic("H2O completion patch site missing");
-    if (std.mem.indexOfPos(u8, original, pos + before.len, before) != null)
-        @panic("H2O completion patch site is not unique");
-    const contents = b.fmt("{s}        link_to_statechanged(sock);\n{s}", .{ original[0..pos], original[pos..] });
-    const files = b.addWriteFiles();
-    _ = files.add("socket/evloop.c.h", contents);
-    substituteSource(lib, h2o, "lib/common/socket.c", files.addCopyFile(h2o.path("lib/common/socket.c"), "socket.c"));
-
-    // Relative includes other than the patched header still use the pinned source tree.
-    lib.root_module.addIncludePath(h2o.path("lib/common"));
-    lib.root_module.addIncludePath(h2o.path("lib/common/socket"));
-    lib.step.dependOn(&files.step);
-    return lib;
-}
-
-fn substituteSource(lib: *std.Build.Step.Compile, h2o: *std.Build.Dependency, sub_path: []const u8, file: std.Build.LazyPath) void {
-    var matches: usize = 0;
-    for (lib.root_module.link_objects.items) |object| {
-        if (object == .c_source_file) {
-            const source = object.c_source_file;
-            if (source.file == .dependency and source.file.dependency.dependency == h2o and
-                std.mem.eql(u8, source.file.dependency.sub_path, sub_path))
-            {
-                source.file = file;
-                matches += 1;
-            }
-        }
-    }
-    if (matches != 1) @panic("expected exactly one matching H2O translation unit");
-}
-
-fn buildShimForTarget(b: *std.Build, target_config: TargetConfig, optimize: std.builtin.OptimizeMode, patched: *std.AutoHashMap(*std.Build.Step.Compile, void)) void {
+fn buildShimForTarget(b: *std.Build, target_config: TargetConfig, optimize: std.builtin.OptimizeMode) void {
     const target = b.resolveTargetQuery(target_config.query);
     const is_debug = optimize == .debug;
     const is_linux = target.result.os.tag == .linux;
@@ -252,7 +201,7 @@ fn buildShimForTarget(b: *std.Build, target_config: TargetConfig, optimize: std.
 
     shim.root_module.addIncludePath(b.path("../src/shim"));
 
-    const h2o_lib = patchedH2o(b, h2o_dep, patched);
+    const h2o_lib = h2o_dep.artifact("h2o-evloop");
     shim.root_module.addIncludePath(h2o_lib.getEmittedIncludeTree());
 
     shim.root_module.linkLibrary(h2o_lib);
