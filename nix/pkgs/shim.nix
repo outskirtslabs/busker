@@ -74,6 +74,10 @@ let
           || rel == "src"
           || rel == "src/shim"
           || lib.hasPrefix "src/shim/" rel
+          || rel == "src/test"
+          || rel == "src/test/fixtures"
+          || rel == "src/test/fixtures/server.crt"
+          || rel == "src/test/fixtures/server.key"
           || (
             lib.hasPrefix "shim/" rel
             && !(lib.any (prefix: lib.hasPrefix prefix rel) excludedShimPrefixes)
