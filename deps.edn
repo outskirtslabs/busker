@@ -1,4 +1,4 @@
-{:paths   ["src/main/clojure" "target/classes"]
+{:paths   ["src/main/clojure"]
  :deps    {;; busker tries to minimize dependencies
            org.babashka/ffi             {:mvn/version "0.1.2"}
            ;; busker requires trove for its light pluggiable logging facade
