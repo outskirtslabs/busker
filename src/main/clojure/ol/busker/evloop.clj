@@ -46,8 +46,8 @@
   (mailbox/wake-waiters! (:mailbox worker)))
 
 (defn publish-command! [worker permit command]
-  (let [m (:mailbox worker)
-        published? (locking (:lock m)
+  (let [{:keys [lock] :as m} (:mailbox worker)
+        published? (locking lock
                      (if (.get ^AtomicBoolean (:running?_ worker))
                        (do (mailbox/publish! m permit command) true)
                        (do (mailbox/release! m permit) false)))]
@@ -314,9 +314,10 @@
     (finally
       (try
         (.set ^AtomicBoolean (:accepting?_ worker) false)
-        (locking (:lock (:mailbox worker))
-          (.set ^AtomicBoolean (:running?_ worker) false)
-          (mailbox/close! (:mailbox worker)))
+        (let [{:keys [lock] :as m} (:mailbox worker)]
+          (locking lock
+            (.set ^AtomicBoolean (:running?_ worker) false)
+            (mailbox/close! m)))
         (when-let [discard (:discard-command! worker)]
           (loop []
             (when-let [command (mailbox/poll! (:mailbox worker))]
