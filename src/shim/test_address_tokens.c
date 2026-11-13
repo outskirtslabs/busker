@@ -710,6 +710,109 @@ static void test_path_change_on_listener_socket(const char *cert,
   w->transport = NULL;
   clj_h2o_http3_release_udp_transport(transport);
 }
+
+/* Sends the client's pending datagrams to the server connection */
+static void server_reads(accept_fixture_t *f, quicly_conn_t *client,
+                         h2o_quic_conn_t *conn) {
+  static uint8_t buf[10 * 1500];
+  struct iovec datagrams[10];
+  size_t n = send_all(client, datagrams, buf, sizeof(buf));
+  receive_all(conn->quic, f->worker->h3_ctx.super.quic, &f->server_addr,
+              &f->client_addr, datagrams, n);
+}
+
+static uint32_t counted(clj_http3_ctx_t *w) {
+  return atomic_load(&w->load->conns);
+}
+
+/* A worker counts the connections that can still carry requests: one is
+   counted off when quicly reports it closed (closing or draining), and at
+   destroy only if that did not happen, so connections in their closing
+   period do not make the worker look loaded to new flows */
+static void test_count_follows_close(const char *cert, const char *key) {
+  accept_fixture_t f;
+  accept_fixture_init(&f, cert, key, NULL);
+  clj_http3_ctx_t *w0 = f.worker;
+  h2o_quic_ctx_t *quic_ctx = &w0->h3_ctx.super;
+  clj_http3_udp_transport_t *transport = new_transport();
+  w0->transport = transport;
+  int pair0[2], pair1[2];
+  CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, pair0) == 0);
+  CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, pair1) == 0);
+  CHECK(clj_http3_transport_register_attachment(transport, 1, 0, pair0[1], w0));
+  int fd1 = clj_h2o_http3_open_udp_fd("127.0.0.1", ntohs(f.server_addr.sin.sin_port));
+  CHECK(fd1 != -1);
+  clj_http3_ctx_t *w1 = clj_h2o_http3_create_worker_ctx_from_fd(
+      &f.context, quic_ctx->loop, quic_ctx->quic, f.hosts, fd1, 1, 1);
+  CHECK(w1 != NULL);
+  w1->transport = transport;
+  w1->forward_fd = pair1[1];
+  CHECK(clj_http3_transport_register_attachment(transport, 1, 1, pair1[1], w1));
+  clj_h2o_http3_activate_udp_transport_generation(transport, 1);
+
+  quicly_conn_t *clients[6];
+  h2o_quic_conn_t *conns[6];
+  for (int i = 0; i < 4; ++i)
+    conns[i] = handshake(&f, clients + i, 1);
+  CHECK(counted(w0) == 4 && h2o_quic_num_connections(quic_ctx) == 4);
+
+  /* The client closes: draining, no longer counted, still a connection */
+  for (int i = 0; i < 2; ++i) {
+    CHECK(quicly_close(clients[i], 0, "") == 0);
+    server_reads(&f, clients[i], conns[i]);
+    CHECK(quicly_get_state(conns[i]->quic) == QUICLY_STATE_DRAINING);
+  }
+  CHECK(counted(w0) == 2 && h2o_quic_num_connections(quic_ctx) == 4);
+
+  /* A new flow read by this worker while those drain stays with it when its
+     live connections are as few as the other worker's */
+  atomic_store(&w1->load->conns, 2);
+  uint64_t turn = h2o_now(quic_ctx->loop);
+  CHECK(clj_http3_choose_worker(w0, turn) == w0->load);
+  atomic_store(&w1->load->conns, 0);
+
+  /* Destroy after the close counts nothing again */
+  clj_on_http3_conn_destroy(conns[0]);
+  clj_on_http3_conn_destroy(conns[1]);
+  CHECK(counted(w0) == 2 && h2o_quic_num_connections(quic_ctx) == 2);
+
+  /* The server closes: closing, no longer counted; destroy counts nothing */
+  h2o_quic_close_connection(conns[2], 0, NULL);
+  CHECK(quicly_get_state(conns[2]->quic) == QUICLY_STATE_CLOSING);
+  CHECK(counted(w0) == 1);
+  clj_on_http3_conn_destroy(conns[2]);
+  CHECK(counted(w0) == 1);
+
+  /* Destroyed without a close: counted off once, at destroy */
+  conns[4] = handshake(&f, clients + 4, 1);
+  CHECK(counted(w0) == 2);
+  clj_on_http3_conn_destroy(conns[3]);
+  CHECK(counted(w0) == 1);
+
+  /* An idle timeout drains without a close reason: counted off at destroy */
+  quicly_context_t *quic = quic_ctx->quic;
+  uint64_t idle = quic->transport_params.max_idle_timeout;
+  quic->transport_params.max_idle_timeout = 50;
+  conns[5] = handshake(&f, clients + 5, 1);
+  quic->transport_params.max_idle_timeout = idle;
+  CHECK(counted(w0) == 2);
+  usleep(400 * 1000);
+  h2o_quic_send(conns[5]);
+  CHECK(counted(w0) == 1 && h2o_quic_num_connections(quic_ctx) == 1);
+
+  clj_on_http3_conn_destroy(conns[4]);
+  CHECK(counted(w0) == 0 && h2o_quic_num_connections(quic_ctx) == 0);
+  for (int i = 0; i < 6; ++i)
+    quicly_free(clients[i]);
+  clj_h2o_http3_dispose_worker_ctx(w1);
+  clj_http3_transport_unregister_attachment(transport, 1, 0, pair0[1]);
+  w0->transport = NULL;
+  w0->load = NULL;
+  close(pair0[0]);
+  close(pair0[1]);
+  close(pair1[0]);
+  clj_h2o_http3_release_udp_transport(transport);
+}
 #endif
 
 int main(int argc, char **argv) {
@@ -723,6 +826,7 @@ int main(int argc, char **argv) {
 #if CLJ_HTTP3_CONNECTED_SOCKETS
   test_connect_after_handshake(argv[1], argv[2]);
   test_path_change_on_listener_socket(argv[1], argv[2]);
+  test_count_follows_close(argv[1], argv[2]);
 #endif
   puts("QUIC address token tests passed");
   return 0;

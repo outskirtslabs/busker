@@ -2445,6 +2445,8 @@ static int clj_quicly_wrapper_set_cid_key(quicly_context_t *ctx,
   return 1;
 }
 
+static quicly_closed_t clj_quic_closed;
+
 quicly_context_t *clj_h2o_create_quicly_ctx(ptls_context_t *ptls_ctx,
                                             h2o_globalconf_t *globalconf) {
   if (!ptls_ctx || !globalconf)
@@ -2476,6 +2478,7 @@ quicly_context_t *clj_h2o_create_quicly_ctx(ptls_context_t *ptls_ctx,
 
   wrapper->ctx.cid_encryptor = wrapper->cid_encryptor;
   wrapper->ctx.generate_resumption_token = &clj_resumption_token_generator;
+  wrapper->ctx.closed = &clj_quic_closed;
 
   quicly_amend_ptls_context(ptls_ctx);
   h2o_http3_server_amend_quicly_context(globalconf, &wrapper->ctx);
@@ -2763,11 +2766,35 @@ static void clj_http3_disconnect(clj_http3_ctx_t *ctx, h2o_quic_conn_t *conn) {
   }
 }
 
+/* quicly records a close reason exactly when it calls its `closed`
+   callback, on entry to closing or draining; an idle or handshake timeout
+   drains without one */
+static int clj_http3_reported_closed(quicly_conn_t *quic) {
+  const char *reason_phrase = NULL;
+  if (quic == NULL || quicly_get_state(quic) < QUICLY_STATE_CLOSING)
+    return 0;
+  quicly_get_close_reason(quic, NULL, &reason_phrase, NULL);
+  return reason_phrase != NULL;
+}
+
+/* A connection in its closing period carries no more requests, so it no
+   longer counts toward its worker's load; it keeps its connected socket and
+   its connection limit slot until destroy */
+static void clj_on_quic_closed(quicly_closed_t *self, quicly_conn_t *quic) {
+  (void)self;
+  h2o_quic_conn_t *conn = *quicly_get_data(quic);
+  if (conn != NULL)
+    clj_http3_count_close(conn->ctx);
+}
+
+static quicly_closed_t clj_quic_closed = {clj_on_quic_closed};
+
 /* HTTP/3 connection destroy wrapper - releases connection limit slot */
 static void clj_on_http3_conn_destroy(h2o_quic_conn_t *conn) {
   clj_http3_disconnect(
       H2O_STRUCT_FROM_MEMBER(clj_http3_ctx_t, h3_ctx.super, conn->ctx), conn);
-  clj_http3_count_close(conn->ctx);
+  if (!clj_http3_reported_closed(conn->quic))
+    clj_http3_count_close(conn->ctx);
   clj_h2o_conn_limit_release();
   H2O_HTTP3_CONN_CALLBACKS.super.destroy_connection(conn);
 }
