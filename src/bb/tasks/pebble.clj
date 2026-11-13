@@ -47,10 +47,9 @@
 
 (defn- pid-alive?
   [pid]
-  (boolean
-   (and (some? pid)
-        (zero? (:exit (p/sh {:continue true}
-                            "kill" "-0" (str pid)))))))
+  (and (some? pid)
+       (zero? (:exit (p/sh {:continue true}
+                           "kill" "-0" (str pid))))))
 
 (defn running?
   []

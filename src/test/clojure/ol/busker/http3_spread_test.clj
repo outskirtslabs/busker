@@ -27,7 +27,6 @@
           (reduce (fn [total ctx]
                     (if (or (nil? ctx) (mem/null? ctx))
                       total
-                      #_{:clj-kondo/ignore [:type-mismatch]}
                       (+ total (long (f ctx)))))
                   0
                   ctxs))

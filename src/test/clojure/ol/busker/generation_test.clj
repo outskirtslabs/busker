@@ -495,7 +495,7 @@
                       :admission-open?  (.get ^AtomicBoolean (:response-receiver-open?_ worker))
                       :destroyed?        destroyed?
                       :destroyed         @destroyed_})
-                  (str "Receiver destruction must defer while a producer has read it before claim.")))
+                  "Receiver destruction must defer while a producer has read it before claim."))
             (deliver release-claim_ true)
             (.join producer 5000)
             (is (= {:response :closed
@@ -562,7 +562,6 @@
                     (deliver result_ {:error error}))))]
           (try
             (is (true? (deref claim-state-changed_ 5000 false)))
-            #_{:clj-kondo/ignore [:type-mismatch]}
             (is (= 1 (h2o/mt-response-pending receiver)))
             (is (= {:destroyed?        false
                     :receiver-present? true}
@@ -1035,7 +1034,7 @@
            slot (:response-slot-payload-capacity worker) plan)
           (mem/write slot response-slot-header-name
                      (mem/slice payload
-                                (long (fixed-final/header-utf8-bytes headers)) 1))
+                                (fixed-final/header-utf8-bytes headers) 1))
           (mem/write slot response-slot-header-name-len 0)
           (is (= 1 (h2o/mt-response-publish receiver claim-handle)))
           (p/wake worker)

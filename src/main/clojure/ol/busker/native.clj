@@ -278,7 +278,7 @@
   "clj_h2o_entrypoint_hosts_init"
   [:pointer :pointer :uint32] :pointer)
 
-(ffi/defcfn config-register-host
+(defcfn config-register-host
   "Register a virtual host with the h2o configuration. Returns its native pointer."
   "h2o_config_register_host"
   [:pointer ffi-h2o-iovec-t :uint16] :pointer)
@@ -399,7 +399,7 @@
     (when e
       (.printStackTrace ^Throwable e ^java.io.PrintWriter *err*))))
 
-(ffi/defcfn create-handler*
+(defcfn create-handler*
   "Construct an H2O handler with its request and cleanup callbacks."
   "clj_h2o_create_handler"
   [:pointer :pointer :pointer :pointer] :pointer)
@@ -492,7 +492,6 @@
 (defn mt-response-slot-data-size
   "Returns the fixed metadata size before slot payload bytes."
   []
-  #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-slot-data-size*)))
 
 (defcfn mt-response-ring-capacity*
@@ -502,7 +501,6 @@
 (defn mt-response-ring-capacity
   "Returns the fixed number of response slots."
   [receiver]
-  #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-ring-capacity* receiver)))
 
 (defcfn mt-response-slot-payload-capacity*
@@ -512,7 +510,6 @@
 (defn mt-response-slot-payload-capacity
   "Returns the byte capacity after each slot metadata area."
   [receiver]
-  #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-slot-payload-capacity* receiver)))
 
 (defcfn mt-response-claimed*
@@ -522,7 +519,6 @@
 (defn mt-response-claimed
   "Returns the current number of claimed response slots."
   [receiver]
-  #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-claimed* receiver)))
 
 (defcfn mt-response-ring-ready*
@@ -532,7 +528,6 @@
 (defn mt-response-ring-ready
   "Returns the current number of ready response slots."
   [receiver]
-  #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-ring-ready* receiver)))
 
 (defcfn mt-response-slot-data*
@@ -557,7 +552,6 @@
    publication and call [[mt-response-abort]] once. Do not share a handle,
    reuse it, or make concurrent stale calls; those uses have no supported contract."
   [receiver]
-  #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-try-claim* receiver)))
 
 (defcfn mt-response-publish*
@@ -572,7 +566,6 @@
    requires the claimant's sequential, single-use handle; concurrent stale
    calls have no supported contract."
   [receiver claim-handle]
-  #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-publish* receiver claim-handle)))
 
 (defcfn mt-response-abort*
@@ -587,7 +580,6 @@
    requires the claimant's sequential, single-use handle; concurrent stale
    calls have no supported contract."
   [receiver claim-handle]
-  #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-abort* receiver claim-handle)))
 
 (defcfn mt-response-ring-drain*
@@ -599,7 +591,6 @@
   Sending retains slot bodies until request cleanup; a return from this call
   does not make a slot reusable. Stale request identities release without sending."
   [receiver]
-  #_{:clj-kondo/ignore [:type-mismatch]}
   (long (mt-response-ring-drain* receiver)))
 
 (defcfn mt-destroy-wakeup-receiver
@@ -631,7 +622,7 @@
   "clj_h2o_free_ssl_ctx"
   [:pointer] :void)
 
-(ffi/defcfn tls-bytes-dup
+(defcfn tls-bytes-dup
   "Duplicate bytes into native-heap memory used by TLS callbacks."
   "clj_h2o_tls_memdup"
   [:pointer :long] :pointer)

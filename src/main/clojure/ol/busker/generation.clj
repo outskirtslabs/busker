@@ -183,7 +183,6 @@
                       (h2o/socket-read-stop listener-ptr)
                       (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
                         (when-not (mem/null? sock-ptr)
-                          #_{:clj-kondo/ignore [:type-mismatch]}
                           (if (pos? (h2o/conn-limit-try-acquire))
                             (do
                               (.incrementAndGet ^AtomicLong active-connection-count_)
@@ -311,7 +310,6 @@
   connection limit and the connection spread rule."
   [{:keys [listener-socks accept-callbacks max-connections worker-connection-counts
            worker-idx accepting-workers limit-waiting]}]
-  #_{:clj-kondo/ignore [:type-mismatch]}
   (let [^AtomicLongArray counts worker-connection-counts
         ^AtomicBoolean limit-waiting limit-waiting
         worker-idx (long worker-idx)
@@ -338,7 +336,6 @@
   (doseq [listener-idx (range (count listener-socks))]
     (let [sock-ptr (nth listener-socks listener-idx)]
       (when (and (not (mem/null? sock-ptr))
-                 #_{:clj-kondo/ignore [:type-mismatch]}
                  (not (zero? (h2o/socket-reading? sock-ptr))))
         (h2o/socket-read-stop sock-ptr))))
   (doseq [http3-ctx http3-ctxs]
@@ -353,14 +350,12 @@
 
 (defn- has-active-http3-connections?
   [http3-ctx]
-  #_{:clj-kondo/ignore [:type-mismatch]}
   (and http3-ctx
        (not (mem/null? http3-ctx))
        (pos? (h2o/http3-num-connections http3-ctx))))
 
 (defn- all-connections-drained?
   [ctx-ptr http3-ctxs active-connection-count_]
-  #_{:clj-kondo/ignore [:type-mismatch]}
   (and (zero? (h2o/context-get-active-conns ctx-ptr))
        (zero? (h2o/context-get-shutdown-conns ctx-ptr))
        (zero? (.get ^AtomicLong active-connection-count_))
@@ -372,7 +367,6 @@
         receiver (when receiver_ (.get ^AtomicReference receiver_))]
     (or (nil? receiver)
         (mem/null? receiver)
-        #_{:clj-kondo/ignore [:type-mismatch]}
         (zero? (h2o/mt-response-pending receiver)))))
 
 (defn- close-response-receiver-admission!
@@ -401,7 +395,6 @@
         (let [receiver (.get receiver_)]
           (if (or (nil? receiver) (mem/null? receiver))
             true
-            #_{:clj-kondo/ignore [:type-mismatch]}
             (if (zero? (h2o/mt-response-pending receiver))
               (do
                 (h2o/mt-destroy-response-receiver receiver)
@@ -1159,51 +1152,51 @@
                  listener-socks-for-thread (mapv :socket thread-listener-states)
                  accept-callbacks-for-thread (mapv :accept-callback-ptr thread-listener-states)
                  http3-ctxs-for-thread (nth http3-worker-contexts thread-idx)
-                 http3-ctxs-guard (http3-ctxs-guard)]
-             (let [worker (evloop/start-worker!
-                           (fn [worker loop-state]
-                             (worker-loop worker
-                                          loop-state
-                                          {:listener-socks listener-socks-for-thread
-                                           :accept-callbacks accept-callbacks-for-thread
-                                           :loop-ptr loop-ptr
-                                           :ctx-ptr ctx-ptr
-                                           :http3-ctxs http3-ctxs-for-thread
-                                           :http3-ctxs-guard http3-ctxs-guard
-                                           :max-connections max-connections
-                                           :shutting-down? shutting-down?
-                                           :active-connection-count_ active-connection-count_
-                                           :worker-connection-counts worker-connection-counts
-                                           :worker-idx thread-idx
-                                           :accepting-workers accepting-workers
-                                           :limit-waiting limit-waiting
-                                           ::stop-accepting-remaining_ stop-accepting-remaining_
-                                           ::stopped-accepting_ stopped-accepting_}))
-                           message-handler
-                           (nth wakeup-receivers thread-idx)
-                           :stream-pool (nth stream-pools thread-idx)
-                           :on-native-failure!
-                           (fn [worker cause]
-                             (try
-                               (worker-native-failure! worker cause)
-                               (finally
-                                 (.set ^AtomicLongArray worker-connection-counts
-                                       (int thread-idx) Long/MAX_VALUE)
-                                 (withdraw-http3-worker! http3-ctxs-guard
-                                                         http3-ctxs-for-thread)
-                                 (wake-other-workers! accepting-workers thread-idx))))
-                           :discard-command! (fn [[op _ _ st record]]
-                                               (when (= :h2o/output op)
-                                                 (rq/discard-record! st record)))
-                           :response-receiver (nth response-receivers thread-idx)
-                           :response-slots (nth response-slots thread-idx)
-                           :response-slot-payload-capacity response-slot-payload-capacity
-                           :callback-dispatch callback-dispatch
-                           :zero-wait-turn! (fn [] (h2o/evloop-run loop-ptr 0))
-                           :hot-poll-ns hot-poll-ns)]
-               (vswap! cleanup-state_ update ::workers (fnil conj []) worker)
-               (.set ^AtomicReferenceArray accepting-workers (int thread-idx) worker)
-               worker))))]
+                 http3-ctxs-guard (http3-ctxs-guard)
+                 worker (evloop/start-worker!
+                         (fn [worker loop-state]
+                           (worker-loop worker
+                                        loop-state
+                                        {:listener-socks listener-socks-for-thread
+                                         :accept-callbacks accept-callbacks-for-thread
+                                         :loop-ptr loop-ptr
+                                         :ctx-ptr ctx-ptr
+                                         :http3-ctxs http3-ctxs-for-thread
+                                         :http3-ctxs-guard http3-ctxs-guard
+                                         :max-connections max-connections
+                                         :shutting-down? shutting-down?
+                                         :active-connection-count_ active-connection-count_
+                                         :worker-connection-counts worker-connection-counts
+                                         :worker-idx thread-idx
+                                         :accepting-workers accepting-workers
+                                         :limit-waiting limit-waiting
+                                         ::stop-accepting-remaining_ stop-accepting-remaining_
+                                         ::stopped-accepting_ stopped-accepting_}))
+                         message-handler
+                         (nth wakeup-receivers thread-idx)
+                         :stream-pool (nth stream-pools thread-idx)
+                         :on-native-failure!
+                         (fn [worker cause]
+                           (try
+                             (worker-native-failure! worker cause)
+                             (finally
+                               (.set ^AtomicLongArray worker-connection-counts
+                                     (int thread-idx) Long/MAX_VALUE)
+                               (withdraw-http3-worker! http3-ctxs-guard
+                                                       http3-ctxs-for-thread)
+                               (wake-other-workers! accepting-workers thread-idx))))
+                         :discard-command! (fn [[op _ _ st record]]
+                                             (when (= :h2o/output op)
+                                               (rq/discard-record! st record)))
+                         :response-receiver (nth response-receivers thread-idx)
+                         :response-slots (nth response-slots thread-idx)
+                         :response-slot-payload-capacity response-slot-payload-capacity
+                         :callback-dispatch callback-dispatch
+                         :zero-wait-turn! (fn [] (h2o/evloop-run loop-ptr 0))
+                         :hot-poll-ns hot-poll-ns)]
+             (vswap! cleanup-state_ update ::workers (fnil conj []) worker)
+             (.set ^AtomicReferenceArray accepting-workers (int thread-idx) worker)
+             worker)))]
     (assoc state ::workers workers)))
 
 (defn- init-stream-pools

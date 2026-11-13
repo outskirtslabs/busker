@@ -63,7 +63,6 @@
             (reduce (fn [total http3-ctx]
                       (if (or (nil? http3-ctx) (mem/null? http3-ctx))
                         total
-                        #_{:clj-kondo/ignore [:type-mismatch]}
                         (+ total (h2o/http3-num-connections http3-ctx))))
                     0
                     worker-http3-ctxs))
