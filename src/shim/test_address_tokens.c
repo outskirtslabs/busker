@@ -4,6 +4,7 @@
 #include <openssl/aead.h>
 #include <openssl/hkdf.h>
 #include <openssl/sha.h>
+#include <dirent.h>
 
 #define CHECK(condition)                                                       \
   do {                                                                         \
@@ -391,7 +392,10 @@ static void accept_fixture_init(accept_fixture_t *f, const char *cert,
   CHECK(server_tls != NULL);
   quicly_context_t *quic = clj_h2o_create_quicly_ctx(server_tls, &f->config);
   CHECK(quic != NULL);
-  int server_fd = bound_udp(&f->server_addr);
+  int server_fd = clj_h2o_http3_open_udp_fd("127.0.0.1", 0);
+  CHECK(server_fd != -1 && clj_set_fd_nonblock(server_fd) == 0);
+  socklen_t len = sizeof(f->server_addr);
+  CHECK(getsockname(server_fd, &f->server_addr.sa, &len) == 0);
   f->worker = clj_h2o_http3_create_worker_ctx_from_fd(
       &f->context, loop, quic, f->hosts, server_fd, 1, 0);
   CHECK(f->worker != NULL);
@@ -492,6 +496,222 @@ static void test_accept(const char *cert, const char *key) {
   CHECK(clj_h2o_conn_limit_current() == before + 1);
 }
 
+#if CLJ_HTTP3_CONNECTED_SOCKETS
+static void receive_all(quicly_conn_t *conn, quicly_context_t *ctx,
+                        quicly_address_t *dest, quicly_address_t *src,
+                        struct iovec *datagrams, size_t num_datagrams) {
+  for (size_t i = 0; i < num_datagrams; ++i) {
+    size_t off = 0;
+    while (off < datagrams[i].iov_len) {
+      quicly_decoded_packet_t packet;
+      if (quicly_decode_packet(ctx, &packet, datagrams[i].iov_base,
+                               datagrams[i].iov_len, &off) == SIZE_MAX)
+        break;
+      quicly_receive(conn, &dest->sa, &src->sa, &packet);
+    }
+  }
+}
+
+static size_t send_all(quicly_conn_t *conn, struct iovec *datagrams,
+                       uint8_t *buf, size_t size) {
+  quicly_address_t dest, src;
+  size_t num_datagrams = 10;
+  CHECK(quicly_send(conn, &dest, &src, datagrams, &num_datagrams, buf, size) ==
+        0);
+  return num_datagrams;
+}
+
+/* The server sends through H2O, on its UDP socket, to the client's socket */
+static void client_reads(accept_fixture_t *f, quicly_conn_t *client) {
+  static uint8_t buf[1500];
+  ssize_t len;
+  while ((len = recv(f->client_fd, buf, sizeof(buf), 0)) > 0) {
+    struct iovec datagram = {buf, (size_t)len};
+    receive_all(client, &f->client_quic, &f->client_addr, &f->server_addr,
+                &datagram, 1);
+  }
+}
+
+static int connected_sockets(clj_http3_ctx_t *ctx) {
+  return (int)ctx->num_connected;
+}
+
+static int count_fds(void) {
+  int n = 0;
+  DIR *dir = opendir("/proc/self/fd");
+  CHECK(dir != NULL);
+  while (readdir(dir) != NULL)
+    ++n;
+  closedir(dir);
+  return n;
+}
+
+/* The worker's hook as H2O calls it during a read of the forwarding channel
+   (clj_forwarded_quic_socket_on_read) */
+static void forwarded_update(clj_http3_ctx_t *w, h2o_quic_conn_t *conn) {
+  w->reading = CLJ_HTTP3_READING_FORWARDED;
+  clj_http3_set_conn_update(w);
+  w->h3_ctx.super.notify_conn_update(&w->h3_ctx.super, conn);
+  w->reading = CLJ_HTTP3_READING_PUBLIC;
+  clj_http3_set_conn_update(w);
+}
+
+static clj_http3_udp_transport_t *new_transport(void) {
+  clj_http3_udp_transport_t *transport = calloc(1, sizeof(*transport));
+  CHECK(transport != NULL);
+  transport->reservation_fd = -1;
+  CHECK(pthread_mutex_init(&transport->mutex, NULL) == 0);
+  return transport;
+}
+
+/* Accepts a quicly client's connection on the fixture's worker; with
+   `complete`, runs the handshake to its end, calling the hook as after a
+   forwarded read at every step and checking that it connects nothing
+   before the end */
+static h2o_quic_conn_t *handshake(accept_fixture_t *f, quicly_conn_t **client,
+                                  int complete) {
+  clj_http3_ctx_t *w = f->worker;
+  h2o_quic_ctx_t *quic_ctx = &w->h3_ctx.super;
+  static quicly_cid_plaintext_t next_cid;
+  ptls_iovec_t alpn = ptls_iovec_init("h3", 2);
+  ptls_handshake_properties_t props = {
+      .client = {.negotiated_protocols = {.list = &alpn, .count = 1}}};
+  CHECK(quicly_connect(client, &f->client_quic, "localhost",
+                       &f->server_addr.sa, NULL, &next_cid,
+                       ptls_iovec_init(NULL, 0), &props, NULL, NULL) == 0);
+  ++next_cid.master_id;
+  static uint8_t buf[10 * 1500];
+  struct iovec datagrams[10];
+  size_t n = send_all(*client, datagrams, buf, sizeof(buf));
+  quicly_decoded_packet_t first;
+  size_t off = 0;
+  CHECK(quicly_decode_packet(quic_ctx->quic, &first, datagrams[0].iov_base,
+                             datagrams[0].iov_len, &off) != SIZE_MAX);
+  h2o_quic_conn_t *conn =
+      clj_on_http3_accept(quic_ctx, &f->server_addr, &f->client_addr, &first);
+  CHECK(conn != NULL);
+  receive_all(conn->quic, quic_ctx->quic, &f->server_addr, &f->client_addr,
+              datagrams + 1, n - 1);
+  forwarded_update(w, conn);
+  CHECK(connected_sockets(w) == 0);
+  for (int round = 0; complete && round < 8 &&
+                      !ptls_handshake_is_complete(quicly_get_tls(conn->quic));
+       ++round) {
+    h2o_quic_send(conn);
+    client_reads(f, *client);
+    forwarded_update(w, conn);
+    CHECK(connected_sockets(w) == 0);
+    n = send_all(*client, datagrams, buf, sizeof(buf));
+    receive_all(conn->quic, quic_ctx->quic, &f->server_addr, &f->client_addr,
+                datagrams, n);
+    if (!ptls_handshake_is_complete(quicly_get_tls(conn->quic))) {
+      forwarded_update(w, conn);
+      CHECK(connected_sockets(w) == 0);
+    }
+  }
+  CHECK(!complete || ptls_handshake_is_complete(quicly_get_tls(conn->quic)));
+  return conn;
+}
+
+/* A connection whose datagrams arrive forwarded gets a connected socket only
+   once its handshake is complete, so a client that has not shown that it
+   receives at its address never gets one; the destroy wrapper closes it */
+static void test_connect_after_handshake(const char *cert, const char *key) {
+  accept_fixture_t f;
+  accept_fixture_init(&f, cert, key, NULL);
+  clj_http3_ctx_t *w = f.worker;
+  clj_http3_udp_transport_t *transport = new_transport();
+  w->transport = transport;
+  quicly_conn_t *client;
+  h2o_quic_conn_t *conn = handshake(&f, &client, 1);
+  int fds_before = count_fds();
+
+  CHECK(w->h3_ctx.super.notify_conn_update == NULL);
+  forwarded_update(w, conn);
+  CHECK(connected_sockets(w) == 1 && count_fds() == fds_before + 1);
+  CHECK(w->h3_ctx.super.notify_conn_update == clj_on_conn_update);
+  CHECK(h2o_socket_compare_address(&w->connected[0]->peer.sa,
+                                   &f.client_addr.sa, 1) == 0);
+  CHECK(sendto(f.client_fd, "x", 1, 0, &f.server_addr.sa,
+               sizeof(f.server_addr.sin)) == 1);
+  char got[8];
+  CHECK(recv(h2o_socket_get_fd(w->connected[0]->sock), got, sizeof(got),
+             MSG_DONTWAIT) == 1);
+
+  uint32_t limit_before = clj_h2o_conn_limit_current();
+  clj_on_http3_conn_destroy(conn);
+  CHECK(connected_sockets(w) == 0 &&
+        atomic_load(&transport->num_connected) == 0);
+  CHECK(clj_h2o_conn_limit_current() == limit_before - 1);
+  CHECK(count_fds() == fds_before);
+  CHECK(w->h3_ctx.super.notify_conn_update == NULL);
+  quicly_free(client);
+  w->transport = NULL;
+  clj_h2o_http3_release_udp_transport(transport);
+}
+
+/* A client whose new path the kernel delivers to the connection's worker
+   directly: H2O reads it from the listener's socket, the old path's socket
+   closes and one for the new path replaces it, so a later sender on the old
+   address and port reaches the listener's socket, not a stale one */
+static void test_path_change_on_listener_socket(const char *cert,
+                                                const char *key) {
+  accept_fixture_t f;
+  accept_fixture_init(&f, cert, key, NULL);
+  clj_http3_ctx_t *w = f.worker;
+  static const uint8_t cid_key[32] = {7};
+  CHECK(clj_quicly_wrapper_set_cid_key(w->h3_ctx.super.quic, cid_key,
+                                       sizeof(cid_key)));
+  clj_http3_udp_transport_t *transport = new_transport();
+  w->transport = transport;
+  quicly_conn_t *client;
+  h2o_quic_conn_t *conn = handshake(&f, &client, 1);
+  forwarded_update(w, conn);
+  CHECK(connected_sockets(w) == 1);
+
+  quicly_address_t rebound;
+  int rebound_fd = bound_udp(&rebound);
+  CHECK(clj_set_fd_nonblock(rebound_fd) == 0);
+  int fds_before = count_fds();
+  /* quicly has validated and promoted the new path */
+  memcpy(quicly_get_peername(conn->quic), &rebound, sizeof(rebound.sin));
+
+  /* A short header datagram with the connection's CID, as a 1-RTT packet
+     on the new path; it does not decrypt, H2O still reports the connection */
+  const quicly_cid_t *dcid = quicly_get_remote_cid(client);
+  uint8_t packet[64] = {0x40};
+  memcpy(packet + 1, dcid->cid, dcid->len);
+  memset(packet + 1 + dcid->len, 0x5a, 40);
+  size_t len = 1 + dcid->len + 40;
+  CHECK(sendto(rebound_fd, packet, len, 0, &f.server_addr.sa,
+               sizeof(f.server_addr.sin)) == (ssize_t)len);
+  h2o_quic_read_socket(&w->h3_ctx.super, w->udp_sock);
+
+  CHECK(connected_sockets(w) == 1 && count_fds() == fds_before);
+  CHECK(atomic_load(&transport->num_connected) == 1);
+  CHECK(h2o_socket_compare_address(&w->connected[0]->peer.sa, &rebound.sa,
+                                   1) == 0);
+  char got[8];
+  CHECK(sendto(f.client_fd, "o", 1, 0, &f.server_addr.sa,
+               sizeof(f.server_addr.sin)) == 1);
+  CHECK(sendto(rebound_fd, "n", 1, 0, &f.server_addr.sa,
+               sizeof(f.server_addr.sin)) == 1);
+  CHECK(recv(h2o_socket_get_fd(w->connected[0]->sock), got, sizeof(got),
+             MSG_DONTWAIT) == 1 &&
+        got[0] == 'n');
+  CHECK(recv(h2o_socket_get_fd(w->udp_sock), got, sizeof(got), MSG_DONTWAIT) ==
+            1 &&
+        got[0] == 'o');
+
+  clj_on_http3_conn_destroy(conn);
+  CHECK(connected_sockets(w) == 0 && count_fds() == fds_before - 1);
+  close(rebound_fd);
+  quicly_free(client);
+  w->transport = NULL;
+  clj_h2o_http3_release_udp_transport(transport);
+}
+#endif
+
 int main(int argc, char **argv) {
   CHECK(argc == 3);
   test_key_matches_h2o();
@@ -500,6 +720,10 @@ int main(int argc, char **argv) {
   test_rebuild_during_swaps();
   test_without_keys();
   test_accept(argv[1], argv[2]);
+#if CLJ_HTTP3_CONNECTED_SOCKETS
+  test_connect_after_handshake(argv[1], argv[2]);
+  test_path_change_on_listener_socket(argv[1], argv[2]);
+#endif
   puts("QUIC address token tests passed");
   return 0;
 }

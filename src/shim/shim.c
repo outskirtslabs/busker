@@ -1757,7 +1757,10 @@ typedef struct {
    forwarded to the worker that it has not read yet. `forward_fd` is the
    write end of the worker's forwarding channel, -1 while no context is
    attached; `writers` counts forwards using it, so detaching waits for them
-   before the descriptor can be closed. */
+   before the descriptor can be closed. `forwarded` and `connected` change
+   only on the worker's thread and are read only by tests, after a gap of a
+   cache line so that the forward path does not write to the line other
+   workers read when they choose. */
 typedef struct clj_http3_worker_load_t {
   uint64_t node_id;
   uint32_t thread_id;
@@ -1768,6 +1771,9 @@ typedef struct clj_http3_worker_load_t {
   _Atomic int forward_fd;
   _Atomic uint32_t writers;
   struct clj_http3_worker_load_t *next;
+  char gap[64];
+  _Atomic uint64_t forwarded;
+  _Atomic uint32_t connected;
 } clj_http3_worker_load_t;
 
 /* The attached workers of a transport, for lookups without the mutex. A set
@@ -1792,6 +1798,35 @@ typedef struct {
 #define CLJ_HTTP3_NEW_FLOWS 64
 #define CLJ_HTTP3_NEW_FLOW_MILLIS 3000
 
+/* A UDP socket connected to the client of a connection whose datagrams the
+   kernel delivers to another worker, so that it delivers them here instead.
+   Linux only: other kernels do not prefer a connected socket within a
+   SO_REUSEPORT group in the same way. */
+#ifdef __linux__
+#define CLJ_HTTP3_CONNECTED_SOCKETS 1
+#else
+#define CLJ_HTTP3_CONNECTED_SOCKETS 0
+#endif
+/* Per listener, over all workers and generations. Every datagram to the
+   port that no connected socket takes is looked up past all of them (Linux
+   6.18: about 4 ns each), so this bounds the cost for the other flows. */
+#define CLJ_HTTP3_CONNECTED_MAX 64
+#define CLJ_HTTP3_CONNECT_RETRY_MILLIS 1000
+
+typedef struct {
+  clj_http3_ctx_t *ctx;
+  h2o_quic_conn_t *conn;
+  h2o_socket_t *sock;
+  quicly_address_t local;
+  quicly_address_t peer;
+} clj_http3_connected_t;
+
+enum {
+  CLJ_HTTP3_READING_PUBLIC,
+  CLJ_HTTP3_READING_FORWARDED,
+  CLJ_HTTP3_READING_CONNECTED
+};
+
 /* HTTP/3 (QUIC) context structure holding all resources for one worker */
 struct clj_http3_ctx_t {
   h2o_http3_server_ctx_t h3_ctx;
@@ -1806,12 +1841,17 @@ struct clj_http3_ctx_t {
   uint32_t thread_id;
   int forward_fd;
   int fd;
-  int reading_forwarded;
+  /* The socket H2O is reading, and for a connected one its client */
+  int reading;
+  quicly_address_t reading_peer;
   /* Flows this worker kept for itself in the loop turn `kept_at` (the loop's
      time); their accepts follow after the whole receive batch */
   uint64_t kept_at;
   uint32_t kept;
   clj_http3_new_flow_t new_flows[CLJ_HTTP3_NEW_FLOWS];
+  uint64_t connect_retry_at;
+  uint32_t num_connected;
+  clj_http3_connected_t *connected[CLJ_HTTP3_CONNECTED_MAX];
 };
 
 typedef struct {
@@ -1836,6 +1876,7 @@ struct clj_http3_udp_transport_t {
   clj_http3_worker_load_t *loads;
   _Atomic(clj_http3_worker_set_t *) workers;
   _Atomic uint32_t spread_cursor;
+  _Atomic uint32_t num_connected;
 };
 
 typedef struct clj_ptls_identity_cache_entry {
@@ -2480,8 +2521,252 @@ static void clj_http3_count_close(h2o_quic_ctx_t *quic_ctx) {
     ;
 }
 
+/* Flow table ages; wall-clock steps must not keep entries alive */
+static uint64_t clj_monotonic_millis(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+static void clj_http3_count_forward(clj_http3_ctx_t *ctx) {
+  if (ctx->load != NULL)
+    atomic_store_explicit(
+        &ctx->load->forwarded,
+        atomic_load_explicit(&ctx->load->forwarded, memory_order_relaxed) + 1,
+        memory_order_relaxed);
+}
+
+static void clj_http3_count_connected(clj_http3_ctx_t *ctx) {
+  if (ctx->load != NULL)
+    atomic_store(&ctx->load->connected, ctx->num_connected);
+}
+
+/* The connected socket is bound to the address the client sends to, so it
+   needs that address in the listener's family and on its port, and a
+   unicast one: a refused bind would pause the worker's attempts for all
+   connections. IPv6 link-local addresses are left out: binding one needs
+   the arriving interface, which H2O does not keep. */
+static int clj_http3_may_connect(clj_http3_ctx_t *ctx,
+                                 const quicly_address_t *local,
+                                 const quicly_address_t *peer) {
+  h2o_quic_socket_t *listener = &ctx->h3_ctx.super.sock;
+  if (listener->sock == NULL || local->sa.sa_family != peer->sa.sa_family ||
+      local->sa.sa_family != listener->addr.ss_family)
+    return 0;
+  switch (local->sa.sa_family) {
+  case AF_INET: {
+    uint32_t addr = ntohl(local->sin.sin_addr.s_addr);
+    return local->sin.sin_port == *listener->port && addr != INADDR_ANY &&
+           addr != INADDR_BROADCAST && !IN_MULTICAST(addr) &&
+           peer->sin.sin_port != 0;
+  }
+  case AF_INET6:
+    return local->sin6.sin6_port == *listener->port &&
+           !IN6_IS_ADDR_UNSPECIFIED(&local->sin6.sin6_addr) &&
+           !IN6_IS_ADDR_MULTICAST(&local->sin6.sin6_addr) &&
+           !IN6_IS_ADDR_LINKLOCAL(&local->sin6.sin6_addr) &&
+           !IN6_IS_ADDR_LINKLOCAL(&peer->sin6.sin6_addr) &&
+           !IN6_IS_ADDR_V4MAPPED(&peer->sin6.sin6_addr) &&
+           peer->sin6.sin6_port != 0;
+  default:
+    return 0;
+  }
+}
+
+/* SO_REUSEPORT as on the listener's sockets (clj_h2o_http3_open_udp_fd), so
+   the socket joins their group: until its connect it takes only its share
+   of the port's datagrams, where a socket bound with SO_REUSEADDR alone
+   would take them all. Packet info tells H2O each datagram's destination
+   address. No DF bit: H2O sends from the listener's socket, never from
+   this one. */
+static int clj_http3_bound_fd(const quicly_address_t *local) {
+#if CLJ_HTTP3_CONNECTED_SOCKETS
+  int on = 1, family = local->sa.sa_family;
+  int fd = socket(family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                  IPPROTO_UDP);
+  if (fd == -1)
+    return -1;
+  if ((family == AF_INET6 &&
+       setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof(on)) != 0) ||
+      setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) != 0 ||
+      setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on)) != 0 ||
+      (family == AF_INET
+           ? setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &on, sizeof(on))
+           : setsockopt(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on,
+                        sizeof(on))) != 0 ||
+      bind(fd, &local->sa, quicly_get_socklen((struct sockaddr *)&local->sa)) !=
+          0) {
+    int saved_errno = errno;
+    close(fd);
+    errno = saved_errno;
+    return -1;
+  }
+  return fd;
+#else
+  (void)local;
+  errno = ENOTSUP;
+  return -1;
+#endif
+}
+
+static int clj_http3_open_connected_fd(const quicly_address_t *local,
+                                       const quicly_address_t *peer) {
+  int fd = clj_http3_bound_fd(local);
+  if (fd != -1 &&
+      connect(fd, &peer->sa, quicly_get_socklen((struct sockaddr *)&peer->sa)) !=
+          0) {
+    int saved_errno = errno;
+    close(fd);
+    errno = saved_errno;
+    return -1;
+  }
+  return fd;
+}
+
+static int clj_http3_reserve_connected(clj_http3_udp_transport_t *transport) {
+  uint32_t num = atomic_load(&transport->num_connected);
+  while (num < CLJ_HTTP3_CONNECTED_MAX) {
+    if (atomic_compare_exchange_weak(&transport->num_connected, &num, num + 1))
+      return 1;
+  }
+  return 0;
+}
+
+static void clj_on_conn_update(h2o_quic_ctx_t *quic_ctx, h2o_quic_conn_t *conn);
+
+/* While the worker reads its forwarding channel, and while it has connected
+   sockets, whose clients may move to a path the kernel delivers to it
+   directly; a worker without either pays nothing */
+static void clj_http3_set_conn_update(clj_http3_ctx_t *ctx) {
+  ctx->h3_ctx.super.notify_conn_update =
+      CLJ_HTTP3_CONNECTED_SOCKETS && (ctx->reading == CLJ_HTTP3_READING_FORWARDED ||
+                                      ctx->num_connected != 0)
+          ? clj_on_conn_update
+          : NULL;
+}
+
+static clj_http3_connected_t **
+clj_http3_find_connected(clj_http3_ctx_t *ctx, h2o_quic_conn_t *conn) {
+  for (uint32_t idx = 0; idx < ctx->num_connected; ++idx) {
+    if (ctx->connected[idx]->conn == conn)
+      return ctx->connected + idx;
+  }
+  return NULL;
+}
+
+static void clj_http3_close_connected(clj_http3_ctx_t *ctx,
+                                      clj_http3_connected_t **slot) {
+  clj_http3_connected_t *connected = *slot;
+  *slot = ctx->connected[--ctx->num_connected];
+  h2o_socket_close(connected->sock);
+  free(connected);
+  atomic_fetch_sub(&ctx->transport->num_connected, 1);
+  clj_http3_count_connected(ctx);
+  clj_http3_set_conn_update(ctx);
+}
+
+static void clj_http3_connected_on_read(h2o_socket_t *sock, const char *err) {
+  clj_http3_connected_t *connected = sock->data;
+  clj_http3_ctx_t *ctx = connected->ctx;
+
+  if (err != NULL)
+    return;
+
+  /* A copy: the connection, and `connected` with it, may close while H2O
+     processes the batch */
+  ctx->reading_peer = connected->peer;
+  ctx->reading = CLJ_HTTP3_READING_CONNECTED;
+  h2o_quic_read_socket(&ctx->h3_ctx.super, sock);
+  ctx->reading = CLJ_HTTP3_READING_PUBLIC;
+}
+
+/* Gives `conn` a socket bound to `local` and connected to `peer`. Returns 0
+   when the connection keeps arriving through the listener's sockets. */
+static int clj_http3_connect(clj_http3_ctx_t *ctx, h2o_quic_conn_t *conn,
+                             const quicly_address_t *local,
+                             const quicly_address_t *peer) {
+  if (ctx->transport == NULL || ctx->num_connected == CLJ_HTTP3_CONNECTED_MAX ||
+      !clj_http3_may_connect(ctx, local, peer))
+    return 0;
+  uint64_t now = clj_monotonic_millis();
+  if (now < ctx->connect_retry_at || !clj_http3_reserve_connected(ctx->transport))
+    return 0;
+  clj_http3_connected_t *connected = malloc(sizeof(*connected));
+  int fd = connected == NULL ? -1 : clj_http3_open_connected_fd(local, peer);
+  if (fd == -1) {
+    free(connected);
+    atomic_fetch_sub(&ctx->transport->num_connected, 1);
+    /* Without a pause every forwarded batch would repeat the failing calls */
+    ctx->connect_retry_at = now + CLJ_HTTP3_CONNECT_RETRY_MILLIS;
+    return 0;
+  }
+  *connected = (clj_http3_connected_t){
+      .ctx = ctx,
+      .conn = conn,
+      .sock = h2o_evloop_socket_create(ctx->h3_ctx.super.loop, fd,
+                                       H2O_SOCKET_FLAG_DONT_READ),
+      .local = *local,
+      .peer = *peer,
+  };
+  connected->sock->data = connected;
+  ctx->connected[ctx->num_connected++] = connected;
+  clj_http3_count_connected(ctx);
+  clj_http3_set_conn_update(ctx);
+  h2o_socket_read_start(connected->sock, clj_http3_connected_on_read);
+  return 1;
+}
+
+/* Keeps `conn`'s connected socket on the addresses of the path it uses. When
+   the client moves (migration, NAT rebinding), the socket of the old path is
+   closed and replaced, whether the new path's datagrams are forwarded here
+   or the kernel delivers them here directly; only forwarded datagrams give a
+   connection its first socket. */
+static void clj_http3_follow_path(clj_http3_ctx_t *ctx, h2o_quic_conn_t *conn,
+                                  quicly_address_t *local,
+                                  quicly_address_t *peer, int may_create) {
+  clj_http3_connected_t **slot = clj_http3_find_connected(ctx, conn);
+  if (slot != NULL) {
+    if (h2o_socket_compare_address(&(*slot)->peer.sa, &peer->sa, 1) == 0 &&
+        h2o_socket_compare_address(&(*slot)->local.sa, &local->sa, 1) == 0)
+      return;
+    clj_http3_close_connected(ctx, slot);
+  } else if (!may_create) {
+    return;
+  }
+  clj_http3_connect(ctx, conn, local, peer);
+}
+
+/* Runs after H2O processes datagrams of `conn` from the forwarding channel
+   or the listener's socket (clj_http3_set_conn_update); a connected socket
+   carries only the path it was opened for. Connects only once the handshake
+   is complete: the client has then shown that it receives at its address,
+   so a spoofed source address never gets a socket. */
+static void clj_on_conn_update(h2o_quic_ctx_t *quic_ctx,
+                               h2o_quic_conn_t *conn) {
+  clj_http3_ctx_t *ctx =
+      H2O_STRUCT_FROM_MEMBER(clj_http3_ctx_t, h3_ctx.super, quic_ctx);
+  if (ctx->reading == CLJ_HTTP3_READING_CONNECTED ||
+      quicly_get_state(conn->quic) != QUICLY_STATE_CONNECTED ||
+      !ptls_handshake_is_complete(quicly_get_tls(conn->quic)))
+    return;
+  clj_http3_follow_path(ctx, conn,
+                        (quicly_address_t *)quicly_get_sockname(conn->quic),
+                        (quicly_address_t *)quicly_get_peername(conn->quic),
+                        ctx->reading == CLJ_HTTP3_READING_FORWARDED);
+}
+
+static void clj_http3_disconnect(clj_http3_ctx_t *ctx, h2o_quic_conn_t *conn) {
+  if (ctx->num_connected != 0) {
+    clj_http3_connected_t **slot = clj_http3_find_connected(ctx, conn);
+    if (slot != NULL)
+      clj_http3_close_connected(ctx, slot);
+  }
+}
+
 /* HTTP/3 connection destroy wrapper - releases connection limit slot */
 static void clj_on_http3_conn_destroy(h2o_quic_conn_t *conn) {
+  clj_http3_disconnect(
+      H2O_STRUCT_FROM_MEMBER(clj_http3_ctx_t, h3_ctx.super, conn->ctx), conn);
   clj_http3_count_close(conn->ctx);
   clj_h2o_conn_limit_release();
   H2O_HTTP3_CONN_CALLBACKS.super.destroy_connection(conn);
@@ -2803,6 +3088,8 @@ static int clj_http3_transport_register_attachment(
   atomic_store(&load->pending, 0);
   atomic_store(&load->accepting, 0);
   atomic_store(&load->withdrawn, 0);
+  atomic_store(&load->forwarded, 0);
+  atomic_store(&load->connected, 0);
   atomic_store(&load->forward_fd, forward_fd);
   transport->attachments[slot] = (clj_http3_transport_attachment_t){
       .node_id = node_id,
@@ -2895,6 +3182,19 @@ static int clj_http3_send_to_worker(clj_http3_worker_load_t *target,
   return CLJ_HTTP3_GONE;
 }
 
+static int clj_http3_forward(clj_http3_ctx_t *ctx,
+                             clj_http3_worker_load_t *target,
+                             quicly_address_t *destaddr,
+                             quicly_address_t *srcaddr, uint8_t ttl,
+                             int new_flow, const uint8_t *datagram,
+                             size_t len) {
+  int sent = clj_http3_send_to_worker(target, destaddr, srcaddr, ttl, new_flow,
+                                      datagram, len);
+  if (sent == CLJ_HTTP3_SENT)
+    clj_http3_count_forward(ctx);
+  return sent;
+}
+
 static int clj_http3_may_choose(clj_http3_worker_set_t *set,
                                 clj_http3_worker_load_t *load) {
   return load != NULL && load->node_id == set->active_node_id &&
@@ -2938,7 +3238,7 @@ static int clj_forward_quic_packets(h2o_quic_ctx_t *h3ctx,
 
   int all_sent = 1;
   for (size_t idx = 0; idx != num_packets; ++idx) {
-    if (clj_http3_send_to_worker(target, destaddr, srcaddr, ttl, 0,
+    if (clj_http3_forward(ctx, target, destaddr, srcaddr, ttl, 0,
                                  packets[idx].octets.base,
                                  packets[idx].octets.len) != CLJ_HTTP3_SENT)
       all_sent = 0;
@@ -2991,13 +3291,6 @@ static clj_http3_worker_load_t *clj_http3_choose_worker(clj_http3_ctx_t *ctx,
     }
   }
   return chosen;
-}
-
-/* Flow table ages; wall-clock steps must not keep entries alive */
-static uint64_t clj_monotonic_millis(void) {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
 static clj_http3_new_flow_t *
@@ -3075,7 +3368,7 @@ static int clj_http3_steer_new_flow(clj_http3_ctx_t *ctx,
   if (flow != NULL) {
     if (flow->target == ctx->load)
       return 1;
-    switch (clj_http3_send_to_worker(flow->target, destaddr, srcaddr, ttl, 0,
+    switch (clj_http3_forward(ctx, flow->target, destaddr, srcaddr, ttl, 0,
                                      bytes, len)) {
     case CLJ_HTTP3_GONE:
       /* The worker is gone, and its connections with it */
@@ -3095,7 +3388,7 @@ static int clj_http3_steer_new_flow(clj_http3_ctx_t *ctx,
   clj_http3_worker_load_t *issuer = clj_http3_cid_worker(ctx, dcid, dcid_len);
   if (issuer != NULL)
     return issuer == ctx->load ||
-           clj_http3_send_to_worker(issuer, destaddr, srcaddr, ttl, 0, bytes,
+           clj_http3_forward(ctx, issuer, destaddr, srcaddr, ttl, 0, bytes,
                                     len) != CLJ_HTTP3_SENT;
 
   /* Choose only for datagrams quicly_accept takes */
@@ -3110,7 +3403,14 @@ static int clj_http3_steer_new_flow(clj_http3_ctx_t *ctx,
   /* The loop's time changes only between loop turns, so it marks the receive
      batch whose accepts are still to come */
   uint64_t turn = h2o_now(ctx->h3_ctx.super.loop);
-  clj_http3_worker_load_t *target = clj_http3_choose_worker(ctx, turn);
+  /* With every connected socket in use a moved connection would be forwarded
+     for its whole life; the kernel's choice is even at such numbers */
+  clj_http3_worker_load_t *target =
+      CLJ_HTTP3_CONNECTED_SOCKETS &&
+              atomic_load(&ctx->transport->num_connected) >=
+                  CLJ_HTTP3_CONNECTED_MAX
+          ? ctx->load
+          : clj_http3_choose_worker(ctx, turn);
   if (target == NULL)
     return 1;
   *flow = (clj_http3_new_flow_t){.expires_at = now + CLJ_HTTP3_NEW_FLOW_MILLIS,
@@ -3121,7 +3421,7 @@ static int clj_http3_steer_new_flow(clj_http3_ctx_t *ctx,
   if (target != ctx->load) {
     /* Added before the write, since the target takes it back on reading */
     atomic_fetch_add(&target->pending, 1);
-    if (clj_http3_send_to_worker(target, destaddr, srcaddr, ttl, 1, bytes,
+    if (clj_http3_forward(ctx, target, destaddr, srcaddr, ttl, 1, bytes,
                                  len) == CLJ_HTTP3_SENT)
       return 0;
     /* The channel is full or gone: accept here */
@@ -3148,8 +3448,14 @@ static int clj_rewrite_forwarded_quic_datagram(h2o_quic_ctx_t *h3ctx,
 
   if (msg->msg_iovlen != 1)
     return 1;
-  /* Datagrams from the public socket keep their real sender. */
-  if (!ctx->reading_forwarded) {
+  /* Datagrams from the public socket keep their real sender. A connected
+     socket is public too; between its bind and its connect it also takes
+     other clients' datagrams, which are treated as on the listener's
+     socket. */
+  if (ctx->reading == CLJ_HTTP3_READING_PUBLIC ||
+      (ctx->reading == CLJ_HTTP3_READING_CONNECTED &&
+       h2o_socket_compare_address(&srcaddr->sa, &ctx->reading_peer.sa, 1) !=
+           0)) {
     /* A datagram sent to another worker is cut to one byte, which H2O fails
        to decode and skips. Returning 0 would make H2O process the datagrams
        grouped before it in the batch with its addresses. */
@@ -3157,6 +3463,8 @@ static int clj_rewrite_forwarded_quic_datagram(h2o_quic_ctx_t *h3ctx,
       msg->msg_iov[0].iov_len = 1;
     return 1;
   }
+  if (ctx->reading == CLJ_HTTP3_READING_CONNECTED)
+    return 1;
 
   encapsulated.offset =
       clj_decode_quic_forwarded_header(&encapsulated.destaddr,
@@ -3208,9 +3516,11 @@ static void clj_forwarded_quic_socket_on_read(h2o_socket_t *sock,
   if (err != NULL)
     return;
 
-  ctx->reading_forwarded = 1;
+  ctx->reading = CLJ_HTTP3_READING_FORWARDED;
+  clj_http3_set_conn_update(ctx);
   h2o_quic_read_socket(&ctx->h3_ctx.super, sock);
-  ctx->reading_forwarded = 0;
+  ctx->reading = CLJ_HTTP3_READING_PUBLIC;
+  clj_http3_set_conn_update(ctx);
 }
 
 static int clj_h2o_http3_open_udp_fd(const char *host, uint16_t port) {
@@ -3534,9 +3844,44 @@ size_t clj_h2o_http3_num_connections(clj_http3_ctx_t *ctx) {
   return h2o_quic_num_connections(&ctx->h3_ctx.super);
 }
 
+/* Load records stay until the transport is released, also after their
+   worker's context is disposed */
+static clj_http3_worker_load_t *
+clj_http3_lookup_load(clj_http3_udp_transport_t *transport, uint64_t node_id,
+                      uint32_t thread_id) {
+  clj_http3_worker_load_t *found = NULL;
+  if (transport == NULL || pthread_mutex_lock(&transport->mutex) != 0)
+    return NULL;
+  for (clj_http3_worker_load_t *load = transport->loads;
+       load != NULL && found == NULL; load = load->next) {
+    if (load->node_id == node_id && load->thread_id == thread_id)
+      found = load;
+  }
+  pthread_mutex_unlock(&transport->mutex);
+  return found;
+}
+
+uint64_t clj_h2o_http3_forwarded_datagrams(clj_http3_udp_transport_t *transport,
+                                           uint64_t node_id,
+                                           uint32_t thread_id) {
+  clj_http3_worker_load_t *load =
+      clj_http3_lookup_load(transport, node_id, thread_id);
+  return load != NULL ? atomic_load(&load->forwarded) : 0;
+}
+
+uint32_t clj_h2o_http3_connected_sockets(clj_http3_udp_transport_t *transport,
+                                         uint64_t node_id, uint32_t thread_id) {
+  clj_http3_worker_load_t *load =
+      clj_http3_lookup_load(transport, node_id, thread_id);
+  return load != NULL ? atomic_load(&load->connected) : 0;
+}
+
 void clj_h2o_http3_dispose_worker_ctx(clj_http3_ctx_t *ctx) {
   if (!ctx)
     return;
+
+  while (ctx->num_connected != 0)
+    clj_http3_close_connected(ctx, ctx->connected);
 
   if (ctx->transport != NULL && ctx->forward_fd != -1)
     clj_http3_transport_unregister_attachment(ctx->transport, ctx->node_id,

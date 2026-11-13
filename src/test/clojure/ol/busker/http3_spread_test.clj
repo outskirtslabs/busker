@@ -12,31 +12,93 @@
    [java.lang.foreign Arena FunctionDescriptor Linker Linker$Option MemoryLayout
     MemorySegment ValueLayout]
    [java.lang.invoke MethodHandle]
-   [java.nio ByteBuffer ByteOrder]))
+   [java.nio ByteBuffer ByteOrder]
+   [java.nio.file Files Path]))
+
+(defn- worker-contexts
+  "HTTP/3 contexts of each worker of the active generation."
+  [server]
+  (::generation/http3-worker-contexts (:instance (:active @(:busker/state server)))))
+
+(defn- sum-over-workers
+  "`f` of each worker's HTTP/3 contexts, summed per worker."
+  [f worker-ctxs]
+  (mapv (fn [ctxs]
+          (reduce (fn [total ctx]
+                    (if (or (nil? ctx) (mem/null? ctx))
+                      total
+                      #_{:clj-kondo/ignore [:type-mismatch]}
+                      (+ total (long (f ctx)))))
+                  0
+                  ctxs))
+        worker-ctxs))
 
 (defn- worker-counts
   "HTTP/3 connections of each worker of the active generation."
   [server]
+  (sum-over-workers h2o/http3-num-connections (worker-contexts server)))
+
+(defn- active-workers
+  "The UDP transport, generation id and worker count of the active
+  generation, which name its workers' counters also after it retires."
+  [server]
   (let [generation (:instance (:active @(:busker/state server)))]
-    (mapv (fn [ctxs]
-            (reduce (fn [total ctx]
-                      (if (or (nil? ctx) (mem/null? ctx))
-                        total
-                        #_{:clj-kondo/ignore [:type-mismatch]}
-                        (+ total (h2o/http3-num-connections ctx))))
-                    0
-                    ctxs))
-          (::generation/http3-worker-contexts generation))))
+    {:transport (first (#'generation/http3-transport-resources
+                        (::generation/listener-claims generation)))
+     :node (::generation/generation-id generation)
+     :n (count (::generation/http3-worker-contexts generation))}))
+
+(defn- per-worker
+  [f {:keys [transport node n]}]
+  (mapv #(long (f transport node (int %))) (range n)))
+
+(defn- connected-sockets
+  "Connected UDP sockets of each of `workers`."
+  [workers]
+  (per-worker h2o/http3-connected-sockets workers))
+
+(defn- forwarded-datagrams
+  "Datagrams each of `workers` has forwarded to other workers."
+  [workers]
+  (per-worker h2o/http3-forwarded-datagrams workers))
+
+(defn- wait-until
+  "Polls `f` until `done?` holds for its value and returns the last value."
+  [f done?]
+  (loop [attempt 0]
+    (let [value (f)]
+      (if (or (done? value) (= 100 attempt))
+        value
+        (do (Thread/sleep 50)
+            (recur (inc attempt)))))))
 
 (defn- wait-for-counts
   "Waits until `done?` holds for the worker counts and returns them."
   [server done?]
-  (loop [attempt 0]
-    (let [counts (worker-counts server)]
-      (if (or (done? counts) (= 100 attempt))
-        counts
-        (do (Thread/sleep 50)
-            (recur (inc attempt)))))))
+  (wait-until #(worker-counts server) done?))
+
+(defn- settled
+  "Polls `f` until its value stays the same for 300 ms and returns it."
+  [f]
+  (loop [value (f) attempt 0]
+    (Thread/sleep 300)
+    (let [next-value (f)]
+      (if (or (= value next-value) (= 20 attempt))
+        next-value
+        (recur next-value (inc attempt))))))
+
+(defn- udp-sockets-on-port
+  "UDP sockets of this network namespace bound to local `port`, and how many
+  of them are connected, from /proc/net/udp and /proc/net/udp6."
+  [port]
+  (let [hex-port (format "%04X" port)
+        rows (for [file ["/proc/net/udp" "/proc/net/udp6"]
+                   line (rest (Files/readAllLines (Path/of file (make-array String 0))))
+                   :let [[_ local remote] (str/split (str/trim line) #"\s+")]
+                   :when (str/ends-with? local (str ":" hex-port))]
+               remote)]
+    {:bound (count rows)
+     :connected (count (remove #(str/ends-with? % ":0000") rows))}))
 
 (defn- start-holding-server
   "Starts a server whose `/hold/N` responses stay open until `release!` is
@@ -57,16 +119,17 @@
                         (proto/close! emitter))
                       {:body emitter})
                     {:status 200 :body "ready"}))
-        server (busker/start!
-                (util/with-static-tls
-                  (util/with-handler
-                    handler
-                    {:n-workers n-workers
-                     :entrypoints {:tls {:bind (str "127.0.0.1:" port)
-                                         :http3? true
-                                         :tls {:tls-compatibility-mode :modern}}}})))]
+        config (util/with-static-tls
+                 (util/with-handler
+                   handler
+                   {:n-workers n-workers
+                    :entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                        :http3? true
+                                        :tls {:tls-compatibility-mode :modern}}}}))
+        server (busker/start! config)]
     (is (zero? (:exit (util/wait-for-curl-ready! :https :h2 port "/ready" :max-time 5))))
     {:server server
+     :config config
      :port port
      :release! (fn [id] (deliver (release-of (str id)) true))}))
 
@@ -201,3 +264,92 @@
         (.set ^java.util.concurrent.atomic.AtomicBoolean (:disposed? guard) true)
         (withdraw! guard [ctx])
         (is (= 1 @calls))))))
+
+(defn- open-moved!
+  "Opens HTTP/3 connections `ids` with every datagram delivered to worker 0,
+  so worker 1 serves every second one by forwarding, and waits until worker 1
+  has a connected socket for each of those."
+  [{:keys [server] :as ctx} ids]
+  (let [held (mapv #(open-held! ctx %) ids)
+        moved (count (filter #(= 1 (:worker %)) held))]
+    (is (= (vec (take (count ids) (cycle [0 1]))) (mapv :worker held)))
+    (is (= [0 moved] (wait-until #(connected-sockets (active-workers server))
+                                 #(= [0 moved] %))))
+    held))
+
+(deftest moved-connections-get-connected-sockets-test
+  (when (linux?)
+    (testing "once a moved connection has a connected socket, worker 0
+    forwards none of its datagrams, and closing the connection closes the
+    socket"
+      (let [{:keys [server port] :as ctx} (start-holding-server 2)]
+        (try
+          (if-not (force-udp-group-to-first-socket! port)
+            (println "SKIP moved-connections-get-connected-sockets-test:"
+                     "the kernel refused the reuseport BPF program")
+            (let [held (open-moved! ctx (range 4))
+                  workers (active-workers server)
+                  [forwarded-before] (settled #(forwarded-datagrams workers))]
+              (is (pos? forwarded-before) "the handshakes were forwarded")
+              (is (= {:bound 4 :connected 2} (udp-sockets-on-port port)))
+              (doseq [[id h] (map-indexed vector held)] (finish! ctx id h))
+              (is (= [0 0] (wait-until #(connected-sockets workers) #(= [0 0] %))))
+              (is (= [0 0] (wait-for-counts server #(= [0 0] %))))
+              (is (= forwarded-before (first (forwarded-datagrams workers)))
+                  "worker 0 forwarded nothing after the connect")
+              (is (= {:bound 2 :connected 0} (udp-sockets-on-port port)))))
+          (finally
+            (busker/stop! server)))))))
+
+(deftest connected-sockets-do-not-outlive-connections-test
+  (when (linux?)
+    (testing "rounds of moved connections and many short ones leave only the
+    listener's sockets"
+      (let [{:keys [server port] :as ctx} (start-holding-server 2)]
+        (try
+          (if-not (force-udp-group-to-first-socket! port)
+            (println "SKIP connected-sockets-do-not-outlive-connections-test:"
+                     "the kernel refused the reuseport BPF program")
+            (let [workers (active-workers server)]
+              (doseq [round (range 3)
+                      :let [ids (range (* 10 round) (+ 4 (* 10 round)))
+                            held (open-moved! ctx ids)]]
+                (doseq [[id h] (map vector ids held)] (finish! ctx id h))
+                (is (= [0 0] (wait-for-counts server #(= [0 0] %))))
+                (is (= [0 0] (wait-until #(connected-sockets workers) #(= [0 0] %))))
+                (is (= {:bound 2 :connected 0} (udp-sockets-on-port port))))
+              (dotimes [idx 20]
+                (let [result (util/curl :https :h3 port "/ready" :max-time 5)]
+                  (is (zero? (:exit result)) (str "short request " idx ": " (:err result)))))
+              (is (= [0 0] (wait-for-counts server #(= [0 0] %))))
+              (is (= [0 0] (wait-until #(connected-sockets workers) #(= [0 0] %))))
+              (is (= {:bound 2 :connected 0} (udp-sockets-on-port port)))))
+          (finally
+            (busker/stop! server)))))))
+
+(deftest reload-with-connected-sockets-test
+  (when (linux?)
+    (testing "moved connections keep their connected sockets while the old
+    generation drains, and its retirement leaves only the new generation's
+    sockets"
+      (let [{:keys [server port config] :as ctx} (start-holding-server 2)]
+        (try
+          (if-not (force-udp-group-to-first-socket! port)
+            (println "SKIP reload-with-connected-sockets-test:"
+                     "the kernel refused the reuseport BPF program")
+            (let [held (open-moved! ctx (range 4))
+                  old-workers (active-workers server)]
+              (is (= :activated (busker/reload! server config {:force? true})))
+              (is (= {:bound 6 :connected 2} (udp-sockets-on-port port)))
+              (let [result (util/curl :https :h3 port "/ready" :max-time 5)]
+                (is (zero? (:exit result)) (:err result))
+                (is (= "ready" (:out result))))
+              (is (= [0 2] (connected-sockets old-workers)))
+              (doseq [[id h] (map-indexed vector held)] (finish! ctx id h))
+              (is (empty? (wait-until #(:draining @(:busker/state server)) empty?)))
+              (is (= [0 0] (connected-sockets old-workers)))
+              (is (= {:bound 2 :connected 0}
+                     (wait-until #(udp-sockets-on-port port)
+                                 #(= {:bound 2 :connected 0} %))))))
+          (finally
+            (busker/stop! server)))))))

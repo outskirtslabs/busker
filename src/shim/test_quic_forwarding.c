@@ -1,5 +1,7 @@
 /* Exercise the private callbacks without adding test-only shim exports. */
 #include "shim.c"
+#include <dirent.h>
+#include <sys/resource.h>
 
 #define CHECK(condition)                                                       \
   do {                                                                         \
@@ -27,7 +29,7 @@ static void test_rewrite(int family, uint8_t incoming_ttl,
   quicly_address_t dest = address(family, 443), src = address(family, 12345);
   uint16_t port = htons(443);
   clj_http3_ctx_t ctx = {.h3_ctx.super.default_ttl = 4,
-                         .reading_forwarded = 1};
+                         .reading = CLJ_HTTP3_READING_FORWARDED};
   ctx.h3_ctx.super.sock.port = &port;
   char buffer[256];
   size_t offset =
@@ -51,7 +53,7 @@ static void test_invalid_source(void) {
   quicly_address_t dest = address(AF_INET, 443), src = address(AF_UNSPEC, 0);
   uint16_t port = htons(443);
   clj_http3_ctx_t ctx = {.h3_ctx.super.default_ttl = 4,
-                         .reading_forwarded = 1};
+                         .reading = CLJ_HTTP3_READING_FORWARDED};
   ctx.h3_ctx.super.sock.port = &port;
   char buffer[256];
   size_t len = clj_encode_quic_forwarded_header(buffer, &dest, &src, 4, 0);
@@ -68,7 +70,7 @@ static void test_other_datagrams(void) {
   quicly_address_t dest = address(AF_INET, 444), src = address(AF_INET, 12345);
   uint16_t port = htons(443);
   clj_http3_ctx_t ctx = {.h3_ctx.super.default_ttl = 4,
-                         .reading_forwarded = 1};
+                         .reading = CLJ_HTTP3_READING_FORWARDED};
   ctx.h3_ctx.super.sock.port = &port;
   char buffer[256];
   size_t len = clj_encode_quic_forwarded_header(buffer, &dest, &src, 255, 0);
@@ -112,7 +114,7 @@ static void test_worker_ctx_send_offload(void) {
 }
 
 static int accept_calls;
-static quicly_address_t accepted_src;
+static quicly_address_t accepted_src, accepted_dest;
 
 static h2o_quic_conn_t *record_accept(h2o_quic_ctx_t *ctx,
                                       quicly_address_t *destaddr,
@@ -120,6 +122,7 @@ static h2o_quic_conn_t *record_accept(h2o_quic_ctx_t *ctx,
                                       quicly_decoded_packet_t *packet) {
   ++accept_calls;
   accepted_src = *srcaddr;
+  accepted_dest = *destaddr;
   return NULL;
 }
 
@@ -187,6 +190,7 @@ static void test_envelope_only_from_forwarding_channel(void) {
   CHECK(clj_set_fd_nonblock(captured[1]) == 0);
   clj_http3_udp_transport_t *transport = calloc(1, sizeof(*transport));
   CHECK(transport != NULL);
+  transport->reservation_fd = -1;
   CHECK(pthread_mutex_init(&transport->mutex, NULL) == 0);
   CHECK(clj_http3_transport_register_attachment(
       transport, quicly_cid_plaintext_invalid.node_id,
@@ -223,6 +227,8 @@ static void test_envelope_only_from_forwarding_channel(void) {
   CHECK(write(fds[1], datagram, len) == (ssize_t)len);
   clj_forwarded_quic_socket_on_read(ctx->forwarded_sock, NULL);
   CHECK(accept_calls == 1);
+  CHECK(ctx->reading == CLJ_HTTP3_READING_PUBLIC &&
+        ctx->h3_ctx.super.notify_conn_update == NULL);
   CHECK(h2o_socket_compare_address(&accepted_src.sa, &claimed_addr.sa, 1) ==
         0);
 
@@ -249,6 +255,7 @@ typedef struct {
   quicly_context_t quic;
   clj_http3_udp_transport_t *transport;
   int separate_ports;
+  const char *host;
   uint16_t port;
   size_t num_workers;
   clj_http3_ctx_t *workers[SPREAD_WORKERS];
@@ -258,7 +265,8 @@ typedef struct {
 static void spread_init(spread_fixture_t *f) {
   *f = (spread_fixture_t){.loop = h2o_evloop_create(),
                           .tls = {.random_bytes = ptls_openssl_random_bytes},
-                          .stream_open = {open_no_stream}};
+                          .stream_open = {open_no_stream},
+                          .host = "127.0.0.1"};
   f->quic = quicly_spec_context;
   f->quic.tls = &f->tls;
   f->quic.stream_open = &f->stream_open;
@@ -269,6 +277,7 @@ static void spread_init(spread_fixture_t *f) {
   CHECK(f->quic.cid_encryptor != NULL);
   f->transport = calloc(1, sizeof(*f->transport));
   CHECK(f->transport != NULL);
+  f->transport->reservation_fd = -1;
   CHECK(pthread_mutex_init(&f->transport->mutex, NULL) == 0);
 }
 
@@ -280,11 +289,12 @@ static void spread_add(spread_fixture_t *f, uint64_t node, size_t num) {
     if (f->separate_ports) {
       fd = bound_udp(&addr);
     } else {
-      fd = clj_h2o_http3_open_udp_fd("127.0.0.1", f->port);
+      fd = clj_h2o_http3_open_udp_fd(f->host, f->port);
       CHECK(fd != -1 && clj_set_fd_nonblock(fd) == 0);
       socklen_t len = sizeof(addr);
       CHECK(getsockname(fd, &addr.sa, &len) == 0);
-      f->port = ntohs(addr.sin.sin_port);
+      f->port = ntohs(addr.sa.sa_family == AF_INET ? addr.sin.sin_port
+                                                   : addr.sin6.sin6_port);
     }
     clj_http3_ctx_t *ctx = calloc(1, sizeof(*ctx));
     CHECK(ctx != NULL);
@@ -1040,6 +1050,7 @@ static void test_set_growth(void) {
   enum { N = 4, RELOADS = 3 };
   clj_http3_udp_transport_t *transport = calloc(1, sizeof(*transport));
   CHECK(transport != NULL);
+  transport->reservation_fd = -1;
   CHECK(pthread_mutex_init(&transport->mutex, NULL) == 0);
   for (uint32_t t = 0; t < N; ++t)
     CHECK(clj_http3_transport_register_attachment(transport, 1, t, 1000 + t,
@@ -1063,6 +1074,399 @@ static void test_set_growth(void) {
   CHECK(loads == N * (RELOADS + 1));
   clj_h2o_http3_release_udp_transport(transport);
 }
+
+#if CLJ_HTTP3_CONNECTED_SOCKETS
+/* Connections are only keys to the connected sockets */
+static h2o_quic_conn_t fake_conns[CLJ_HTTP3_CONNECTED_MAX + 2];
+
+static int count_fds(void) {
+  DIR *dir = opendir("/proc/self/fd");
+  CHECK(dir != NULL);
+  int n = 0;
+  while (readdir(dir) != NULL)
+    ++n;
+  closedir(dir);
+  return n;
+}
+
+static int udp_client(int family, quicly_address_t *addr) {
+  int fd = socket(family, SOCK_DGRAM, 0);
+  CHECK(fd != -1);
+  *addr = address(family, 0);
+  socklen_t len = quicly_get_socklen(&addr->sa);
+  CHECK(bind(fd, &addr->sa, len) == 0);
+  CHECK(getsockname(fd, &addr->sa, &len) == 0);
+  return fd;
+}
+
+static void send_from(int fd, spread_fixture_t *f, int family) {
+  quicly_address_t to = address(family, f->port);
+  CHECK(sendto(fd, "x", 1, 0, &to.sa, quicly_get_socklen(&to.sa)) == 1);
+}
+
+/* Drains `fd`, counting datagrams from `from` and from others */
+static void drain_count(int fd, quicly_address_t *from, int *mine,
+                        int *others) {
+  char buf[DATAGRAM_MAX];
+  quicly_address_t src;
+  socklen_t len = sizeof(src);
+  while (recvfrom(fd, buf, sizeof(buf), MSG_DONTWAIT, &src.sa, &len) >= 0) {
+    if (h2o_socket_compare_address(&src.sa, &from->sa, 1) == 0)
+      ++*mine;
+    else
+      ++*others;
+    len = sizeof(src);
+  }
+}
+
+static void group_count(spread_fixture_t *f, quicly_address_t *from, int *mine,
+                        int *others) {
+  *mine = *others = 0;
+  for (size_t i = 0; i < f->num_workers; ++i)
+    drain_count(h2o_socket_get_fd(f->workers[i]->udp_sock), from, mine,
+                others);
+}
+
+static void connected_count(clj_http3_ctx_t *w, quicly_address_t *from,
+                            int *mine, int *others) {
+  *mine = *others = 0;
+  CHECK(w->num_connected == 1);
+  drain_count(h2o_socket_get_fd(w->connected[0]->sock), from, mine, others);
+}
+
+static uint32_t transport_connected(spread_fixture_t *f) {
+  return atomic_load(&f->transport->num_connected);
+}
+
+static void connected_setup(spread_fixture_t *f, int family) {
+  spread_init(f);
+  f->host = family == AF_INET ? "127.0.0.1" : "::1";
+  spread_add(f, 7, 2);
+  spread_activate(f, 7);
+}
+
+/* The connected socket receives its client's datagrams and no others;
+   datagrams queued before the connect stay on the listener's sockets */
+static void test_connected_socket_takes_its_flow(int family) {
+  spread_fixture_t f;
+  connected_setup(&f, family);
+  clj_http3_ctx_t *w = f.workers[1];
+  quicly_address_t client, other, local = address(family, f.port);
+  int client_fd = udp_client(family, &client);
+  int other_fd = udp_client(family, &other);
+  int fds_before = count_fds(), mine, others;
+
+  for (int i = 0; i < 3; ++i)
+    send_from(client_fd, &f, family);
+  CHECK(clj_http3_connect(w, fake_conns, &local, &client));
+  CHECK(transport_connected(&f) == 1 && clj_h2o_http3_connected_sockets(f.transport, 7, 1) == 1);
+  for (int i = 0; i < 5; ++i) {
+    send_from(client_fd, &f, family);
+    send_from(other_fd, &f, family);
+  }
+  connected_count(w, &client, &mine, &others);
+  CHECK(mine == 5 && others == 0);
+  group_count(&f, &client, &mine, &others);
+  CHECK(mine == 3 && others == 5);
+
+  /* H2O learns the destination address of a datagram read on it */
+  uint8_t initial[DATAGRAM_MAX];
+  size_t initial_len = quic_datagram(initial, QUICLY_PACKET_TYPE_INITIAL, 1);
+  CHECK(sendto(client_fd, initial, initial_len, 0, &local.sa,
+               quicly_get_socklen(&local.sa)) == (ssize_t)initial_len);
+  accept_calls = 0;
+  clj_http3_connected_on_read(w->connected[0]->sock, NULL);
+  CHECK(accept_calls == 1);
+  CHECK(h2o_socket_compare_address(&accepted_dest.sa, &local.sa, 1) == 0);
+
+  /* The connection's end closes it, once */
+  clj_http3_disconnect(w, fake_conns);
+  clj_http3_disconnect(w, fake_conns);
+  CHECK(w->num_connected == 0 && transport_connected(&f) == 0 &&
+        clj_h2o_http3_connected_sockets(f.transport, 7, 1) == 0);
+  CHECK(count_fds() == fds_before);
+  send_from(client_fd, &f, family);
+  group_count(&f, &client, &mine, &others);
+  CHECK(mine == 1);
+
+  close(client_fd);
+  close(other_fd);
+  spread_teardown(&f);
+}
+
+/* A connected socket is public: an envelope on it is payload, its client's
+   datagrams are not steered, and other senders' datagrams, which arrive
+   between its bind and its connect, are treated as on the listener's
+   socket */
+static void test_reading_connected_socket(void) {
+  spread_fixture_t f;
+  connected_setup(&f, AF_INET);
+  clj_http3_ctx_t *w = f.workers[1];
+  set_conns(f.workers[0], 0);
+  set_conns(w, 3);
+  quicly_address_t client, local = address(AF_INET, f.port);
+  quicly_address_t claimed = address(AF_INET, 7777);
+  int client_fd = udp_client(AF_INET, &client);
+  CHECK(clj_http3_connect(w, fake_conns, &local, &client));
+  h2o_socket_t *sock = w->connected[0]->sock;
+
+  uint8_t buf[DATAGRAM_MAX];
+  size_t len = enveloped_initial(buf, &local, &claimed);
+  CHECK(sendto(client_fd, buf, len, 0, &local.sa, sizeof(local.sin)) ==
+        (ssize_t)len);
+  accept_calls = 0;
+  clj_http3_connected_on_read(sock, NULL);
+  CHECK(accept_calls == 0);
+  CHECK(w->reading == CLJ_HTTP3_READING_PUBLIC &&
+        w->h3_ctx.super.notify_conn_update == clj_on_conn_update);
+
+  len = quic_datagram(buf, QUICLY_PACKET_TYPE_INITIAL, 1);
+  CHECK(sendto(client_fd, buf, len, 0, &local.sa, sizeof(local.sin)) ==
+        (ssize_t)len);
+  clj_http3_connected_on_read(sock, NULL);
+  CHECK(accept_calls == 1 && forwarded_to(&f, 0) == 0);
+  CHECK(h2o_socket_compare_address(&accepted_src.sa, &client.sa, 1) == 0);
+  CHECK(h2o_socket_compare_address(&accepted_dest.sa, &local.sa, 1) == 0);
+
+  w->reading = CLJ_HTTP3_READING_CONNECTED;
+  w->reading_peer = client;
+  quicly_address_t other = address(AF_INET, 6000);
+  uint64_t forwarded = clj_h2o_http3_forwarded_datagrams(f.transport, 7, 1);
+  CHECK(arrive(&f, 1, &other, QUICLY_PACKET_TYPE_INITIAL, 9) == 0);
+  CHECK(forwarded_to(&f, 0) == 1);
+  CHECK(clj_h2o_http3_forwarded_datagrams(f.transport, 7, 1) == forwarded + 1);
+  CHECK(arrive(&f, 1, &client, QUICLY_PACKET_TYPE_INITIAL, 10) == 1);
+  CHECK(forwarded_to(&f, 0) == 0);
+  w->reading = CLJ_HTTP3_READING_PUBLIC;
+
+  close(client_fd);
+  spread_teardown(&f);
+}
+
+/* At most CLJ_HTTP3_CONNECTED_MAX per listener over all its workers; above
+   that a connection keeps arriving through the listener's sockets. Disposing
+   a worker closes its sockets. */
+static void test_connected_limit(void) {
+  spread_fixture_t f;
+  spread_init(&f);
+  int fds_before = count_fds();
+  spread_add(&f, 7, 2);
+  spread_activate(&f, 7);
+  quicly_address_t local = address(AF_INET, f.port);
+  for (int i = 0; i < CLJ_HTTP3_CONNECTED_MAX; ++i) {
+    quicly_address_t peer = address(AF_INET, (uint16_t)(40000 + i));
+    CHECK(clj_http3_connect(f.workers[i % 2], fake_conns + i, &local, &peer));
+  }
+  CHECK(transport_connected(&f) == CLJ_HTTP3_CONNECTED_MAX);
+  quicly_address_t peer = address(AF_INET, 41000);
+  CHECK(!clj_http3_connect(f.workers[0], fake_conns + CLJ_HTTP3_CONNECTED_MAX,
+                           &local, &peer));
+  CHECK(!clj_http3_connect(f.workers[1], fake_conns + CLJ_HTTP3_CONNECTED_MAX,
+                           &local, &peer));
+  CHECK(transport_connected(&f) == CLJ_HTTP3_CONNECTED_MAX);
+  CHECK(f.workers[0]->connect_retry_at == 0);
+
+  clj_http3_disconnect(f.workers[1], fake_conns + 1);
+  CHECK(clj_http3_connect(f.workers[0], fake_conns + CLJ_HTTP3_CONNECTED_MAX,
+                          &local, &peer));
+  uint32_t on_first = f.workers[0]->num_connected;
+  CHECK(on_first == CLJ_HTTP3_CONNECTED_MAX / 2 + 1);
+
+  int open = count_fds();
+  clj_h2o_http3_dispose_worker_ctx(f.workers[0]);
+  f.workers[0] = NULL;
+  /* its connected sockets, its UDP socket and its forwarding channel */
+  CHECK(count_fds() == open - (int)on_first - 3);
+  CHECK(transport_connected(&f) == CLJ_HTTP3_CONNECTED_MAX - on_first);
+  spread_teardown(&f);
+  CHECK(count_fds() == fds_before);
+}
+
+/* A client that changes address or port gets a socket for its new path; the
+   old one is closed */
+static void test_connected_follows_path(void) {
+  spread_fixture_t f;
+  connected_setup(&f, AF_INET);
+  clj_http3_ctx_t *w = f.workers[1];
+  quicly_address_t first, second, local = address(AF_INET, f.port);
+  int first_fd = udp_client(AF_INET, &first);
+  int second_fd = udp_client(AF_INET, &second);
+  int fds_before = count_fds(), mine, others;
+
+  /* Only forwarded datagrams give a connection its first socket */
+  clj_http3_follow_path(w, fake_conns, &local, &first, 0);
+  CHECK(w->num_connected == 0 && count_fds() == fds_before);
+  clj_http3_follow_path(w, fake_conns, &local, &first, 1);
+  clj_http3_follow_path(w, fake_conns, &local, &first, 1);
+  CHECK(w->num_connected == 1 && count_fds() == fds_before + 1);
+  send_from(first_fd, &f, AF_INET);
+  connected_count(w, &first, &mine, &others);
+  CHECK(mine == 1);
+
+  clj_http3_follow_path(w, fake_conns, &local, &second, 0);
+  CHECK(w->num_connected == 1 && transport_connected(&f) == 1 &&
+        count_fds() == fds_before + 1);
+  CHECK(h2o_socket_compare_address(&w->connected[0]->peer.sa, &second.sa, 1) ==
+        0);
+  send_from(first_fd, &f, AF_INET);
+  send_from(second_fd, &f, AF_INET);
+  connected_count(w, &second, &mine, &others);
+  CHECK(mine == 1 && others == 0);
+  group_count(&f, &first, &mine, &others);
+  CHECK(mine == 1 && others == 0);
+
+  clj_http3_disconnect(w, fake_conns);
+  CHECK(count_fds() == fds_before);
+  close(first_fd);
+  close(second_fd);
+  spread_teardown(&f);
+}
+
+static void lowest_fd_limit(struct rlimit *saved) {
+  CHECK(getrlimit(RLIMIT_NOFILE, saved) == 0);
+  int probe = dup(0);
+  CHECK(probe != -1);
+  close(probe);
+  struct rlimit low = *saved;
+  low.rlim_cur = (rlim_t)probe;
+  CHECK(setrlimit(RLIMIT_NOFILE, &low) == 0);
+}
+
+/* After a failed call: no descriptor, no reservation, and a pause before the
+   worker tries again. Addresses a connected socket cannot use make no call
+   and no pause. */
+static void expect_failure(spread_fixture_t *f, clj_http3_ctx_t *w,
+                           quicly_address_t *local, quicly_address_t *peer,
+                           int expected_errno, int open) {
+  errno = 0;
+  CHECK(!clj_http3_connect(w, fake_conns, local, peer));
+  CHECK(errno == expected_errno);
+  CHECK(count_fds() == open && transport_connected(f) == 0 &&
+        w->num_connected == 0);
+  CHECK((w->connect_retry_at != 0) == (expected_errno != 0));
+  w->connect_retry_at = 0;
+}
+
+static void test_connect_failures(int family) {
+  spread_fixture_t f;
+  connected_setup(&f, family);
+  clj_http3_ctx_t *w = f.workers[1];
+  quicly_address_t local = address(family, f.port), peer = address(family, 40000);
+  int open = count_fds();
+
+  quicly_address_t any = local, other_port = address(family, f.port + 1),
+                   no_port = address(family, 0),
+                   other_family = address(family == AF_INET ? AF_INET6 : AF_INET,
+                                          f.port);
+  if (family == AF_INET)
+    any.sin.sin_addr.s_addr = htonl(INADDR_ANY);
+  else
+    any.sin6.sin6_addr = in6addr_any;
+  expect_failure(&f, w, &any, &peer, 0, open);
+  expect_failure(&f, w, &other_port, &peer, 0, open);
+  expect_failure(&f, w, &local, &no_port, 0, open);
+  expect_failure(&f, w, &other_family, &peer, 0, open);
+  expect_failure(&f, w, &local, &other_family, 0, open);
+  quicly_address_t multicast = local;
+  if (family == AF_INET) {
+    quicly_address_t broadcast_local = local;
+    inet_pton(AF_INET, "224.0.0.1", &multicast.sin.sin_addr);
+    broadcast_local.sin.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    expect_failure(&f, w, &broadcast_local, &peer, 0, open);
+  } else {
+    inet_pton(AF_INET6, "ff02::1", &multicast.sin6.sin6_addr);
+  }
+  expect_failure(&f, w, &multicast, &peer, 0, open);
+  if (family == AF_INET6) {
+    quicly_address_t link_local = local, link_peer = peer, mapped = peer;
+    inet_pton(AF_INET6, "fe80::1", &link_local.sin6.sin6_addr);
+    inet_pton(AF_INET6, "fe80::2", &link_peer.sin6.sin6_addr);
+    inet_pton(AF_INET6, "::ffff:127.0.0.1", &mapped.sin6.sin6_addr);
+    expect_failure(&f, w, &link_local, &peer, 0, open);
+    expect_failure(&f, w, &local, &link_peer, 0, open);
+    expect_failure(&f, w, &local, &mapped, 0, open);
+  }
+
+  /* socket: no descriptor left */
+  struct rlimit saved;
+  lowest_fd_limit(&saved);
+  errno = 0;
+  CHECK(!clj_http3_connect(w, fake_conns, &local, &peer));
+  int socket_errno = errno;
+  CHECK(setrlimit(RLIMIT_NOFILE, &saved) == 0);
+  CHECK(socket_errno == EMFILE && w->connect_retry_at != 0);
+  CHECK(count_fds() == open && transport_connected(&f) == 0);
+  /* paused: the same call that now works does not happen yet */
+  CHECK(!clj_http3_connect(w, fake_conns, &local, &peer));
+  CHECK(count_fds() == open);
+  w->connect_retry_at = 0;
+
+  /* bind: an address that is not on this host */
+  quicly_address_t foreign = local;
+  if (family == AF_INET)
+    inet_pton(AF_INET, "192.0.2.1", &foreign.sin.sin_addr);
+  else
+    inet_pton(AF_INET6, "2001:db8::1", &foreign.sin6.sin6_addr);
+  expect_failure(&f, w, &foreign, &peer, EADDRNOTAVAIL, open);
+
+  /* connect: broadcast without SO_BROADCAST */
+  if (family == AF_INET) {
+    quicly_address_t broadcast = peer;
+    broadcast.sin.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    expect_failure(&f, w, &local, &broadcast, EACCES, open);
+  }
+
+  CHECK(clj_http3_connect(w, fake_conns, &local, &peer));
+  clj_http3_disconnect(w, fake_conns);
+  CHECK(count_fds() == open);
+  spread_teardown(&f);
+}
+
+/* SO_REUSEPORT puts the socket in the listener's group: before its connect
+   it takes only a share of the port's datagrams, where a socket bound with
+   SO_REUSEADDR alone takes them all */
+static void test_bound_socket_joins_group(int family) {
+  spread_fixture_t f;
+  connected_setup(&f, family);
+  quicly_address_t local = address(family, f.port);
+  int fd = clj_http3_bound_fd(&local);
+  CHECK(fd != -1);
+  for (int i = 0; i < 64; ++i) {
+    quicly_address_t from;
+    int client_fd = udp_client(family, &from);
+    send_from(client_fd, &f, family);
+    close(client_fd);
+  }
+  int on_new = 0, unused = 0, on_group, more;
+  quicly_address_t nobody = address(family, 1);
+  drain_count(fd, &nobody, &unused, &on_new);
+  group_count(&f, &nobody, &more, &on_group);
+  CHECK(on_new > 0 && on_new < 64 && on_new + on_group == 64);
+  close(fd);
+  spread_teardown(&f);
+}
+
+/* With every connected socket of the listener in use, a moved connection
+   would be forwarded for its whole life: new flows stay where the kernel
+   put them, and their later Initials follow */
+static void test_full_listener_keeps_flows(void) {
+  spread_fixture_t f;
+  spread_setup(&f, 2);
+  set_conns(f.workers[0], 3);
+  set_conns(f.workers[1], 0);
+  atomic_store(&f.transport->num_connected, CLJ_HTTP3_CONNECTED_MAX);
+  quicly_address_t kept = address(AF_INET, 5000), moved = address(AF_INET, 5001);
+  CHECK(arrive(&f, 0, &kept, QUICLY_PACKET_TYPE_INITIAL, 1) == 1);
+  CHECK(forwarded_to(&f, 1) == 0 && pending(f.workers[1]) == 0);
+  atomic_store(&f.transport->num_connected, CLJ_HTTP3_CONNECTED_MAX - 1);
+  CHECK(arrive(&f, 0, &kept, QUICLY_PACKET_TYPE_INITIAL, 1) == 1);
+  CHECK(forwarded_to(&f, 1) == 0);
+  CHECK(arrive(&f, 0, &moved, QUICLY_PACKET_TYPE_INITIAL, 2) == 0);
+  CHECK(forwarded_to(&f, 1) == 1);
+  atomic_store(&f.transport->num_connected, 0);
+  spread_teardown(&f);
+}
+#endif
 
 int main(void) {
   test_worker_ctx_send_offload();
@@ -1097,6 +1501,18 @@ int main(void) {
   test_fallback_skips_unavailable_workers();
   test_unregister();
   test_set_growth();
+#if CLJ_HTTP3_CONNECTED_SOCKETS
+  for (int i = 0; i < 2; ++i) {
+    int family = i == 0 ? AF_INET : AF_INET6;
+    test_connected_socket_takes_its_flow(family);
+    test_connect_failures(family);
+    test_bound_socket_joins_group(family);
+  }
+  test_full_listener_keeps_flows();
+  test_reading_connected_socket();
+  test_connected_limit();
+  test_connected_follows_path();
+#endif
   puts("QUIC forwarding tests passed");
   return 0;
 }

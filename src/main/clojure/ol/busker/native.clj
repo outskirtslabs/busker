@@ -1266,6 +1266,21 @@
   "clj_h2o_http3_num_connections"
   [:pointer] :long)
 
+(defcfn http3-forwarded-datagrams
+  "Datagrams worker `thread-id` of generation `node-id` has forwarded to other
+   workers over the UDP transport. For tests and diagnostics; safe from any
+   thread until the transport is released, also after the worker stopped."
+  "clj_h2o_http3_forwarded_datagrams"
+  [:pointer :long :int] :long)
+
+(defcfn http3-connected-sockets
+  "UDP sockets worker `thread-id` of generation `node-id` holds connected to
+   clients whose datagrams the kernel delivers to another worker. For tests
+   and diagnostics; safe from any thread until the transport is released,
+   also after the worker stopped."
+  "clj_h2o_http3_connected_sockets"
+  [:pointer :long :int] :int)
+
 (defcfn http3-free-worker-ctx
   "Free HTTP/3 worker context and close UDP socket.
    Note: all connections must be closed first (num_connections == 0)."

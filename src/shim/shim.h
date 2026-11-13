@@ -527,6 +527,18 @@ void clj_h2o_http3_withdraw_worker(clj_http3_ctx_t *ctx);
 /* Get the number of active HTTP/3 connections on this context */
 size_t clj_h2o_http3_num_connections(clj_http3_ctx_t *ctx);
 
+/* For tests and diagnostics, from any thread while `transport` is not
+   released, also after the worker's context is disposed: the datagrams
+   worker `thread_id` of generation `node_id` has forwarded to other
+   workers, and the UDP sockets it holds connected to clients whose
+   datagrams the kernel delivers to another worker; 0 for an unknown
+   worker */
+uint64_t clj_h2o_http3_forwarded_datagrams(clj_http3_udp_transport_t *transport,
+                                           uint64_t node_id,
+                                           uint32_t thread_id);
+uint32_t clj_h2o_http3_connected_sockets(clj_http3_udp_transport_t *transport,
+                                         uint64_t node_id, uint32_t thread_id);
+
 /* Dispose HTTP/3 worker context and close UDP socket.
    Note: all connections must be closed first (num_connections == 0) */
 void clj_h2o_http3_dispose_worker_ctx(clj_http3_ctx_t *ctx);
