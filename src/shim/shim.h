@@ -184,6 +184,9 @@ typedef struct {
   int has_http1__upgrade_to_http2;
   int http1__upgrade_to_http2;
 
+  int has_http1__req_io_timeout_while_generating;
+  int http1__req_io_timeout_while_generating;
+
   int has_http2__idle_timeout;
   uint64_t http2__idle_timeout;
 

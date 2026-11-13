@@ -221,6 +221,8 @@
      :http1__req_io_timeout (num-val :http1-req-io-timeout)
      :has_http1__upgrade_to_http2 (has? :http1-upgrade?)
      :http1__upgrade_to_http2 (bool->int :http1-upgrade?)
+     :has_http1__req_io_timeout_while_generating (has? :http1-req-io-timeout-while-generating?)
+     :http1__req_io_timeout_while_generating (bool->int :http1-req-io-timeout-while-generating?)
      :has_http2__idle_timeout (has? :http2-idle-timeout)
      :http2__idle_timeout (num-val :http2-idle-timeout)
      :has_http2__graceful_shutdown_timeout (has? :http2-graceful-shutdown-timeout)

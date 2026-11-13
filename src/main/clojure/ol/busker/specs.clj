@@ -510,6 +510,12 @@
    :default true})
 (s/def ::http1-upgrade? boolean?)
 
+(def http1-req-io-timeout-while-generating?
+  {:key ::http1-req-io-timeout-while-generating?
+   :doc "Also run the HTTP/1.1 request I/O timeout while a response waits for its next output."
+   :default false})
+(s/def ::http1-req-io-timeout-while-generating? boolean?)
+
 (def http2-idle-timeout
   {:key ::http2-idle-timeout
    :doc "HTTP/2 idle timeout in milliseconds."
@@ -634,6 +640,7 @@
                    ::http1-req-timeout
                    ::http1-req-io-timeout
                    ::http1-upgrade?
+                   ::http1-req-io-timeout-while-generating?
                    ::http2-idle-timeout
                    ::http2-graceful-shutdown-timeout
                    ::http2-max-streams
@@ -718,6 +725,7 @@
    http1-req-timeout
    http1-req-io-timeout
    http1-upgrade?
+   http1-req-io-timeout-while-generating?
    http2-idle-timeout
    http2-graceful-shutdown-timeout
    http2-max-streams
@@ -754,7 +762,8 @@
    :compress-gzip-level (:default compress-gzip-level)
    :compress-brotli-level (:default compress-brotli-level)
    :compress-zstd-level (:default compress-zstd-level)
-   :http1-upgrade? (:default http1-upgrade?)})
+   :http1-upgrade? (:default http1-upgrade?)
+   :http1-req-io-timeout-while-generating? (:default http1-req-io-timeout-while-generating?)})
 
 (defn valid-config?
   [config]

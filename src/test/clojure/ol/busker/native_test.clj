@@ -154,7 +154,7 @@
           :request-meta    112
           :entrypoint-hosts (native/entrypoint-hosts-size)
           :request-context (native/req-ctx-size)
-          :globalconf      328
+          :globalconf      336
           :ticket          128}
          {:header          (ffi/sizeof native/ffi-clj-header-t)
           :iovec          (ffi/sizeof native/ffi-h2o-iovec-t)
@@ -195,7 +195,7 @@
                    [native/ffi-clj-req-ctx-t :fixed-claim 1 160]
                    [native/ffi-clj-req-ctx-t :on-response-generator-proceed pointer 184]
                    [native/ffi-clj-req-ctx-t :on-response-generator-stop pointer 192]
-                   [native/ffi-clj-h2o-flat-globalconf-t :compress_args_zstd_quality 1 320]
+                   [native/ffi-clj-h2o-flat-globalconf-t :compress_args_zstd_quality 1 328]
                    [native/ffi-clj-session-ticket-t :not_after 1 120]]]
     (doseq [[layout path value expected] positions]
       (is (= expected (ffi-byte-offset layout path value)) (str path)))

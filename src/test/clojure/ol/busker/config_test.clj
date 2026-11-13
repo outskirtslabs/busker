@@ -308,3 +308,15 @@
                 (load-errors (assoc base :worker-hot-poll-micros -1))))
       (is (some #(= ::cfg/config-spec-invalid (:error %))
                 (load-errors (assoc base :worker-hot-poll-micros 1.5)))))))
+
+(deftest http1-req-io-timeout-while-generating-test
+  (let [base {:entrypoints {:http {:bind ":8080" :tls false}}
+              :dispatch [{}]}]
+    (testing "defaults to false"
+      (is (false? (:http1-req-io-timeout-while-generating? (cfg/load! base)))))
+    (testing "accepts true"
+      (is (true? (:http1-req-io-timeout-while-generating?
+                  (cfg/load! (assoc base :http1-req-io-timeout-while-generating? true))))))
+    (testing "rejects non-boolean values"
+      (is (some #(= ::cfg/config-spec-invalid (:error %))
+                (load-errors (assoc base :http1-req-io-timeout-while-generating? 1)))))))

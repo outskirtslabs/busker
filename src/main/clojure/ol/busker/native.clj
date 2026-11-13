@@ -178,6 +178,8 @@
             [:http1__req_io_timeout :long]
             [:has_http1__upgrade_to_http2 :int]
             [:http1__upgrade_to_http2 :int]
+            [:has_http1__req_io_timeout_while_generating :int]
+            [:http1__req_io_timeout_while_generating :int]
             [:has_http2__idle_timeout :int]
             [:http2__idle_timeout :long]
             [:has_http2__graceful_shutdown_timeout :int]

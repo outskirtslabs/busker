@@ -168,6 +168,26 @@
           (is (= {:status :proceeded} (deref (:progress result) 10000 ::timeout)))))
       (finish-client! client))))
 
+(deftest silent-http1-stream-expires-when-io-timeout-runs-while-generating-test
+  (with-stream
+    :h1 "identity" {:http1-req-io-timeout 1500
+                    :http1-req-io-timeout-while-generating? true}
+    (fn [{:keys [emitter ^Process process ^InputStream input closed]}]
+      (let [frame "data: before idle\n\n"
+            accepted (emit-flushed! emitter frame)]
+        (read-head! input)
+        (is (= frame (read-text! input frame)))
+        (is (= {:status :proceeded} (deref (:progress accepted) 10000 ::timeout)))
+        (let [start (System/nanoTime)
+              remainder (await-call! #(slurp input))
+              elapsed-ms (/ (- (System/nanoTime) start) 1000000.0)]
+          (is (= "" remainder))
+          (is (<= 700 elapsed-ms 12000) (str "idle EOF after " elapsed-ms "ms"))
+          (is (.waitFor process 5 TimeUnit/SECONDS))
+          (is (= 18 (.exitValue process)))
+          (is (true? (deref closed 2000 false)))
+          (is (not (response/open? emitter))))))))
+
 (defn- check-heartbeats! [interval-ms count config]
   (with-stream
     :h1 "identity" config

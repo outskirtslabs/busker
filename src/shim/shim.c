@@ -1386,6 +1386,11 @@ clj_h2o_apply_flat_config(h2o_globalconf_t *conf,
     conf->http1.upgrade_to_http2 = flat->http1__upgrade_to_http2;
   }
 
+  if (flat->has_http1__req_io_timeout_while_generating) {
+    conf->http1.req_io_timeout_while_generating =
+        flat->http1__req_io_timeout_while_generating;
+  }
+
   if (flat->has_http2__idle_timeout) {
     conf->http2.idle_timeout = flat->http2__idle_timeout;
   }
@@ -1450,8 +1455,9 @@ void clj_h2o_create_globalconf(h2o_globalconf_t *conf,
     return;
 
   h2o_config_init(conf);
-  /* Silent HTTP/1 streams such as SSE stay open; the request I/O timeout
-     covers request receipt and each response write. */
+  /* By default silent HTTP/1 streams such as SSE stay open; the request I/O
+     timeout covers request receipt and each response write. The flat
+     configuration can turn the timeout on while generating. */
   conf->http1.req_io_timeout_while_generating = 0;
 
   if (flat != NULL)
