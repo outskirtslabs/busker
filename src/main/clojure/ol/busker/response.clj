@@ -32,7 +32,8 @@
    [java.nio.charset Charset CharsetEncoder CodingErrorAction StandardCharsets]
    [java.util Arrays Iterator]
    [clojure.lang MapEntry RT]
-   [ol.busker.internal.protocols Request]))
+   [ol.busker.internal.protocols Request]
+   [ol.busker.response_queue BlockOutput]))
 
 (set! *warn-on-reflection* true)
 
@@ -86,26 +87,54 @@
       (hdr.util/header response "content-length" (str length))
       response)))
 
-(defn- write-string! [^String body response ^OutputStream out]
-  (let [encoder (encoder response)
-        chars (CharBuffer/wrap body)
-        bytes (ByteBuffer/allocate 8192)]
-    (loop [flushing? false]
-      (let [result (if flushing? (.flush encoder bytes) (.encode encoder chars bytes true))]
-        (when (.isError result) (.throwException result))
-        (.write out (.array bytes) 0 (.position bytes))
-        (.clear bytes)
-        (cond
-          (.isOverflow result) (recur flushing?)
-          (not flushing?) (recur true))))))
+(defn- spill-size
+  "Returns a byte count that holds the encoding of any one character, a
+  surrogate pair or a final flush of `encoder`."
+  ^long [^CharsetEncoder encoder]
+  (max 16 (* 2 (long (Math/ceil (.maxBytesPerChar encoder))))))
 
-(defn- write-byte-buffer! [^ByteBuffer body ^OutputStream out]
-  (let [source (.duplicate body)
-        bytes (byte-array (min 8192 (.remaining source)))]
+(defn- write-string! [^String body response ^BlockOutput out]
+  ;; Encoder output goes straight into each block. When a block cannot hold one
+  ;; encoded character, that character is encoded into `spill` and copied over.
+  (when (pos? (.length body))
+    (let [encoder (encoder response)
+          chars (CharBuffer/wrap body)
+          ^ByteBuffer spill (.flip (ByteBuffer/allocate (spill-size encoder)))
+          phase_ (volatile! :encode)
+          encode! (fn [^ByteBuffer target]
+                    (loop []
+                      (let [result (if (= :flush @phase_)
+                                     (.flush encoder target)
+                                     (.encode encoder chars target true))]
+                        (when (.isError result) (.throwException result))
+                        (cond
+                          (.isOverflow result) nil
+                          (= :flush @phase_) (vreset! phase_ :done)
+                          :else (do (vreset! phase_ :flush) (recur))))))
+          drain! (fn [^ByteBuffer buffer]
+                   (let [n (int (min (.remaining buffer) (.remaining spill)))]
+                     (.put buffer (.slice spill (.position spill) n))
+                     (.position spill (unchecked-add-int (.position spill) n))))]
+      (while (or (.hasRemaining spill) (not= :done @phase_))
+        (.fillBlock out
+                    (fn [^ByteBuffer buffer]
+                      (drain! buffer)
+                      (when-not (or (.hasRemaining spill) (= :done @phase_))
+                        (encode! buffer)
+                        (when (and (zero? (.position buffer)) (not= :done @phase_))
+                          (.clear spill)
+                          (encode! spill)
+                          (.flip spill)
+                          (drain! buffer)))))))))
+
+(defn- write-byte-buffer! [^ByteBuffer body ^BlockOutput out]
+  (let [source (.duplicate body)]
     (while (.hasRemaining source)
-      (let [n (min (alength bytes) (.remaining source))]
-        (.get source bytes 0 n)
-        (.write out bytes 0 n)))))
+      (.fillBlock out
+                  (fn [^ByteBuffer buffer]
+                    (let [n (int (min (.remaining buffer) (.remaining source)))]
+                      (.put buffer (.slice source (.position source) n))
+                      (.position source (unchecked-add-int (.position source) n))))))))
 
 #_{:clj-kondo/ignore [:unresolved-namespace]}
 (compile-if

@@ -1020,3 +1020,210 @@
           (pr-str @timings_))
       (finally
         (busker/stop! server)))))
+
+(defn- response-body ^bytes [^bytes response]
+  (let [text (String. response StandardCharsets/ISO_8859_1)
+        start (+ 4 (.indexOf text "\r\n\r\n"))]
+    (java.util.Arrays/copyOfRange response start (alength response))))
+
+(deftest ring-bodies-larger-than-the-output-buffer-arrive-intact-test
+  (let [text (apply str (repeat 40 "é水😀 plain "))
+        latin (str text (char 0xd800) "end")
+        buffer (doto (ByteBuffer/wrap (byte-array (range 120)))
+                 (.position 3)
+                 (.limit 117))
+        bodies {"/utf8" [{:status 200 :body text}
+                         (.getBytes text StandardCharsets/UTF_8)]
+                "/latin1" [{:status 200
+                            :headers {"content-type" "text/plain; charset=ISO-8859-1"}
+                            :body latin}
+                           (.getBytes latin StandardCharsets/ISO_8859_1)]
+                "/buffer" [{:status 200 :body buffer}
+                           (byte-array (range 3 117))]}
+        [server port] (start-server (fn [{:keys [uri]}] (first (get bodies uri)))
+                                    {:output-buffer-size 16})]
+    (try
+      (doseq [[path [_ expected]] bodies]
+        (is (= (vec expected) (vec (response-body (request-bytes port "GET" path)))) path))
+      (is (= [3 117] [(.position buffer) (.limit buffer)]))
+      (finally (busker/stop! server)))))
+
+(deftest blocked-producer-does-not-delay-other-responses-test
+  (doseq [path ["/streaming" "/fixed"]]
+    (testing path
+      (let [entered (promise)
+            release (promise)
+            completed (promise)
+            [server port]
+            (start-server
+             (fn [{:keys [uri] emitter :ol.busker.request/emitter}]
+               (if (= "/other" uri)
+                 {:status 200 :body "other"}
+                 (do
+                   (Thread/startVirtualThread
+                    #(deliver completed
+                              (try
+                                (when (= "/streaming" uri)
+                                  (protocols/emit! emitter {:status 200} {:flush? true}))
+                                (protocols/emit! emitter
+                                                 (fn [^ByteBuffer b]
+                                                   (.put b (.getBytes "blocked" StandardCharsets/US_ASCII))
+                                                   (deliver entered true)
+                                                   @release)
+                                                 {:capacity 7 :end? true})
+                                (catch Throwable t t))))
+                   {:body emitter}))))]
+        (try
+          (with-open [socket (connect port)]
+            (.write (.getOutputStream socket)
+                    (.getBytes (str "GET " path " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                               StandardCharsets/US_ASCII))
+            (is (true? (deref entered 5000 false)))
+            (is (str/ends-with? (request-text port "GET" "/other") "other")
+                "The worker serves another response while a producer fills.")
+            (is (not (realized? completed)))
+            (deliver release true)
+            (is (= :accepted (:status (deref completed 5000 ::timeout))))
+            (is (str/includes? (slurp (.getInputStream socket)) "blocked")))
+          (finally
+            (deliver release true)
+            (busker/stop! server)))))))
+
+(deftest native-termination-during-fill-keeps-the-block-test
+  (let [entered (promise)
+        release (promise)
+        closed (promise)
+        late-write (promise)
+        completed (promise)
+        [server port]
+        (start-server
+         (fn [{emitter :ol.busker.request/emitter}]
+           (protocols/on-close! emitter #(deliver closed true))
+           (Thread/startVirtualThread
+            #(deliver completed
+                      (try
+                        (protocols/emit! emitter "head\n" {:flush? true})
+                        (protocols/emit! emitter
+                                         (fn [^ByteBuffer b]
+                                           (.put b (byte 65))
+                                           (deliver entered true)
+                                           @release
+                                           (deliver late-write
+                                                    (try (.put b (byte 66)) :written
+                                                         (catch Throwable t t))))
+                                         {:capacity 2 :flush? true})
+                        (catch Throwable t t))))
+           {:body emitter})
+         {:http1-req-io-timeout 500})]
+    (try
+      (with-open [socket (connect port)]
+        (request-stream! socket)
+        (read-through! socket "head\n")
+        (is (true? (deref entered 5000 false)))
+        (is (true? (deref closed 10000 false)) "The I/O timeout ends the response during the fill.")
+        (deliver release true)
+        (is (= :written (deref late-write 5000 ::timeout)))
+        (is (= {:status :closed} (deref completed 5000 ::timeout)))
+        (is (not (str/includes? (slurp (.getInputStream socket)) "AB"))))
+      (finally
+        (deliver release true)
+        (busker/stop! server)))))
+
+(deftest heartbeats-behind-stalled-output-stay-bounded-test
+  (let [ready (promise)
+        [server port] (start-server
+                       (fn [{emitter :ol.busker.request/emitter}]
+                         (deliver ready emitter)
+                         {:body emitter}))]
+    (try
+      (with-open [socket (connect port {:receive-buffer-size 1024})]
+        (request-stream! socket)
+        (let [emitter (deref ready 5000 nil)
+              chunk (byte-array 32768 (byte 65))
+              outcome
+              (deref
+               (on-virtual-thread
+                (fn []
+                  (protocols/emit! emitter {:status 200 :headers {"content-type" "text/event-stream"}})
+                   ;; The client never reads. A chunk receipt that stays pending
+                   ;; for two seconds marks the output as stalled.
+                  (loop [last-receipt nil]
+                    (let [result (protocols/emit! emitter chunk {:wait? false :flush? true})]
+                      (cond
+                        (= :accepted (:status result)) (recur (:progress result))
+                        (and last-receipt (= ::stalled (deref last-receipt 2000 ::stalled))) nil
+                        :else (recur last-receipt))))
+                  (let [results (doall (repeatedly 10000 (fn [] (protocols/emit! emitter ":\n\n"
+                                                                                 {:wait? false :flush? true}))))
+                        accepted (filter #(= :accepted (:status %)) results)]
+                    {:accepted (count accepted)
+                     :full? (boolean (some #(= :full (:status %)) results))
+                     :settled (count (filter (comp realized? :progress) accepted))})))
+               60000 ::timeout)]
+          (is (map? (:value outcome)) (pr-str outcome))
+          (let [{:keys [accepted full? settled]} (:value outcome)]
+            (is (<= accepted 64) "Pending receipts bound heartbeats behind stalled output.")
+            (is (true? full?))
+            (is (zero? settled)))
+          (protocols/close! emitter)))
+      (finally (busker/stop! server)))))
+
+(deftest sustained-empty-writes-keep-other-connections-and-timers-responsive-test
+  (let [busy (promise)
+        busy-emitter (promise)
+        silent-closed (promise)
+        stop (promise)
+        operations (atom 0)
+        [server port]
+        (start-server
+         (fn [{:keys [uri] emitter :ol.busker.request/emitter}]
+           (case uri
+             "/other" {:status 200 :body "other"}
+             "/silent" (do (protocols/on-close! emitter #(deliver silent-closed true))
+                           (protocols/emit! emitter "silent\n" {:flush? true})
+                           {:body emitter})
+             "/busy" (do (deliver busy-emitter emitter)
+                         (Thread/startVirtualThread
+                          #(deliver busy
+                                    (try
+                                      (loop [n 0]
+                                        (if (realized? stop)
+                                          n
+                                          (do
+                                            (protocols/emit! emitter "" {:flush? true})
+                                            (protocols/flush! emitter)
+                                            (when (zero? (mod n 200))
+                                              (protocols/emit! emitter ":\n\n" {:flush? true}))
+                                            (swap! operations inc)
+                                            (recur (inc n)))))
+                                      (catch Throwable t t))))
+                         {:body emitter})))
+         {:http1-req-io-timeout 1500})]
+    (try
+      (with-open [busy-socket (connect port)
+                  silent-socket (connect port)]
+        (.write (.getOutputStream busy-socket)
+                (.getBytes "GET /busy HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" StandardCharsets/US_ASCII))
+        (let [drain (Thread/startVirtualThread
+                     #(try (.transferTo (.getInputStream busy-socket) (java.io.OutputStream/nullOutputStream))
+                           (catch Throwable _ nil)))]
+          (try
+            (let [start @operations]
+              (.write (.getOutputStream silent-socket)
+                      (.getBytes "GET /silent HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" StandardCharsets/US_ASCII))
+              (read-through! silent-socket "silent\n")
+              (dotimes [_ 20]
+                (is (str/ends-with? (request-text port "GET" "/other") "other")))
+              (is (true? (deref silent-closed 10000 false))
+                  "The native I/O timer closes the silent stream.")
+              (is (> @operations (+ start 1000)) "Control traffic continued meanwhile.")
+              (is (protocols/open? @busy-emitter)))
+            (deliver stop true)
+            (is (integer? (deref busy 10000 ::timeout)))
+            (finally
+              (deliver stop true)
+              (.close busy-socket)
+              (.join drain 5000)))))
+      (finally
+        (deliver stop true)
+        (busker/stop! server)))))

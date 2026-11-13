@@ -351,7 +351,7 @@
               (bp/release! (:buffer-pool st) @block_)
               (release-credit! st capacity true))))))))
 
-(defn- publish-initial! [st initial receipt ^bytes bytes off n opts]
+(defn- publish-initial! [st initial receipt n producer opts]
   (let [capacity (:output-buffer-size st)
         block @initial
         retained_ (volatile! block)]
@@ -363,9 +363,8 @@
         (let [permit (reserve-command! st true)]
           (when (keyword? permit) (throw (IOException. "Response closed")))
           (vreset! permit_ permit)
-          (bp/fill-native-range! (:segment block) n
-                                 (fn [^ByteBuffer buffer] (.put buffer bytes (int off) (int n))))
-          (let [used (if (:suppress-body? opts) 0 n)]
+          (let [written (bp/fill-native-range! (:segment block) n producer)
+                used (if (:suppress-body? opts) 0 written)]
             (when (zero? used)
               (bp/release! (:buffer-pool st) block)
               (vreset! retained_ nil))
@@ -382,8 +381,13 @@
             (bp/release! (:buffer-pool st) @retained_)
             (release-credit! st @credit_ false)))))))
 
+(definterface BlockOutput
+  (fillBlock [producer]))
+
 (defn emit-incremental!
   "Accepts a begin record before calling `write-body` with an OutputStream.
+  The stream also implements `BlockOutput`: `fillBlock` publishes the bytes that
+  `producer` writes into one native block of up to `:output-buffer-size` bytes.
   One receipt covers all chunks and EOF. Failures after begin return that receipt."
   [st head write-body opts]
   (if-not (open? st)
@@ -398,7 +402,17 @@
             (if (not= :accepted (:status begin))
               begin
               (let [initial (atom (:initial begin))
-                    out (proxy [OutputStream] []
+                    fill! (fn [n producer]
+                            (when-not (open? st) (throw (IOException. "Response closed")))
+                            (if @initial
+                              (publish-initial! st initial receipt n producer opts)
+                              (let [result (prepare-record!
+                                            st nil n producer
+                                            (assoc opts :wait? true :end? false :body? true)
+                                            receipt false false)]
+                                (when-not (= :accepted (:status result))
+                                  (throw (IOException. "Response closed"))))))
+                    out (proxy [OutputStream BlockOutput] []
                           (write
                             ([x]
                              (if (number? x)
@@ -408,19 +422,11 @@
                              (java.util.Objects/checkFromIndexSize (int off) (int len) (alength ^bytes bytes))
                              (loop [offset off remaining len]
                                (when (pos? remaining)
-                                 (when-not (open? st) (throw (IOException. "Response closed")))
                                  (let [n (min remaining (:output-buffer-size st))]
-                                   (if @initial
-                                     (publish-initial! st initial receipt bytes offset n opts)
-                                     (let [result (prepare-record!
-                                                   st nil n
-                                                   (fn [^ByteBuffer buffer]
-                                                     (.put buffer ^bytes bytes (int offset) (int n)))
-                                                   (assoc opts :wait? true :end? false :body? true)
-                                                   receipt false false)]
-                                       (when-not (= :accepted (:status result))
-                                         (throw (IOException. "Response closed")))))
+                                   (fill! n (fn [^ByteBuffer buffer]
+                                              (.put buffer ^bytes bytes (int offset) (int n))))
                                    (recur (+ offset n) (- remaining n)))))))
+                          (fillBlock [producer] (fill! (:output-buffer-size st) producer))
                           (flush [] (flush! st))
                           (close [] (flush! st)))]
                 (try
