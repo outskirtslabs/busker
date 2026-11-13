@@ -24,11 +24,11 @@
        (re-seq #"(?s)\[source,clojure\]\n----\n(.*?)\n----"
                (slurp path))))
 
-(def example-ports
-  {"quickstart" {:http 18080 :https 18443}
-   "early-hints" {:http 18081 :https 18444}
-   "sse" {:http 18082 :https 18445}
-   "first-server" {:http 18083 :https 18446}})
+(defn- free-ports
+  []
+  (let [http (util/free-port)]
+    {:http http
+     :https (first (remove #{http} (repeatedly util/free-port)))}))
 
 (def first-server-local-deps
   {:aliases
@@ -60,15 +60,14 @@
     ["clojure" "-M:run"]))
 
 (defn- start-example!
-  [example]
-  (let [{:keys [http https]} (get example-ports example)]
-    (p/process (example-command example)
-               {:dir (example-path example)
-                :extra-env {"BUSKER_HTTP_BIND" (format "127.0.0.1:%d" http)
-                            "BUSKER_HTTPS_BIND" (format "127.0.0.1:%d" https)}
-                :out :string
-                :err :string
-                :shutdown p/destroy-tree})))
+  [example {:keys [http https]}]
+  (p/process (example-command example)
+             {:dir (example-path example)
+              :extra-env {"BUSKER_HTTP_BIND" (format "127.0.0.1:%d" http)
+                          "BUSKER_HTTPS_BIND" (format "127.0.0.1:%d" https)}
+              :out :string
+              :err :string
+              :shutdown p/destroy-tree}))
 
 (defn- stop-example!
   [proc]
@@ -174,8 +173,8 @@
                          #(select-keys % [:bind :tls :http1? :http2? :http3?]))}))))
 
 (deftest quickstart-example-test
-  (let [{:keys [http https]} (example-ports "quickstart")
-        proc (start-example! "quickstart")]
+  (let [{:keys [http https] :as ports} (free-ports)
+        proc (start-example! "quickstart" ports)]
     (try
       (wait-for-server! proc http)
       (testing "HTTP/1.1 keep-alive promptly serves the next request"
@@ -213,8 +212,8 @@
         (stop-example! proc)))))
 
 (deftest early-hints-example-test
-  (let [{:keys [http https]} (example-ports "early-hints")
-        proc (start-example! "early-hints")]
+  (let [{:keys [http https] :as ports} (free-ports)
+        proc (start-example! "early-hints" ports)]
     (try
       (wait-for-server! proc http)
       (testing "html and css"
@@ -240,8 +239,8 @@
         (stop-example! proc)))))
 
 (deftest sse-example-test
-  (let [{:keys [http https]} (example-ports "sse")
-        proc (start-example! "sse")]
+  (let [{:keys [http https] :as ports} (free-ports)
+        proc (start-example! "sse" ports)]
     (try
       (wait-for-server! proc http "/missing")
       (testing "events stream"
@@ -270,8 +269,8 @@
         (stop-example! proc)))))
 
 (deftest first-server-example-test
-  (let [{:keys [http]} (example-ports "first-server")
-        proc (start-example! "first-server")]
+  (let [{:keys [http] :as ports} (free-ports)
+        proc (start-example! "first-server" ports)]
     (try
       (wait-for-server! proc http)
       (testing "plain HTTP hello"
