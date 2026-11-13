@@ -136,7 +136,8 @@
             [:http_version :int]
             [:has_body :int16]
             [:is_early_data :int16]
-            [:entrypoint :uint32]]])
+            [:entrypoint :uint32]
+            [:connection_id :long]]])
 
 (def ffi-clj-req-ctx-t
   [:struct [[:req :pointer]
@@ -822,10 +823,11 @@
        ~@(map-indexed (fn [i form] `(aset ~entries ~i ~form)) kvs)
        (clojure.lang.PersistentArrayMap. ~entries))))
 
-;; Byte offsets that copy-request-context reads. They follow ffi-clj-req-ctx-t,
-;; ffi-clj-req-meta-t and ffi-clj-header-t; layout tests check them against the
-;; shim. Text field i of the metadata (authority, method, path, remote address,
-;; scheme) has its pointer at 8i and its length at 48 + 8i.
+;; Byte offsets that copy-request-context and request-connection-id read. They
+;; follow ffi-clj-req-ctx-t, ffi-clj-req-meta-t and ffi-clj-header-t; layout
+;; tests check them against the shim. Text field i of the metadata (authority,
+;; method, path, remote address, scheme) has its pointer at 8i and its length at
+;; 48 + 8i.
 (def ^:no-doc ^:const req-ctx-req-offset 0)
 (def ^:no-doc ^:const req-ctx-meta-offset 8)
 (def ^:no-doc ^:const req-meta-text-offset 0)
@@ -836,6 +838,7 @@
 (def ^:no-doc ^:const req-meta-has-body-offset 100)
 (def ^:no-doc ^:const req-meta-early-data-offset 102)
 (def ^:no-doc ^:const req-meta-entrypoint-offset 104)
+(def ^:no-doc ^:const req-meta-connection-id-offset 112)
 (def ^:no-doc ^:const header-size 32)
 (def ^:no-doc ^:const header-value-offset 16)
 (def ^:no-doc ^:const header-length-offset 8)
@@ -965,6 +968,12 @@
                        (method-keyword-at bytes start (- (aget ends 1) start)))
      :bytes bytes
      :ends ends}))
+
+(defn ^:no-doc request-connection-id
+  "Returns H2O's id of the connection of the request whose native context is
+  `ctx-ptr`. Valid only on the worker thread inside the request callback."
+  ^long [^MemorySegment ctx-ptr]
+  (read-native-long (+ (.address ctx-ptr) req-ctx-meta-offset req-meta-connection-id-offset)))
 
 (defn create-handler
   "Creates and configures an H2O handler with its request and cleanup callbacks.

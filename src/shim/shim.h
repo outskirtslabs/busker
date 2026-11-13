@@ -86,6 +86,10 @@ typedef struct {
   /* Index of the entrypoint whose listener accepted the connection, or
      CLJ_ENTRYPOINT_UNKNOWN. */
   uint32_t entrypoint;
+  /* H2O's id of the request's connection (h2o_conn_t.id). One process-wide
+     counter numbers HTTP/1, HTTP/2 and HTTP/3 connections from 1 and never
+     reuses an id, unlike the connection's address. */
+  uint64_t connection_id;
 } clj_req_meta_t;
 
 #define CLJ_ENTRYPOINT_UNKNOWN UINT32_MAX

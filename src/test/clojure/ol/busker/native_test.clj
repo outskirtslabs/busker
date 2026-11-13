@@ -181,7 +181,7 @@
           :sendvec         32
           :h2o-header      40
           :generator       16
-          :request-meta    112
+          :request-meta    120
           :entrypoint-hosts (native/entrypoint-hosts-size)
           :request-context (native/req-ctx-size)
           :globalconf      336
@@ -219,12 +219,14 @@
                    [native/ffi-h2o-generator-t :stop pointer 8]
                    [native/ffi-clj-req-meta-t :is_early_data 1 102]
                    [native/ffi-clj-req-meta-t :entrypoint 1 104]
+                   [native/ffi-clj-req-meta-t :connection_id 1 112]
                    [native/ffi-clj-req-ctx-t [:meta :headers_len] 1 96]
                    [native/ffi-clj-req-ctx-t [:meta :entrypoint] 1 112]
-                   [native/ffi-clj-req-ctx-t :fixed-slot pointer 152]
-                   [native/ffi-clj-req-ctx-t :fixed-claim 1 160]
-                   [native/ffi-clj-req-ctx-t :on-response-generator-proceed pointer 184]
-                   [native/ffi-clj-req-ctx-t :on-response-generator-stop pointer 192]
+                   [native/ffi-clj-req-ctx-t [:meta :connection_id] 1 120]
+                   [native/ffi-clj-req-ctx-t :fixed-slot pointer 160]
+                   [native/ffi-clj-req-ctx-t :fixed-claim 1 168]
+                   [native/ffi-clj-req-ctx-t :on-response-generator-proceed pointer 192]
+                   [native/ffi-clj-req-ctx-t :on-response-generator-stop pointer 200]
                    [native/ffi-clj-h2o-flat-globalconf-t :compress_args_zstd_quality 1 328]
                    [native/ffi-clj-session-ticket-t :not_after 1 120]]]
     (doseq [[layout path value expected] positions]
@@ -262,7 +264,8 @@
                                      :http_version    0x101
                                      :has_body        1
                                      :is_early_data   0
-                                     :entrypoint      3}
+                                     :entrypoint      3
+                                     :connection_id   12345}
      :on-cleanup                    (pointer)
      :on-request-body-chunk         (pointer)
      :response-receiver             (pointer)
@@ -283,21 +286,21 @@
 (def ^:private request-context-reader-offsets
   {:req                          0
    :meta                         8
-   :on-cleanup                   120
-   :on-request-body-chunk        128
-   :response-receiver             136
-   :response-hash-next            144
-   :fixed-slot                    152
-   :fixed-claim                   160
-   :generator                     168
-   :on-response-generator-proceed 184
-   :on-response-generator-stop    192
-   :preferred-chunk-size          200
-   :dispatch-module-id            208
-   :dispatch-request-seq          216
-   :cleanup                       224
-   :closing                       228
-   :response_started              232})
+   :on-cleanup                   128
+   :on-request-body-chunk        136
+   :response-receiver             144
+   :response-hash-next            152
+   :fixed-slot                    160
+   :fixed-claim                   168
+   :generator                     176
+   :on-response-generator-proceed 192
+   :on-response-generator-stop    200
+   :preferred-chunk-size          208
+   :dispatch-module-id            216
+   :dispatch-request-seq          224
+   :cleanup                       232
+   :closing                       236
+   :response_started              240})
 
 (def ^:private request-metadata-reader-offsets
   {:authority       0
@@ -315,7 +318,8 @@
    :http_version    96
    :has_body        100
    :is_early_data   102
-   :entrypoint      104})
+   :entrypoint      104
+   :connection_id   112})
 
 (def ^:private generator-reader-offsets
   {:proceed 0
@@ -335,7 +339,8 @@
             [:meta :http_version] (+ meta native/req-meta-http-version-offset)
             [:meta :has_body] (+ meta native/req-meta-has-body-offset)
             [:meta :is_early_data] (+ meta native/req-meta-early-data-offset)
-            [:meta :entrypoint] (+ meta native/req-meta-entrypoint-offset)}
+            [:meta :entrypoint] (+ meta native/req-meta-entrypoint-offset)
+            [:meta :connection_id] (+ meta native/req-meta-connection-id-offset)}
            {:req (ffi-byte-offset native/ffi-clj-req-ctx-t :req pointer)
             :meta (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :authority] pointer)
             [:meta :authority] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :authority] pointer)
@@ -347,7 +352,8 @@
             [:meta :http_version] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :http_version] 1)
             [:meta :has_body] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :has_body] 1)
             [:meta :is_early_data] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :is_early_data] 1)
-            [:meta :entrypoint] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :entrypoint] 1)}))
+            [:meta :entrypoint] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :entrypoint] 1)
+            [:meta :connection_id] (ffi-byte-offset native/ffi-clj-req-ctx-t [:meta :connection_id] 1)}))
     (is (= {:size native/header-size
             :name-length native/header-length-offset
             :value native/header-value-offset
@@ -358,7 +364,7 @@
             :value-length (ffi-byte-offset native/ffi-clj-header-t :value_len 1)}))))
 
 (deftest request-context-layout-test
-  (is (= 240 (ffi/sizeof native/ffi-clj-req-ctx-t)))
+  (is (= 248 (ffi/sizeof native/ffi-clj-req-ctx-t)))
   (doseq [[field expected-offset] request-context-reader-offsets]
     (let [path (case field :meta [:meta :authority] :generator [:generator :proceed] field)
           value (if (contains? #{:preferred-chunk-size :dispatch-module-id :dispatch-request-seq
@@ -444,7 +450,8 @@
                                :scheme scheme-ptr :scheme_len scheme-len
                                :headers header-ptr :headers_len header-count
                                :http_version http-version :has_body has-body
-                               :is_early_data early-data :entrypoint entrypoint}))
+                               :is_early_data early-data :entrypoint entrypoint
+                               :connection_id 1}))
       (native/copy-request-context pointer))))
 
 (deftest copy-request-context-reads-the-entrypoint-index-test
@@ -454,6 +461,13 @@
                                               :entrypoint (unchecked-int 0xFFFFFFFF))))))
   (is (not (contains? native/assembled-request-keys :ol.busker/entrypoint))
       "the entrypoint comes from the overlay, so reading it does not decode the request"))
+
+(deftest request-connection-id-reads-the-native-context-test
+  (with-open [arena (ffi/confined-arena)]
+    (let [pointer (ffi/alloc arena native/ffi-clj-req-ctx-t)]
+      (ffi/write pointer native/ffi-clj-req-ctx-t
+                 (assoc-in (request-context-value arena) [:meta :connection_id] Long/MAX_VALUE))
+      (is (= Long/MAX_VALUE (native/request-connection-id pointer))))))
 
 (defn- assembled-snapshot
   [snapshot input-stream]
@@ -694,7 +708,8 @@
                             :http_version 0x0200
                             :has_body 1
                             :is_early_data 1
-                            :entrypoint 0}))
+                            :entrypoint 0
+                            :connection_id 1}))
         pointer (ffi/alloc arena native/ffi-clj-req-ctx-t)]
     (ffi/write pointer native/ffi-clj-req-ctx-t context)
     {:pointer pointer :request request}))

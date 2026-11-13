@@ -40,15 +40,17 @@
 #define explicit_bzero(s, n) OPENSSL_cleanse(s, n)
 #endif
 
-_Static_assert(sizeof(clj_req_ctx_t) == 240, "FFM request context size");
+_Static_assert(sizeof(clj_req_ctx_t) == 248, "FFM request context size");
 _Static_assert(offsetof(clj_req_meta_t, entrypoint) == 104,
                "FFM request entrypoint offset");
-_Static_assert(offsetof(clj_req_ctx_t, fixed_slot) == 152, "FFM fixed slot offset");
-_Static_assert(offsetof(clj_req_ctx_t, fixed_claim) == 160, "FFM fixed claim offset");
-_Static_assert(offsetof(clj_req_ctx_t, generator) == 168, "FFM generator offset");
-_Static_assert(offsetof(clj_req_ctx_t, on_response_generator_proceed) == 184,
+_Static_assert(offsetof(clj_req_meta_t, connection_id) == 112,
+               "FFM request connection id offset");
+_Static_assert(offsetof(clj_req_ctx_t, fixed_slot) == 160, "FFM fixed slot offset");
+_Static_assert(offsetof(clj_req_ctx_t, fixed_claim) == 168, "FFM fixed claim offset");
+_Static_assert(offsetof(clj_req_ctx_t, generator) == 176, "FFM generator offset");
+_Static_assert(offsetof(clj_req_ctx_t, on_response_generator_proceed) == 192,
                "FFM proceed callback offset");
-_Static_assert(offsetof(clj_req_ctx_t, on_response_generator_stop) == 192,
+_Static_assert(offsetof(clj_req_ctx_t, on_response_generator_stop) == 200,
                "FFM stop callback offset");
 
 /* Global connection limit counter and maximum.
@@ -538,6 +540,7 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
   meta->has_body = clj_h2o_req_has_body(req);
   meta->is_early_data = h2o_conn_is_early_data(req->conn) ? 1 : 0;
   meta->entrypoint = clj_request_entrypoint(req);
+  meta->connection_id = req->conn->id;
 #if CLJ_DEBUG
   assert(meta->entrypoint != CLJ_ENTRYPOINT_UNKNOWN);
 #endif
