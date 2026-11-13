@@ -4,10 +4,47 @@
    [clojure.java.io :as io]
    [clojure.java.shell :as shell]
    [clojure.string :as str]
-   [clojure.test :refer [deftest is]])
+   [clojure.test :refer [deftest is testing]]
+   [ol.busker.native.loader :as loader])
   (:import
    [java.io File]
+   [java.nio ByteBuffer ByteOrder]
+   [java.nio.file Files]
+   [java.security MessageDigest]
    [java.util.concurrent TimeUnit]))
+
+(defn- object-identity
+  "Returns the object format and machine of the shared library `bytes`."
+  [^bytes bytes]
+  (let [buffer (.order (ByteBuffer/wrap bytes) ByteOrder/LITTLE_ENDIAN)]
+    (cond
+      (= [0x7f 0x45 0x4c 0x46] (mapv #(bit-and 0xff %) (take 4 bytes)))
+      [:elf ({62 :x86-64 183 :aarch64} (.getShort buffer 18))]
+      (= (unchecked-int 0xfeedfacf) (.getInt buffer 0))
+      [:mach-o ({0x01000007 :x86-64 0x0100000c :aarch64} (.getInt buffer 4))]
+      :else [:unknown nil])))
+
+(defn- sha-256 [^bytes bytes]
+  (vec (.digest (MessageDigest/getInstance "SHA-256") bytes)))
+
+;; Only the host target can be loaded here; the other three are checked by
+;; object format and machine.
+(deftest packaged-targets-match-their-platforms
+  (doseq [[target library identity] [["linux-x86-64" "libh2oclj.so" [:elf :x86-64]]
+                                     ["linux-aarch64" "libh2oclj.so" [:elf :aarch64]]
+                                     ["macos-x86-64" "libh2oclj.dylib" [:mach-o :x86-64]]
+                                     ["macos-aarch64" "libh2oclj.dylib" [:mach-o :aarch64]]]]
+    (testing target
+      (let [file (io/file "shim" target "resources" target library)]
+        (is (.isFile file))
+        (when (.isFile file)
+          (let [bytes (Files/readAllBytes (.toPath file))]
+            (is (= identity (object-identity bytes)))
+            (when (= target (loader/get-os-arch))
+              (is (= (sha-256 bytes)
+                     (sha-256 (with-open [in (io/input-stream (io/resource (str target "/" library)))]
+                                (.readAllBytes in))))
+                  "The default loaded resource is the built host library."))))))))
 
 (deftest packaged-library-loads-reloads-and-stops
   (let [{:keys [exit out err]} (shell/sh "clojure" "-Srepro" "-T:build" "jar")]
