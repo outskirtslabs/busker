@@ -1,7 +1,7 @@
 (ns ol.busker.generation-test
   (:require
    [babashka.ffi :as mem]
-   [clojure.test :refer [deftest is]]
+   [clojure.test :refer [deftest is testing]]
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.buffer-pool :as bp]
    [ol.busker.worker-mailbox :as mailbox]
@@ -14,6 +14,7 @@
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as protocols]
    [ol.busker.request :as request]
+   [ol.busker.request-dispatch :as request-dispatch]
    [ol.busker.response-queue :as response-queue]
    [ol.busker.wake-endpoint :as wake-endpoint]
    [ol.busker.test-utils :as util])
@@ -21,7 +22,8 @@
    [java.lang.foreign Arena]
    [java.net InetSocketAddress Socket]
    [java.nio.charset StandardCharsets]
-   [java.util.concurrent AbstractExecutorService]
+   [java.util.concurrent AbstractExecutorService CountDownLatch ExecutorService Executors
+    TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicReference]
    [java.util.concurrent.locks ReentrantReadWriteLock]))
 
@@ -203,6 +205,139 @@
                             0)}
         #(#'generation/worker-loop worker {::evloop/mailbox-work? false} native-state))
       (is (= expected-wait @wait-ms_) (str "sent? " sent?)))))
+
+(deftest queued-request-tasks-limit-the-native-wait-to-one-millisecond
+  (doseq [[queued? expected-wait] [[true 1] [false 1000]]]
+    (let [wait-ms_ (atom nil)
+          executor (proxy [AbstractExecutorService] []
+                     (execute [_])
+                     (isShutdown [] false))
+          dispatch (request-dispatch/create executor)
+          worker (evloop/map->Worker
+                  {:mailbox (mailbox/create)
+                   :callback-dispatch nil
+                   :response-slots []
+                   :response-slot-payload-capacity 0
+                   :hot-poll-ns 0
+                   :native-failure_ (AtomicReference.)
+                   :response-slot-monitor (Object.)
+                   :request-dispatch dispatch})
+          native-state {:loop-ptr :loop
+                        :ctx-ptr :context
+                        :listener-socks []
+                        :accept-callbacks []
+                        :max-connections 0}]
+      (request-dispatch/dispatch! dispatch 1 (fn []))
+      (when queued?
+        (request-dispatch/dispatch! dispatch 1 (fn [])))
+      (with-redefs-fn
+        {#'generation/check-and-initiate-shutdown! (fn [state _] state)
+         #'generation/update-receiver-destruction (fn [state _] state)
+         #'generation/dispose-context-if-ready (fn [state _ _] state)
+         #'callback-dispatch/pending-response-work? (constantly false)
+         #'callback-dispatch/drain-responses! (constantly false)
+         #'generation/update-listener-state! (fn [& _])
+         #'h2o/evloop-now (constantly 0)
+         #'h2o/cleanup-thread (constantly 1000)
+         #'h2o/evloop-run (fn [_ wait-ms]
+                            (reset! wait-ms_ wait-ms)
+                            0)}
+        #(#'generation/worker-loop worker {::evloop/mailbox-work? false} native-state))
+      (is (= expected-wait @wait-ms_) (str "queued? " queued?)))))
+
+(defn- recording-executor
+  "Returns an executor that records submitted runnables in `submitted_`."
+  [submitted_]
+  (proxy [AbstractExecutorService] []
+    (execute [task] (swap! submitted_ conj task))
+    (isShutdown [] false)))
+
+(deftest hot-poll-turn-sweeps-while-request-tasks-are-queued
+  (let [submitted_ (atom [])
+        turns_ (atom 0)
+        dispatch (request-dispatch/create (recording-executor submitted_))
+        release (CountDownLatch. 1)
+        started (CountDownLatch. 1)
+        queued (fn [])]
+    (with-redefs [h2o/evloop-run (fn [_ wait-ms] (swap! turns_ inc) (is (zero? wait-ms)) 0)]
+      (testing "without queued tasks the turn is only the native turn"
+        ((#'generation/zero-wait-turn-fn :loop dispatch))
+        (is (= 1 @turns_)))
+      (request-dispatch/dispatch! dispatch 1 (fn []
+                                               (.countDown started)
+                                               (.await release 10 TimeUnit/SECONDS)))
+      (request-dispatch/dispatch! dispatch 1 queued)
+      (let [drainer (Thread/startVirtualThread ^Runnable (first @submitted_))]
+        (is (.await started 10 TimeUnit/SECONDS))
+        (Thread/sleep 5)
+        (testing "a queued task behind a slow drainer gets a thread during the poll"
+          ((#'generation/zero-wait-turn-fn :loop dispatch))
+          (is (identical? queued (peek @submitted_))))
+        (.countDown release)
+        (is (.join drainer (java.time.Duration/ofSeconds 10)))))))
+
+(deftest stop-gives-each-request-queued-at-that-moment-a-new-thread
+  (let [real (Executors/newVirtualThreadPerTaskExecutor)
+        first_ (atom nil)
+        executor (proxy [AbstractExecutorService] []
+                   (execute [task]
+                     (when-not (compare-and-set! first_ nil task)
+                       (.execute real task)))
+                   (shutdown [] (.shutdown real))
+                   (shutdownNow [] (.shutdownNow real))
+                   (isShutdown [] (.isShutdown real))
+                   (isTerminated [] (.isTerminated real))
+                   (awaitTermination [n unit] (.awaitTermination real n unit)))
+        dispatch (request-dispatch/create executor)
+        done (CountDownLatch. 5)
+        generation {::generation/phase (atom :running)
+                    ::generation/stop-lock (Object.)
+                    ::generation/executor executor
+                    ::generation/workers [{:callback-dispatch nil :request-dispatch dispatch}]}]
+    (try
+      (dotimes [_ 5]
+        (request-dispatch/dispatch! dispatch 1 (fn []
+                                                 (Thread/sleep 200)
+                                                 (.countDown done))))
+      (with-redefs [callback-dispatch/begin-drain! identity
+                    evloop/broadcast-wake! (fn [_]
+                                             (Thread/startVirtualThread
+                                              #(request-dispatch/sweep! dispatch)))]
+        (let [start (System/nanoTime)]
+          (generation/begin-stop! generation)
+          (is (.isShutdown ^ExecutorService executor))
+          (Thread/startVirtualThread ^Runnable @first_)
+          (is (.await done 10 TimeUnit/SECONDS))
+          (let [ms (/ (- (System/nanoTime) start) 1e6)]
+            (is (< ms 600) (str "five 200 ms requests took " ms " ms")))))
+      (finally
+        (.shutdownNow real)))))
+
+(deftest interrupted-stop-shuts-the-executor-down-without-waiting-for-sweeps
+  (let [executor (Executors/newVirtualThreadPerTaskExecutor)
+        phase (atom :running)
+        generation {::generation/phase phase
+                    ::generation/stop-lock (Object.)
+                    ::generation/executor executor
+                    ::generation/workers [{:callback-dispatch nil
+                                           :request-dispatch (request-dispatch/create executor)}
+                                          {:callback-dispatch nil
+                                           :request-dispatch (request-dispatch/create executor)}]}]
+    (try
+      (with-redefs [callback-dispatch/begin-drain! identity
+                    evloop/broadcast-wake! (fn [_])]
+        (.interrupt (Thread/currentThread))
+        (let [start (System/nanoTime)
+              _ (generation/begin-stop! generation)
+              ms (/ (- (System/nanoTime) start) 1e6)
+              interrupted? (Thread/interrupted)]
+          (is (< ms 300) (str "an interrupted stop took " ms " ms with workers that never sweep"))
+          (is (.isShutdown executor))
+          (is (= :stopping @phase))
+          (is interrupted? "the interrupt stays set for the caller")))
+      (finally
+        (Thread/interrupted)
+        (.shutdownNow executor)))))
 
 (deftest wake-receiver-retires-on-event-loop-worker-test
   (let [events_ (atom [])

@@ -11,6 +11,7 @@
    [ol.busker.worker-context :as worker-context]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
+   [ol.busker.request-dispatch :as request-dispatch]
    [ol.busker.response :as response])
   (:import
    [java.nio ByteBuffer]
@@ -178,7 +179,9 @@
                                        :ol.busker/entrypoint entrypoint})
                             ring-resp (run-handler ring-handler ring-req)]
                         (response/send-ring-response! emitter ring-resp)))]
-              (.execute executor request-task))
+              (if-let [reuse (:request-dispatch worker)]
+                (request-dispatch/dispatch! reuse (h2o/request-connection-id req-ctx-ptr) request-task)
+                (.execute executor request-task)))
             h2o/CLJ_HANDLER_OK
             (catch RejectedExecutionException _
               (callback-dispatch/retire! dispatch module-id request-seq)

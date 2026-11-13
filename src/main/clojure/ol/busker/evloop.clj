@@ -137,6 +137,7 @@
             response-slots
             ^long response-slot-payload-capacity
             callback-dispatch
+            request-dispatch
             ^HashMap requests
             args
             stream-pool
@@ -337,6 +338,8 @@
    Options:
    - :thread-name-prefix - prefix for thread name (default 'h2o-evloop')
    - :callback-dispatch - worker-local native callback dispatcher
+   - :request-dispatch - worker-local handler dispatch with
+     `:request-threads :reuse-within-connection`, see [[ol.busker.request-dispatch]]
    - :response-receiver - native complete-response receiver
    - :response-slots - generation-scoped native slot views
    - :response-slot-payload-capacity - writable bytes in one slot
@@ -347,7 +350,7 @@
    Returns: worker"
 
   [loop-fn message-handler wakeup-receiver
-   & {:keys [callback-dispatch response-receiver response-slots
+   & {:keys [callback-dispatch request-dispatch response-receiver response-slots
              response-slot-payload-capacity thread-name-prefix stream-pool
              on-native-failure! discard-command! zero-wait-turn! hot-poll-ns]
       :or {thread-name-prefix "h2o-evloop"
@@ -361,6 +364,7 @@
         worker (map->Worker {:id id
                              :thread nil
                              :callback-dispatch callback-dispatch
+                             :request-dispatch request-dispatch
                              :requests (:entries callback-dispatch)
                              :running?_ (AtomicBoolean. true)
                              :accepting?_ (AtomicBoolean. true)

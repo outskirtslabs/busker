@@ -22,3 +22,5 @@ See [Busker architecture](../architecture.md) for the execution, response-storag
   - Sends fixed-response bodies directly from slots retained until native cleanup.
 - [010 — Direct native wake from publishing threads](010-direct-native-wake-from-publishing-threads.md)
   - Publishing threads send at most one native wake per worker sleep.
+- [011 — Opt-in reuse of a virtual thread within one connection](011-share-virtual-threads-within-a-connection.md)
+  - `:request-threads :reuse-within-connection` runs quick requests of one connection on one virtual thread; the default keeps one thread per request.

@@ -438,6 +438,12 @@
    :default 0})
 (s/def ::worker-hot-poll-micros nat-int?)
 
+(def request-threads
+  {:key ::request-threads
+   :doc "How handlers get virtual threads. `:per-request`, the default, starts a new virtual thread for every request. `:reuse-within-connection` lets quick requests of one connection run one after another on the same virtual thread, so anything bound to the thread stays for the next request of that connection, for example ThreadLocal values, the thread's name, context class loader, uncaught-exception handler and identity, a lock left held, or a late interrupt or unpark."
+   :default :per-request})
+(s/def ::request-threads #{:per-request :reuse-within-connection})
+
 (def max-connections
   {:key ::max-connections
    :doc "Maximum concurrent connections across all workers."
@@ -628,6 +634,7 @@
           :opt-un [::tls
                    ::n-workers
                    ::worker-hot-poll-micros
+                   ::request-threads
                    ::max-connections
                    ::output-buffer-size
                    ::server-name
@@ -713,6 +720,7 @@
    managed-plan
    n-workers
    worker-hot-poll-micros
+   request-threads
    max-connections
    output-buffer-size
    server-name
@@ -754,6 +762,7 @@
    :dispatch (:default dispatch)
    :n-workers (:default n-workers)
    :worker-hot-poll-micros (:default worker-hot-poll-micros)
+   :request-threads (:default request-threads)
    :max-connections (:default max-connections)
    :output-buffer-size (:default output-buffer-size)
    :server-name (:default server-name)

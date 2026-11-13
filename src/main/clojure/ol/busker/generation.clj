@@ -36,6 +36,7 @@
    [ol.busker.native :as h2o]
    [ol.busker.native.socket :as socket]
    [ol.busker.request :as request]
+   [ol.busker.request-dispatch :as request-dispatch]
    [ol.busker.response-queue :as rq]
    [ol.busker.worker-mailbox :as mailbox]
    [ol.busker.tickets :as tickets]
@@ -495,7 +496,9 @@
         sent? (when-not disposed?
                 (when ring-work? (fixed-final/notify-capacity! worker))
                 (callback-dispatch/drain-responses! (:callback-dispatch worker)))
-        shutting? (true? (:shutdown-initiated? loop-state))]
+        shutting? (true? (:shutdown-initiated? loop-state))
+        tasks-queued? (when-let [reuse (:request-dispatch worker)]
+                        (request-dispatch/sweep! reuse))]
     (if disposed?
       (h2o/evloop-run loop-ptr 0)
       (let [now (h2o/evloop-now loop-ptr)
@@ -512,7 +515,10 @@
                       :else base-wait)]
         (when-not shutting?
           (update-listener-state! state))
-        (h2o/evloop-run loop-ptr (if (pos? (p/count-msgs worker)) 0 wait-ms))))
+        (h2o/evloop-run loop-ptr (cond
+                                   (pos? (p/count-msgs worker)) 0
+                                   tasks-queued? (min 1 wait-ms)
+                                   :else wait-ms))))
     loop-state))
 
 (defn http3-enabled?
@@ -1153,14 +1159,27 @@
                        runtime))))
         (->> (assoc state ::listener-runtimes)))))
 
+(defn- zero-wait-turn-fn
+  "Returns the hot poll's native turn. With a request dispatch, the turn also
+  sweeps it while tasks are queued, so a request behind a slow handler gets
+  its thread during the poll."
+  [loop-ptr request-dispatch]
+  (if request-dispatch
+    (fn []
+      (h2o/evloop-run loop-ptr 0)
+      (when (request-dispatch/queued? request-dispatch)
+        (request-dispatch/sweep! request-dispatch)))
+    (fn [] (h2o/evloop-run loop-ptr 0))))
+
 (defn- init-worker-state
-  [{::keys [config n-workers loops contexts listener-runtimes http3-worker-contexts
+  [{::keys [config executor n-workers loops contexts listener-runtimes http3-worker-contexts
             max-connections shutting-down? message-handler wakeup-receivers response-receivers
             response-slots response-slot-payload-capacity stream-pools
             arena stop-accepting-remaining_ stopped-accepting_
             active-connection-count_ worker-connection-counts accepting-workers limit-waiting]
     :as state} cleanup-state_]
   (let [hot-poll-ns (* 1000 (long (:worker-hot-poll-micros config)))
+        reuse? (= :reuse-within-connection (:request-threads config))
         workers
         (vec
          (for [thread-idx (range n-workers)]
@@ -1173,6 +1192,7 @@
                  accept-callbacks-for-thread (mapv :accept-callback-ptr thread-listener-states)
                  http3-ctxs-for-thread (nth http3-worker-contexts thread-idx)
                  http3-ctxs-guard (http3-ctxs-guard)
+                 reuse (when reuse? (request-dispatch/create executor))
                  worker (evloop/start-worker!
                          (fn [worker loop-state]
                            (worker-loop worker
@@ -1212,7 +1232,8 @@
                          :response-slots (nth response-slots thread-idx)
                          :response-slot-payload-capacity response-slot-payload-capacity
                          :callback-dispatch callback-dispatch
-                         :zero-wait-turn! (fn [] (h2o/evloop-run loop-ptr 0))
+                         :request-dispatch reuse
+                         :zero-wait-turn! (zero-wait-turn-fn loop-ptr reuse)
                          :hot-poll-ns hot-poll-ns)]
              (vswap! cleanup-state_ update ::workers (fnil conj []) worker)
              (.set ^AtomicReferenceArray accepting-workers (int thread-idx) worker)
@@ -1259,8 +1280,14 @@
         (tickets/stop-key-manager! key-mgr))
       (when (seq (::workers generation))
         (doseq [worker (::workers generation)]
+          (some-> (:request-dispatch worker) request-dispatch/begin-stop!)
           (callback-dispatch/begin-drain! (:callback-dispatch worker)))
-        (evloop/broadcast-wake! (::workers generation)))
+        (evloop/broadcast-wake! (::workers generation))
+        (let [deadline (+ (System/nanoTime) 1000000000)]
+          (doseq [worker (::workers generation)]
+            (some-> (:request-dispatch worker)
+                    (request-dispatch/await-stop-moves!
+                     (max 1 (quot (- deadline (System/nanoTime)) 1000000)))))))
       (when-let [^ExecutorService executor (::executor generation)]
         (.shutdown executor))
       (reset! phase :stopping)))
@@ -1288,6 +1315,8 @@
            (when (= :stopping @phase-atom)
              (when executor
                (when-not (.awaitTermination executor timeout timeunit)
+                 (doseq [worker (::workers generation)]
+                   (some-> (:request-dispatch worker) request-dispatch/interrupt-remaining!))
                  (.shutdownNow executor)
                  (when-not (.awaitTermination executor timeout timeunit)
                    (println "Virtual thread request executor pool did not shutdown cleanly"))))

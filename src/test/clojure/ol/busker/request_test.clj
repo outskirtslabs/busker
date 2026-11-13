@@ -9,6 +9,7 @@
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.request :as request]
+   [ol.busker.request-dispatch :as request-dispatch]
    [ol.busker.response-queue :as queue]
    [ol.busker.test-utils :as util]
    [ol.busker.worker-context :as worker-context])
@@ -60,6 +61,36 @@
             (is (identical? pool (:buffer-pool (queue/new-response-state req))))
             (is (nil? (meta req)))
             (is (= 1 (count @tasks_)))))))))
+
+(deftest reuse-mode-dispatches-requests-by-connection-id
+  (with-open [arena (ffi/shared-arena)]
+    (let [dispatch (callback-dispatch/create arena)
+          _ (callback-dispatch/bind-thread! dispatch (Thread/currentThread))
+          shutdown?_ (atom false)
+          tasks_ (atom [])
+          executor (proxy [AbstractExecutorService] []
+                     (execute [task] (swap! tasks_ conj task))
+                     (isShutdown [] @shutdown?_))
+          worker {:callback-dispatch dispatch
+                  :request-dispatch (request-dispatch/create executor)
+                  :response-receiver_ (AtomicReference. ffi/null)}
+          config {:entrypoints {:http {}}}
+          context (fn [id]
+                    (doto (ffi/alloc arena h2o/ffi-clj-req-ctx-t)
+                      (ffi/write (ffi/place h2o/ffi-clj-req-ctx-t [:meta :connection_id]) id)))
+          on-request (fn [ctx-ptr]
+                       (request/on-request executor identity config identity ctx-ptr
+                                           {:has-body 0 :entrypoint 0}))]
+      (with-redefs [pi/running? (constantly true)
+                    worker-context/get-current-worker (constantly worker)
+                    h2o/install-request-dispatch (constantly 1)]
+        (let [first-connection (context 41)]
+          (is (= [h2o/CLJ_HANDLER_OK h2o/CLJ_HANDLER_OK h2o/CLJ_HANDLER_OK]
+                 [(on-request first-connection) (on-request first-connection)
+                  (on-request (context 42))]))
+          (is (= 2 (count @tasks_)) "one drainer per connection, the second request queued")
+          (reset! shutdown?_ true)
+          (is (= h2o/CLJ_HANDLER_SHUTTING_DOWN (on-request first-connection))))))))
 
 (deftest request-without-a-known-entrypoint-is-not-dispatched
   (doseq [index [h2o/CLJ_ENTRYPOINT_UNKNOWN 2 nil]]

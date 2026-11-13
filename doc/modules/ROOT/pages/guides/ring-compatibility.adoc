@@ -8,7 +8,8 @@ The xref:ROOT:ring-reference.adoc[Ring request and response reference] lists the
 == Synchronous handlers on virtual threads
 
 Busker supports Ring's one-argument handler: it receives a request map and returns a response map.
-Each request runs on a virtual thread, separate from the workers that drive network I/O.
+Each request runs on a new virtual thread, separate from the workers that drive network I/O, and its handler may block.
+With xref:ROOT:configuration.adoc[`:request-threads :reuse-within-connection`], quick requests of one connection can run one after another on the same virtual thread, so anything bound to the thread stays for the next request of that connection, for example `ThreadLocal` values, the thread's name, context class loader, uncaught-exception handler and identity, a lock left held, or a late interrupt or unpark; the xref:ROOT:guides/runtime-model.adoc[runtime model] gives the details.
 When a handler waits for Java I/O, the JVM can park its virtual thread and use the carrier thread for other work.
 Application code can therefore read a request body or call another service without adopting a callback-based handler API.
 

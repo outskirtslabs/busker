@@ -9,7 +9,7 @@ If a slow handler could stall a network thread, one unlucky request would delay 
 Busker calls each dedicated network thread a _worker_.
 Each worker has one _event loop_ and watches its sockets for activity.
 The `:n-workers` setting fixes the number of network workers, and therefore the number of network threads.
-This setting does not limit application threads because Busker starts one virtual thread for each request.
+This setting does not limit application threads because Busker starts one virtual thread for each request, unless the `:request-threads` setting described below says otherwise.
 
 The `:max-connections` setting limits the number of open connections shared by all workers.
 When that limit is reached, the workers stop accepting new connections until an existing connection closes.
@@ -52,6 +52,35 @@ The Ring handler and its synchronous middleware run there, and Busker writes the
 Most web handlers spend much of their time waiting for request data, databases, or other services.
 The JVM can park a virtual thread during ordinary blocking Java I/O, leaving the event loops free to serve other connections.
 This is why a synchronous Ring handler can read an upload or wait for a database without moving to Ring's callback API.
+
+=== Sharing virtual threads within a connection
+
+Starting a virtual thread for every request often wakes an idle platform thread, which runs a few microseconds of handler work and goes back to sleep.
+On a machine with many CPUs and many quick requests per connection, those wake-ups, not the handlers, limit the request rate.
+The xref:ROOT:configuration.adoc[`:request-threads` setting] chooses how handlers get their threads:
+
+* `:per-request`, the default, starts a new virtual thread for every request.
+* `:reuse-within-connection` lets quick requests of one connection run one after another on the same virtual thread.
+
+With `:reuse-within-connection`, a request that arrives while no thread runs requests of its connection starts a new virtual thread, as with `:per-request`.
+Requests of that connection that arrive while the thread is busy wait for it and run on it in turn.
+Once the thread has run requests back to back for about a tenth of a millisecond, later requests of its connection get new virtual threads, and the worker gives the requests already waiting new threads at its next check.
+An idle worker checks at least once per millisecond while requests wait, so a request can wait for up to about 1 ms plus one event-loop turn behind another request of its connection, counted from when that connection's thread starts running.
+While that thread still waits for a platform thread to run on, the requests behind it are not moved, and they run on it in turn once it starts.
+Handlers may still block: a slow handler only sends the requests behind it to new threads.
+When a stop or reload begins, each worker gives every waiting request of its connections a new thread at its next event-loop turn, and later requests are handled as with `:per-request`.
+If a worker does not take that turn within one second, or the thread that stops the server is interrupted, the waiting requests of the workers that have not taken that turn run one after another on the thread they wait for.
+Requests of different connections never share a thread.
+
+The setting can help when connections carry many quick requests at once, such as HTTP/2 and HTTP/3 clients that multiplex many requests, on machines with many CPUs.
+It does not help HTTP/1.1, where a connection carries one request at a time, so its requests mostly arrive alone, and it can cost HTTP/1.1 a little throughput, most with pipelining, because the second of two requests that arrive together waits for the first.
+On a machine with few CPUs the gain for HTTP/2 and HTTP/3 is small or none.
+
+The cost is that a request does not start on a fresh thread.
+Anything bound to the thread stays for the next request of the same connection that runs on it.
+For example: `ThreadLocal` values; the thread's name, context class loader and uncaught-exception handler; its identity, so anything keyed by the `Thread` object or its id; a lock the handler left held; and an interrupt or unpark that application code sends to the thread after its request ended, which makes the next request's first blocking call return or throw at once.
+Busker itself binds nothing to the thread per request, and scoped values cannot carry over.
+Keep `:per-request` if your handlers or libraries keep per-request state on the thread.
 
 CPU intensive work does not park.
 A handler that computes for a long time occupies one of the platform threads that runs virtual-thread work for the whole computation.

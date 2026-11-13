@@ -94,6 +94,7 @@
     (is (= (specs/default-n-workers (.availableProcessors (Runtime/getRuntime)))
            (:n-workers specs/default-config)))
     (is (= 0 (:worker-hot-poll-micros specs/default-config)))
+    (is (= :per-request (:request-threads specs/default-config)))
     (is (= 1024 (:max-connections specs/default-config)))
     (is (= 4
            (get-in specs/default-config
@@ -320,3 +321,18 @@
     (testing "rejects non-boolean values"
       (is (some #(= ::cfg/config-spec-invalid (:error %))
                 (load-errors (assoc base :http1-req-io-timeout-while-generating? 1)))))))
+
+(deftest request-threads-test
+  (let [base {:entrypoints {:http {:bind ":8080" :tls false}}
+              :dispatch [{}]}]
+    (testing "defaults to a new virtual thread for every request"
+      (is (= :per-request (:request-threads (cfg/load! base)))))
+    (testing "accepts both values"
+      (is (= :per-request (:request-threads (cfg/load! (assoc base :request-threads :per-request)))))
+      (is (= :reuse-within-connection
+             (:request-threads (cfg/load! (assoc base :request-threads :reuse-within-connection))))))
+    (testing "rejects any other value"
+      (doseq [value [:reuse "per-request" nil true]]
+        (is (some #(= ::cfg/config-spec-invalid (:error %))
+                  (load-errors (assoc base :request-threads value)))
+            (pr-str value))))))
