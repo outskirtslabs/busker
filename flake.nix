@@ -139,6 +139,16 @@
               name = "APPLE_SDK_PATH";
               value = "${apple-sdk}";
             }
+            # Zig keeps its build cache and unpacked dependencies in the project
+            # by default, so every checkout would compile H2O and BoringSSL again.
+            {
+              name = "ZIG_LOCAL_CACHE_DIR";
+              eval = "\${ZIG_LOCAL_CACHE_DIR:-\${XDG_CACHE_HOME:-$HOME/.cache}/zig}";
+            }
+            {
+              name = "ZIG_LOCAL_PKG_DIR";
+              eval = "\${ZIG_LOCAL_PKG_DIR:-\${XDG_CACHE_HOME:-$HOME/.cache}/zig/pkg}";
+            }
           ];
         };
     };
