@@ -218,7 +218,7 @@ One application caller can serialize access to a pending-receipt atom and skip w
         (:status result)))))
 ----
 
-This application atom does not replace Busker's writer synchronization. Use `on-close!` independently to remove closed connections. A scheduled heartbeat can pass `":\n\n"` to this function; do not queue missed heartbeats. For 15-second heartbeats, set `:http1-req-io-timeout 60000`; two-second heartbeats work with the default timeout. This setting affects all HTTP/1 request I/O, not just SSE, and does not change a proxy's timeout.
+This application atom does not replace Busker's writer synchronization. Use `on-close!` independently to remove closed connections. A scheduled heartbeat can pass `":\n\n"` to this function; do not queue missed heartbeats. See xref:configuration.adoc#_http1_streaming_timeouts[HTTP/1 streaming timeouts] for what heartbeats are for and how to choose their interval.
 
 == Content length
 

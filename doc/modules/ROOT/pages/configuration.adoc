@@ -84,7 +84,7 @@ either use their documented default or remain unset.
 | `:handshake-timeout` | Optional TLS handshake timeout in milliseconds.
 | `:max-spare-pipes` | Optional non-negative idle pipe cache limit.
 | `:http1-req-timeout` | Optional HTTP/1.1 request timeout in milliseconds.
-| `:http1-req-io-timeout` | Optional HTTP/1.1 request I/O timeout in milliseconds.
+| `:http1-req-io-timeout` | Optional HTTP/1.1 request I/O timeout in milliseconds. Covers request receipt and response writes, not the wait for the application's next output; see <<HTTP/1 streaming timeouts>>.
 | `:http1-upgrade?` | Allow h2c upgrade, default `true`.
 | `:http2-idle-timeout` | Optional HTTP/2 idle timeout in milliseconds.
 | `:http2-graceful-shutdown-timeout` | Optional HTTP/2 graceful shutdown timeout in milliseconds.
@@ -119,11 +119,15 @@ Blocking emitter calls park under pressure; nonblocking calls return full. Press
 
 === HTTP/1 streaming timeouts
 
-`:http1-req-io-timeout` applies to HTTP/1 request I/O, not just SSE. Increasing it also permits other HTTP/1 I/O stalls to last longer. A silent open stream can expire under this timeout.
+`:http1-req-io-timeout` (default 5000) limits how long HTTP/1 request I/O may make no progress: receipt of the request and its body, and each write of the response that the client does not read. It does not run while the application has nothing to send, so a silent open HTTP/1 stream, such as an SSE stream between events, stays open however long it waits. Increasing it lets these I/O stalls last longer.
 
-SSE heartbeats must send actual comment bytes such as `":\n\n"`, with `{:wait? false :flush? true}`. An empty write or a flush alone is not a heartbeat. A two-second heartbeat works with the default timeout. For a 15-second heartbeat, set `:http1-req-io-timeout 60000`.
+HTTP/2 and HTTP/3 streams follow separate settings. `:http2-idle-timeout` applies only while an HTTP/2 connection has no response waiting for the application, so a silent HTTP/2 stream stays open. An HTTP/3 connection closes when it receives no packet for `:http3-idle-timeout` (default 30000) or the idle limit the client announces, whichever is shorter, so a silent HTTP/3 stream stays open only while the client sends packets, such as keep-alive pings, or the server sends heartbeats that the client acknowledges.
 
-Do not accumulate heartbeats while output is stalled: keep at most one pending receipt, poll it with `realized?`, and skip this heartbeat when it is pending or admission returns full. Use `on-close!` independently for connection cleanup. Proxy timeouts are separate and are not changed by this setting.
+Heartbeats serve other purposes. On an idle HTTP/1 stream, Busker learns that the client has gone away only at the next write, so a heartbeat lets `on-close!` run promptly (see xref:guides/runtime-model.adoc#http1-idle-disconnects[When an idle HTTP/1.1 client disconnects]). Heartbeats also keep HTTP/3 connections inside their idle timeout, and keep proxies, load balancers and clients that close quiet connections after an idle limit from closing the stream; Busker's settings do not change those limits.
+
+SSE heartbeats must send actual comment bytes such as `":\n\n"`, with `{:wait? false :flush? true}`. An empty write or a flush alone is not a heartbeat. Choose the interval from the shortest idle limit between the server and the client.
+
+Do not accumulate heartbeats while output is stalled: keep at most one pending receipt, poll it with `realized?`, and skip this heartbeat when it is pending or admission returns full. Use `on-close!` independently for connection cleanup.
 
 == Entrypoints (`:entrypoints`)
 

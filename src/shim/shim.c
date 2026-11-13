@@ -1450,6 +1450,9 @@ void clj_h2o_create_globalconf(h2o_globalconf_t *conf,
     return;
 
   h2o_config_init(conf);
+  /* Silent HTTP/1 streams such as SSE stay open; the request I/O timeout
+     covers request receipt and each response write. */
+  conf->http1.req_io_timeout_while_generating = 0;
 
   if (flat != NULL)
     clj_h2o_apply_flat_config(conf, flat);

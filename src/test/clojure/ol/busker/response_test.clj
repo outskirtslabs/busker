@@ -120,6 +120,17 @@
           (.append response (char b))
           (recur))))))
 
+(defn- request-stream-with-unfinished-body!
+  "Sends a request whose body never completes, so the HTTP/1 request I/O
+  timeout stays armed while the response streams."
+  ([^Socket socket] (request-stream-with-unfinished-body! socket "/"))
+  ([^Socket socket path]
+   (let [out (.getOutputStream socket)]
+     (.write out (.getBytes (str "POST " path " HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                                 "Content-Length: 100\r\nConnection: close\r\n\r\npartial")
+                            StandardCharsets/US_ASCII))
+     (.flush out))))
+
 (defn- read-response! [^Socket socket]
   (let [headers (read-through! socket "\r\n\r\n")
         content-length (some->> (re-find #"(?im)^content-length: (\d+)\r?$" headers)
@@ -1117,7 +1128,7 @@
          {:http1-req-io-timeout 500})]
     (try
       (with-open [socket (connect port)]
-        (request-stream! socket)
+        (request-stream-with-unfinished-body! socket)
         (read-through! socket "head\n")
         (is (true? (deref entered 5000 false)))
         (is (true? (deref closed 10000 false)) "The I/O timeout ends the response during the fill.")
@@ -1168,6 +1179,34 @@
           (protocols/close! emitter)))
       (finally (busker/stop! server)))))
 
+(deftest io-timeout-ends-a-response-the-client-does-not-read-test
+  (let [ready (promise)
+        closed (promise)
+        [server port] (start-server
+                       (fn [{emitter :ol.busker.request/emitter}]
+                         (protocols/on-close! emitter #(deliver closed true))
+                         (deliver ready emitter)
+                         {:body emitter})
+                       {:http1-req-io-timeout 500})]
+    (try
+      (with-open [socket (connect port {:receive-buffer-size 1024})]
+        (request-stream! socket)
+        (let [emitter (deref ready 5000 nil)
+              chunk (byte-array 32768 (byte 65))
+              writer (on-virtual-thread
+                      #(loop [writes 0]
+                         (if (= :accepted (:status (protocols/emit! emitter chunk {:flush? true})))
+                           (recur (inc writes))
+                           writes)))
+              start (System/nanoTime)
+              outcome (deref writer 30000 ::timeout)
+              elapsed-ms (/ (- (System/nanoTime) start) 1000000.0)]
+          (is (pos-int? (:value outcome)) (pr-str outcome))
+          (is (< elapsed-ms 4000) (str "stalled write ended after " elapsed-ms "ms"))
+          (is (true? (deref closed 5000 false)) "The I/O timeout ends the stalled write.")
+          (is (not (protocols/open? emitter)))))
+      (finally (busker/stop! server)))))
+
 (deftest sustained-empty-writes-keep-other-connections-and-timers-responsive-test
   (let [busy (promise)
         busy-emitter (promise)
@@ -1209,8 +1248,7 @@
                            (catch Throwable _ nil)))]
           (try
             (let [start @operations]
-              (.write (.getOutputStream silent-socket)
-                      (.getBytes "GET /silent HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" StandardCharsets/US_ASCII))
+              (request-stream-with-unfinished-body! silent-socket "/silent")
               (read-through! silent-socket "silent\n")
               (dotimes [_ 20]
                 (is (str/ends-with? (request-text port "GET" "/other") "other")))
@@ -1222,6 +1260,7 @@
             (is (integer? (deref busy 10000 ::timeout)))
             (finally
               (deliver stop true)
+              (when (realized? busy-emitter) (protocols/close! @busy-emitter))
               (.close busy-socket)
               (.join drain 5000)))))
       (finally

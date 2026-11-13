@@ -150,23 +150,23 @@
     (testing (str transport " / " encoding)
       (check-cell! transport encoding))))
 
-(deftest silent-http1-stream-expires-after-configured-io-timeout-test
+(deftest silent-http1-stream-outlasts-io-timeout-test
   (with-stream
-    :h1 "identity" {:http1-req-io-timeout 1500}
-    (fn [{:keys [emitter ^Process process ^InputStream input closed]}]
-      (let [frame "data: before idle\n\n"
-            accepted (emit-flushed! emitter frame)]
+    :h1 "identity" {:http1-req-io-timeout 500}
+    (fn [{:keys [emitter input closed] :as client}]
+      (let [before "data: before idle\n\n"
+            after "data: after idle\n\n"
+            accepted (emit-flushed! emitter before)]
         (read-head! input)
-        (is (= frame (read-text! input frame)))
+        (is (= before (read-text! input before)))
         (is (= {:status :proceeded} (deref (:progress accepted) 10000 ::timeout)))
-        (let [start (System/nanoTime)
-              remainder (await-call! #(slurp input))
-              elapsed-ms (/ (- (System/nanoTime) start) 1000000.0)]
-          (is (= "" remainder))
-          (is (<= 700 elapsed-ms 12000) (str "idle EOF after " elapsed-ms "ms"))
-          (is (.waitFor process 5 TimeUnit/SECONDS))
-          (is (= 18 (.exitValue process)))
-          (is (true? (deref closed 2000 false))))))))
+        (Thread/sleep 2000)
+        (is (response/open? emitter) "Silence longer than the I/O timeout keeps the stream open.")
+        (is (not (realized? closed)))
+        (let [result (emit-flushed! emitter after)]
+          (is (= after (read-text! input after)))
+          (is (= {:status :proceeded} (deref (:progress result) 10000 ::timeout)))))
+      (finish-client! client))))
 
 (defn- check-heartbeats! [interval-ms count config]
   (with-stream
@@ -186,6 +186,3 @@
 
 (deftest two-second-heartbeats-with-default-timeout-test
   (check-heartbeats! 2000 6 {}))
-
-(deftest fifteen-second-heartbeats-with-sixty-second-timeout-test
-  (check-heartbeats! 15000 5 {:http1-req-io-timeout 60000}))
