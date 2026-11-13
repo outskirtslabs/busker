@@ -134,8 +134,8 @@
                    :task (apply shell "cljfmt --quiet -v fix" (if (seq *command-line-args*) *command-line-args* paths))}
 
                   fmt:check
-                  {:doc  "Check code formatting without making changes"
-                   :task (apply shell "cljfmt check " paths)}
+                  {:doc  "Check formatting as the Nix package check does, without changing files"
+                   :task (shell "cljfmt check src")}
 
                   lint:copy-configs
                   {:doc  "Copy clj-kondo config files from deps in the project"
@@ -143,11 +143,8 @@
                            (shell (str "clj-kondo --lint " cp " --dependencies --copy-configs --skip-lint")))}
 
                   lint
-                  {:doc  "Run the clj-kondo linter on the clojure code"
-                   :task (shell (str "clj-kondo" " --fail-level error"
-                                     (if (seq *command-line-args*)
-                                       (str " --lint " (first *command-line-args*))
-                                       " --lint src")))}
+                  {:doc  "Run the clj-kondo linter as the Nix package check does; warnings fail"
+                   :task (shell (str "clj-kondo --lint " (or (first *command-line-args*) "src")))}
 
                   hcloud
                   {:doc  "Manage the Hetzner Cloud benchmark server"
@@ -195,7 +192,7 @@
 
                   qa
                   {:doc     "Run full quality assurance: format, lint, and test"
-                   :depends [build lint test:all test]}
+                   :depends [fmt:check lint build test:all test]}
 
                   gen-docs
                   {:doc  "Generate all Antora documentation"
