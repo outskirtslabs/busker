@@ -20,7 +20,7 @@
    [java.net BindException ConnectException DatagramSocket InetSocketAddress Socket]
    [java.nio.file Files]
    [java.nio.file.attribute FileAttribute]
-   [java.util.concurrent ExecutorService LinkedBlockingQueue]))
+   [java.util.concurrent ExecutorService LinkedBlockingQueue TimeUnit]))
 
 (defn- response-config
   [port handler]
@@ -989,6 +989,34 @@
       (is (empty? (remove before (live-rotation-threads))))
       (finally
         (run! io/delete-file (reverse (file-seq (io/file storage-root))))))))
+
+(deftest failed-startup-reports-a-failed-cleanup-test
+  (let [port (util/free-port)
+        stop! generation/stop!
+        failure (ex-info "simulated cleanup failure" {})]
+    (with-redefs [native/create-ssl-ctx (fn [& _] mem/null)
+                  generation/stop! (fn [state]
+                                     (stop! state 60 TimeUnit/SECONDS)
+                                     (throw failure))]
+      (let [error (start-failure (tls-response-config port (constantly {:status 200})))]
+        (is (some #(identical? failure %)
+                  (mapcat #(.getSuppressed ^Throwable %)
+                          (take-while some? (iterate ex-cause error)))))))))
+
+(deftest failed-startup-keeps-its-error-when-cleanup-rethrows-it-test
+  (let [port (util/free-port)
+        stop! generation/stop!
+        failure (ex-info "simulated worker startup failure" {})]
+    (with-redefs [generation/init-worker-state (fn [_ _]
+                                                 (throw failure))
+                  generation/stop! (fn [state]
+                                     (stop! state 60 TimeUnit/SECONDS)
+                                     (throw failure))]
+      (let [causes (take-while some? (iterate ex-cause
+                                              (start-failure
+                                               (response-config port (constantly {:status 200})))))]
+        (is (some #(identical? failure %) causes))
+        (is (not-any? #(instance? IllegalArgumentException %) causes))))))
 
 (deftest failed-startup-destroys-ticket-manager-after-an-invalid-http3-key-test
   (let [port (util/free-port)

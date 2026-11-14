@@ -1401,5 +1401,7 @@
            (if-let [state @cleanup-state_]
              (stop! state)
              (release-listener-claims! listener-claims))
-           (catch Throwable _ nil))
+           (catch Throwable cleanup-error
+             (when-not (identical? t cleanup-error)
+               (.addSuppressed t cleanup-error))))
          (throw t))))))
