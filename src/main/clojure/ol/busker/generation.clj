@@ -186,29 +186,95 @@
                (catch Throwable t
                  (log-callback-failure! ::connection-close-callback-failed t))))]
     {::connection-close-cb cb
-     ::connection-close-cb-ptr (mem/callback (mem/auto-arena) cb [:pointer] :void)}))
+     ::connection-close-cb-ptr (mem/callback (mem/auto-arena) cb [:pointer] :void)
+     ::accept-failure-run {:started (AtomicLong. Long/MIN_VALUE)
+                           :failed-worker? (AtomicBoolean.)}}))
+
+(def ^:const accept-failure-run-limit-nanos
+  "How long a run of failed accepts, from its first failure to the next
+  completed accept, may last before the worker is failed."
+  1000000000)
+
+(defn- now-nanos
+  []
+  (System/nanoTime))
+
+(defn- attempt!
+  [f]
+  (try (f) (catch Throwable _ nil)))
+
+(defn- undo-failed-accept!
+  "Gives back what an accept took before it failed at `stage`. From `:closable`
+  on, closing the socket runs its close callback, which releases the slot and
+  the counts; at `:handed` H2O has the socket and nothing is given back."
+  [stage sock-ptr ^AtomicLong active-connection-count_ ^AtomicLongArray counts worker-idx]
+  (when (= :counted stage)
+    (attempt! #(.decrementAndGet active-connection-count_))
+    (attempt! #(.decrementAndGet counts (int worker-idx))))
+  (when (#{:limited :counted} stage)
+    (attempt! h2o/conn-limit-release))
+  (when (#{:accepted :limited :counted :closable} stage)
+    (attempt! #(h2o/socket-close sock-ptr))))
+
+(defn- end-accept-failure-run!
+  [{:keys [^AtomicLong started ^AtomicBoolean failed-worker?]}]
+  (.set started Long/MIN_VALUE)
+  (.set failed-worker? false))
+
+(defn- accept-failed!
+  "Stops `listener-ptr` for this event-loop turn after a failed accept of the
+  worker at `worker-idx`. The first failure of a run starts it and is logged;
+  when the run has lasted [[accept-failure-run-limit-nanos]], the worker is
+  failed once."
+  [^AtomicReferenceArray workers worker-idx
+   {:keys [^AtomicLong started ^AtomicBoolean failed-worker?]} listener-ptr ^Throwable t]
+  (attempt! #(h2o/socket-read-stop listener-ptr))
+  (attempt!
+   #(let [now (now-nanos)]
+      (if (= Long/MIN_VALUE (.get started))
+        (do (.set started now)
+            (log-callback-failure! ::accept-callback-failed t))
+        (when (and (>= (- now (.get started)) accept-failure-run-limit-nanos)
+                   (.compareAndSet failed-worker? false true))
+          (let [worker (.get workers (int worker-idx))]
+            (log-callback-failure! ::accept-failures-failed-worker t)
+            (when-let [fail (:on-native-failure! worker)]
+              (fail worker t))))))))
 
 (defn- create-accept-callback
-  [accept-ctx-ptr on-close-callback active-connection-count_
-   ^AtomicLongArray counts workers worker-idx]
+  [accept-ctx-ptr {::keys [connection-close-cb-ptr accept-failure-run]}
+   active-connection-count_ ^AtomicLongArray counts workers worker-idx]
   (let [worker-idx (long worker-idx)
         accept-cb (fn [listener-ptr _err-ptr]
-                    (try
-                      (if-not (at-minimum? (.get counts (int worker-idx)) counts)
-                        (h2o/socket-read-stop listener-ptr)
-                        (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
-                          (when-not (mem/null? sock-ptr)
-                            (if (pos? (h2o/conn-limit-try-acquire))
-                              (do
-                                (.incrementAndGet ^AtomicLong active-connection-count_)
-                                (let [own (.incrementAndGet counts (int worker-idx))]
-                                  (h2o/socket-set-on-close sock-ptr on-close-callback mem/null)
-                                  (h2o/h2o-accept accept-ctx-ptr sock-ptr)
-                                  (when (at-minimum? own counts)
-                                    (wake-other-workers! workers worker-idx))))
-                              (h2o/socket-close sock-ptr)))))
-                      (catch Throwable t
-                        (log-callback-failure! ::accept-callback-failed t))))]
+                    (let [stage_ (volatile! nil)
+                          sock_ (volatile! nil)]
+                      (try
+                        (if-not (at-minimum? (.get counts (int worker-idx)) counts)
+                          (h2o/socket-read-stop listener-ptr)
+                          (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
+                            (when-not (mem/null? sock-ptr)
+                              (vreset! sock_ sock-ptr)
+                              (vreset! stage_ :accepted)
+                              (if (pos? (h2o/conn-limit-try-acquire))
+                                (do
+                                  (vreset! stage_ :limited)
+                                  (.incrementAndGet ^AtomicLong active-connection-count_)
+                                  (let [own (.incrementAndGet counts (int worker-idx))]
+                                    (vreset! stage_ :counted)
+                                    (h2o/socket-set-on-close sock-ptr connection-close-cb-ptr mem/null)
+                                    (vreset! stage_ :closable)
+                                    (h2o/h2o-accept accept-ctx-ptr sock-ptr)
+                                    (vreset! stage_ :handed)
+                                    (end-accept-failure-run! accept-failure-run)
+                                    (when (at-minimum? own counts)
+                                      (wake-other-workers! workers worker-idx))))
+                                (do
+                                  (vreset! stage_ nil)
+                                  (h2o/socket-close sock-ptr))))))
+                        (catch Throwable t
+                          (undo-failed-accept! @stage_ @sock_ active-connection-count_
+                                               counts worker-idx)
+                          (accept-failed! workers worker-idx accept-failure-run listener-ptr t)))))]
     {::accept-cb accept-cb
      ::accept-cb-ptr (mem/callback (mem/auto-arena) accept-cb [:pointer :pointer] :void)}))
 
@@ -1129,7 +1195,7 @@
                                                    ssl-ctx-ptr)
                  accept-callback (create-accept-callback
                                   accept-ctx
-                                  (::connection-close-cb-ptr (nth on-close-callbacks thread-idx))
+                                  (nth on-close-callbacks thread-idx)
                                   active-connection-count_
                                   worker-connection-counts
                                   accepting-workers

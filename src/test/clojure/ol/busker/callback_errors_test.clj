@@ -119,17 +119,112 @@
 
 ;; Accept and connection-close callbacks
 
-(deftest accept-callback-contains-and-logs-errors
-  (let [failure (IllegalStateException. "accept failed")
+(defn- run-accepts
+  "Runs one accept on worker 0 of one for each `[outcome millis]` of `steps`,
+  with the clock at `millis`. An outcome is `:ok`, `:limit` for an accept at the
+  connection limit, or a Throwable for `h2o-accept` to throw; `natives` replaces
+  further H2O calls. Closing a socket whose close callback is installed runs
+  that callback, as H2O does. Returns what the accepts took, gave back and
+  reported."
+  [steps natives]
+  (let [active (AtomicLong.)
+        counts (AtomicLongArray. 1)
+        worker-failures (atom 0)
+        worker {:on-native-failure! (fn [_ _] (swap! worker-failures inc))}
+        workers (doto (AtomicReferenceArray. 1) (.set 0 worker))
+        calls (atom [])
+        record (fn [k] (fn [& _] (swap! calls conj k) nil))
+        close-installed? (atom false)
+        per-worker (#'generation/create-connection-close-callback active counts 0)
+        sock (ffi/alloc (ffi/auto-arena) 8)
+        outcome_ (atom nil)
+        clock_ (atom 0)
         {::generation/keys [accept-cb]}
-        (#'generation/create-accept-callback nil nil (AtomicLong.)
-                                             (AtomicLongArray. 1)
-                                             (AtomicReferenceArray. 1) 0)
-        [result events]
-        (with-redefs [h2o/evloop-socket-accept (fn [_] (throw failure))]
-          (capture-logs #(accept-cb ffi/null ffi/null)))]
-    (is (nil? result))
-    (is (= [{:id ::generation/accept-callback-failed :error failure}] events))))
+        (#'generation/create-accept-callback ::accept-ctx per-worker active counts workers 0)
+        defaults {#'generation/now-nanos (fn [] (* 1000000 @clock_))
+                  #'h2o/socket-read-stop (record :read-stop)
+                  #'h2o/evloop-socket-accept (fn [_] sock)
+                  #'h2o/conn-limit-try-acquire (fn []
+                                                 (swap! calls conj :acquire)
+                                                 (if (= :limit @outcome_) 0 1))
+                  #'h2o/conn-limit-release (record :release)
+                  #'h2o/socket-set-on-close (fn [& _] (reset! close-installed? true))
+                  #'h2o/h2o-accept (fn [& _]
+                                     (when (instance? Throwable @outcome_) (throw @outcome_))
+                                     (reset! close-installed? false))
+                  #'h2o/socket-close (fn [_]
+                                       (swap! calls conj :socket-close)
+                                       (when @close-installed?
+                                         (reset! close-installed? false)
+                                         ((::generation/connection-close-cb per-worker) sock)))}
+        [_ events]
+        (with-redefs-fn (merge defaults natives)
+          #(capture-logs (fn []
+                           (doseq [[outcome millis] steps]
+                             (reset! outcome_ outcome)
+                             (reset! clock_ millis)
+                             (accept-cb ::listener ffi/null)))))]
+    {:events (mapv :id events)
+     :worker-failures @worker-failures
+     :in-run? (not= Long/MIN_VALUE
+                    (.get ^AtomicLong (:started (::generation/accept-failure-run per-worker))))
+     :calls (frequencies @calls)
+     :active (.get active)
+     :count (.get counts 0)}))
+
+(def ^:private accept-failure (OutOfMemoryError. "accept failed"))
+
+(deftest failed-accept-before-h2o-gives-back-the-slot-counts-and-socket
+  (let [{:keys [events worker-failures calls active count]}
+        (run-accepts [[:ok 0] [:ok 1]]
+                     {#'h2o/socket-set-on-close
+                      (fn [& _] (throw (IllegalStateException. "set-on-close failed")))})]
+    (is (= 0 active))
+    (is (= 0 count))
+    (is (= {:acquire 2 :release 2 :socket-close 2 :read-stop 2} calls))
+    (is (= 0 worker-failures))
+    (is (= [::generation/accept-callback-failed] events)
+        "Only the first failure of a run is logged.")))
+
+(deftest failed-h2o-accept-closes-the-socket-and-its-close-callback-gives-back
+  (let [{:keys [calls active count]} (run-accepts [[accept-failure 0] [accept-failure 1]] {})]
+    (is (= 0 active))
+    (is (= 0 count))
+    (is (= {:acquire 2 :release 2 :socket-close 2 :read-stop 2} calls)
+        "The close callback releases each slot once.")))
+
+(deftest failed-accept-before-a-socket-stops-the-listener-for-the-turn
+  (let [{:keys [events calls active count]}
+        (run-accepts [[:ok 0]]
+                     {#'h2o/evloop-socket-accept
+                      (fn [_] (throw (IllegalStateException. "accept failed")))})]
+    (is (= {:read-stop 1} calls))
+    (is (= [0 0] [active count]))
+    (is (= [::generation/accept-callback-failed] events))))
+
+(deftest failed-accepts-that-clear-leave-the-worker-serving
+  (let [{:keys [events worker-failures in-run? calls active count]}
+        (run-accepts (concat (map (fn [ms] [accept-failure ms]) (range 0 20 2)) [[:ok 21]]) {})]
+    (is (= 0 worker-failures) "The worker keeps serving.")
+    (is (false? in-run?) "The completed accept ends the run.")
+    (is (= [1 1] [active count]) "Only the completed connection is counted.")
+    (is (= 1 (- (:acquire calls) (:release calls))) "Only its slot is taken.")
+    (is (= [::generation/accept-callback-failed] events) "One log line for the run.")))
+
+(deftest failed-accepts-that-last-a-second-fail-the-worker-once
+  (let [{:keys [events worker-failures active count]}
+        (run-accepts (map (fn [ms] [accept-failure ms]) [0 400 999 1000 1500 2000]) {})]
+    (is (= 1 worker-failures))
+    (is (= [0 0] [active count]))
+    (is (= [::generation/accept-callback-failed ::generation/accept-failures-failed-worker]
+           events)
+        "The run is logged once, and failing the worker once more.")))
+
+(deftest an-accept-at-the-connection-limit-does-not-end-a-run
+  (let [{:keys [worker-failures in-run?]}
+        (run-accepts [[accept-failure 0] [:limit 500] [accept-failure 1000]] {})]
+    (is (true? in-run?))
+    (is (= 1 worker-failures))))
 
 (deftest connection-close-callback-contains-and-logs-errors
   (let [failure (IllegalStateException. "release failed")
