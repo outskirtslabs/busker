@@ -805,9 +805,8 @@ static void test_count_follows_close(const char *cert, const char *key) {
   for (int i = 0; i < 6; ++i)
     quicly_free(clients[i]);
   clj_h2o_http3_dispose_worker_ctx(w1);
-  clj_http3_transport_unregister_attachment(transport, 1, 0, pair0[1]);
+  clj_http3_transport_unregister_attachment(transport, w0);
   w0->transport = NULL;
-  w0->load = NULL;
   close(pair0[0]);
   close(pair0[1]);
   close(pair1[0]);

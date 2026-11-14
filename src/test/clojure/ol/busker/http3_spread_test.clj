@@ -39,7 +39,8 @@
 
 (defn- active-workers
   "The UDP transport, generation id and worker count of the active
-  generation, which name its workers' counters also after it retires."
+  generation, which name its workers' counters also after it retires; the
+  counters read 0 once the workers are freed."
   [server]
   (let [generation (:instance (:active @(:busker/state server)))]
     {:transport (first (#'generation/http3-transport-resources
@@ -346,7 +347,6 @@
               (is (= [0 2] (connected-sockets old-workers)))
               (doseq [[id h] (map-indexed vector held)] (finish! ctx id h))
               (is (empty? (wait-until #(:draining @(:busker/state server)) empty?)))
-              (is (= [0 0] (connected-sockets old-workers)))
               (is (= {:bound 2 :connected 0}
                      (wait-until #(udp-sockets-on-port port)
                                  #(= {:bound 2 :connected 0} %))))))

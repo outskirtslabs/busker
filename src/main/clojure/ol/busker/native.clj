@@ -1262,16 +1262,17 @@
 
 (defcfn http3-forwarded-datagrams
   "Datagrams worker `thread-id` of generation `node-id` has forwarded to other
-   workers over the UDP transport. For tests and diagnostics; safe from any
-   thread until the transport is released, also after the worker stopped."
+   workers over the UDP transport; 0 once the worker's context is freed. For
+   tests and diagnostics; safe from any thread until the transport is
+   released."
   "clj_h2o_http3_forwarded_datagrams"
   [:pointer :long :int] :long)
 
 (defcfn http3-connected-sockets
   "UDP sockets worker `thread-id` of generation `node-id` holds connected to
-   clients whose datagrams the kernel delivers to another worker. For tests
-   and diagnostics; safe from any thread until the transport is released,
-   also after the worker stopped."
+   clients whose datagrams the kernel delivers to another worker; 0 once the
+   worker's context is freed. For tests and diagnostics; safe from any thread
+   until the transport is released."
   "clj_h2o_http3_connected_sockets"
   [:pointer :long :int] :int)
 

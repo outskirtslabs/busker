@@ -11,6 +11,11 @@
     }                                                                          \
   } while (0)
 
+#include "test_heap.h"
+
+/* Why heap checks are skipped, or NULL */
+static const char *heap_skip;
+
 static quicly_address_t address(int family, uint16_t port) {
   quicly_address_t addr = {0};
   addr.sa.sa_family = family;
@@ -195,6 +200,7 @@ static void test_envelope_only_from_forwarding_channel(void) {
   CHECK(clj_http3_transport_register_attachment(
       transport, quicly_cid_plaintext_invalid.node_id,
       quicly_cid_plaintext_invalid.thread_id, captured[0], NULL));
+  CHECK(clj_http3_transport_register_attachment(transport, 1, 1, fds[1], ctx));
   ctx->transport = transport;
   ctx->node_id = 1;
   ctx->thread_id = 1;
@@ -969,15 +975,13 @@ static void test_failed_forward_accepts_locally(void) {
   CHECK(forwarded_to(&f, 1) == 1);
 
   /* When the worker is gone its flows come here */
-  clj_http3_transport_unregister_attachment(f.transport, 7, 1,
-                                            f.workers[1]->forward_fd);
-  CHECK(atomic_load(&f.workers[1]->load->forward_fd) == -1);
+  clj_http3_transport_unregister_attachment(f.transport, f.workers[1]);
+  CHECK(f.workers[1]->load == NULL);
   CHECK(arrive(&f, 0, &moved, QUICLY_PACKET_TYPE_INITIAL, 2) == 1);
   CHECK(arrive(&f, 0, &moved, QUICLY_PACKET_TYPE_0RTT, 2) == 1);
-  uint32_t pending_before = pending(f.workers[1]);
   quicly_address_t next = address(AF_INET, 5002);
   CHECK(arrive(&f, 0, &next, QUICLY_PACKET_TYPE_INITIAL, 4) == 1);
-  CHECK(pending(f.workers[1]) == pending_before);
+  CHECK(forwarded_to(&f, 1) == 0);
   spread_teardown(&f);
 }
 
@@ -1010,68 +1014,257 @@ static void test_fallback_skips_unavailable_workers(void) {
   spread_teardown(&f);
 }
 
-/* Unregistering publishes a set without the worker before waiting for its
-   writers, and the worker is then neither found nor written to */
-static void test_unregister(void) {
+/* A register, unregister or activation on another thread, so that the test
+   thread can act as a worker in the middle of a use of the worker sets */
+typedef struct {
+  spread_fixture_t *f;
+  clj_http3_ctx_t *unregister; /* NULL: activate generation 7 */
+  pthread_t thread;
+  _Atomic int returned;
+} lifecycle_call_t;
+
+static void *lifecycle_call_run(void *arg) {
+  lifecycle_call_t *call = arg;
+  if (call->unregister != NULL)
+    clj_http3_transport_unregister_attachment(call->f->transport,
+                                              call->unregister);
+  else
+    clj_h2o_http3_activate_udp_transport_generation(call->f->transport, 7);
+  atomic_store(&call->returned, 1);
+  return NULL;
+}
+
+static void lifecycle_call_start(lifecycle_call_t *call, spread_fixture_t *f,
+                                 clj_http3_ctx_t *unregister) {
+  *call = (lifecycle_call_t){.f = f, .unregister = unregister};
+  CHECK(pthread_create(&call->thread, NULL, lifecycle_call_run, call) == 0);
+}
+
+/* Whether the call has returned within `millis` */
+static int lifecycle_call_returns(lifecycle_call_t *call, int millis) {
+  for (int i = 0; i < millis && !atomic_load(&call->returned); ++i)
+    usleep(1000);
+  return atomic_load(&call->returned);
+}
+
+/* Unregistering publishes a set without the worker at once, but returns,
+   frees the worker's record and lets its descriptor be closed only after a
+   worker that found it in the old set has finished */
+static void test_unregister_waits_for_users(void) {
   spread_fixture_t f;
   spread_setup(&f, 2);
-  clj_http3_worker_load_t *load = f.workers[1]->load;
-  clj_http3_transport_unregister_attachment(f.transport, 7, 1,
-                                            f.workers[1]->forward_fd);
+  clj_http3_worker_load_t *self = f.workers[0]->load;
+  clj_http3_enter_sets(self);
   clj_http3_worker_set_t *set = atomic_load(&f.transport->workers);
-  CHECK(clj_http3_find_worker(set, 7, 1) == NULL && set->num_loads == 1);
-  CHECK(atomic_load(&load->forward_fd) == -1 &&
-        atomic_load(&load->writers) == 0);
+  clj_http3_worker_load_t *target = clj_http3_find_worker(set, 7, 1);
+  CHECK(target != NULL);
+  lifecycle_call_t call;
+  lifecycle_call_start(&call, &f, f.workers[1]);
+  CHECK(!lifecycle_call_returns(&call, 200));
+  CHECK(clj_http3_find_worker(atomic_load(&f.transport->workers), 7, 1) ==
+        NULL);
+  /* Freed too early, these would read the free-list links glibc writes
+     into freed blocks */
+  if (heap_skip == NULL)
+    CHECK(set->active_node_id == 7 && set->num_loads == 2 &&
+          set->loads[1] == target && target->node_id == 7 &&
+          target->thread_id == 1);
+  CHECK(atomic_load(&target->forward_fd) == -1);
   quicly_address_t addr = address(AF_INET, 5000);
   uint8_t byte = 0;
-  CHECK(clj_http3_send_to_worker(load, &addr, &addr, 4, 0, &byte, 1) ==
+  CHECK(clj_http3_send_to_worker(target, &addr, &addr, 4, 0, &byte, 1) ==
         CLJ_HTTP3_GONE);
-  CHECK(atomic_load(&load->writers) == 0 && forwarded_to(&f, 1) == 0);
+  clj_http3_leave_sets(self);
+  CHECK(lifecycle_call_returns(&call, 5000));
+  CHECK(pthread_join(call.thread, NULL) == 0);
+  CHECK(f.workers[1]->load == NULL && forwarded_to(&f, 1) == 0);
   spread_teardown(&f);
 }
 
-static size_t count_sets(clj_http3_udp_transport_t *transport,
-                         size_t *max_loads) {
-  size_t n = 0;
-  *max_loads = 0;
-  for (clj_http3_worker_set_t *set = atomic_load(&transport->workers);
-       set != NULL; set = set->replaced) {
-    ++n;
-    if (set->num_loads > *max_loads)
-      *max_loads = set->num_loads;
+/* A replaced set is freed only after every worker that loaded it has
+   finished; a use that begins after the swap does not hold it up */
+static void test_publish_waits_for_users(void) {
+  spread_fixture_t f;
+  spread_setup(&f, 2);
+  clj_http3_worker_load_t *self = f.workers[1]->load;
+  clj_http3_worker_load_t *other = f.workers[0]->load;
+  clj_http3_enter_sets(self);
+  clj_http3_worker_set_t *set = atomic_load(&f.transport->workers);
+  lifecycle_call_t call;
+  lifecycle_call_start(&call, &f, NULL);
+  CHECK(!lifecycle_call_returns(&call, 200));
+  CHECK(atomic_load(&f.transport->workers) != set);
+  /* As in test_unregister_waits_for_users */
+  if (heap_skip == NULL)
+    CHECK(set->active_node_id == 7 && set->num_loads == 2 &&
+          set->loads[0] == other && set->loads[1] == self);
+  clj_http3_leave_sets(self);
+  clj_http3_enter_sets(self);
+  CHECK(lifecycle_call_returns(&call, 5000));
+  clj_http3_leave_sets(self);
+  CHECK(pthread_join(call.thread, NULL) == 0);
+  spread_teardown(&f);
+}
+
+/* Forwarding by CID and steering a new flow each mark one use */
+static void test_uses_are_marked(void) {
+  spread_fixture_t f;
+  spread_setup(&f, 2);
+  clj_http3_worker_load_t *self = f.workers[0]->load;
+  uint64_t before = atomic_load(&self->using_sets);
+  quicly_address_t dest = address(AF_INET, 443), src = address(AF_INET, 5000);
+  uint8_t payload[] = "quic packet";
+  quicly_decoded_packet_t packet = {.octets = {payload, sizeof(payload)}};
+  uint64_t node = 7;
+  CHECK(clj_forward_quic_packets(&f.workers[0]->h3_ctx.super, &node, 1, &dest,
+                                 &src, 4, &packet, 1) == 1);
+  CHECK(atomic_load(&self->using_sets) == before + 2);
+  set_conns(f.workers[0], 1);
+  set_conns(f.workers[1], 0);
+  CHECK(arrive(&f, 0, &src, QUICLY_PACKET_TYPE_INITIAL, 1) == 0);
+  CHECK(atomic_load(&self->using_sets) == before + 4);
+  CHECK(forwarded_to(&f, 1) == 2);
+  spread_teardown(&f);
+}
+
+/* Only Linux shows, through /proc, that the sender sleeps inside its write;
+   elsewhere the test could not tell a write in progress from one not begun */
+#ifdef __linux__
+#include <sys/syscall.h>
+
+/* Worker 0 forwarding to worker 1 on its own thread */
+typedef struct {
+  spread_fixture_t *f;
+  int steer;
+  _Atomic int tid;
+  _Atomic int result;
+  _Atomic int returned;
+} sender_t;
+
+static void *sender_run(void *arg) {
+  sender_t *sender = arg;
+  atomic_store(&sender->tid, (int)syscall(SYS_gettid));
+  quicly_address_t dest = address(AF_INET, 443), src = address(AF_INET, 5000);
+  uint8_t payload[] = "quic packet";
+  quicly_decoded_packet_t packet = {.octets = {payload, sizeof(payload)}};
+  uint64_t node = 7;
+  atomic_store(&sender->result,
+               sender->steer
+                   ? arrive(sender->f, 0, &src, QUICLY_PACKET_TYPE_INITIAL, 1)
+                   : clj_forward_quic_packets(
+                         &sender->f->workers[0]->h3_ctx.super, &node, 1, &dest,
+                         &src, 4, &packet, 1));
+  atomic_store(&sender->returned, 1);
+  return NULL;
+}
+
+/* Whether the sender sleeps in the kernel, which only its write can do */
+static int sender_blocked(sender_t *sender) {
+  for (int i = 0; i < 5000; ++i) {
+    char path[64], buf[512];
+    snprintf(path, sizeof(path), "/proc/self/task/%d/stat",
+             atomic_load(&sender->tid));
+    FILE *stat = atomic_load(&sender->tid) != 0 ? fopen(path, "r") : NULL;
+    if (stat != NULL) {
+      size_t n = fread(buf, 1, sizeof(buf) - 1, stat);
+      fclose(stat);
+      buf[n] = '\0';
+      char *end = strrchr(buf, ')');
+      if (end != NULL && end[1] == ' ' && end[2] == 'S')
+        return 1;
+    }
+    usleep(1000);
   }
+  return 0;
+}
+
+/* A write to another worker's channel happens while the sender is marked, so
+   unregistering the target, after which its descriptor closes, waits for it */
+static void test_writes_are_marked(int steer) {
+  spread_fixture_t f;
+  spread_setup(&f, 2);
+  set_conns(f.workers[0], 1);
+  set_conns(f.workers[1], 0);
+  int fd = f.workers[1]->forward_fd;
+  char filler[1024] = {0};
+  while (write(fd, filler, sizeof(filler)) > 0)
+    ;
+  CHECK(errno == EAGAIN || errno == EWOULDBLOCK);
+  CHECK(fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK) == 0);
+
+  sender_t sender = {.f = &f, .steer = steer};
+  pthread_t thread;
+  CHECK(pthread_create(&thread, NULL, sender_run, &sender) == 0);
+  CHECK(sender_blocked(&sender));
+  CHECK((atomic_load(&f.workers[0]->load->using_sets) & 1) == 1);
+  lifecycle_call_t call;
+  lifecycle_call_start(&call, &f, f.workers[1]);
+  CHECK(!lifecycle_call_returns(&call, 200));
+
+  forwarded_to(&f, 1);
+  CHECK(pthread_join(thread, NULL) == 0);
+  CHECK(atomic_load(&sender.result) == (steer ? 0 : 1));
+  CHECK(lifecycle_call_returns(&call, 5000));
+  CHECK(pthread_join(call.thread, NULL) == 0);
+  CHECK((atomic_load(&f.workers[0]->load->using_sets) & 1) == 0);
+  spread_teardown(&f);
+}
+#else
+static void test_writes_are_marked(int steer) {
+  printf("write marking test (%s) skipped: needs /proc to see a blocked "
+         "write\n",
+         steer ? "steering" : "forwarding");
+}
+#endif
+
+static size_t count_loads(clj_http3_udp_transport_t *transport) {
+  size_t n = 0;
+  for (clj_http3_worker_load_t *load = transport->loads; load != NULL;
+       load = load->next)
+    ++n;
   return n;
 }
 
-/* Each register, unregister and activation keeps one set until release:
-   2N + 1 sets of at most 2N workers per reload of N workers, plus one load
-   record per worker and generation */
-static void test_set_growth(void) {
-  enum { N = 4, RELOADS = 3 };
+/* One reload of N workers: the next generation registers and is activated,
+   and the previous one unregisters */
+static void reload_round(clj_http3_udp_transport_t *transport,
+                         clj_http3_ctx_t *ctxs, uint64_t node, size_t n) {
+  clj_http3_ctx_t *next = ctxs + (node % 2) * n, *prev = ctxs + (1 - node % 2) * n;
+  for (uint32_t t = 0; t < n; ++t) {
+    next[t] = (clj_http3_ctx_t){.node_id = node, .thread_id = t,
+                                .forward_fd = (int)(1000 + node % 2 * n + t)};
+    CHECK(clj_http3_transport_register_attachment(
+        transport, node, t, next[t].forward_fd, next + t));
+  }
+  clj_h2o_http3_activate_udp_transport_generation(transport, node);
+  for (uint32_t t = 0; t < n && node > 1; ++t)
+    clj_http3_transport_unregister_attachment(transport, prev + t);
+}
+
+/* Heap in use and load records stay level over many reloads */
+static void test_memory_per_reload(void) {
+  enum { N = 8, RELOADS = 1000 };
+  if (heap_skip != NULL) {
+    printf("memory per reload test skipped: %s\n", heap_skip);
+    return;
+  }
   clj_http3_udp_transport_t *transport = calloc(1, sizeof(*transport));
+  clj_http3_ctx_t ctxs[2 * N];
   CHECK(transport != NULL);
   transport->reservation_fd = -1;
   CHECK(pthread_mutex_init(&transport->mutex, NULL) == 0);
-  for (uint32_t t = 0; t < N; ++t)
-    CHECK(clj_http3_transport_register_attachment(transport, 1, t, 1000 + t,
-                                                  NULL));
-  clj_h2o_http3_activate_udp_transport_generation(transport, 1);
-  for (uint64_t node = 2; node <= RELOADS + 1; ++node) {
-    for (uint32_t t = 0; t < N; ++t)
-      CHECK(clj_http3_transport_register_attachment(
-          transport, node, t, (int)(1000 * node + t), NULL));
-    clj_h2o_http3_activate_udp_transport_generation(transport, node);
-    for (uint32_t t = 0; t < N; ++t)
-      clj_http3_transport_unregister_attachment(transport, node - 1, t,
-                                                (int)(1000 * (node - 1) + t));
-  }
-  size_t max_loads, loads = 0;
-  CHECK(count_sets(transport, &max_loads) == (N + 1) + RELOADS * (2 * N + 1));
-  CHECK(max_loads <= 2 * N);
-  for (clj_http3_worker_load_t *load = transport->loads; load != NULL;
-       load = load->next)
-    ++loads;
-  CHECK(loads == N * (RELOADS + 1));
+  uint64_t node = 1;
+  for (; node <= 10; ++node)
+    reload_round(transport, ctxs, node, N);
+  size_t before = heap_now();
+  for (; node <= 10 + RELOADS; ++node)
+    reload_round(transport, ctxs, node, N);
+  size_t after = heap_now();
+  fprintf(stderr, "heap in use after %d reloads of %d workers: %zu bytes more\n",
+          RELOADS, N, after > before ? after - before : 0);
+  CHECK(after <= before + 1024);
+  CHECK(count_loads(transport) == N && transport->num_attachments == N);
+  CHECK(atomic_load(&transport->workers)->num_loads == N);
   clj_h2o_http3_release_udp_transport(transport);
 }
 
@@ -1469,6 +1662,9 @@ static void test_full_listener_keeps_flows(void) {
 #endif
 
 int main(void) {
+  heap_skip = heap_skip_reason();
+  if (heap_skip != NULL)
+    printf("QUIC forwarding heap checks skipped: %s\n", heap_skip);
   test_worker_ctx_send_offload();
   for (int unknown_initial = 0; unknown_initial <= 1; ++unknown_initial) {
     test_forward(0, unknown_initial);
@@ -1499,8 +1695,12 @@ int main(void) {
   test_batch_keeps_addresses();
   test_failed_forward_accepts_locally();
   test_fallback_skips_unavailable_workers();
-  test_unregister();
-  test_set_growth();
+  test_unregister_waits_for_users();
+  test_publish_waits_for_users();
+  test_uses_are_marked();
+  test_writes_are_marked(0);
+  test_writes_are_marked(1);
+  test_memory_per_reload();
 #if CLJ_HTTP3_CONNECTED_SOCKETS
   for (int i = 0; i < 2; ++i) {
     int family = i == 0 ? AF_INET : AF_INET6;
