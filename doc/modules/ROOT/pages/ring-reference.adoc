@@ -95,7 +95,7 @@ Busker sends scalar strings unchanged and applies `str` to other scalar values.
 It emits each element of a sequential response header value as a separate field line, in sequence order.
 This supports Ring vector values and the sequential `Set-Cookie` values produced by `wrap-cookies` and `wrap-session`.
 
-Each response head permits at most 64 header pairs and 16384 staging bytes. These limits apply to ordinary Ring responses, streaming heads and informational responses. Busker throws before accepting a head that exceeds either limit; streaming does not increase header capacity.
+Busker sets no limit on response headers. A head above 64 header pairs or 16384 staging bytes takes the streaming path and logs a `:ol.busker.response/large-head` warning.
 
 Busker does not infer a response `content-type`; set that header in the response or with middleware.
 
@@ -152,7 +152,6 @@ With an emitter, an application can:
 An informational response cannot contain a body.
 Each informational response has a separate complete header map.
 After the final response is committed, its status and headers cannot change.
-The same 64-pair and 16384-byte header limits apply to each `emit!` response map, whether blocking or nonblocking. Excess headers throw rather than returning `:full`.
 
 The emitter is available in the request under `:ol.busker.request/emitter`.
 A handler uses it by returning it as the response body.

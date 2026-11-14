@@ -270,20 +270,19 @@
   (is (thrown? ClassCastException
                (#'response/normalized-head {:headers {:x-key "v"}} nil false))))
 
-(deftest fixed-head-header-storage-limits
+(deftest heads-above-the-fixed-header-space-are-not-fixed
   (let [pairs (fn [n] (vec (repeat n "value")))]
     (is (= 64 (count (:headers (fixed-head {:body "ok"
                                             :headers (array-map "X-Repeat" (pairs 64)
                                                                 "Content-Length" "2")})))))
-    (doseq [[headers header-count] [[{"X-Repeat" (pairs 65)} 65]
-                                    [(array-map "X-Repeat" (pairs 63) "X-Other" ["a" "b"]) 65]
-                                    [{"X-Large" (apply str (repeat 16384 "x"))} 1]]
-            build [#(#'response/ordinary-fixed-plan plan-request {:body "ok" :headers headers})
-                   #(#'response/normalized-head {:body "ok" :headers headers} 2 false)
-                   #(#'response/normalized-head {:status 103 :headers headers} nil true)]]
-      (let [error (try (build) nil (catch clojure.lang.ExceptionInfo e e))]
-        (is (= "Response headers exceed bounded header storage" (ex-message error)))
-        (is (= {:header-count header-count} (ex-data error)))))))
+    (doseq [[headers header-count header-bytes]
+            [[{"X-Repeat" (pairs 65)} 65 (* 65 13)]
+             [(array-map "X-Repeat" (pairs 63) "X-Other" ["a" "b"]) 65 (+ (* 63 13) 16)]
+             [{"X-Large" (apply str (repeat 16344 "x"))} 1 16351]]]
+      (is (nil? (#'response/ordinary-fixed-plan plan-request {:body "ok" :headers headers})))
+      (doseq [head [(#'response/normalized-head {:body "ok" :headers headers} 2 false)
+                    (#'response/normalized-head {:status 103 :headers headers} nil true)]]
+        (is (= [header-count header-bytes] [(count (:headers head)) (:header-bytes head)]))))))
 
 (deftest informational-head-lowercases-names-and-drops-content-length
   (is (= {:status 103 :headers [["link" "</a.css>; rel=preload"] ["x-two" "1"] ["x-two" "2"]]
@@ -386,9 +385,7 @@
         (is (= 64 (count (re-seq #"(?im)^x-repeat: value\r?$" wire))))
         (is (str/ends-with? wire "\r\n\r\nok")))
       (finally (busker/stop! server))))
-  (doseq [headers [{"X-Repeat" (repeat 65 "value")}
-                   {"X-Large" (apply str (repeat 16384 "x"))}
-                   {"Content-Length" "not-a-number"}
+  (doseq [headers [{"Content-Length" "not-a-number"}
                    {"Content-Length" ["2" "2"]}]]
     (is (thrown? Exception
                  (#'response/normalized-head {:body "ok" :headers headers} 2 false)))
@@ -399,28 +396,34 @@
                   {:body "ok" :headers headers})))))
 
 (deftest invalid-ring-response-terminates-transport
-  (doseq [headers [{"X-Repeat" (repeat 65 "value")}
-                   {"X-Large" (apply str (repeat 16384 "x"))}]
+  ;; A header name that is not a string throws a ClassCastException, which is
+  ;; not an invalid-response error, so the response fails rather than getting a 500.
+  (doseq [headers [{:x-key "v"} {'x-key "v"}]
           informational? [false true]]
     (let [closed (promise)
+          close-count (atom 0)
           [server port] (start-server
                          (fn [{emitter :ol.busker.request/emitter}]
-                           (protocols/on-close! emitter #(deliver closed true))
+                           (protocols/on-close! emitter #(do (swap! close-count inc)
+                                                             (deliver closed true)))
                            (when informational? (protocols/emit! emitter {:status 103}))
-                           {:body "invalid-body" :headers headers}))]
+                           {:body "invalid-body" :headers headers}))
+          context (pr-str [headers informational?])]
       (try
         (with-open [^Socket socket (connect port)]
           (.setSoTimeout socket 2000)
           (request-stream! socket)
           (let [wire (String. (.readAllBytes (.getInputStream socket)) StandardCharsets/UTF_8)]
-            (is (str/includes? wire "HTTP/1.1 200 OK\r\n"))
-            (is (str/includes? (str/lower-case wire) "transfer-encoding: chunked\r\n"))
-            (is (not (str/includes? wire "invalid-body")))
-            (is (not (str/ends-with? wire "\r\n0\r\n\r\n")))))
-        (is (true? (deref closed 2000 false)))
+            (is (str/includes? wire "HTTP/1.1 200 OK\r\n") context)
+            (is (str/includes? (str/lower-case wire) "transfer-encoding: chunked\r\n") context)
+            (is (not (str/includes? wire "invalid-body")) context)
+            (is (not (str/ends-with? wire "\r\n0\r\n\r\n")) context)))
+        (is (true? (deref closed 2000 false)) context)
         (finally
           (is (= {:value nil}
-                 (deref (on-virtual-thread #(busker/stop! server)) 5000 ::timeout))))))))
+                 (deref (on-virtual-thread #(busker/stop! server)) 5000 ::timeout))
+              context)
+          (is (= 1 @close-count) context))))))
 
 (deftest ordinary-ring-body-forms
   (let [response_ (atom {:status 200 :body nil})

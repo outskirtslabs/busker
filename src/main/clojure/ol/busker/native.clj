@@ -1116,6 +1116,19 @@
     (when (pos? length)
       (String. bytes (int start) (int length) StandardCharsets/UTF_8))))
 
+(defn- path-uri
+  "Returns `path` without the query string that starts at `query-index`, or
+  `path` itself when `query-index` is negative."
+  ^String [^String path ^long query-index]
+  (if (neg? query-index) path (subs path 0 query-index)))
+
+(defn ^:no-doc request-uri
+  "Returns the path of the request copy `req-ctx` without its query string, as
+  in Ring `:uri`, or nil when there is no path."
+  [req-ctx]
+  (when-let [^String path (copied-text (:bytes req-ctx) (:ends req-ctx) 2)]
+    (path-uri path (.indexOf path "?"))))
+
 (defn- copied-headers
   "Returns the Ring headers map of the copied header fields, or nil when the
   request has none. Names are lower-cased; an empty value is the empty string;
@@ -1161,7 +1174,7 @@
      ;; `if` yields a boxed Boolean, which `aset` on an Object array accepts
      ;; without reflection.
      :ol.busker/early-data? (if (= 1 (:early-data req-ctx)) true false)
-     :uri (if (neg? query-index) path (subs path 0 query-index))
+     :uri (path-uri path query-index)
      :server-name server-name
      :query-string (when-not (neg? query-index) (subs path (inc query-index)))
      :body (when (= 1 (:has-body req-ctx))

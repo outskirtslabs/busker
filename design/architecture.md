@@ -73,10 +73,10 @@ Each request retains the generation configuration unchanged and references its w
 ## Responses
 
 Internally there are two paths for responses to take: streaming responses or fixed-final.
-A Ring response returned by a handler is sent down the fixed-final path when nothing has been written to its emitter, its status is 200 to 999, and its body is nil, a byte array, a ByteBuffer, or a string whose encoding in the response charset is at most `:output-buffer-size` and 32768 bytes.
+A Ring response returned by a handler is sent down the fixed-final path when nothing has been written to its emitter, its status is 200 to 999, its head fits 64 header pairs and 16384 staging bytes, and its body is nil, a byte array, a ByteBuffer, or a string whose encoding in the response charset is at most `:output-buffer-size` and 32768 bytes.
 This is a perf optimization so small requests can be sent in one clj->h2o operation.
 
-Other supported bodies use the streaming path, which sends body data in chunks with backpressure to prevent the application from producing data faster than the client can read it. Every response head, including streaming and informational heads, must fit 64 header pairs and 16384 staging bytes. Excess headers cause an exception before acceptance; streaming does not increase header capacity.
+Other supported bodies use the streaming path, which sends body data in chunks with backpressure to prevent the application from producing data faster than the client can read it. Streaming heads have no header limit. A response whose head does not fit a fixed slot takes the streaming path and logs a `:ol.busker.response/large-head` warning.
 
 ### Fixed-final responses
 
@@ -98,7 +98,7 @@ The content length is the handler's `content-length` header when it sets one, ot
 
 A handler's `content-length` that is not a non-negative integer is an invalid response. So is one that differs from the length of a complete body whose length Busker knows, on either path. Busker does not replace it: it cannot tell a stale header from a truncated body. Statuses 204, 205 and 304 and a HEAD response with an empty body are not checked, since no body goes out and the header describes another response. A string or sequence body in a charset that Java can name but not encode, such as `x-JISAutoDetect`, is also an invalid response, found before the head. An `emit!` producer on a fixed slot whose output differs from the head's content length throws before publication.
 
-An `emit!` producer with `:end? true` on an emitter without earlier output also uses a slot, through a confined ByteBuffer view, when its capacity is at most 32768 bytes, the request method is not HEAD and the status is not 204, 205 or 304. Ring returns on this path use no streaming controller or receipt. Slot exhaustion parks a blocking caller or rejects a nonblocking operation; it does not select a second copying transport.
+An `emit!` producer with `:end? true` on an emitter without earlier output also uses a slot, through a confined ByteBuffer view, when its capacity is at most 32768 bytes, its head fits the slot, the request method is not HEAD and the status is not 204, 205 or 304. Ring returns on this path use no streaming controller or receipt. Slot exhaustion parks a blocking caller or rejects a nonblocking operation; it does not select a second copying transport.
 
 ### Streaming responses
 

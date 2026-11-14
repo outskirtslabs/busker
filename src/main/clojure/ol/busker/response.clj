@@ -293,12 +293,7 @@
                                (some? header-length) (coerce-content-length header-length)
                                (and (some? length) (not informational?)) (long length)
                                :else -1)
-              header-bytes (when-not (> n fixed-final/max-header-pairs)
-                             (serialization/header-bytes pairs))]
-          (when (or (nil? header-bytes)
-                    (> (serialization/staging-bytes n header-bytes)
-                       fixed-final/max-header-staging-bytes))
-            (throw (ex-info "Response headers exceed bounded header storage" {:header-count n})))
+              header-bytes (serialization/header-bytes pairs)]
           {:status status :headers pairs :header-bytes header-bytes
            :content-length (cond
                              (= reset-content-status status) 0
@@ -323,6 +318,19 @@
 
 (defn- normalized-head [response length informational?]
   (build-head response length informational? true (get-compress-hint response)))
+
+(defn- warn-large-head!
+  "Logs that the accepted `head` of the response to `req` does not fit a fixed
+  slot. The URI leaves out the query string, which can hold secrets."
+  [req head]
+  (try
+    (let [req-ctx (:req-ctx req)]
+      (trove/log! {:level :warn :id ::large-head
+                   :msg "Response head does not fit the fixed header space and takes the streaming path"
+                   :data {:request-method (:request-method req-ctx) :uri (h2o/request-uri req-ctx)
+                          :status (:status head) :header-count (count (:headers head))
+                          :header-bytes (:header-bytes head)}}))
+    (catch Throwable _ nil)))
 
 (defn- apply-head! [req head informational?]
   (let [{:keys [status headers content-length compress-hint]} head
@@ -577,19 +585,32 @@
                                     {:bytes capacity :output-buffer-size buffer-size})))
                 head (when (or response? (nil? committed))
                        (normalized-head response (when (:end? opts) length) info?))
+                large-head? (and head (not (fixed-final/head-fits? (count (:headers head))
+                                                                   (:header-bytes head))))
                 effective-head (or head committed (normalized-head response nil false))
                 opts (assoc opts :body? body? :informational? info?
                             :suppress-body? (or (= :head (:request-method (:req-ctx req)))
                                                 (contains? #{204 205 304} (:status effective-head))))]
-            (if (and (fn? body) (:end? opts) (nil? writer) (not info?)
+            (if (and (fn? body) (:end? opts) (nil? writer) (not info?) (not large-head?)
                      (<= capacity fixed-final/response-ring-max-body-bytes)
                      (not (:suppress-body? opts)))
               (fixed-producer! emitter effective-head body capacity opts)
               (if-let [writer (ensure-writer! emitter)]
                 (if (and (bounded-body? body) (<= capacity buffer-size))
-                  (response-queue/emit-bounded! writer head capacity (bounded-producer body response) opts)
-                  (response-queue/emit-incremental! writer head
-                                                    #(write-adapted-body! body response % (:end? opts)) opts))
+                  (let [result (response-queue/emit-bounded! writer head capacity
+                                                             (bounded-producer body response) opts)]
+                    (when (and large-head? (= :accepted (:status result)))
+                      (warn-large-head! req head))
+                    result)
+                  (response-queue/emit-incremental!
+                   writer head
+                   (if large-head?
+                     ;; emit-incremental! calls the body writer only after it accepts the head.
+                     (fn [out]
+                       (warn-large-head! req head)
+                       (write-adapted-body! body response out (:end? opts)))
+                     #(write-adapted-body! body response % (:end? opts)))
+                   opts))
                 {:status :closed})))
           (finally (release-producer! (.lifecycle-lock emitter) (.lifecycle_ emitter))))))))
 
@@ -632,7 +653,8 @@
                 head (build-head response (when-not unknown-length? length) false false hint)]
             (when-not (== (long (:content-length head)) (long length))
               (check-known-length! head length (:request-method (:req-ctx req))))
-            [head (fixed-plan req head body length)]))))))
+            (when (fixed-final/head-fits? (count (:headers head)) (:header-bytes head))
+              [head (fixed-plan req head body length)])))))))
 
 (def ^:private internal-error-response
   {:status 500

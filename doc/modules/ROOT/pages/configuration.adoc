@@ -113,7 +113,7 @@ Each worker reserves 256 * `:output-buffer-size` bytes of native streaming stora
 
 Each worker also has 256 fixed-response slots. A fixed body must fit both `:output-buffer-size` and 32768 bytes. Supported bodies beyond those limits use streaming storage.
 
-All response heads, including streaming and informational heads, are limited to 64 header pairs and 16384 staging bytes. Busker throws before accepting a head that exceeds either limit. These header limits are not configurable; increasing `:output-buffer-size` does not change them.
+A fixed-response slot holds a head of at most 64 header pairs and 16384 staging bytes. A larger head uses streaming storage and logs a `:ol.busker.response/large-head` warning.
 
 Each response permits at most that many pending payload bytes and a separate native send of at most that size. At most 64 body receipts may remain pending. Small nonempty writes each initially use a block even when they use fewer bytes. Protocol/compression buffers, request metadata and caller-retained input are additional memory costs.
 

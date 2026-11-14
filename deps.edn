@@ -16,7 +16,9 @@
            :deploy {:extra-deps {slipset/deps-deploy {:mvn/version "0.2.5"}}}
            :test   {:extra-paths ["src/test/clojure"]
                     :extra-deps {ring/ring-core {:mvn/version "1.15.3"}}
-                    :jvm-opts ["-Xmx8g"]}
+                    :jvm-opts ["-Xmx8g"
+                               "-Djdk.http.maxHeaderSize=0"
+                               "-Djdk.httpclient.maxLiteralWithIndexing=4096"]}
            :dev    {:extra-paths ["dev"]
                     :jvm-opts
                     ["-Xmx8g"

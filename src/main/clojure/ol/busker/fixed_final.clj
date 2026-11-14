@@ -78,6 +78,13 @@
   ^long [headers]
   (serialization/header-staging-bytes headers))
 
+(defn head-fits?
+  "Returns true when `pair-count` header pairs whose names and values take
+  `header-bytes` UTF-8 bytes fit the header space of a slot."
+  [^long pair-count ^long header-bytes]
+  (and (<= pair-count max-header-pairs)
+       (<= (serialization/staging-bytes pair-count header-bytes) max-header-staging-bytes)))
+
 (defn ^:no-doc header-utf8-bytes
   ^long [headers]
   (serialization/header-bytes headers))
