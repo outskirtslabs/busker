@@ -81,6 +81,29 @@
     (is (thrown? clojure.lang.ExceptionInfo
                  ((ffi/cfn library "clj_h2o_absent_symbol" [] :long))))))
 
+(deftest concurrent-extractions-use-separate-files
+  (let [threads 4
+        loads (atom [])
+        ready (java.util.concurrent.CountDownLatch. 1)]
+    (with-redefs [ffi/load-library (fn [path]
+                                     (swap! loads conj {:path path
+                                                        :exists? (.exists (File. ^String path))})
+                                     {:path path})]
+      (let [futures (doall (repeatedly threads
+                                       #(future (.await ready)
+                                                (loader/load-bundled-library))))
+            _ (.countDown ready)
+            paths (mapv (comp :path deref) futures)]
+        (is (= threads (count (distinct paths))) (str "Extraction paths: " paths))
+        (is (every? :exists? @loads))
+        (is (not-any? #(.exists (File. ^String %)) paths))))
+    (let [failed (atom nil)]
+      (with-redefs [ffi/load-library (fn [path]
+                                       (reset! failed path)
+                                       (throw (ex-info "load failed" {})))]
+        (is (thrown? clojure.lang.ExceptionInfo (loader/load-bundled-library)))
+        (is (not (.exists (File. ^String @failed))))))))
+
 (deftest native-library-override-and-failures
   (let [library-name (if (str/includes? (loader/get-os-arch) "macos")
                        "libh2oclj.dylib" "libh2oclj.so")

@@ -12,7 +12,8 @@
    [clojure.string :as str]
    [babashka.ffi :as ffi])
   (:import
-   [java.nio.file Files]))
+   [java.nio.file Files]
+   [java.nio.file.attribute FileAttribute]))
 
 (defn copy-resource [resource-path output-path]
   (with-open [in (io/input-stream (io/resource resource-path))
@@ -38,8 +39,8 @@
                    "libh2oclj.dylib"
                    "libh2oclj.so")
         resource-path (str platform "/" lib-name)
-        temp-dir (System/getProperty "java.io.tmpdir")
-        temp-lib-path (str temp-dir "/h2oclj_" (System/currentTimeMillis) "_" lib-name)]
+        temp-lib-path (str (Files/createTempFile "h2oclj_" (str "_" lib-name)
+                                                 (make-array FileAttribute 0)))]
     #_(println "resource path" resource-path)
     (try
       (copy-resource resource-path temp-lib-path)
