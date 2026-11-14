@@ -2112,6 +2112,13 @@ static int clj_on_client_hello_cb(ptls_on_client_hello_t *self,
   return 0;
 }
 
+/* The default groups of h2o's server (src/main.c). picotls'
+   ptls_openssl_key_exchanges holds only secp256r1, which makes clients that
+   send an x25519 key share first need a HelloRetryRequest. */
+static ptls_key_exchange_algorithm_t *clj_quic_key_exchanges[] = {
+    &ptls_openssl_x25519, &ptls_openssl_secp256r1, &ptls_openssl_secp384r1,
+    NULL};
+
 ptls_context_t *clj_h2o_create_ptls_ctx(const char *cert_file,
                                         const char *key_file,
                                         clj_tls_lookup_cb lookup_cb,
@@ -2139,7 +2146,7 @@ ptls_context_t *clj_h2o_create_ptls_ctx(const char *cert_file,
   wrapper->ctx = (ptls_context_t){
       .random_bytes = ptls_openssl_random_bytes,
       .get_time = &ptls_get_time,
-      .key_exchanges = ptls_openssl_key_exchanges,
+      .key_exchanges = clj_quic_key_exchanges,
       .cipher_suites = ptls_openssl_cipher_suites,
       .on_client_hello = &wrapper->on_client_hello,
   };

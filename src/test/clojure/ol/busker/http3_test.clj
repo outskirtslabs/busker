@@ -829,6 +829,50 @@
           (busker/stop! server)
           (io/delete-file session-file true))))))
 
+(defn- curl-h3-handshake
+  "Runs one verbose HTTP/3 curl request and returns its exit code with the
+  key exchange group and the signature algorithm curl reports. The signature
+  is `UNDEF` on a resumed handshake, which has no CertificateVerify."
+  [session-file port curves]
+  (let [result (util/curl :https :h3 port "/"
+                          :args ["-v" "--ssl-sessions" session-file
+                                 "--curves" curves])
+        [_ group signature] (re-find #"SSL connection using TLSv1\.3 / \S+ / (\S+) / (\S+)"
+                                     (:err result))]
+    {:exit      (:exit result)
+     :err       (:err result)
+     :group     group
+     :signature signature}))
+
+(deftest http3-x25519-client-handshake-and-resumption-test
+  (testing "a client that sends only an X25519 key share completes without a retry and resumes"
+    (when-not (curl-ssl-sessions-supported?)
+      (throw (Exception. "your curl was not compiled with --enable-ssls-export and thus does not support --ssl-sessions")))
+    (let [port         (util/free-port)
+          session-file (str (System/getProperty "java.io.tmpdir") "/busker-test-x25519-sessions-" port ".txt")
+          server       (busker/start!
+                        (util/with-static-tls
+                          (util/with-handler
+                            (fn [_] {:status 200 :body "ok"})
+                            {:entrypoints {:tls {:bind   (str "127.0.0.1:" port)
+                                                 :http3? true}}})))]
+      (try
+        (io/delete-file session-file true)
+        (util/wait-for-curl-ready! :https :h3 port "/" :max-time 5)
+        ;; A server without X25519 answers this ClientHello with a
+        ;; HelloRetryRequest for P-256, and refuses resumption after one.
+        (let [full (curl-h3-handshake session-file port "X25519:P-256")]
+          (is (= 0 (:exit full)) (:err full))
+          (is (= ["x25519" "RSASSA-PSS"] [(:group full) (:signature full)])
+              (:err full)))
+        (let [resumed (curl-h3-handshake session-file port "X25519:P-256")]
+          (is (= 0 (:exit resumed)) (:err resumed))
+          (is (= ["x25519" "UNDEF"] [(:group resumed) (:signature resumed)])
+              (:err resumed)))
+        (finally
+          (busker/stop! server)
+          (io/delete-file session-file true))))))
+
 (deftest tcp-tls-session-resumption-test
   (testing "TCP TLS 1.2 session resumption via tickets"
     (let [port         (util/free-port)
