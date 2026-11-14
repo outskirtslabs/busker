@@ -768,7 +768,8 @@
                         t))))
 
 (defn- create-http3-contexts
-  [listeners config config-ptr ticket-mgr-ptr ticket-lifetime-seconds tls-lookup-callback-ptr]
+  [listeners config config-ptr ticket-mgr-ptr ticket-lifetime-seconds tls-lookup-callback-ptr
+   cleanup-state_]
   (let [{:keys [cert-file key-file]} (first-static-tls-identity config)]
     (try
       (into {}
@@ -799,9 +800,11 @@
                                        {:listener-index idx})))
                      (when (and ticket-mgr-ptr (not (mem/null? ticket-mgr-ptr)))
                        (h2o/ticket-manager-set-quic-tag ticket-mgr-ptr quicly-ctx))
-                     [idx {:ptls-ctx ptls-ctx
-                           :quicly-ctx quicly-ctx
-                           :encrypt-ticket encrypt-ticket}]))))
+                     (let [entry {:ptls-ctx ptls-ctx
+                                  :quicly-ctx quicly-ctx
+                                  :encrypt-ticket encrypt-ticket}]
+                       (vswap! cleanup-state_ assoc-in [::http3-contexts idx] entry)
+                       [idx entry])))))
              listeners))
       (catch Throwable t
         (wrap-stage-error "Failed to initialize HTTP/3 TLS state"
@@ -811,7 +814,8 @@
 
 (defn- create-http3-worker-contexts
   [generation-id n-workers listeners loops contexts entrypoint-hosts http3-contexts listener-claims
-   ticket-mgr-ptr]
+   ticket-mgr-ptr cleanup-state_]
+  (vswap! cleanup-state_ assoc ::http3-worker-contexts (vec (repeat n-workers [])))
   (vec
    (for [thread-idx (range n-workers)]
      (vec
@@ -840,6 +844,7 @@
                                 {:listener-index listener-idx
                                  :thread-idx thread-idx
                                  :port (:port listener)})))
+              (vswap! cleanup-state_ update-in [::http3-worker-contexts thread-idx] conj http3-ctx)
               http3-ctx))))))))
 
 (defn- free-http3-contexts
@@ -1006,7 +1011,7 @@
 (defn- init-tls-http3-state
   [{::keys [generation-id listener-runtimes config config-ptr entrypoint-hosts n-workers
             loops contexts tls-lookup-callback listener-claims memory-ticket-service]
-    :as state}]
+    :as state} cleanup-state_]
   (let [listeners (mapv :listener listener-runtimes)
         ssl-ctx-ptrs (mapv :ssl-ctx-ptr listener-runtimes)
         has-tls-listeners? (some some? ssl-ctx-ptrs)
@@ -1024,6 +1029,7 @@
                                      (not session-tickets-disabled?))
                             (h2o/ticket-manager-create
                              session-ticket-lifetime-seconds))
+        _ (vswap! cleanup-state_ assoc ::native-ticket-mgr native-ticket-mgr)
         key-manager
         (when native-ticket-mgr
           (cond
@@ -1041,7 +1047,8 @@
             (-> (tickets/create-key-manager (tickets/memory-ticket-store)
                                             native-ticket-mgr
                                             session-ticket-config)
-                (tickets/start-key-manager!))))]
+                (tickets/start-key-manager!))))
+        _ (vswap! cleanup-state_ assoc ::key-manager key-manager)]
     (when native-ticket-mgr
       (doseq [ssl-ctx-ptr ssl-ctx-ptrs]
         (when ssl-ctx-ptr
@@ -1051,7 +1058,8 @@
                                                 config-ptr
                                                 native-ticket-mgr
                                                 session-ticket-lifetime-seconds
-                                                tls-lookup-callback-ptr)
+                                                tls-lookup-callback-ptr
+                                                cleanup-state_)
           http3-worker-contexts (create-http3-worker-contexts generation-id
                                                               n-workers
                                                               listeners
@@ -1060,7 +1068,8 @@
                                                               entrypoint-hosts
                                                               http3-contexts
                                                               listener-claims
-                                                              native-ticket-mgr)]
+                                                              native-ticket-mgr
+                                                              cleanup-state_)]
       (assoc state
              ::ticket-store standalone-ticket-store
              ::native-ticket-mgr native-ticket-mgr
@@ -1118,24 +1127,27 @@
             listener-claims
             tls-lookup-callback
             active-connection-count_ worker-connection-counts accepting-workers]
-    :as state}]
+    :as state} cleanup-state_]
   (let [tls-lookup-callback-ptr (:callback-ptr tls-lookup-callback)]
     (-> state
         ::config
         :entrypoints
         (->> (into [] (mapcat config/entrypoint->listeners))
-             (mapv #(init-single-listener-state %
-                                                listener-claims
-                                                n-workers
-                                                loops
-                                                contexts
-                                                arena
-                                                entrypoint-hosts
-                                                on-close-callbacks
-                                                tls-lookup-callback-ptr
-                                                active-connection-count_
-                                                worker-connection-counts
-                                                accepting-workers)))
+             (mapv (fn [listener]
+                     (let [runtime (init-single-listener-state listener
+                                                               listener-claims
+                                                               n-workers
+                                                               loops
+                                                               contexts
+                                                               arena
+                                                               entrypoint-hosts
+                                                               on-close-callbacks
+                                                               tls-lookup-callback-ptr
+                                                               active-connection-count_
+                                                               worker-connection-counts
+                                                               accepting-workers)]
+                       (vswap! cleanup-state_ update ::listener-runtimes (fnil conj []) runtime)
+                       runtime))))
         (->> (assoc state ::listener-runtimes)))))
 
 (defn- init-worker-state
@@ -1380,7 +1392,8 @@
                              next-state))
                          state
                          [init-tls-lookup-state init-core-state init-stream-pools
-                          init-listener-state init-tls-http3-state
+                          #(init-listener-state % cleanup-state_)
+                          #(init-tls-http3-state % cleanup-state_)
                           #(init-worker-state % cleanup-state_) finalize-generation-state])
            activate-http3-transports? activate-http3-transports!))
        (catch Throwable t

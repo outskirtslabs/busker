@@ -1,5 +1,6 @@
 (ns ol.busker.reload-test
   (:require
+   [clojure.java.io :as io]
    [clojure.test :refer [deftest is]]
    [babashka.ffi :as mem]
    [ol.busker.clave-adapter :as clave-adapter]
@@ -13,9 +14,12 @@
    [ol.busker.test-utils :as util]
    [ol.busker.tickets :as tickets]
    [ol.clave.acme.solver.http :as http-solver]
-   [ol.clave.automation :as automation])
+   [ol.clave.automation :as automation]
+   [ol.clave.storage.file :as file-storage])
   (:import
-   [java.net ConnectException Socket]
+   [java.net BindException ConnectException DatagramSocket InetSocketAddress Socket]
+   [java.nio.file Files]
+   [java.nio.file.attribute FileAttribute]
    [java.util.concurrent ExecutorService LinkedBlockingQueue]))
 
 (defn- response-config
@@ -818,6 +822,39 @@
     (catch ConnectException _
       false)))
 
+(defn- plain-udp-bind?
+  "Binds without SO_REUSEADDR or SO_REUSEPORT, which Busker's UDP sockets set,
+  so the bind fails while any of them is still open on `port`."
+  [port]
+  (try
+    (with-open [s (DatagramSocket. nil)]
+      (.bind s (InetSocketAddress. "127.0.0.1" (int port)))
+      true)
+    (catch BindException _
+      false)))
+
+(defn- second-attach-fails
+  [attach attached_]
+  (fn [& args]
+    (if (seq @attached_)
+      mem/null
+      (let [ctx (apply attach args)]
+        (swap! attached_ conj ctx)
+        ctx))))
+
+(defn- live-rotation-threads
+  []
+  (into #{}
+        (filter #(and (= "busker-ticket-rotation" (.getName ^Thread %))
+                      (.isAlive ^Thread %)))
+        (.keySet (Thread/getAllStackTraces))))
+
+(defn- invalid-key-file
+  []
+  (doto (java.io.File/createTempFile "busker-invalid-key" ".pem")
+    (.deleteOnExit)
+    (spit "not a private key\n")))
+
 (defn- start-failure
   [config]
   (try
@@ -825,6 +862,36 @@
     nil
     (catch clojure.lang.ExceptionInfo e
       e)))
+
+(deftest failed-startup-closes-listeners-built-before-a-tls-failure-test
+  (let [ports [(util/free-port) (util/free-port)]
+        create-ssl-ctx native/create-ssl-ctx
+        free-ssl-ctx native/free-ssl-ctx
+        created_ (atom [])
+        freed_ (atom [])
+        config (util/with-static-tls
+                 {:entrypoints (into {}
+                                     (map-indexed
+                                      (fn [index port]
+                                        [(keyword (str "https-" index))
+                                         {:bind (str "127.0.0.1:" port)
+                                          :http3? false
+                                          :tls {:tls-compatibility-mode :modern}}]))
+                                     ports)
+                  :dispatch [{:handler (constantly {:status 200})}]})]
+    (with-redefs [native/create-ssl-ctx (fn [& args]
+                                          (if (seq @created_)
+                                            mem/null
+                                            (let [ctx (apply create-ssl-ctx args)]
+                                              (swap! created_ conj ctx)
+                                              ctx)))
+                  native/free-ssl-ctx (fn [ctx]
+                                        (swap! freed_ conj ctx)
+                                        (free-ssl-ctx ctx))]
+      (is (= :tls-startup (:stage (ex-data (start-failure config))))))
+    (is (= 1 (count @created_)))
+    (is (= @created_ @freed_))
+    (is (not-any? accepts-tcp? ports))))
 
 (deftest failed-startup-closes-listener-duplicates-after-a-dup-failure-test
   (let [port (util/free-port)
@@ -846,6 +913,102 @@
     (is (= 1 @dups_))
     (is (= 1 @freed_))
     (is (not (accepts-tcp? port)))))
+
+(deftest failed-startup-releases-http3-state-built-before-an-attach-failure-test
+  (let [port (util/free-port)
+        attach native/http3-attach-udp-transport
+        free-worker-ctx native/http3-free-worker-ctx
+        free-quicly-ctx native/http3-free-quicly-ctx
+        create-ticket-mgr native/ticket-manager-create
+        destroy-ticket-mgr native/ticket-manager-destroy
+        attached_ (atom [])
+        detached_ (atom [])
+        quicly-freed_ (atom 0)
+        ticket-mgrs_ (atom [])
+        destroyed-ticket-mgrs_ (atom [])
+        config (assoc (tls-response-config port (constantly {:status 200}))
+                      :n-workers 2)]
+    (with-redefs [native/http3-attach-udp-transport (second-attach-fails attach attached_)
+                  native/http3-free-worker-ctx (fn [ctx]
+                                                 (swap! detached_ conj ctx)
+                                                 (free-worker-ctx ctx))
+                  native/http3-free-quicly-ctx (fn [ctx]
+                                                 (swap! quicly-freed_ inc)
+                                                 (free-quicly-ctx ctx))
+                  native/ticket-manager-create (fn [lifetime]
+                                                 (let [mgr (create-ticket-mgr lifetime)]
+                                                   (swap! ticket-mgrs_ conj mgr)
+                                                   mgr))
+                  native/ticket-manager-destroy (fn [mgr]
+                                                  (swap! destroyed-ticket-mgrs_ conj mgr)
+                                                  (destroy-ticket-mgr mgr))]
+      (is (some? (start-failure config))))
+    (is (= 1 (count @attached_)))
+    (is (= @attached_ @detached_))
+    (is (= 1 @quicly-freed_))
+    (is (= 1 (count @ticket-mgrs_)))
+    (is (= @ticket-mgrs_ @destroyed-ticket-mgrs_))
+    (is (plain-udp-bind? port))))
+
+(deftest failed-reload-keeps-the-active-generation-serving-http3-test
+  (let [port (util/free-port)
+        config (fn [body]
+                 (assoc (tls-response-config port (constantly {:status 200 :body body}))
+                        :n-workers 2))
+        server (runtime/start! (config "old"))
+        attach native/http3-attach-udp-transport
+        free-worker-ctx native/http3-free-worker-ctx
+        attached_ (atom [])
+        detached_ (atom [])]
+    (try
+      (is (= "old" (:out (util/curl :https :h3 port "/" :max-time 5))))
+      (with-redefs [native/http3-attach-udp-transport (second-attach-fails attach attached_)
+                    native/http3-free-worker-ctx (fn [ctx]
+                                                   (swap! detached_ conj ctx)
+                                                   (free-worker-ctx ctx))]
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (runtime/reload! server (config "new") {:force? true}))))
+      (is (= 1 (count @attached_)))
+      (is (= @attached_ @detached_))
+      (let [results (mapv (fn [_] (util/curl :https :h3 port "/" :max-time 5)) (range 30))]
+        (is (= (repeat 30 "old") (map :out results))))
+      (finally
+        (runtime/stop! server)))))
+
+(deftest failed-startup-stops-the-storage-ticket-rotation-thread-test
+  (let [port (util/free-port)
+        storage-root (str (Files/createTempDirectory "busker-session-storage"
+                                                     (make-array FileAttribute 0)))
+        config (-> (tls-response-config port (constantly {:status 200}))
+                   (assoc-in [:tls :certificates :load 0 :key-file] (str (invalid-key-file)))
+                   (assoc-in [:tls :storage] (file-storage/file-storage {:root storage-root}))
+                   (assoc-in [:tls :session-tickets] {:persistence :storage}))
+        before (live-rotation-threads)]
+    (try
+      (is (= :tls-startup (:stage (ex-data (start-failure config)))))
+      (is (empty? (remove before (live-rotation-threads))))
+      (finally
+        (run! io/delete-file (reverse (file-seq (io/file storage-root))))))))
+
+(deftest failed-startup-destroys-ticket-manager-after-an-invalid-http3-key-test
+  (let [port (util/free-port)
+        key-file (invalid-key-file)
+        create-ticket-mgr native/ticket-manager-create
+        destroy-ticket-mgr native/ticket-manager-destroy
+        ticket-mgrs_ (atom [])
+        destroyed-ticket-mgrs_ (atom [])
+        config (-> (tls-response-config port (constantly {:status 200}))
+                   (assoc-in [:tls :certificates :load 0 :key-file] (str key-file)))]
+    (with-redefs [native/ticket-manager-create (fn [lifetime]
+                                                 (let [mgr (create-ticket-mgr lifetime)]
+                                                   (swap! ticket-mgrs_ conj mgr)
+                                                   mgr))
+                  native/ticket-manager-destroy (fn [mgr]
+                                                  (swap! destroyed-ticket-mgrs_ conj mgr)
+                                                  (destroy-ticket-mgr mgr))]
+      (is (= :tls-startup (:stage (ex-data (start-failure config))))))
+    (is (= 1 (count @ticket-mgrs_)))
+    (is (= @ticket-mgrs_ @destroyed-ticket-mgrs_))))
 
 (deftest reload-activates-while-managed-certificates-converge-test
   (let [port (util/free-port)
