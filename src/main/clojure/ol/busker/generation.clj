@@ -788,11 +788,14 @@
                    (let [encrypt-ticket
                          (when (and ticket-mgr-ptr (not (mem/null? ticket-mgr-ptr)))
                            (h2o/ticket-manager-create-encrypt-ticket ticket-mgr-ptr 1))
-                         _ (when encrypt-ticket
-                             (h2o/ptls-ctx-set-tickets ptls-ctx
-                                                       encrypt-ticket
-                                                       ticket-lifetime-seconds
-                                                       8192))
+                         _ (when (and encrypt-ticket
+                                      (not (zero? (h2o/ptls-ctx-set-tickets ptls-ctx
+                                                                            encrypt-ticket
+                                                                            ticket-lifetime-seconds
+                                                                            8192))))
+                             (h2o/http3-free-ptls-ctx ptls-ctx)
+                             (throw (ex-info "Failed to set session tickets for HTTP/3"
+                                             {:listener-index idx})))
                          quicly-ctx (h2o/http3-create-quicly-ctx ptls-ctx config-ptr)]
                      (when (or (nil? quicly-ctx) (mem/null? quicly-ctx))
                        (h2o/http3-free-ptls-ctx ptls-ctx)

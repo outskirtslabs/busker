@@ -1906,9 +1906,18 @@ typedef struct clj_ptls_wrapper_t {
   ptls_openssl_sign_certificate_t sign_certificate;
   clj_tls_lookup_cb lookup_cb;
   void *lookup_user_ctx;
+  clj_encrypt_ticket_t *encrypt_ticket;
   clj_ptls_identity_cache_entry_t *cache_head;
   pthread_mutex_t cache_mutex;
 } clj_ptls_wrapper_t;
+
+static void clj_ptls_free_certificates(ptls_context_t *ctx) {
+  for (size_t i = 0; i != ctx->certificates.count; ++i)
+    free(ctx->certificates.list[i].base);
+  free(ctx->certificates.list);
+  ctx->certificates.list = NULL;
+  ctx->certificates.count = 0;
+}
 
 /* ALPN negotiation callback for HTTP/3 */
 static int clj_on_client_hello_cb(ptls_on_client_hello_t *self,
@@ -2053,11 +2062,7 @@ static int clj_on_client_hello_cb(ptls_on_client_hello_t *self,
 
       if (!init_ok) {
         pthread_mutex_unlock(&wrapper->cache_mutex);
-        if (new_entry->ctx.certificates.list != NULL) {
-          for (size_t i = 0; i != new_entry->ctx.certificates.count; ++i)
-            free(new_entry->ctx.certificates.list[i].base);
-          free(new_entry->ctx.certificates.list);
-        }
+        clj_ptls_free_certificates(&new_entry->ctx);
         free(new_entry->hostname);
         free(new_entry->cert_chain_pem);
         free(new_entry->private_key_pem);
@@ -2134,6 +2139,7 @@ ptls_context_t *clj_h2o_create_ptls_ctx(const char *cert_file,
   if (has_static_identity) {
     if (ptls_load_certificates(&wrapper->ctx, cert_file) != 0) {
       DEBUG_LOG("failed to load certificates from %s", cert_file);
+      clj_ptls_free_certificates(&wrapper->ctx);
       pthread_mutex_destroy(&wrapper->cache_mutex);
       free(wrapper);
       return NULL;
@@ -2142,7 +2148,7 @@ ptls_context_t *clj_h2o_create_ptls_ctx(const char *cert_file,
     FILE *fp = fopen(key_file, "r");
     if (!fp) {
       DEBUG_LOG("failed to open key file: %s", key_file);
-      free(wrapper->ctx.certificates.list);
+      clj_ptls_free_certificates(&wrapper->ctx);
       pthread_mutex_destroy(&wrapper->cache_mutex);
       free(wrapper);
       return NULL;
@@ -2152,7 +2158,7 @@ ptls_context_t *clj_h2o_create_ptls_ctx(const char *cert_file,
     fclose(fp);
     if (!pkey) {
       DEBUG_LOG("failed to load private key from %s", key_file);
-      free(wrapper->ctx.certificates.list);
+      clj_ptls_free_certificates(&wrapper->ctx);
       pthread_mutex_destroy(&wrapper->cache_mutex);
       free(wrapper);
       return NULL;
@@ -2162,7 +2168,7 @@ ptls_context_t *clj_h2o_create_ptls_ctx(const char *cert_file,
         0) {
       DEBUG_LOG("failed to setup private key");
       EVP_PKEY_free(pkey);
-      free(wrapper->ctx.certificates.list);
+      clj_ptls_free_certificates(&wrapper->ctx);
       pthread_mutex_destroy(&wrapper->cache_mutex);
       free(wrapper);
       return NULL;
@@ -2185,21 +2191,14 @@ void clj_h2o_free_ptls_ctx(ptls_context_t *ctx) {
   if (wrapper->ctx.sign_certificate != NULL)
     ptls_openssl_dispose_sign_certificate(&wrapper->sign_certificate);
 
-  if (wrapper->ctx.certificates.list) {
-    for (size_t i = 0; i != wrapper->ctx.certificates.count; ++i)
-      free(wrapper->ctx.certificates.list[i].base);
-    free(wrapper->ctx.certificates.list);
-  }
+  clj_ptls_free_certificates(&wrapper->ctx);
+  free(wrapper->encrypt_ticket);
 
   clj_ptls_identity_cache_entry_t *entry = wrapper->cache_head;
   while (entry != NULL) {
     clj_ptls_identity_cache_entry_t *next = entry->next;
     ptls_openssl_dispose_sign_certificate(&entry->sign_certificate);
-    if (entry->ctx.certificates.list != NULL) {
-      for (size_t i = 0; i != entry->ctx.certificates.count; ++i)
-        free(entry->ctx.certificates.list[i].base);
-      free(entry->ctx.certificates.list);
-    }
+    clj_ptls_free_certificates(&entry->ctx);
     free(entry->hostname);
     free(entry->cert_chain_pem);
     free(entry->private_key_pem);
@@ -2447,7 +2446,7 @@ static int clj_quicly_wrapper_set_cid_key(quicly_context_t *ctx,
     return 0;
 
   if (wrapper->cid_encryptor != NULL)
-    free(wrapper->cid_encryptor);
+    quicly_free_default_cid_encryptor(wrapper->cid_encryptor);
 
   wrapper->cid_encryptor = cid_encryptor;
   wrapper->ctx.cid_encryptor = cid_encryptor;
@@ -2502,7 +2501,7 @@ void clj_h2o_free_quicly_ctx(quicly_context_t *ctx) {
       H2O_STRUCT_FROM_MEMBER(clj_quicly_wrapper_t, ctx, ctx);
 
   if (wrapper->cid_encryptor)
-    free(wrapper->cid_encryptor);
+    quicly_free_default_cid_encryptor(wrapper->cid_encryptor);
 
   free(wrapper);
 }
@@ -4010,22 +4009,16 @@ clj_ticket_manager_t *clj_ticket_manager_create(uint32_t ticket_lifetime_seconds
     mgr->quic_tp_tag_valid = 0;
     atomic_init(&mgr->generation, 1);
 
-    /* Generate initial key so server is ready immediately */
-    clj_session_ticket_t initial_key;
-    generate_random_key(&initial_key, current_time_ms(), ticket_lifetime_seconds);
-
-    mgr->keys = malloc(sizeof(initial_key));
+    mgr->keys = malloc(sizeof(*mgr->keys));
     if (!mgr->keys) {
         pthread_rwlock_destroy(&mgr->rwlock);
         free(mgr);
         return NULL;
     }
-    memcpy(mgr->keys, &initial_key, sizeof(initial_key));
+    /* Generate initial key so server is ready immediately */
+    generate_random_key(mgr->keys, current_time_ms(), ticket_lifetime_seconds);
     mgr->num_keys = 1;
     mgr->capacity = 1;
-
-    /* Secure erase the stack copy */
-    explicit_bzero(&initial_key, sizeof(initial_key));
 
     return mgr;
 }
@@ -4263,15 +4256,22 @@ clj_encrypt_ticket_t *clj_ticket_manager_create_encrypt_ticket(
     return enc;
 }
 
-void clj_ptls_ctx_set_tickets(
+int clj_ptls_ctx_set_tickets(
     ptls_context_t *ctx,
     clj_encrypt_ticket_t *encrypt_ticket,
     uint32_t ticket_lifetime,
     uint32_t max_early_data_size)
 {
-    if (!ctx) return;
+    if (!ctx) return -1;
+
+    clj_ptls_wrapper_t *wrapper =
+        H2O_STRUCT_FROM_MEMBER(clj_ptls_wrapper_t, ctx, ctx);
+    /* Identity cache entries copy the context, so a replaced callback would
+       stay in use by them */
+    if (wrapper->encrypt_ticket != NULL) return -1;
 
     if (encrypt_ticket) {
+        wrapper->encrypt_ticket = encrypt_ticket;
         ctx->encrypt_ticket = &encrypt_ticket->super;
     }
     ctx->ticket_lifetime = ticket_lifetime;
@@ -4280,6 +4280,7 @@ void clj_ptls_ctx_set_tickets(
     /* Send 2 NewSessionTicket messages (like Cloudflare).
        This gives client redundancy and curl seems to need 2 before sending early data. */
     ctx->ticket_requests.server.max_count = 2;
+    return 0;
 }
 
 /* SSL_CTX ticket manager storage for TCP TLS.

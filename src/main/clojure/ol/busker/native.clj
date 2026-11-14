@@ -1184,7 +1184,8 @@
   [:string :string :pointer :pointer] :pointer)
 
 (defcfn http3-free-ptls-ctx
-  "Free picotls context and associated resources."
+  "Free picotls context and associated resources, including the
+   encrypt-ticket callback passed to [[ptls-ctx-set-tickets]]."
   "clj_h2o_free_ptls_ctx"
   [:pointer] :void)
 
@@ -1367,9 +1368,12 @@
 
 (defcfn ptls-ctx-set-tickets
   "Configure ptls context for session tickets.
-   Sets encrypt_ticket callback, ticket lifetime, and max early data size."
+   Sets encrypt_ticket callback, ticket lifetime, and max early data size.
+   Call it once per context, before the context is used. Returns 0 on
+   success, after which [[http3-free-ptls-ctx]] frees the encrypt-ticket
+   callback, or -1 without changing anything when the context already has one."
   "clj_ptls_ctx_set_tickets"
-  [:pointer :pointer :int :int] :void)
+  [:pointer :pointer :int :int] :int)
 
 (defcfn ssl-ctx-set-tickets
   "Configure SSL_CTX for TCP TLS session tickets and 0-RTT.

@@ -459,7 +459,8 @@ ptls_context_t *clj_h2o_create_ptls_ctx(const char *cert_file,
                                         clj_tls_lookup_cb lookup_cb,
                                         void *lookup_user_ctx);
 
-/* Free picotls context and associated resources */
+/* Free picotls context and associated resources, including the
+   encrypt_ticket passed to clj_ptls_ctx_set_tickets */
 void clj_h2o_free_ptls_ctx(ptls_context_t *ctx);
 
 /* Create quicly context configured for HTTP/3.
@@ -593,8 +594,13 @@ clj_encrypt_ticket_t *clj_ticket_manager_create_encrypt_ticket(
     int is_quic);
 
 /* Configure ptls context for session tickets.
-   Sets encrypt_ticket callback, ticket lifetime, and max early data size. */
-void clj_ptls_ctx_set_tickets(
+   Sets encrypt_ticket callback, ticket lifetime, and max early data size.
+   ctx must come from clj_h2o_create_ptls_ctx. Call it once per context,
+   before the context is used. On success clj_h2o_free_ptls_ctx frees
+   encrypt_ticket. Returns 0, or -1 without changing anything when ctx is
+   NULL or already has an encrypt_ticket; the caller then keeps
+   encrypt_ticket. */
+int clj_ptls_ctx_set_tickets(
     ptls_context_t *ctx,
     clj_encrypt_ticket_t *encrypt_ticket,
     uint32_t ticket_lifetime,

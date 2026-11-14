@@ -82,7 +82,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }).artifact("h2o-evloop");
     const test_step = b.step("test", "Test native callbacks and fixed-slot lifetime");
-    const native_tests = [_][]const u8{ "quic_forwarding", "address_tokens", "fixed_retention", "socket_write_completion" };
+    const native_tests = [_][]const u8{ "quic_forwarding", "address_tokens", "fixed_retention", "socket_write_completion", "tls_cleanup" };
     for (native_tests) |test_name| {
         const forwarding_test = b.addExecutable(.{
             .name = b.fmt("test-{s}", .{test_name}),
@@ -102,7 +102,7 @@ pub fn build(b: *std.Build) void {
         forwarding_test.root_module.linkSystemLibrary("dl", .{});
         forwarding_test.root_module.linkSystemLibrary("m", .{});
         const run_forwarding_test = b.addRunArtifact(forwarding_test);
-        if (std.mem.eql(u8, test_name, "address_tokens")) {
+        if (std.mem.eql(u8, test_name, "address_tokens") or std.mem.eql(u8, test_name, "tls_cleanup")) {
             run_forwarding_test.addFileArg(b.path("../src/test/fixtures/server.crt"));
             run_forwarding_test.addFileArg(b.path("../src/test/fixtures/server.key"));
         }
