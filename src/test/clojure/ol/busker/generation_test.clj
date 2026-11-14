@@ -1355,7 +1355,7 @@
         (fixed-final/notify-capacity! worker)
         (generation/stop! instance)))))
 
-(deftest failed-worker-retirement-retains-the-callback-arena-test
+(deftest failed-worker-with-a-block-checked-out-keeps-the-callback-arena-test
   (with-open [arena (mem/shared-arena)]
     (let [dispatch (callback-dispatch/create arena)
           worker (retirement-worker dispatch (AtomicReference.) (Thread.) (constantly :accepted))
@@ -1363,20 +1363,25 @@
           generation-state {::generation/phase phase
                             ::generation/stop-lock (Object.)
                             ::generation/workers [worker]
+                            ::generation/worker-states [{:http3-ctxs-guard (#'generation/http3-ctxs-guard)
+                                                         :listener-socks []
+                                                         ::generation/listeners-closed?_ (AtomicBoolean. false)}]
                             ::generation/wakeup-receivers [nil]
                             ::generation/listener-runtimes []
                             ::generation/listener-claims {}
                             ::generation/config {}
-                            ::generation/arena arena}]
+                            ::generation/arena arena}
+          block (bp/try-borrow! (:stream-pool worker))]
       (try
         (.set ^AtomicReference (:native-failure_ worker)
               (ex-info "simulated worker failure" {}))
         (with-redefs [evloop/broadcast-wake! (constantly nil)]
-          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"retirement timed out"
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"nothing can finish"
                                 (generation/stop! generation-state))))
         (is (= :retirement-failed @phase))
         (is (= 1 (.byteSize (mem/alloc arena 1))))
         (finally
+          (bp/release! (:stream-pool worker) block)
           (bp/retire! (:stream-pool worker))
           (swap! @#'generation/failed-retirements_
                  (fn [retirements]
@@ -1398,7 +1403,7 @@
         permit (mailbox/reserve! (:mailbox worker) false (constantly false))]
     (try
       (with-redefs [evloop/broadcast-wake! (constantly nil)]
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"retirement timed out"
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"nothing can finish"
                               (generation/stop! generation-state)))
         (is (= :retirement-failed @phase))
         (is (.isAlive (.scope ^Arena arena)))
@@ -1415,6 +1420,39 @@
         (swap! @#'generation/failed-retirements_
                (fn [retirements]
                  (vec (remove #(identical? generation-state %) retirements))))))))
+
+(deftest retirement-of-a-live-worker-thread-times-out-test
+  (with-open [arena (mem/shared-arena)]
+    (let [release (CountDownLatch. 1)
+          thread (doto (Thread. #(.await release)) (.start))
+          worker (assoc (retirement-worker (callback-dispatch/create arena) (AtomicReference.)
+                                           thread (constantly :accepted))
+                        :id 7)
+          generation-state {::generation/phase (atom :running)
+                            ::generation/stop-lock (Object.)
+                            ::generation/workers [worker]
+                            ::generation/wakeup-receivers [nil]
+                            ::generation/listener-runtimes []
+                            ::generation/listener-claims {}
+                            ::generation/config {}
+                            ::generation/arena arena}]
+      (try
+        (with-redefs [evloop/broadcast-wake! (constantly nil)]
+          (let [error (try
+                        (generation/stop! generation-state 50 TimeUnit/MILLISECONDS)
+                        nil
+                        (catch clojure.lang.ExceptionInfo e e))]
+            (is (= "Generation retirement timed out while worker threads still run. Native resources kept."
+                   (ex-message error)))
+            (is (= [7] (:alive-workers (ex-data error))))))
+        (is (= :retirement-failed @(::generation/phase generation-state)))
+        (finally
+          (.countDown release)
+          (.join thread)
+          (bp/retire! (:stream-pool worker))
+          (swap! @#'generation/failed-retirements_
+                 (fn [retirements]
+                   (vec (remove #(identical? generation-state %) retirements)))))))))
 
 (deftest native-callbacks-deliver-and-retire-request-state-test
   (let [port 18585
