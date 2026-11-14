@@ -721,6 +721,54 @@ static void cleanup_request(void *ptr) {
   ctx->on_request_cleanup = NULL;
 }
 
+/* A failed body delivery ends the request. Before any response has started,
+   Busker lets go of the request first, so only H2O answers it. */
+static void detach_after_body_failure(clj_req_ctx_t *ctx) {
+  if (!ctx->response_started)
+    cleanup_request(ctx);
+}
+
+typedef struct {
+  h2o_timer_t timer;
+  h2o_req_t *req;
+} clj_body_failure_t;
+
+static void dispose_body_failure(void *ptr) {
+  h2o_timer_unlink(&((clj_body_failure_t *)ptr)->timer);
+}
+
+static void on_body_failure_timer(h2o_timer_t *timer) {
+  clj_body_failure_t *failure =
+      H2O_STRUCT_FROM_MEMBER(clj_body_failure_t, timer, timer);
+  if (failure->req->proceed_req != NULL)
+    failure->req->proceed_req(failure->req, "request body delivery failed");
+}
+
+/* Inside on_req, proceed_req with an error can free the request on HTTP/2
+   while H2O still uses it, so it runs from a zero-delay timer, as H2O's
+   deferred request actions do (lib/core/request.c). Request-pool disposal
+   unlinks the timer. */
+static void fail_body_after_handler(h2o_req_t *req) {
+  clj_body_failure_t *failure = h2o_mem_alloc_shared(
+      &req->pool, sizeof(*failure), dispose_body_failure);
+  failure->req = req;
+  h2o_timer_init(&failure->timer, on_body_failure_timer);
+  h2o_timer_link(req->conn->ctx->loop, 0, &failure->timer);
+}
+
+static int deliver_body_chunk(clj_req_ctx_t *ctx, int is_end_stream) {
+  h2o_req_t *req = ctx->req;
+  if (req->entity.base != NULL && req->entity.len > 0)
+    return ctx->on_request_body_chunk(ctx->dispatch_module_id,
+                                      ctx->dispatch_request_seq,
+                                      req->entity.base, req->entity.len,
+                                      is_end_stream ? 1 : 0);
+  if (is_end_stream)
+    return ctx->on_request_body_chunk(ctx->dispatch_module_id,
+                                      ctx->dispatch_request_seq, NULL, 0, 1);
+  return 0;
+}
+
 /**
  * from h2o.h:
  * Called be the protocol handler to submit chunk of request body to the
@@ -737,15 +785,12 @@ static int clj_body_write_callback(void *self, int is_end_stream) {
       ctx->dispatch_request_seq == 0 || ctx->on_request_body_chunk == NULL)
     return 1;
 
-  h2o_req_t *req = ctx->req;
-  if (req->entity.base != NULL && req->entity.len > 0)
-    ctx->on_request_body_chunk(ctx->dispatch_module_id,
-                               ctx->dispatch_request_seq, req->entity.base,
-                               req->entity.len, is_end_stream ? 1 : 0);
-  else if (is_end_stream)
-    ctx->on_request_body_chunk(ctx->dispatch_module_id,
-                               ctx->dispatch_request_seq, NULL, 0, 1);
-
+  if (deliver_body_chunk(ctx, is_end_stream) != 0) {
+    detach_after_body_failure(ctx);
+    /* HTTP/1 answers 502 or ends the connection after the response; HTTP/2
+       and HTTP/3 reset the stream. */
+    return 1;
+  }
   return 0;
 }
 
@@ -796,16 +841,17 @@ static int request_handler(h2o_handler_t *self, h2o_req_t *req) {
     if (req->proceed_req != NULL) {
       req->write_req.cb = clj_body_write_callback;
       req->write_req.ctx = ctx;
-      if (req->entity.base != NULL && req->entity.len > 0)
-        ctx->on_request_body_chunk(ctx->dispatch_module_id,
-                                   ctx->dispatch_request_seq, req->entity.base,
-                                   req->entity.len, 0);
-      else
+      if (req->entity.base == NULL || req->entity.len == 0) {
         req->proceed_req(req, NULL);
-    } else if (req->entity.base != NULL) {
-      ctx->on_request_body_chunk(ctx->dispatch_module_id,
-                                 ctx->dispatch_request_seq, req->entity.base,
-                                 req->entity.len, 1);
+      } else if (deliver_body_chunk(ctx, 0) != 0) {
+        detach_after_body_failure(ctx);
+        fail_body_after_handler(req);
+      }
+    } else if (req->entity.base != NULL &&
+               deliver_body_chunk(ctx, 1) != 0) {
+      detach_after_body_failure(ctx);
+      h2o_send_error_502(req, "Bad Gateway", "Bad Gateway",
+                         H2O_SEND_ERROR_HTTP1_CLOSE_CONNECTION);
     }
   }
   return 0;

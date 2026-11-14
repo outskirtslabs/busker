@@ -37,10 +37,10 @@
           req {:write-req {:write-chunk (fn [chunk final?]
                                           (swap! received conj [chunk final?]))}}
           body (ffi/cfn (:body (callback-dispatch/callback-pointers dispatch))
-                        [:long :long :pointer :long :int] :void)]
+                        [:long :long :pointer :long :int] :int)]
       (is (nil? (callback-dispatch/register! dispatch module-id request-seq req nil)))
-      (body module-id request-seq ffi/null 0 1)
-      (body module-id request-seq (ffi/alloc arena 1) 0 1)
+      (is (= 0 (body module-id request-seq ffi/null 0 1)))
+      (is (= 0 (body module-id request-seq (ffi/alloc arena 1) 0 1)))
       (is (= 2 (count @received)))
       (is (= [nil true] (first @received)))
       (let [[chunk final?] (second @received)]

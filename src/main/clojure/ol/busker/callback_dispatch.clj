@@ -137,20 +137,30 @@
     (catch Throwable _ nil)))
 
 (defn- body-callback!
+  "Delivers one request body chunk. Returns 0 when it was delivered; otherwise
+  the request body has failed and the shim ends the request."
   [dispatch module-id request-seq chunk-seg chunk-len is-last]
-  (try
-    (when-let [[req _] (live-entry dispatch module-id request-seq)]
-      (if-let [write-chunk (-> req :write-req :write-chunk)]
-        (write-chunk
-         (when-not (ffi/null? chunk-seg)
-           (if (zero? chunk-len)
-             (byte-array 0)
-             (ffi/read-array (ffi/reinterpret chunk-seg (long chunk-len))
-                             :byte (long chunk-len))))
-         (= 1 is-last))
-        (increment! dispatch :malformed)))
-    (catch Throwable t
-      (callback-fault! dispatch ::body-callback-failed t))))
+  (let [write-req_ (volatile! nil)]
+    (try
+      (if-let [[req _] (live-entry dispatch module-id request-seq)]
+        (if-let [write-chunk (:write-chunk (vreset! write-req_ (:write-req req)))]
+          (do
+            (write-chunk
+             (when-not (ffi/null? chunk-seg)
+               (if (zero? chunk-len)
+                 (byte-array 0)
+                 (ffi/read-array (ffi/reinterpret chunk-seg (long chunk-len))
+                                 :byte (long chunk-len))))
+             (= 1 is-last))
+            0)
+          (do (increment! dispatch :malformed) 1))
+        1)
+      (catch Throwable t
+        (callback-fault! dispatch ::body-callback-failed t)
+        (try
+          (when-let [fail! (:fail! @write-req_)] (fail! t))
+          (catch Throwable _ nil))
+        1))))
 
 (defn- proceed-callback!
   [dispatch module-id request-seq]
@@ -199,7 +209,7 @@
         stop-callback (partial stop-callback! dispatch)
         body-callback-ptr
         (ffi/callback arena body-callback
-                      [:long :long :pointer :long :int] :void)
+                      [:long :long :pointer :long :int] :int)
         proceed-callback-ptr
         (ffi/callback arena proceed-callback [:long :long] :void)
         stop-callback-ptr

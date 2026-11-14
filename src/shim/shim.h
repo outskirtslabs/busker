@@ -111,9 +111,11 @@ typedef struct clj_mt_receiver_t clj_mt_receiver_t;
 typedef struct clj_response_slot_t clj_response_slot_t;
 typedef void (*clj_request_cleanup_cb)(uint64_t module_id,
                                        uint64_t request_seq);
-typedef void (*clj_request_body_chunk_cb)(uint64_t module_id,
-                                           uint64_t request_seq, char *chunk,
-                                           size_t chunk_len, int is_end_stream);
+/* Returns 0 when the chunk was delivered; any other value fails the request
+   body, and nothing calls proceed for it. */
+typedef int (*clj_request_body_chunk_cb)(uint64_t module_id,
+                                          uint64_t request_seq, char *chunk,
+                                          size_t chunk_len, int is_end_stream);
 typedef void (*clj_response_generator_proceed_cb)(uint64_t module_id,
                                                    uint64_t request_seq);
 typedef void (*clj_response_generator_stop_cb)(uint64_t module_id,

@@ -6,7 +6,10 @@
   make Clojure code under an upcall fail in a way the callback contains."
   (:require
    [babashka.ffi :as ffi]
-   [clojure.test :refer [deftest is]]
+   [babashka.process :as p]
+   [clojure.string :as str]
+   [clojure.test :refer [deftest is testing]]
+   [ol.busker.buffer-pool :as bp]
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.config :as config]
    [ol.busker.fixed-final :as fixed-final]
@@ -18,6 +21,10 @@
    [ol.busker.worker-context :as worker-context]
    [taoensso.trove :as trove])
   (:import
+   [java.io IOException InputStream]
+   [java.net InetSocketAddress Socket]
+   [java.nio.charset StandardCharsets]
+   [java.util.concurrent TimeUnit]
    [java.util.concurrent.atomic AtomicLong AtomicLongArray AtomicReferenceArray]))
 
 (defn- capture-logs
@@ -247,15 +254,27 @@
     (callback-dispatch/register! dispatch (:module-id dispatch) request-seq req emitter)
     request-seq))
 
-(deftest body-callback-logs-the-failure-as-its-error
+(deftest body-callback-reports-delivery-and-fails-the-body-on-error
   (with-open [arena (ffi/shared-arena)]
     (let [dispatch (bound-dispatch arena)
           failure (IllegalStateException. "chunk failed")
-          request-seq (register! dispatch {:write-req {:write-chunk (fn [_ _] (throw failure))}} nil)
-          [_ events] (capture-logs
-                      #((:body-callback dispatch) (:module-id dispatch) request-seq ffi/null 0 1))]
+          failed (atom [])
+          throw? (atom false)
+          request-seq (register! dispatch
+                                 {:write-req {:write-chunk (fn [_ _] (when @throw? (throw failure)))
+                                              :fail! #(swap! failed conj %)}}
+                                 nil)
+          body (fn [] ((:body-callback dispatch) (:module-id dispatch) request-seq ffi/null 0 1))
+          ok (body)
+          _ (reset! throw? true)
+          [failed-result events] (capture-logs body)]
+      (is (= 0 ok))
+      (is (= 1 failed-result))
+      (is (= [failure] @failed))
       (is (= [{:id ::callback-dispatch/body-callback-failed :error failure}] events))
-      (is (= 1 (faults dispatch))))))
+      (is (= 1 (faults dispatch)))
+      (is (= 1 ((:body-callback dispatch) (:module-id dispatch) (inc request-seq) ffi/null 0 1))
+          "A chunk for no live request is not delivered."))))
 
 (deftest body-callback-contains-a-failing-log-backend
   (with-open [arena (ffi/shared-arena)]
@@ -264,7 +283,7 @@
                                  {:write-req {:write-chunk (fn [_ _] (throw (IllegalStateException. "chunk failed")))}}
                                  nil)]
       (binding [trove/*log-fn* (fn [& _] (throw (RuntimeException. "backend failed")))]
-        (is (nil? ((:body-callback dispatch) (:module-id dispatch) request-seq ffi/null 0 1))))
+        (is (= 1 ((:body-callback dispatch) (:module-id dispatch) request-seq ffi/null 0 1))))
       (is (= 1 (faults dispatch))))))
 
 (deftest proceed-and-stop-callbacks-contain-and-log-errors
@@ -298,3 +317,176 @@
       (is (= -1 result))
       (is (= [{:id ::h2o/tls-lookup-callback-exception :error failure}] events))
       (is (= [0 0 0 0] (mapv #(ffi/read % :long) outputs))))))
+
+;; Request body channel
+
+(deftest failed-request-body-wakes-the-reader-with-an-ioexception
+  (let [{:keys [write-chunk fail! ^InputStream input-stream]}
+        (request/create-write-req-channel (fn [] nil))
+        cause (IllegalStateException. "chunk failed")
+        reader (future (try (.read input-stream) (catch IOException e e)))]
+    (Thread/sleep 100)
+    (fail! cause)
+    (let [result (deref reader 2000 ::timeout)]
+      (is (instance? IOException result))
+      (is (identical? cause (ex-cause result))))
+    (write-chunk (.getBytes "late" StandardCharsets/US_ASCII) true)
+    (is (thrown? IOException (.read input-stream)) "Later reads fail too.")
+    (.close input-stream)
+    (is (thrown? IOException (.read input-stream)))))
+
+;; Failed request bodies against a real server
+
+(defn- throwing-body-channel
+  "Returns a replacement for `request/create-write-req-channel` whose
+  `:write-chunk` throws on its `n`th call, after recording that call's chunk
+  length and end flag in `failed-chunk_`."
+  [n failed-chunk_]
+  (let [create request/create-write-req-channel]
+    (fn [proceed-callback]
+      (let [calls (AtomicLong.)]
+        (update (create proceed-callback) :write-chunk
+                (fn [write-chunk]
+                  (fn [chunk is-last]
+                    (if (= n (.incrementAndGet calls))
+                      (do (reset! failed-chunk_ [(some-> ^bytes chunk alength) is-last])
+                          (throw (IllegalStateException. "chunk handling failed")))
+                      (write-chunk chunk is-last)))))))))
+
+(defn- reading-handler
+  "Returns a handler that reads the whole request body and delivers what the
+  read returned or threw to `read_`."
+  [read_]
+  (fn [{:keys [^InputStream body]}]
+    (deliver read_ (try (count (.readAllBytes body)) (catch Throwable t t)))
+    {:status 200 :body "read"}))
+
+(defn- start-server
+  [config handler]
+  (generation/start! (config/load! (util/with-handler handler config)) nil))
+
+(defn- dispatch-of [instance]
+  (:callback-dispatch (first (::generation/workers instance))))
+
+(defn- await-released
+  "Waits until the request entry is gone and every stream block is back, and
+  returns the dispatch diagnostics."
+  [instance]
+  (let [dispatch (dispatch-of instance)
+        pool (:stream-pool (first (::generation/workers instance)))
+        deadline (+ (System/nanoTime) (.toNanos TimeUnit/SECONDS 5))]
+    (loop []
+      (if (or (and (callback-dispatch/no-live-entries? dispatch)
+                   (zero? (bp/checked-out pool)))
+              (> (System/nanoTime) deadline))
+        (do (Thread/sleep 200) (callback-dispatch/diagnostics dispatch))
+        (do (Thread/sleep 20) (recur))))))
+
+(defn- assert-request-ended
+  [instance read_]
+  (let [read (deref read_ 5000 ::timeout)]
+    (is (instance? IOException read) (str "The handler's read failed: " read)))
+  (is (= {:retired 1 :duplicate 0 :callback-fault 1}
+         (select-keys (await-released instance) [:retired :duplicate :callback-fault]))
+      "The request is released once.")
+  (is (callback-dispatch/no-live-entries? (dispatch-of instance))))
+
+(deftest failed-later-body-chunk-ends-an-http1-request
+  (let [port (util/free-port)
+        read_ (promise)
+        failed-chunk_ (atom nil)]
+    (with-redefs [request/create-write-req-channel (throwing-body-channel 2 failed-chunk_)]
+      (let [instance (start-server {:n-workers 1
+                                    :entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                                         :tls false}}}
+                                   (reading-handler read_))]
+        (try
+          (with-open [socket (doto (Socket.)
+                               (.connect (InetSocketAddress. "127.0.0.1" (int port)) 2000)
+                               (.setSoTimeout 5000))]
+            (let [out (.getOutputStream socket)]
+              (.write out (.getBytes (str "POST / HTTP/1.1\r\nHost: localhost\r\n"
+                                          "Content-Length: 10\r\n\r\nhello")
+                                     StandardCharsets/US_ASCII))
+              (.flush out)
+              (Thread/sleep 300)
+              (.write out (.getBytes "world" StandardCharsets/US_ASCII))
+              (.flush out)
+              (let [response (String. (.readAllBytes (.getInputStream socket))
+                                      StandardCharsets/ISO_8859_1)]
+                (is (str/starts-with? response "HTTP/1.1 502 ") response))))
+          (is (= [5 true] @failed-chunk_))
+          (assert-request-ended instance read_)
+          (finally
+            (generation/stop! instance)))))))
+
+(def ^:private protocols
+  {:h1 {:scheme :http :entrypoint {:http {:tls false}}}
+   :h2 {:scheme :https :entrypoint {:tls {:http3? false :tls {:tls-compatibility-mode :modern}}}}
+   :h3 {:scheme :https :entrypoint {:tls {:http3? true :tls {:tls-compatibility-mode :modern}}}}})
+
+(defn- with-failing-first-chunk
+  "Starts a one-worker server for `proto` whose first body chunk fails, calls
+  `send` with the port, and returns `[send-result failed-chunk]` once the request
+  has ended."
+  [proto send]
+  (let [port (util/free-port)
+        read_ (promise)
+        failed-chunk_ (atom nil)
+        entrypoints (update-vals (get-in protocols [proto :entrypoint])
+                                 #(assoc % :bind (str "127.0.0.1:" port)))]
+    (with-redefs [request/create-write-req-channel (throwing-body-channel 1 failed-chunk_)]
+      (let [instance (start-server (util/with-static-tls {:n-workers 1 :entrypoints entrypoints})
+                                   (reading-handler read_))]
+        (try
+          (Thread/sleep 200)
+          (let [result (send port)]
+            (assert-request-ended instance read_)
+            [result @failed-chunk_])
+          (finally
+            (generation/stop! instance)))))))
+
+(defn- assert-answered
+  [{:keys [exit out]}]
+  (is (not= 28 exit) "The client is answered before its time limit.")
+  (is (not (str/ends-with? out "\n200")) (str "exit " exit ": " out)))
+
+;; HTTP/3 is covered only for bodies that arrive complete: a streamed HTTP/3
+;; upload currently aborts the process inside H2O's receive path even when no
+;; failure is injected.
+(deftest failed-first-chunk-of-a-complete-body-ends-the-request
+  (doseq [proto [:h1 :h2 :h3]]
+    (testing proto
+      (let [[result failed-chunk]
+            (with-failing-first-chunk
+              proto
+              #(util/curl (get-in protocols [proto :scheme]) proto % "/"
+                          :max-time 5
+                          :args ["-o" "-" "-w" "\n%{http_code}"
+                                 "--data-binary" "0123456789"]))]
+        (is (= [10 true] failed-chunk) "The whole body arrived in the failing chunk.")
+        (assert-answered result)
+        (is (str/ends-with? (:out result) "\n502"))))))
+
+(defn- curl-streamed
+  "Uploads `hello`, then a second later `world`, with curl over `proto`."
+  [proto port]
+  (let [url (if (= :h1 proto)
+              (str "http://127.0.0.1:" port "/")
+              (str "https://localhost.examp1e.net:" port "/"))
+        args (cond-> ["curl" "-k" "-s" "--max-time" "5" "-T" "-" "-o" "-" "-w" "'\n%{http_code}'"]
+               (= :h1 proto) (into ["--http1.1" "-H" "'Expect:'"])
+               (= :h2 proto) (into ["--http2" "--resolve"
+                                    (str "localhost.examp1e.net:" port ":127.0.0.1")]))]
+    (p/shell {:out :string :err :string :continue true}
+             "bash" "-c"
+             (str "(printf hello; sleep 1; printf world) | " (str/join " " (conj args url))))))
+
+(deftest failed-first-chunk-of-a-streamed-body-ends-the-request
+  (doseq [proto [:h1 :h2]]
+    (testing proto
+      (let [[result failed-chunk] (with-failing-first-chunk proto #(curl-streamed proto %))]
+        (is (= [5 false] failed-chunk) "The failing chunk was the first of a streamed body.")
+        (assert-answered result)
+        (when (= :h1 proto)
+          (is (str/ends-with? (:out result) "\n502")))))))

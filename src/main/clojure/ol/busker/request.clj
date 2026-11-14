@@ -14,6 +14,7 @@
    [ol.busker.request-dispatch :as request-dispatch]
    [ol.busker.response :as response])
   (:import
+   [java.io IOException]
    [java.nio ByteBuffer]
    [java.nio.channels Channels ReadableByteChannel]
    [java.util.concurrent ExecutorService LinkedBlockingQueue RejectedExecutionException]
@@ -28,18 +29,22 @@
 
    `:write-chunk` runs on the event-loop worker and never blocks. H2O delivers
    the next chunk only after proceed, so the queue holds at most one chunk and
-   the EOF marker; `:write-chunk` and `close` take `admission` only to check
-   closure and enqueue, so close cannot slip in between and fill the queue."
+   the EOF marker; `:write-chunk`, `:fail!` and `close` take `admission` only
+   to check closure and enqueue, so close cannot slip in between and fill the
+   queue. After `:fail!` every read throws an IOException with its cause."
   [proceed-callback]
   (let [queue (LinkedBlockingQueue. 2)
         eof-marker ::eof
         admission (Object.)
         closed? (volatile! false)
+        failure (volatile! nil)
+        failed! #(throw (IOException. "Request body delivery failed" ^Throwable @failure))
         current-buf (volatile! nil)
         body-channel
         (reify
           ReadableByteChannel
           (read [_ dst]
+            (when @failure (failed!))
             (when @closed?
               (throw (java.nio.channels.ClosedChannelException.)))
 
@@ -48,7 +53,7 @@
                       (not (.hasRemaining ^ByteBuffer @current-buf)))
               (let [chunk (.take queue)]
                 (if (identical? chunk eof-marker)
-                  (vreset! closed? true)
+                  (if @failure (failed!) (vreset! closed? true))
                   (vreset! current-buf (ByteBuffer/wrap chunk)))))
 
             (if @closed?
@@ -84,7 +89,7 @@
     {:channel body-channel
      :write-chunk (fn [chunk is-last]
                     (locking admission
-                      (when-not @closed?
+                      (when-not (or @closed? @failure)
                         (when (and chunk
                                    (pos? (alength ^bytes chunk))
                                    (not (.offer queue chunk)))
@@ -93,6 +98,12 @@
                         (when (and is-last (not (.offer queue eof-marker)))
                           (throw (IllegalStateException.
                                   "Request body end delivered before the previous chunk was read"))))))
+     :fail! (fn [^Throwable cause]
+              (locking admission
+                (when-not (or @closed? @failure)
+                  (vreset! failure cause)
+                  (.clear queue)
+                  (.offer queue eof-marker))))
      :input-stream (Channels/newInputStream body-channel)}))
 
 (defn set-req-body-channel
