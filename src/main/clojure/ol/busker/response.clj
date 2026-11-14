@@ -508,7 +508,8 @@
   ;; :closed is terminal, a writer is only created while the lifecycle is open,
   ;; and closing a closed lifecycle does nothing. Its slot waiters were woken
   ;; when it closed: stop-emitter and close-emitter! wake them, and a fixed
-  ;; publication closes it from its only producer, which has already claimed.
+  ;; publication closes it from the only thread that claims for it, which has
+  ;; already claimed.
   ;; So an unlocked read that sees both is final, and nothing is left to do.
   (when-not (and (= :closed (:phase @(.lifecycle_ emitter)))
                  (nil? @(.writer_ emitter)))
@@ -742,6 +743,35 @@
                 (when (fixed-final/head-fits? (count (:headers head)) (:header-bytes head))
                   (fixed-plan req head body length))))))))))
 
+(defn- untouched?
+  "Returns true when nothing has used `emitter`: no output, writer, producer or
+  close callback, and it is open."
+  [^H2OResponseEmitter emitter]
+  (and (identical? open-lifecycle @(.lifecycle_ emitter))
+       (nil? @(.writer_ emitter))))
+
+(defn- publish-untouched!
+  "Publishes `plan` as the whole response of an untouched `emitter` and closes
+  the emitter with one state change. Returns `::touched`, and sends nothing,
+  when the emitter was used before the publication. Otherwise returns the
+  result of [[fixed-final/publish-direct-response!]]."
+  [^H2OResponseEmitter emitter plan]
+  (if-not (untouched? emitter)
+    ::touched
+    (fixed-final/publish-direct-response!
+     (:worker (.req emitter)) plan #(not (p/open? emitter))
+     (fn [publish!]
+       (let [lock (.lifecycle-lock emitter)]
+         (locking lock
+           (if (untouched? emitter)
+             (do
+               (publish!)
+               ;; An untouched lifecycle has no producer, waiter, receipt or
+               ;; close callback to settle.
+               (reset! (.lifecycle_ emitter) {:phase :closed :callbacks [] :producer nil :committed plan})
+               :accepted)
+             ::touched)))))))
+
 (def ^:private internal-error-response
   {:status 500
    :headers {"content-type" "text/plain; charset=utf-8"}
@@ -758,7 +788,8 @@
         (when (:status response) (p/emit! emitter (dissoc response :body)))
         (if-let [plan (when (and (p/open? emitter) (nil? @(.writer_ emitter)))
                         (ordinary-fixed-plan (.req emitter) response))]
-          (when (= :accepted (acquire-producer! (.lifecycle-lock emitter) (.lifecycle_ emitter) true))
+          (when (and (= ::touched (publish-untouched! emitter plan))
+                     (= :accepted (acquire-producer! (.lifecycle-lock emitter) (.lifecycle_ emitter) true)))
             (try
               (if (and (p/open? emitter) (nil? @(.writer_ emitter)))
                 (fixed-final/publish-direct-response!

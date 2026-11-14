@@ -8,6 +8,7 @@
    [ol.busker.generation :as generation]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
+   [ol.busker.protocols :as protocols]
    [ol.busker.response :as response]
    [ol.busker.response-queue :as response-queue]
    [ol.busker.test-utils :as util])
@@ -979,3 +980,92 @@
           (is (= [0 1] [fixed streaming]) (pr-str context))))
       (finally
         (busker/stop! server)))))
+
+(defn- with-fake-slot
+  "Calls `f` with a worker that has one fixed slot and an atom of the native
+  slot calls made while `f` runs. `on-claim` runs in each claim."
+  [on-claim f]
+  (with-open [arena (mem/confined-arena)]
+    (let [capacity 64
+          slot (mem/alloc arena (+ pinned-data-size capacity 1))
+          worker (assoc (direct-response-worker (mem/alloc arena 1) [slot] capacity)
+                        :response-slot-waiters (AtomicInteger.))
+          calls_ (atom [])]
+      (with-redefs [h2o/mt-response-use-acquire (constantly 1)
+                    h2o/mt-response-use-release (fn [_])
+                    h2o/mt-response-try-claim
+                    (unary-long-fn (fn [_] (on-claim) (swap! calls_ conj :claim) 65537))
+                    h2o/mt-response-publish
+                    (receiver-handle->long-fn (fn [_ _] (swap! calls_ conj :publish) 1))
+                    h2o/mt-response-abort
+                    (receiver-handle->long-fn (fn [_ _] (swap! calls_ conj :abort) 1))
+                    pi/wake (fn [_])]
+        (f worker calls_)))))
+
+(defn- fixed-emitter [worker]
+  (response/new-response-emitter
+   {:worker worker :config {:output-buffer-size 32768}
+    :dispatch-module-id 1 :dispatch-request-seq 1 :req-ctx {:request-method :get}}
+   (fn [^Runnable task] (.run task))))
+
+(defn- lifecycle [emitter]
+  @(.lifecycle_ ^ol.busker.response.H2OResponseEmitter emitter))
+
+(deftest untouched-emitter-closes-with-its-fixed-publication
+  (with-fake-slot
+    (fn [])
+    (fn [worker calls_]
+      (let [emitter (fixed-emitter worker)
+            late (atom 0)]
+        (response/send-ring-response! emitter {:body "ok"})
+        (is (= [:claim :publish] @calls_))
+        (is (= {:phase :closed :callbacks [] :producer nil} (dissoc (lifecycle emitter) :committed)))
+        (is (instance? ol.busker.fixed_final.DirectResponsePlan (:committed (lifecycle emitter))))
+        (is (false? (protocols/open? emitter)))
+        (is (true? (protocols/committed? emitter)))
+        (protocols/on-close! emitter #(swap! late inc))
+        (is (= 1 @late))))))
+
+(deftest used-emitter-sends-its-fixed-response-as-producer
+  (with-fake-slot
+    (fn [])
+    (fn [worker calls_]
+      (let [emitter (fixed-emitter worker)
+            closed (atom 0)]
+        (protocols/on-close! emitter #(swap! closed inc))
+        (response/send-ring-response! emitter {:body "ok"})
+        (is (= [:claim :publish] @calls_))
+        (is (= 1 @closed))
+        (is (= {:phase :closed :callbacks [] :producer nil} (dissoc (lifecycle emitter) :committed)))))))
+
+(deftest emitter-used-during-the-claim-publishes-once-as-producer
+  (let [emitter_ (promise)
+        closed (atom 0)
+        claims (atom 0)]
+    (with-fake-slot
+      (fn []
+        (when (= 1 (swap! claims inc))
+          (protocols/on-close! @emitter_ #(swap! closed inc))))
+      (fn [worker calls_]
+        (let [emitter (fixed-emitter worker)]
+          (deliver emitter_ emitter)
+          (response/send-ring-response! emitter {:body "ok"})
+          (is (= [:claim :abort :claim :publish] @calls_))
+          (is (= 1 @closed))
+          (is (false? (protocols/open? emitter))))))))
+
+(deftest emitter-closed-during-the-claim-sends-nothing
+  (doseq [callback? [false true]]
+    (let [emitter_ (promise)
+          closed (atom 0)]
+      (with-fake-slot
+        (fn [] (response/stop-emitter @emitter_))
+        (fn [worker calls_]
+          (let [emitter (fixed-emitter worker)]
+            (deliver emitter_ emitter)
+            (when callback? (protocols/on-close! emitter #(swap! closed inc)))
+            (response/send-ring-response! emitter {:body "ok"})
+            (is (= [:claim :abort] @calls_) (pr-str callback?))
+            (is (= (if callback? 1 0) @closed))
+            (is (false? (protocols/open? emitter)))
+            (is (false? (protocols/committed? emitter)))))))))
