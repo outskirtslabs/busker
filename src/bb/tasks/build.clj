@@ -25,6 +25,22 @@
      com.outskirtslabs.busker/macos-aarch64
      com.outskirtslabs.busker/macos-x86-64})
 
+(def zig-optimize-modes
+  #{"Debug" "ReleaseSafe" "ReleaseFast" "ReleaseSmall"})
+
+(defn zig-optimize
+  "Returns the Zig optimize mode for the shim: the `busker.zig.optimize`
+  system property, set with `bb -Dbusker.zig.optimize=<mode> <task>`, or
+  ReleaseSafe."
+  []
+  (let [mode (System/getProperty "busker.zig.optimize" "ReleaseSafe")]
+    (when-not (contains? zig-optimize-modes mode)
+      (throw (ex-info (str "Unknown Zig optimize mode " (pr-str mode)
+                           "; busker.zig.optimize must be one of "
+                           (str/join ", " (sort zig-optimize-modes)))
+                      {:mode mode})))
+    mode))
+
 (defn ->deps-file [lib-dir]
   (-> lib-dir
       (fs/path "deps.edn")
@@ -141,6 +157,9 @@
   (t/shell {:dir dir} (str "neil version set " version " --no-tag"))
 
   (assoc-deps! dir version))
+
+(defn build-shim! []
+  (t/shell {:dir "shim"} (str "zig build -Doptimize=" (zig-optimize))))
 
 (defn lib-clean! [dir]
   (t/clojure {:dir dir} "-T:build clean"))

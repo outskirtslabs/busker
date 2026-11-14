@@ -111,7 +111,7 @@ zig2nixEnv.package {
     }:$PATH"
   '';
   zigBuildFlags = [
-    "-Doptimize=Debug"
+    "-Doptimize=ReleaseSafe"
   ];
   postInstall = ''
     source ${clojureLocker.shellEnv}

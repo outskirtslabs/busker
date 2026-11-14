@@ -17,8 +17,8 @@
                   :init     (do (def paths ["src" "dev"]))
 
                   build:shim
-                  {:doc  "Compile C shim library"
-                   :task (shell {:dir "shim"} "zig build -Doptimize=Debug")}
+                  {:doc  "Compile C shim library as ReleaseSafe; bb -Dbusker.zig.optimize=Debug <task> picks another mode"
+                   :task (build/build-shim!)}
 
                   prep
                   {:doc  "Prepare the clojure deps"

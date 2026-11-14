@@ -11,6 +11,24 @@ bb build:shim       # all four Linux/macOS, x86-64/AArch64 libraries
 bb fmt && bb qa     # full project validation; do not run another build concurrently
 ```
 
+Every bb task that builds the shim, including the native jars and their
+publication, builds it as ReleaseSafe, and so does the Nix package: optimised,
+with Zig's undefined-behaviour checks and the C asserts kept. Pass the
+`busker.zig.optimize` system property to bb to pick another Zig mode for the
+task and everything it depends on:
+
+```bash
+bb -Dbusker.zig.optimize=Debug build:shim
+bb -Dbusker.zig.optimize=Debug qa
+```
+
+Debug builds also print the shim's debug log to stderr and check a few more
+invariants with asserts.
+
+In ReleaseSafe a failed undefined-behaviour check stops the process with a
+bare SIGILL, while Debug prints which check failed and where, so reproduce a
+crash of a published jar with a Debug build.
+
 From this directory:
 
 ```bash

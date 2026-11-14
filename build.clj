@@ -2,7 +2,6 @@
   (:require
    [clojure.edn :as edn]
    [clojure.java.io :as io]
-   [clojure.java.shell :as shell]
    [clojure.string :as str]
    [clojure.tools.build.api :as b]))
 
@@ -63,23 +62,6 @@
 
 (defn permalink [subpath]
   (str repo-url-prefix "/blob/" rev "/" subpath))
-
-(defn compile-shim
-  "Compile the native shim for the current host platform."
-  [_]
-  (let [optimize (or (some-> (System/getenv "BUSKER_ZIG_OPTIMIZE")
-                             str/trim
-                             not-empty)
-                     "ReleaseSafe")
-        build-result (shell/sh "zig"
-                               "build"
-                               "-Dall-targets=false"
-                               (str "-Doptimize=" optimize)
-                               :dir "shim")]
-    (when (not= 0 (:exit build-result))
-      (println (:out build-result))
-      (println (:err build-result))
-      (throw (ex-info "Zig build failed" build-result)))))
 
 (defn jar [_]
   (clean nil)
