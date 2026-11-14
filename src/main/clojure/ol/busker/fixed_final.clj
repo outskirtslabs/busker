@@ -119,23 +119,22 @@
                        :payload-bytes payload-length
                        :payload-capacity payload-capacity})))
     (let [^MemorySegment data slot
-          ;; The payload view ends one byte after the capacity, for the zero
-          ;; byte that follows the last string written.
-          payload (.asSlice data (long response-slot-data-size) (inc payload-capacity))
-          body-offset (serialization/stage-headers-at! data response-slot-headers-offset
-                                                       payload headers)]
+          payload-start (long response-slot-data-size)
+          body-offset (serialization/stage-headers! data response-slot-headers-offset
+                                                    payload-start headers)
+          body-start (+ payload-start body-offset)]
       (when-not (= header-bytes body-offset)
         (throw (ex-info "Fixed response header size changed while packing"
                         {:expected header-bytes :actual body-offset})))
       (cond
         (zero? body-length) nil
-        (string? body) (let [end (serialization/write-utf8! payload body-offset body body-length)]
-                         (when-not (= payload-length end)
+        (string? body) (let [end (serialization/write-utf8! data body-start body body-length)]
+                         (when-not (= (+ body-start body-length) end)
                            (throw (ex-info "Fixed response body size changed while packing"
                                            {:expected body-length
-                                            :actual (- end body-offset)}))))
+                                            :actual (- end body-start)}))))
         (instance? byte-array-class body)
-        (MemorySegment/copy ^bytes body 0 payload ValueLayout/JAVA_BYTE body-offset (int body-length))
+        (MemorySegment/copy ^bytes body 0 data ValueLayout/JAVA_BYTE body-start (int body-length))
         :else
         (throw (ex-info "Unsupported direct fixed response body" {:type (class body)})))
       (put-slot-long! data slot-module-id-offset module-id)

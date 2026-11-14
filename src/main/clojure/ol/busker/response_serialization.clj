@@ -83,36 +83,29 @@
   (.setString segment offset value StandardCharsets/UTF_8)
   (+ offset length))
 
-(defn stage-headers-at!
-  "Writes `headers` as `clj_header_t` descriptors into `descriptors` from byte
-  `descriptors-offset`, and their names and values into `payload` from offset
-  0, returning UTF-8 byte use.
+(defn stage-headers!
+  "Writes `headers` into `segment`: `clj_header_t` descriptors from byte
+  `descriptors-offset`, and their names and values from byte `payload-offset`.
+  Returns the UTF-8 bytes the names and values take.
 
-  Both segments must remain valid until native code has copied the descriptors."
-  ^long [^MemorySegment descriptors ^long descriptors-offset ^MemorySegment payload headers]
-  (let [base (.address payload)
+  `segment` must remain valid until native code has copied the descriptors."
+  ^long [^MemorySegment segment ^long descriptors-offset ^long payload-offset headers]
+  (let [base (.address segment)
         n (count headers)]
     (loop [index (long 0)
-           cursor (long 0)]
+           cursor payload-offset]
       (if (< index n)
         (let [[^String name ^String value] (nth headers index)
-              value-offset (write-utf8! payload cursor name (utf8-length name))
-              next-cursor (write-utf8! payload value-offset value (utf8-length value))
+              value-offset (write-utf8! segment cursor name (utf8-length name))
+              next-cursor (write-utf8! segment value-offset value (utf8-length value))
               descriptor (+ descriptors-offset (* index h2o/header-size))]
-          (.set descriptors ValueLayout/JAVA_LONG_UNALIGNED descriptor (+ base cursor))
-          (.set descriptors ValueLayout/JAVA_LONG_UNALIGNED
+          (.set segment ValueLayout/JAVA_LONG_UNALIGNED descriptor (+ base cursor))
+          (.set segment ValueLayout/JAVA_LONG_UNALIGNED
                 (+ descriptor h2o/header-length-offset) (- value-offset cursor))
-          (.set descriptors ValueLayout/JAVA_LONG_UNALIGNED
+          (.set segment ValueLayout/JAVA_LONG_UNALIGNED
                 (+ descriptor h2o/header-value-offset) (+ base value-offset))
-          (.set descriptors ValueLayout/JAVA_LONG_UNALIGNED
+          (.set segment ValueLayout/JAVA_LONG_UNALIGNED
                 (+ descriptor h2o/header-value-offset h2o/header-length-offset)
                 (- next-cursor value-offset))
           (recur (unchecked-inc index) next-cursor))
-        cursor))))
-
-(defn stage-headers!
-  "Writes `headers` into `descriptors` and `payload`, returning UTF-8 byte use.
-
-  Both segments must remain valid until native code has copied the descriptors."
-  ^long [^MemorySegment descriptors ^MemorySegment payload headers]
-  (stage-headers-at! descriptors 0 payload headers))
+        (- cursor payload-offset)))))

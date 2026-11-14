@@ -52,11 +52,9 @@
     mem/null
     (let [descriptor-bytes (serialization/descriptor-bytes headers)
           header-bytes (serialization/header-bytes headers)
-          segment (mem/alloc arena (inc (+ descriptor-bytes header-bytes)))
-          descriptors (mem/slice segment 0 descriptor-bytes)
-          payload (mem/slice segment descriptor-bytes (inc header-bytes))]
-      (serialization/stage-headers! descriptors payload headers)
-      descriptors)))
+          segment (mem/alloc arena (inc (+ descriptor-bytes header-bytes)))]
+      (serialization/stage-headers! segment 0 descriptor-bytes headers)
+      segment)))
 
 (defn- ensure-worker!
   [req]
