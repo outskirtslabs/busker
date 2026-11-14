@@ -2,6 +2,7 @@
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]
+   [babashka.ffi :as mem]
    [clojure.test :refer [deftest is testing]]
    [ol.busker :as busker]
    [ol.busker.fixed-final :as fixed-final]
@@ -12,11 +13,13 @@
    [ring.core.protocols :as ring-protocols])
   (:import
    [java.io ByteArrayInputStream InputStream OutputStream]
+   [java.lang.foreign MemorySegment ValueLayout]
    [java.net InetSocketAddress Socket]
    [java.nio ByteBuffer]
    [java.nio.charset StandardCharsets]
    [java.security KeyStore]
    [java.security.cert CertificateFactory]
+   [java.util HashMap LinkedHashMap]
    [java.util.concurrent CountDownLatch TimeUnit]
    [javax.net.ssl SNIHostName SSLContext SSLSocket SSLSocketFactory TrustManagerFactory]))
 
@@ -180,11 +183,31 @@
 (def ^:private plan-request
   {:dispatch-module-id 1 :dispatch-request-seq 1 :config {:output-buffer-size 32768}})
 
-(defn- head-fields [head]
-  (select-keys head [:status :headers :content-length :compress-hint]))
+(defn- staged-pairs
+  "Returns the header pairs that `plan` writes into a fixed slot."
+  [plan]
+  (with-open [arena (mem/confined-arena)]
+    (let [data-size (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t)
+          capacity (+ fixed-final/max-header-staging-bytes fixed-final/response-ring-max-body-bytes)
+          ^MemorySegment slot (mem/alloc arena (+ data-size capacity 1))
+          _ (fixed-final/write-direct-response-slot! slot capacity plan)
+          i64 #(.get slot ValueLayout/JAVA_LONG_UNALIGNED (long %))
+          text (fn [field]
+                 (String. ^bytes (.toArray (.asSlice slot (- (i64 field) (.address slot)) (i64 (+ field 8)))
+                                           ValueLayout/JAVA_BYTE)
+                          StandardCharsets/UTF_8))
+          descriptors (- data-size (* fixed-final/max-header-pairs 32))]
+      (mapv (fn [i]
+              (let [descriptor (+ descriptors (* 32 i))]
+                [(text descriptor) (text (+ descriptor 16))]))
+            (range (i64 fixed-final/slot-headers-len-offset))))))
+
+(defn- plan-fields [^ol.busker.fixed_final.DirectResponsePlan plan]
+  {:status (.-status plan) :headers (staged-pairs plan)
+   :content-length (.-content-length plan) :compress-hint (.-compress-hint plan)})
 
 (defn- fixed-head [response]
-  (some-> (#'response/ordinary-fixed-plan plan-request response) first head-fields))
+  (some-> (#'response/ordinary-fixed-plan plan-request response) plan-fields))
 
 (deftest header-pairs-preserve-order-and-coercion
   (doseq [[headers expected]
@@ -230,6 +253,67 @@
            (fixed-head {:status 201 :body "ok"
                         :headers (array-map "X-Repeat" ["first" "second"] "X-Lazy" (map str [1]))})))))
 
+(deftest fixed-plan-stages-the-pairs-of-the-final-head
+  (doseq [headers [nil {} {"content-type" "text/plain"}
+                   (array-map "X-Empty" [] "X-List" '(1 nil) "X-Key" :value
+                              "X-Lazy" (map str [2 3]) "CONTENT-LENGTH" 2 "content-length" nil)
+                   {"x-name" "café ☕" "x-multi" ["a" "😀" "b"] "x-number" 7}]]
+    (let [response {:body "ok" :headers headers}
+          ^ol.busker.fixed_final.DirectResponsePlan plan
+          (#'response/ordinary-fixed-plan plan-request response)
+          head (#'response/normalized-head response 2 false)]
+      (is (= [(count (:headers head)) (:header-bytes head)]
+             [(.-header-count plan) (.-header-bytes plan)])
+          (pr-str headers))
+      (is (= (:headers head) (staged-pairs plan)) (pr-str headers)))))
+
+(deftest fixed-plan-takes-java-header-maps
+  (let [compress-hint (response/get-compress-hint {})
+        linked (doto (LinkedHashMap.) (.put "content-type" "text/plain") (.put "X-A" "1")
+                     (.put "Content-Length" "2") (.put "X-B" ["2" "3"]))
+        hashed (doto (HashMap.) (.put "x-one" "1"))]
+    (is (= {:status 200 :headers [["content-type" "text/plain"] ["X-A" "1"] ["X-B" "2"] ["X-B" "3"]]
+            :content-length 2 :compress-hint compress-hint}
+           (fixed-head {:body "ok" :headers linked})))
+    (is (= {:status 200 :headers [["x-one" "1"]] :content-length 2 :compress-hint compress-hint}
+           (fixed-head {:body "ok" :headers hashed})))))
+
+(deftest fixed-plan-takes-header-entry-sequences
+  (let [compress-hint (response/get-compress-hint {})
+        headers (array-map "content-type" "text/plain; charset=utf-8" "X-A" "1"
+                           "Content-Length" "2" "X-M" ["a" "b"])]
+    (doseq [shape [vec seq]]
+      (is (= {:status 200
+              :headers [["content-type" "text/plain; charset=utf-8"] ["X-A" "1"] ["X-M" "a"] ["X-M" "b"]]
+              :content-length 2 :compress-hint compress-hint}
+             (fixed-head {:body "ok" :headers (shape headers)}))
+          (pr-str shape))
+      (is (= {:status 200 :headers [["X-M" "a"] ["X-M" "b"]] :content-length 4
+              :compress-hint compress-hint}
+             (fixed-head {:body (.getBytes "body" StandardCharsets/UTF_8)
+                          :headers (shape (array-map "X-M" ["a" "b"]))}))
+          (pr-str shape)))))
+
+(deftest fixed-plan-takes-the-first-content-length
+  (is (= 2 (:content-length (fixed-head {:body "ok" :headers (array-map "Content-Length" "2"
+                                                                        "content-length" "5")}))))
+  (is (= 2 (:content-length (fixed-head {:body "ok" :headers (array-map "content-length" nil
+                                                                        "CONTENT-LENGTH" 2
+                                                                        "Content-Length" "5")}))))
+  (is (thrown-with-msg? Exception #"does not match its body"
+                        (fixed-head {:body "ok" :headers (array-map "content-length" "5"
+                                                                    "Content-Length" "2")}))))
+
+(deftest fixed-plan-reads-each-non-string-header-value-once
+  (let [calls (atom 0)
+        counted (reify Object (toString [_] (str "v" (swap! calls inc))))]
+    (doseq [value [counted [counted "s"]]]
+      (reset! calls 0)
+      (is (= {:status 200 :headers (if (vector? value) [["X-V" "v1"] ["X-V" "s"]] [["X-V" "v1"]])
+              :content-length 2 :compress-hint (response/get-compress-hint {})}
+             (fixed-head {:body "ok" :headers {"X-V" value}})))
+      (is (= 1 @calls)))))
+
 (deftest fixed-head-status-rules
   (is (= 200 (:status (fixed-head {:body "ok"}))))
   (doseq [headers [{} {"Content-Length" "9"}]]
@@ -245,7 +329,7 @@
            [{:status 200} 0]]]
     (is (= content-length (:content-length (fixed-head response))) (pr-str response)))
   (let [head-request (assoc plan-request :req-ctx {:request-method :head})
-        head-length #(:content-length (first (#'response/ordinary-fixed-plan head-request %)))]
+        head-length #(:content-length (plan-fields (#'response/ordinary-fixed-plan head-request %)))]
     (is (= -1 (head-length {:status 200})))
     (is (= 9 (head-length {:status 200 :headers {"Content-Length" "9"}})))
     (is (= 2 (head-length {:status 200 :body "ok"}))))
@@ -254,7 +338,7 @@
 
 (deftest fixed-head-compress-hint
   (let [request (assoc-in plan-request [:config :compress-min-size] 3)
-        hint (fn [response] (:compress-hint (first (#'response/ordinary-fixed-plan request response))))]
+        hint (fn [response] (:compress-hint (plan-fields (#'response/ordinary-fixed-plan request response))))]
     (is (= h2o/H2O_COMPRESS_HINT_ENABLE (hint {:body "okay"})))
     (is (= h2o/H2O_COMPRESS_HINT_DISABLE (hint {:body "ok"})))
     (is (= h2o/H2O_COMPRESS_HINT_ENABLE_BR

@@ -16,8 +16,10 @@
    [babashka.ffi :as ffi]
    [ol.busker.native :as h2o])
   (:import
+   [clojure.lang RT]
    [java.lang.foreign MemorySegment ValueLayout]
-   [java.nio.charset StandardCharsets]))
+   [java.nio.charset StandardCharsets]
+   [java.util Iterator]))
 
 (set! *warn-on-reflection* true)
 
@@ -83,6 +85,25 @@
   (.setString segment offset value StandardCharsets/UTF_8)
   (+ offset length))
 
+(defn- stage-string!
+  "Writes `value` as UTF-8 into `segment` at `cursor`, and its address and byte
+  length into the name or value field at byte `field` of a `clj_header_t`
+  descriptor. Returns the cursor after the bytes of `value`."
+  ^long [^MemorySegment segment ^long field ^long cursor ^String value]
+  (let [end (write-utf8! segment cursor value (utf8-length value))]
+    (.set segment ValueLayout/JAVA_LONG_UNALIGNED field (+ (.address segment) cursor))
+    (.set segment ValueLayout/JAVA_LONG_UNALIGNED (+ field h2o/header-length-offset) (- end cursor))
+    end))
+
+(defmacro ^:private stage-pair!
+  "Writes descriptor number `index` for the pair `name` and `value`, whose bytes
+  start at `cursor`, and evaluates to the cursor after the value."
+  [segment descriptors-offset index cursor name value]
+  `(let [descriptor# (+ ~descriptors-offset (* ~index h2o/header-size))]
+     (stage-string! ~segment (+ descriptor# h2o/header-value-offset)
+                    (stage-string! ~segment descriptor# ~cursor ~name)
+                    ~value)))
+
 (defn stage-headers!
   "Writes `headers` into `segment`: `clj_header_t` descriptors from byte
   `descriptors-offset`, and their names and values from byte `payload-offset`.
@@ -90,22 +111,43 @@
 
   `segment` must remain valid until native code has copied the descriptors."
   ^long [^MemorySegment segment ^long descriptors-offset ^long payload-offset headers]
-  (let [base (.address segment)
-        n (count headers)]
+  (let [n (count headers)]
     (loop [index (long 0)
            cursor payload-offset]
       (if (< index n)
-        (let [[^String name ^String value] (nth headers index)
-              value-offset (write-utf8! segment cursor name (utf8-length name))
-              next-cursor (write-utf8! segment value-offset value (utf8-length value))
-              descriptor (+ descriptors-offset (* index h2o/header-size))]
-          (.set segment ValueLayout/JAVA_LONG_UNALIGNED descriptor (+ base cursor))
-          (.set segment ValueLayout/JAVA_LONG_UNALIGNED
-                (+ descriptor h2o/header-length-offset) (- value-offset cursor))
-          (.set segment ValueLayout/JAVA_LONG_UNALIGNED
-                (+ descriptor h2o/header-value-offset) (+ base value-offset))
-          (.set segment ValueLayout/JAVA_LONG_UNALIGNED
-                (+ descriptor h2o/header-value-offset h2o/header-length-offset)
-                (- next-cursor value-offset))
-          (recur (unchecked-inc index) next-cursor))
+        (let [[name value] (nth headers index)]
+          (recur (unchecked-inc index)
+                 (stage-pair! segment descriptors-offset index cursor name value)))
         (- cursor payload-offset)))))
+
+(defn stage-ring-headers!
+  "Writes the pairs of the Ring header map `headers` into `segment` like
+  [[stage-headers!]] and returns the UTF-8 bytes they take. Pairs keep header
+  order, names and values pass through `str`, each item of a sequential value
+  becomes a separate pair, and content-length headers in any letter case are
+  left out."
+  ^long [^MemorySegment segment ^long descriptors-offset ^long payload-offset headers]
+  (let [^Iterator entries (RT/iter headers)]
+    (loop [index (long 0)
+           cursor payload-offset
+           header-name nil
+           ^Iterator values nil]
+      (cond
+        (and values (.hasNext values))
+        (recur (unchecked-inc index)
+               (stage-pair! segment descriptors-offset index cursor header-name (str (.next values)))
+               header-name values)
+
+        (.hasNext entries)
+        (let [entry (.next entries)
+              ^String entry-name (key entry)
+              value (val entry)]
+          (cond
+            (.equalsIgnoreCase "content-length" entry-name) (recur index cursor nil nil)
+            (sequential? value) (recur index cursor (str entry-name) (RT/iter value))
+            :else (recur (unchecked-inc index)
+                         (stage-pair! segment descriptors-offset index cursor
+                                      (str entry-name) (str value))
+                         nil nil)))
+
+        :else (- cursor payload-offset)))))

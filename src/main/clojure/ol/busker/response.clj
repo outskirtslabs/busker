@@ -30,7 +30,7 @@
    [java.io InputStream OutputStream]
    [java.nio ByteBuffer CharBuffer]
    [java.nio.charset Charset CharsetEncoder CodingErrorAction StandardCharsets]
-   [java.util Arrays Iterator]
+   [java.util Arrays Iterator Map]
    [clojure.lang MapEntry RT]
    [ol.busker.internal.protocols Request]
    [ol.busker.response_queue BlockOutput]))
@@ -276,10 +276,9 @@
   head, otherwise it is `-1`. Status 205 always has content length 0 and status
   204 never has one (RFC 9110, section 8.6).
   `:header-bytes` is the UTF-8 byte count of the pair names and values.
-  `compress-hint` is stored as given. `retain-response?` stores the response
-  without its body under `:response`, for later body operations that need its
-  headers."
-  [response length informational? retain-response? compress-hint]
+  `compress-hint` is stored as given. The response without its body is stored
+  under `:response`, for later body operations that need its headers."
+  [response length informational? compress-hint]
   (let [status (or (:status response) 200)
         headers (:headers response)
         ^Iterator entries (RT/iter headers)]
@@ -313,24 +312,23 @@
                              (= no-content-status status) -1
                              :else content-length)
            :compress-hint compress-hint
-           :response (when retain-response? (-> response (assoc :status status) (dissoc :body)))})))))
+           :response (-> response (assoc :status status) (dissoc :body))})))))
 
 (defn- check-known-length!
-  "Throws when final `head` declares a content length other than `length`, the
-  length of the body. Call it only when the two differ. Statuses 204, 205 and
+  "Throws when a final head with `status` declares `content-length` but the body
+  has `length` bytes. Call it only when the two differ. Statuses 204, 205 and
   304 and a HEAD response with an empty body are not checked: no body goes out,
   and the header describes another response (RFC 9110, section 8.6)."
-  [head length request-method]
-  (let [status (:status head)]
-    (when-not (or (= no-content-status status)
-                  (= reset-content-status status)
-                  (= not-modified-status status)
-                  (and (zero? (long length)) (= :head request-method)))
-      (throw (invalid-response "Response content-length does not match its body"
-                               {:content-length (:content-length head) :body-length length})))))
+  [status content-length length request-method]
+  (when-not (or (= no-content-status status)
+                (= reset-content-status status)
+                (= not-modified-status status)
+                (and (zero? (long length)) (= :head request-method)))
+    (throw (invalid-response "Response content-length does not match its body"
+                             {:content-length content-length :body-length length}))))
 
 (defn- normalized-head [response length informational?]
-  (build-head response length informational? true (get-compress-hint response)))
+  (build-head response length informational? (get-compress-hint response)))
 
 (defn- warn-large-head!
   "Logs that the accepted `head` of the response to `req` does not fit a fixed
@@ -577,7 +575,8 @@
               (let [head (normalized-head data (when (:end? opts) validation-length) info?)]
                 (when (and (:end? opts) (some? validation-length)
                            (not (== (long (:content-length head)) (long validation-length))))
-                  (check-known-length! head validation-length (:request-method (:req-ctx req))))))
+                  (check-known-length! (:status head) (:content-length head) validation-length
+                                       (:request-method (:req-ctx req))))))
           ;; Strings check their charset when their length is computed.
           _ (when (sequential? body) (encodable (response-charset validation-response)))
           _ (when (and response? (not info?) (p/committed? emitter))
@@ -641,10 +640,63 @@
               (<= (.length ^String body) limit) (.getBytes ^String body (encodable charset))
               :else ::ineligible))))
 
+(deftype FixedHead [^long pair-count ^long header-bytes header-length])
+
+(defn- header-text
+  "Returns the text `str` makes of the header value `value` when that text
+  cannot change between calls, for a string or nil, otherwise nil."
+  ^String [value]
+  (cond
+    (string? value) value
+    (nil? value) ""
+    :else nil))
+
+(defn- fixed-head
+  "Returns the [[FixedHead]] of the Ring header map `headers` from one pass: the
+  number of pairs that [[ol.busker.response-serialization/stage-ring-headers!]]
+  stages, the UTF-8 bytes of their names and values, and the first
+  content-length value, as [[build-head]] finds them for a final head.
+  Returns nil at the first value or item that is neither a string nor nil, so
+  that [[build-head]] calls `str` on each such value once."
+  [headers]
+  (let [^Iterator entries (RT/iter headers)]
+    (loop [pair-count 0
+           header-bytes 0
+           header-length nil
+           name-bytes 0
+           ^Iterator values nil]
+      (cond
+        (and values (.hasNext values))
+        (when-let [text (header-text (.next values))]
+          (recur (inc pair-count)
+                 (+ header-bytes name-bytes (serialization/utf8-length text))
+                 header-length name-bytes values))
+
+        (.hasNext entries)
+        (let [entry (.next entries)
+              header-name (key entry)
+              value (val entry)]
+          (cond
+            (.equalsIgnoreCase "content-length" ^String header-name)
+            (recur pair-count header-bytes (if (nil? header-length) value header-length) 0 nil)
+
+            (sequential? value)
+            (recur pair-count header-bytes header-length
+                   (serialization/utf8-length header-name) (RT/iter value))
+
+            :else
+            (when-let [text (header-text value)]
+              (recur (inc pair-count)
+                     (+ header-bytes (serialization/utf8-length header-name)
+                        (serialization/utf8-length text))
+                     header-length 0 nil))))
+
+        :else (FixedHead. pair-count header-bytes header-length)))))
+
 (defn- ordinary-fixed-plan [req response]
   (let [status (or (:status response) 200)
         config (:config req)
-        limit (min (:output-buffer-size config) fixed-final/response-ring-max-body-bytes)]
+        limit (min (long (:output-buffer-size config)) fixed-final/response-ring-max-body-bytes)]
     (when (and (integer? status) (<= 200 status 999))
       (let [body (fixed-body (:body response) response limit)
             length (cond
@@ -654,20 +706,41 @@
                      (instance? ByteBuffer body) (.remaining ^ByteBuffer body)
                      :else -1)]
         (when (<= 0 length limit)
-          (let [hint (get-compress-hint response)
+          (let [request-method (:request-method (:req-ctx req))
+                hint (get-compress-hint response)
                 hint (if (and (= h2o/H2O_COMPRESS_HINT_ENABLE hint)
-                              (< length (or (:compress-min-size config) 0)))
+                              (< length (long (or (:compress-min-size config) 0))))
                        h2o/H2O_COMPRESS_HINT_DISABLE
                        hint)
                 ;; Without a body, the length a GET or a 200 would carry is unknown.
                 unknown-length? (and (nil? body)
-                                     (or (= not-modified-status status)
-                                         (= :head (:request-method (:req-ctx req)))))
-                head (build-head response (when-not unknown-length? length) false false hint)]
-            (when-not (== (long (:content-length head)) (long length))
-              (check-known-length! head length (:request-method (:req-ctx req))))
-            (when (fixed-final/head-fits? (count (:headers head)) (:header-bytes head))
-              [head (fixed-plan req head body length)])))))))
+                                     (or (= not-modified-status status) (= :head request-method)))]
+            ;; The slot write stages a vector as normalized pairs, so header
+            ;; shapes other than a map, such as entry vectors, take build-head.
+            (if-let [^FixedHead head (let [headers (:headers response)]
+                                       (when (or (nil? headers) (instance? Map headers))
+                                         (fixed-head headers)))]
+              (let [header-length (.-header-length head)
+                    declared-length (cond
+                                      (some? header-length) (coerce-content-length header-length)
+                                      unknown-length? -1
+                                      :else length)
+                    content-length (cond
+                                     (= reset-content-status status) 0
+                                     (= no-content-status status) -1
+                                     :else declared-length)]
+                (when-not (== content-length length)
+                  (check-known-length! status content-length length request-method))
+                (when (fixed-final/head-fits? (.-pair-count head) (.-header-bytes head))
+                  (fixed-final/ring-response-plan
+                   (long (:dispatch-module-id req)) (long (:dispatch-request-seq req)) (long status)
+                   (:headers response) (.-pair-count head) (.-header-bytes head) body length
+                   content-length (long hint))))
+              (let [head (build-head response (when-not unknown-length? length) false hint)]
+                (when-not (== (long (:content-length head)) length)
+                  (check-known-length! status (:content-length head) length request-method))
+                (when (fixed-final/head-fits? (count (:headers head)) (:header-bytes head))
+                  (fixed-plan req head body length))))))))))
 
 (def ^:private internal-error-response
   {:status 500
@@ -683,8 +756,8 @@
                (not (instance? ByteBuffer body))
                (satisfies? p/ResponseEmitter body))
         (when (:status response) (p/emit! emitter (dissoc response :body)))
-        (if-let [[head plan] (when (and (p/open? emitter) (nil? @(.writer_ emitter)))
-                               (ordinary-fixed-plan (.req emitter) response))]
+        (if-let [plan (when (and (p/open? emitter) (nil? @(.writer_ emitter)))
+                        (ordinary-fixed-plan (.req emitter) response))]
           (when (= :accepted (acquire-producer! (.lifecycle-lock emitter) (.lifecycle_ emitter) true))
             (try
               (if (and (p/open? emitter) (nil? @(.writer_ emitter)))
@@ -694,7 +767,7 @@
                    (locking lock
                      (if (p/open? emitter)
                        (do
-                         (swap! (.lifecycle_ emitter) assoc :committed head)
+                         (swap! (.lifecycle_ emitter) assoc :committed plan)
                          (publish!)
                          (terminal! (.lifecycle-lock emitter) (.lifecycle_ emitter)
                                     (.callback-tail_ emitter) (.callback-dispatch emitter))

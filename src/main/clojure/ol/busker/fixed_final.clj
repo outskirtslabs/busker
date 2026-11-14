@@ -65,6 +65,7 @@
                              ^long request-seq
                              ^long status
                              headers
+                             ^long header-count
                              ^long header-bytes
                              body
                              ^long body-length
@@ -72,7 +73,7 @@
                              ^long compress-hint])
 
 (alter-meta! #'->DirectResponsePlan assoc :doc
-             "Creates a direct response-ring plan. `module-id` and `request-seq` select the request; `status`, `headers`, and `header-bytes` describe the response head; `body`, `body-length`, and `content-length` describe the final payload; `compress-hint` selects native compression handling.")
+             "Creates a direct response-ring plan. `module-id` and `request-seq` select the request. `status`, `headers`, `header-count`, and `header-bytes` describe the response head. `body`, `body-length`, and `content-length` describe the final payload. `compress-hint` selects native compression handling.")
 (defn header-staging-bytes
   "Returns the established descriptor and C-string budget for `headers`."
   ^long [headers]
@@ -90,12 +91,21 @@
   (serialization/header-bytes headers))
 
 (defn direct-response-plan
-  "Creates a fixed-final plan from normalized headers and a complete body.
+  "Creates a fixed-final plan from normalized header pairs and a complete body.
   The caller must check eligibility and supply exact encoded byte lengths before
   publication; this constructor does not validate those limits."
   [module-id request-seq status headers header-bytes body body-length content-length compress-hint]
-  (DirectResponsePlan. module-id request-seq status headers header-bytes body body-length
-                       content-length compress-hint))
+  (DirectResponsePlan. module-id request-seq status headers (count headers) header-bytes body
+                       body-length content-length compress-hint))
+
+(defn ring-response-plan
+  "Creates a fixed-final plan like [[direct-response-plan]] from a Ring header
+  map `headers`. `header-count` is the number of header pairs that
+  [[ol.busker.response-serialization/stage-ring-headers!]] writes for the map."
+  [module-id request-seq status headers header-count header-bytes body body-length content-length
+   compress-hint]
+  (DirectResponsePlan. module-id request-seq status headers header-count header-bytes body
+                       body-length content-length compress-hint))
 
 (def ^:private byte-array-class (Class/forName "[B"))
 
@@ -114,22 +124,26 @@
         request-seq (.-request-seq plan)
         status (.-status plan)
         headers (.-headers plan)
+        header-count (.-header-count plan)
         header-bytes (.-header-bytes plan)
         body (.-body plan)
         body-length (.-body-length plan)
         content-length (.-content-length plan)
         compress-hint (.-compress-hint plan)
         payload-length (+ header-bytes body-length)]
-    (when (or (> (count headers) max-header-pairs)
+    (when (or (> header-count max-header-pairs)
               (> payload-length payload-capacity))
       (throw (ex-info "Fixed response does not fit its claimed slot"
-                      {:header-count (count headers)
+                      {:header-count header-count
                        :payload-bytes payload-length
                        :payload-capacity payload-capacity})))
     (let [^MemorySegment data slot
           payload-start (long response-slot-data-size)
-          body-offset (serialization/stage-headers! data response-slot-headers-offset
-                                                    payload-start headers)
+          body-offset (if (vector? headers)
+                        (serialization/stage-headers! data response-slot-headers-offset
+                                                      payload-start headers)
+                        (serialization/stage-ring-headers! data response-slot-headers-offset
+                                                           payload-start headers))
           body-start (+ payload-start body-offset)]
       (when-not (= header-bytes body-offset)
         (throw (ex-info "Fixed response header size changed while packing"
@@ -149,7 +163,7 @@
         (throw (ex-info "Unsupported direct fixed response body" {:type (class body)})))
       (put-slot-long! data slot-module-id-offset module-id)
       (put-slot-long! data slot-request-seq-offset request-seq)
-      (put-slot-long! data slot-headers-len-offset (count headers))
+      (put-slot-long! data slot-headers-len-offset header-count)
       (put-slot-long! data slot-content-length-offset content-length)
       (put-slot-long! data slot-body-offset-offset body-offset)
       (put-slot-long! data slot-body-len-offset body-length)

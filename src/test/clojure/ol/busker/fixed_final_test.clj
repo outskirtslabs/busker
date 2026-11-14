@@ -63,10 +63,11 @@
 
 (defn- slot-capture [response]
   (with-open [arena (mem/confined-arena)]
-    (let [[head plan] (#'response/ordinary-fixed-plan
-                       {:dispatch-module-id 7 :dispatch-request-seq 11
-                        :config {:output-buffer-size 32768}}
-                       response)
+    (let [^ol.busker.fixed_final.DirectResponsePlan plan
+          (#'response/ordinary-fixed-plan
+           {:dispatch-module-id 7 :dispatch-request-seq 11
+            :config {:output-buffer-size 32768}}
+           response)
           ^MemorySegment slot (mem/alloc arena (+ pinned-data-size pinned-capacity 1))
           _ (.fill slot (unchecked-byte 0xAA))
           _ (fixed-final/write-direct-response-slot! slot pinned-capacity plan)
@@ -84,7 +85,8 @@
                            ValueLayout/JAVA_BYTE)
           window (+ payload-len 2)
           payload (.toArray (.asSlice slot pinned-data-size window) ValueLayout/JAVA_BYTE)]
-      {:head (select-keys head [:status :content-length :compress-hint])
+      {:head {:status (.-status plan) :content-length (.-content-length plan)
+              :compress-hint (.-compress-hint plan)}
        :fields {:claim-token (i64 0) :module-id (i64 8) :request-seq (i64 16)
                 :headers-len n :content-length (i64 32) :body-offset (i64 40)
                 :body-len (i64 48) :payload-len payload-len
