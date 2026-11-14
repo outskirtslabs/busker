@@ -4389,10 +4389,6 @@ int clj_ptls_ctx_set_tickets(
     }
     ctx->ticket_lifetime = ticket_lifetime;
     ctx->max_early_data_size = max_early_data_size;
-
-    /* Send 2 NewSessionTicket messages (like Cloudflare).
-       This gives client redundancy and curl seems to need 2 before sending early data. */
-    ctx->ticket_requests.server.max_count = 2;
     return 0;
 }
 

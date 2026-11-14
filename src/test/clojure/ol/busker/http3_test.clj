@@ -10,7 +10,8 @@
    [ol.busker.generation :as generation]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as proto]
-   [ol.busker.test-utils :as util])
+   [ol.busker.test-utils :as util]
+   [ol.busker.tickets :as tickets])
   (:import
    java.net.InetSocketAddress
    java.nio.channels.DatagramChannel))
@@ -869,6 +870,39 @@
           (is (= 0 (:exit resumed)) (:err resumed))
           (is (= ["x25519" "UNDEF"] [(:group resumed) (:signature resumed)])
               (:err resumed)))
+        (finally
+          (busker/stop! server)
+          (io/delete-file session-file true))))))
+
+(deftest http3-tickets-use-busker-ticket-keys-test
+  (testing "HTTP/3 session tickets are encrypted and decrypted with Busker's ticket keys"
+    (when-not (curl-ssl-sessions-supported?)
+      (throw (Exception. "your curl was not compiled with --enable-ssls-export and thus does not support --ssl-sessions")))
+    (let [port         (util/free-port)
+          session-file (str (System/getProperty "java.io.tmpdir") "/busker-test-ticket-keys-" port ".txt")
+          server       (busker/start!
+                        (util/with-static-tls
+                          (util/with-handler
+                            (fn [_] {:status 200 :body "ok"})
+                            {:entrypoints {:tls {:bind   (str "127.0.0.1:" port)
+                                                 :http3? true}}})))
+          resumed?     (fn []
+                         (let [result (curl-h3-handshake session-file port "X25519")]
+                           (is (= 0 (:exit result)) (:err result))
+                           (is (some? (:signature result)) (:err result))
+                           (= "UNDEF" (:signature result))))]
+      (try
+        (io/delete-file session-file true)
+        (util/wait-for-curl-ready! :https :h3 port "/" :max-time 5)
+        (is (false? (resumed?)) "the first handshake is a full one")
+        (is (true? (resumed?)) "a ticket issued under the current keys resumes")
+        (let [native-mgr (::generation/native-ticket-mgr
+                          (:instance (:active @(:busker/state server))))
+              now-ms     (System/currentTimeMillis)]
+          (tickets/sync-keys-to-native! native-mgr
+                                        [(tickets/generate-key now-ms (* 3600 1000))]))
+        (is (false? (resumed?)) "a ticket issued under replaced keys does not resume")
+        (is (true? (resumed?)) "a ticket issued under the new keys resumes")
         (finally
           (busker/stop! server)
           (io/delete-file session-file true))))))
