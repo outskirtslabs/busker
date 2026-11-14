@@ -173,7 +173,7 @@
       data)))
 
 ;; Fixed-slot waiters. A thread waits on `:response-slot-monitor` only in
-;; claim-response!; under the monitor it increments `:response-slot-waiters`
+;; wait-for-claim!. Under the monitor it increments `:response-slot-waiters`
 ;; before its first check and rechecks before each wait. A notifier makes its
 ;; change, issues a full fence, reads the count and takes the monitor for
 ;; notifyAll only when the count is above zero. Either the notifier sees the
@@ -234,10 +234,10 @@
                   [receiver claim])))))
         (finally (.unlock read-lock))))))
 
-(defn- claim-response!
-  [worker wait? cancelled?]
+(defn- wait-for-claim!
+  [worker cancelled?]
   (let [monitor (:response-slot-monitor worker)
-        ^AtomicInteger waiters (when wait? (:response-slot-waiters worker))]
+        ^AtomicInteger waiters (:response-slot-waiters worker)]
     (locking monitor
       (when waiters (.incrementAndGet waiters))
       (try
@@ -245,11 +245,22 @@
           (if (cancelled?)
             :closed
             (let [claim (claim-once! worker)]
-              (if (and wait? (= :overloaded claim))
+              (if (= :overloaded claim)
                 (do (.wait ^Object monitor) (recur))
                 claim))))
         (finally
           (when waiters (.decrementAndGet waiters)))))))
+
+(defn- claim-response!
+  "Claims a slot without the slot monitor, and waits on it only when `wait?`
+  and no slot is free."
+  [worker wait? cancelled?]
+  (if (cancelled?)
+    :closed
+    (let [claim (claim-once! worker)]
+      (if (and wait? (= :overloaded claim))
+        (wait-for-claim! worker cancelled?)
+        claim))))
 
 (defn- prepare-and-publish!
   [worker claim cancelled? prepare! accept!]

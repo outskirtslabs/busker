@@ -745,6 +745,29 @@
                 (.interrupt thread)
                 (.join thread 2000)))))))))
 
+(deftest claim-with-a-free-slot-skips-the-monitor-test
+  (let [worker (counted-slot-worker)
+        monitor (:response-slot-monitor worker)
+        held (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        holder (Thread/startVirtualThread
+                #(locking monitor
+                   (.countDown held)
+                   (.await release)))]
+    (with-redefs-fn
+      {#'fixed-final/claim-once! (fn [_] [:receiver 65537])}
+      (fn []
+        (try
+          (is (.await held 2 TimeUnit/SECONDS))
+          (doseq [wait? [true false]]
+            (is (= [:receiver 65537]
+                   (deref (future (#'fixed-final/claim-response! worker wait? (constantly false)))
+                          1000 :blocked))))
+          (is (zero? (.get ^AtomicInteger (:response-slot-waiters worker))))
+          (finally
+            (.countDown release)
+            (.join holder 2000)))))))
+
 (deftest capacity-notice-without-waiters-skips-the-monitor-test
   (let [worker (counted-slot-worker)
         monitor (:response-slot-monitor worker)
