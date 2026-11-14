@@ -318,6 +318,22 @@
       (is (= 2 (:content-length (fixed-head {:body (.getBytes "é" StandardCharsets/UTF_8)
                                              :headers headers})))))))
 
+(deftest ring-sequence-writer-gets-the-resolved-charset
+  (doseq [[headers expected]
+          [[nil {"content-type" "text/plain; charset=UTF-8"}]
+           [{"X-Other" "1"} {"X-Other" "1" "content-type" "text/plain; charset=UTF-8"}]
+           [{"Content-Type" "text/html; charset=bogus" "X-Other" "1"}
+            {"Content-Type" "text/html; charset=UTF-8" "X-Other" "1"}]
+           [{"CONTENT-TYPE" "text/html; charset=iso-8859-1"}
+            {"CONTENT-TYPE" "text/html; charset=ISO-8859-1"}]
+           [(array-map "Content-Type" "text/plain; charset=iso-8859-1"
+                       "content-type" "text/plain; charset=utf-8")
+            {"Content-Type" "text/plain; charset=UTF-8"
+             "content-type" "text/plain; charset=utf-8"}]]]
+    (is (= {:status 200 :headers expected}
+           (#'response/ring-seq-response {:status 200 :headers headers}))
+        (pr-str headers))))
+
 (deftest fixed-path-body-limit
   (let [limit fixed-final/response-ring-max-body-bytes
         latin1 {"content-type" "text/plain; charset=iso-8859-1"}]

@@ -1,5 +1,5 @@
 (ns ol.busker.response-length-test
-  "Content length and charset errors in handler responses, over HTTP/1.1,
+  "Content length and charset handling in handler responses, over HTTP/1.1,
   HTTP/2 and HTTP/3."
   (:require
    [clojure.string :as str]
@@ -21,6 +21,29 @@
 (defn- emit-then [emitter f]
   (Thread/startVirtualThread f)
   {:body emitter})
+
+(def ^:private sequence-bodies
+  {"list" #(list "ca" "fé")
+   "lazy-seq" #(map identity ["ca" "fé"])
+   "vector" #(vector "ca" "fé")})
+
+(defn- sequence-response
+  "Returns the response for `/seq/<charset>/<kind>`: \"café\" as a `kind` body
+  of two parts in `charset`. Returns nil for another path."
+  [uri]
+  (when-let [[_ charset kind] (re-matches #"/seq/([^/]+)/([^/]+)" uri)]
+    {:status 200
+     :headers {"content-type" (str "text/plain; charset=" charset)}
+     :body ((sequence-bodies kind))}))
+
+(def ^:private sequence-cases
+  "Each sequence path with the body a client reads as UTF-8. An unknown charset
+  uses UTF-8."
+  (for [[charset encoding] [["bogus" StandardCharsets/UTF_8]
+                            ["ISO-8859-1" StandardCharsets/ISO_8859_1]]
+        kind (sort (keys sequence-bodies))]
+    [(str "/seq/" charset "/" kind)
+     (String. (.getBytes "café" ^java.nio.charset.Charset encoding) StandardCharsets/UTF_8)]))
 
 (defn- handler [{:keys [uri] emitter :ol.busker.request/emitter}]
   (case uri
@@ -56,7 +79,7 @@
                                                          {:end? true :capacity 16})
                                                 (catch Exception _ :threw))]
                                    (p/emit! emitter {:status 500 :body (str result)} {:end? true})))
-    {:status 200 :body "ready"}))
+    (or (sequence-response uri) {:status 200 :body "ready"})))
 
 (def ^:private handler-error-paths
   "Responses that are a handler error before their head is sent."
@@ -113,15 +136,38 @@
        :head head
        :content-length (some-> (re-find #"(?m)^content-length: (\d+)" head) second parse-long)})))
 
+(defn- read-line-crlf [^InputStream in]
+  (let [out (StringBuilder.)]
+    (loop []
+      (let [b (.read in)]
+        (when (neg? b) (throw (ex-info "EOF in chunked body" {:read (str out)})))
+        (.append out (char b))
+        (if (str/ends-with? (str out) "\r\n")
+          (subs (str out) 0 (- (.length out) 2))
+          (recur))))))
+
+(defn- read-chunked
+  "Reads a chunked body without trailers."
+  ^bytes [^InputStream in]
+  (let [out (ByteArrayOutputStream.)]
+    (loop []
+      (let [size (Long/parseLong (first (str/split (read-line-crlf in) #";")) 16)]
+        (.write out (.readNBytes in (int size)))
+        (read-line-crlf in)
+        (if (zero? size) (.toByteArray out) (recur))))))
+
 (defn- read-response
   "Reads one final response, after any informational heads."
   [^InputStream in method]
-  (let [{:keys [status content-length] :as head} (read-head in)]
+  (let [{:keys [status content-length head] :as response} (read-head in)]
     (if (< status 200)
       (read-response in method)
-      (assoc head :body (if (= "HEAD" method)
-                          ""
-                          (String. (.readNBytes in (int content-length)) StandardCharsets/UTF_8))))))
+      (assoc response :body (cond
+                              (= "HEAD" method) ""
+                              content-length (String. (.readNBytes in (int content-length))
+                                                      StandardCharsets/UTF_8)
+                              (str/includes? head "transfer-encoding: chunked")
+                              (String. (read-chunked in) StandardCharsets/UTF_8))))))
 
 (defn- read-to-eof
   "Returns the bytes read until the server closes the connection, or `:open`
@@ -237,3 +283,16 @@
       (doseq [proto [:h2 :h3]]
         (is (= {:exit 0 :status 500 :body ":threw"} (curl-exchange proto tls-port "/emit-producer"))
             (pr-str proto))))))
+
+(deftest sequence-body-in-an-unknown-charset-uses-utf8-test
+  (with-server
+    (fn [{:keys [port tls-port]}]
+      (doseq [[path body] sequence-cases]
+        (let [[first-response second-response]
+              (try (keep-alive-pair port "GET" path)
+                   (catch Exception e [{:error (ex-message e)}]))]
+          (is (= [200 body] ((juxt :status :body) first-response)) path)
+          (is (= [200 "second"] ((juxt :status :body) second-response)) path))
+        (doseq [proto [:h2 :h3]]
+          (is (= {:exit 0 :status 200 :body body} (curl-exchange proto tls-port path))
+              (pr-str [proto path])))))))

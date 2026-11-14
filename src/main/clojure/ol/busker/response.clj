@@ -177,11 +177,24 @@
     (sequential? body) (doseq [part body] (write-body! part response out))
     :else (write-ring-body! body response out)))
 
+(defn- ring-seq-response
+  "Returns `response` with its content type set to name the charset Busker uses.
+  Ring's sequence writer throws on a charset Java does not know. The entry is
+  the first content-type header in any case, which is the one Ring reads."
+  [response]
+  (let [headers (:headers response)
+        header-name (or (some (fn [[k _]] (when (and (string? k) (.equalsIgnoreCase "content-type" ^String k)) k))
+                              headers)
+                        "content-type")
+        media-type (some-> (get headers header-name) str (str/split #";" 2) first)]
+    (assoc-in response [:headers header-name]
+              (str (or media-type "text/plain") "; charset=" (.name (response-charset response))))))
+
 (defn- write-adapted-body! [body response out complete?]
   (if (and complete? (streamable-response-body? body)
            (not (or (string? body) (instance? byte-array-class body)
                     (instance? ByteBuffer body) (nil? body))))
-    (write-ring-body! body response out)
+    (write-ring-body! body (if (seq? body) (ring-seq-response response) response) out)
     (write-body! body response out)))
 
 (defn- bounded-body? [body]
