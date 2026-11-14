@@ -3768,6 +3768,12 @@ static int clj_h2o_http3_open_udp_fd(const char *host, uint16_t port) {
   return -1;
 }
 
+/* h2o's server defaults (src/main.c). The decoder capacity goes into SETTINGS,
+   so clients can compress request headers. H2O's server encoder inserts
+   nothing, so the encoder capacity does not change responses. */
+static const h2o_http3_qpack_context_t clj_http3_qpack = {
+    .encoder_table_capacity = 16384, .decoder_table_capacity = 16384};
+
 static clj_http3_ctx_t *
 clj_h2o_http3_create_worker_ctx_from_fd(h2o_context_t *h2o_ctx,
                                         h2o_evloop_t *loop,
@@ -3810,6 +3816,7 @@ clj_h2o_http3_create_worker_ctx_from_fd(h2o_context_t *h2o_ctx,
                                 NULL, h2o_ctx->globalconf->http3.use_gso);
 
   ctx->h3_ctx.accept_ctx = &ctx->accept_ctx;
+  ctx->h3_ctx.qpack = clj_http3_qpack;
 
   return ctx;
 }
@@ -4250,15 +4257,18 @@ void clj_ticket_manager_set_quic_tag(
 {
     if (!mgr || !quic_ctx) return;
 
-    /* Hash transport parameters that affect 0-RTT compatibility.
-       Uses first 8 bytes of SHA256 hash. */
-    uint64_t params[6] = {
+    /* Hash transport parameters and HTTP/3 settings that affect 0-RTT
+       compatibility. As in h2o's ssl.c, this includes the QPACK table
+       capacity, because a client may use the capacity it remembers in 0-RTT
+       (RFC 9204 Section 3.2.3). Uses first 8 bytes of SHA256 hash. */
+    uint64_t params[7] = {
         quic_ctx->transport_params.max_streams_bidi,
         quic_ctx->transport_params.max_streams_uni,
         quic_ctx->transport_params.max_stream_data.bidi_local,
         quic_ctx->transport_params.max_stream_data.bidi_remote,
         quic_ctx->transport_params.max_stream_data.uni,
-        quic_ctx->transport_params.max_data
+        quic_ctx->transport_params.max_data,
+        clj_http3_qpack.decoder_table_capacity
     };
 
     uint8_t hash[32];

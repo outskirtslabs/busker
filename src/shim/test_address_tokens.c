@@ -862,6 +862,91 @@ static void test_count_follows_close(const char *cert, const char *key) {
   close(pair1[0]);
   clj_h2o_http3_release_udp_transport(transport);
 }
+
+/* The server's control stream, as the client receives it */
+static uint8_t control_stream[64];
+static size_t control_stream_len;
+
+static void stream_ignore_shift(quicly_stream_t *stream, size_t delta) {
+  (void)stream;
+  (void)delta;
+}
+static void stream_ignore_emit(quicly_stream_t *stream, size_t off, void *dst,
+                               size_t *len, int *wrote_all) {
+  (void)stream;
+  (void)off;
+  (void)dst;
+  (void)len;
+  (void)wrote_all;
+}
+static void stream_ignore_error(quicly_stream_t *stream, quicly_error_t err) {
+  (void)stream;
+  (void)err;
+}
+static void stream_record(quicly_stream_t *stream, size_t off, const void *src,
+                          size_t len) {
+  if (stream->stream_id != 3)
+    return;
+  CHECK(off + len <= sizeof(control_stream));
+  memcpy(control_stream + off, src, len);
+  if (off + len > control_stream_len)
+    control_stream_len = off + len;
+}
+static const quicly_stream_callbacks_t record_callbacks = {
+    stream_ignore_error, stream_ignore_shift, stream_ignore_emit,
+    stream_ignore_error, stream_record,       stream_ignore_error};
+static quicly_error_t open_recorded(quicly_stream_open_t *self,
+                                    quicly_stream_t *stream) {
+  (void)self;
+  stream->callbacks = &record_callbacks;
+  return 0;
+}
+static quicly_stream_open_t record_streams = {open_recorded};
+
+/* The value of SETTINGS parameter `id` on the received control stream, or
+   UINT64_MAX when the frame does not carry it (RFC 9114 Section 7.2.4) */
+static uint64_t received_setting(uint64_t id) {
+  const uint8_t *src = control_stream, *end = control_stream + control_stream_len;
+  CHECK(quicly_decodev(&src, end) == H2O_HTTP3_STREAM_TYPE_CONTROL);
+  CHECK(quicly_decodev(&src, end) == H2O_HTTP3_FRAME_TYPE_SETTINGS);
+  uint64_t len = quicly_decodev(&src, end);
+  CHECK(len <= (uint64_t)(end - src));
+  for (end = src + len; src != end;) {
+    uint64_t key = quicly_decodev(&src, end), value = quicly_decodev(&src, end);
+    CHECK(key != UINT64_MAX && value != UINT64_MAX);
+    if (key == id)
+      return value;
+  }
+  return UINT64_MAX;
+}
+
+/* The server's SETTINGS allow the client a QPACK dynamic table of h2o's
+   size and as many blocked streams as it may open */
+static void test_settings_allow_qpack_dynamic_table(const char *cert,
+                                                    const char *key) {
+  accept_fixture_t f;
+  accept_fixture_init(&f, cert, key, NULL);
+  f.client_quic.transport_params.max_streams_uni = 3;
+  f.client_quic.stream_open = &record_streams;
+  clj_http3_udp_transport_t *transport = new_transport();
+  f.worker->transport = transport;
+  quicly_conn_t *client;
+  h2o_quic_conn_t *conn = handshake(&f, &client, 1);
+  for (int round = 0; round < 8 && control_stream_len < 4; ++round) {
+    h2o_quic_send(conn);
+    client_reads(&f, client);
+  }
+
+  CHECK(received_setting(H2O_HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY) ==
+        16384);
+  CHECK(received_setting(H2O_HTTP3_SETTINGS_QPACK_BLOCKED_STREAMS) ==
+        f.worker->h3_ctx.super.quic->transport_params.max_streams_bidi);
+
+  clj_on_http3_conn_destroy(conn);
+  quicly_free(client);
+  f.worker->transport = NULL;
+  clj_h2o_http3_release_udp_transport(transport);
+}
 #endif
 
 int main(int argc, char **argv) {
@@ -877,6 +962,7 @@ int main(int argc, char **argv) {
   test_connect_after_handshake(argv[1], argv[2]);
   test_path_change_on_listener_socket(argv[1], argv[2]);
   test_count_follows_close(argv[1], argv[2]);
+  test_settings_allow_qpack_dynamic_table(argv[1], argv[2]);
 #endif
   puts("QUIC address token tests passed");
   return 0;
