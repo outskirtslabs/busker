@@ -72,11 +72,8 @@
       devShell =
         pkgs:
         let
-          zig = zig2nix.packages.${pkgs.system}."zig-0_17_0";
-          # zig2nix's fetch/unpack logic still requires Zig 0.16.
-          zig2nixEnv = zig2nix.outputs.zig-env.${pkgs.system} {
-            zig = zig2nix.packages.${pkgs.system}."zig-0_16_0";
-          };
+          zig = zig2nix.packages.${pkgs.system}.zig-0_17_1;
+          zig2nixEnv = zig2nix.outputs.zig-env.${pkgs.system} { inherit zig; };
           apple-sdk = self.packages.${pkgs.system}.apple-sdk;
           javaVersion = "25";
         in
@@ -117,9 +114,11 @@
             pkgs.ruby
             pkgs.liburing
             zig
+            # zon2lock expects `zig fetch --save` to unpack into the zig-pkg
+            # directory of its temporary directory (zig2nix
+            # src/zig2nix/src/zon2lock.zig), so it must not see ZIG_LOCAL_PKG_DIR.
             (pkgs.writeShellScriptBin "zig2nix" ''
-              # Keep 0.16's package tarballs separate from the 0.17 compiler cache.
-              export ZIG_GLOBAL_CACHE_DIR="$(${pkgs.coreutils}/bin/realpath -m "''${ZIG_GLOBAL_CACHE_DIR:-$PWD/.zig-cache-global}/zig2nix-0.16")"
+              unset ZIG_LOCAL_PKG_DIR
               exec ${zig2nixEnv.zig2nix}/bin/zig2nix "$@"
             '')
             pkgs.gdb

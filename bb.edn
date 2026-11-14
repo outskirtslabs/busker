@@ -58,7 +58,7 @@
                   {:override-builtin true
                    :doc              "Clean everything"
                    :depends          [clean]
-                   :task             (shell {:dir "shim"} "rm -rf .zig-cache .zig-cache-global")}
+                   :task             (shell {:dir "shim"} "rm -rf .zig-cache")}
 
                   publish
                   {:doc     "Publish the clojure libs to clojars"

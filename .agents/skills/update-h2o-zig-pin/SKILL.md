@@ -6,7 +6,7 @@ description: Updates Busker's h2o-zig Zig and Nix pins, synchronizes duplicated 
 # Update the h2o-zig Pin
 
 Run every project command inside the Nix devshell. Run the steps sequentially; never run another command in parallel with `bb build`.
-Use Zig 0.17.0 for compilation and tests. The devshell's `zig2nix` command uses Zig 0.16 only for dependency fetching, with an isolated cache. Keep that split until the pinned zig2nix supports the Zig 0.17 fetch API.
+Use the devshell's Zig 0.17.1 for compilation, tests and `zig2nix`. The devshell's `zig2nix` command unsets `ZIG_LOCAL_PKG_DIR`; calling zig2nix from another environment with that variable set makes `zon2lock` fail and leaves an empty lock file.
 
 ## Pin locations
 

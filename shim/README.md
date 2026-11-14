@@ -1,7 +1,7 @@
 # Native shim
 
 This directory builds the shared libraries from [../src/shim/](../src/shim/).
-Use **Zig 0.17.0** and Perl, supplied by `nix develop` at the repository root.
+Use Zig 0.17.1 and Perl, supplied by `nix develop` at the repository root.
 The devshell also supplies the macOS SDK for cross-compilation.
 
 From the repository root:
@@ -28,10 +28,9 @@ Keep `build.zig.zon`, `build.zig.zon2json-lock`, and the independent `h2o-zig`
 flake input aligned on one published commit. Generate hashes with `zig fetch`
 and regenerate the lock with `zig2nix`; do not hand-edit hashes.
 
-The pinned zig2nix fetch code does not yet support Zig 0.17. The devshell's
-`zig2nix` command and Nix dependency fetches therefore use Zig 0.16 with a
-separate cache. **Compilation and tests use Zig 0.17.** Do not mix the fetch
-cache with the compiler cache: the versions emit different package tarballs.
+The devshell's `zig2nix` command runs without `ZIG_LOCAL_PKG_DIR`:
+`zig2nix zon2lock` fetches each package into the `zig-pkg` directory of a
+temporary directory it creates, and fails if Zig unpacks it elsewhere.
 
 These source updates do not replace already-published native JARs. Build from
 this checkout to exercise the updated dependencies; publishing a new native

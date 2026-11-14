@@ -24,7 +24,6 @@ zig-out
 .dir-locals.el
 .eca/
 .tmuxb_session
-.zig-cache-global/
 .scratch/
 .scratch-org/
 .worktrees/

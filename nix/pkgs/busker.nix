@@ -38,7 +38,7 @@ let
   warmShimJars = pkgs.lib.concatMapStringsSep "\n" (target: ''
     (
       cd "shim/${target.dir}"
-      ${clojure}/bin/clojure -Srepro -P -T:build jar || true
+      ${clojure}/bin/clojure -Srepro -T:build jar
     )
   '') shimTargets;
 in
@@ -52,7 +52,6 @@ clojureLib.mkCljLib {
     ".gitlibs"
     ".m2"
     "shim/.zig-cache"
-    "shim/.zig-cache-global"
     "shim/zig-cache"
     "shim/zig-out"
   ]
@@ -86,12 +85,19 @@ clojureLib.mkCljLib {
     export GITLIBS="$HOME/.gitlibs"
     export JAVA_TOOL_OPTIONS="-Duser.home=$HOME"
     unset CLJ_CACHE CLJ_CONFIG XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME
+    # The locker works on a copy without .git; build.clj needs a revision.
+    export GIT_REV="lockfile-generation"
 
     ${clojure}/bin/clojure -Srepro -P || true
     ${clojure}/bin/clojure -Srepro -X:deps prep :aliases '[:bench :build :dev :test]'
     ${clojure}/bin/clojure -Srepro -P -M:dev:test:kaocha || true
 
-    ${clojure}/bin/clojure -Srepro -P -T:build jar || true
+    # The jar tasks run for real, not with -P: create-basis resolves the root
+    # deps built into tools.deps, including a Clojure version -P never fetches.
+    # The shim jars come from another package (nix/pkgs/shim.nix) that uses
+    # this lock file, so clj-helpers' default lock command, which runs only
+    # this package's build command, would miss them.
+    ${clojure}/bin/clojure -Srepro -T:build jar
     ${warmShimJars}
   '';
 }

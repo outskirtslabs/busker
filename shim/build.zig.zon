@@ -2,7 +2,7 @@
     .name = .http_clj,
     .version = "0.0.1",
     .fingerprint = 0xaabaf927ba0e83fa,
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .@"h2o-zig" = .{
             .url = "git+https://github.com/outskirtslabs/h2o-zig.git#9ca8c1d2aec0a726539b582625cb447c477b4bbf",
