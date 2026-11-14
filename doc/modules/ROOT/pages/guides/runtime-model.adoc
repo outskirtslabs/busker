@@ -153,7 +153,7 @@ Those protocols keep listening for messages about open streams while a response 
 Suppose the configuration changes while that slow response is still open.
 xref:ROOT:api/ol-busker.adoc#reload-BANG-[`ol.busker/reload!`] does not tear down the running generation and then try to replace it.
 It builds a candidate generation beside the active one while the active generation keeps serving traffic.
-An unchanged configuration snapshot returns `:unchanged` unless the caller requests a forced reload.
+An unchanged configuration snapshot returns `:unchanged` unless the caller requests a forced reload or a worker of the active generation has failed. In that case a reload replaces the generation.
 
 If the candidate cannot start, `reload!` cleans it up, throws an exception, and leaves the active generation serving traffic.
 The old generation has not begun shutting down at this point.
@@ -166,6 +166,7 @@ A request never jumps to the new generation halfway through.
 
 The old generation then drains in the background.
 `reload!` returns after the old generation has stopped accepting work, not after every old request has finished.
+If the old generation does not stop accepting within 60 seconds, `reload!` logs the error and returns with the new generation serving. The old generation is still retired in the background.
 Several generations may be draining after several quick reloads, each with the requests that began while it was active.
 
 == Draining and stopping

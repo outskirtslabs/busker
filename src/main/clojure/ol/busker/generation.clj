@@ -1449,6 +1449,11 @@
     (tickets/start-key-manager! key-manager))
   generation)
 
+(defn failed-worker?
+  "Returns true when a worker of `generation` has failed."
+  [generation]
+  (boolean (some #(.get ^AtomicReference (:native-failure_ %)) (::workers generation))))
+
 (defn begin-stop!
   [{::keys [stop-lock phase] :as generation}]
   (locking stop-lock

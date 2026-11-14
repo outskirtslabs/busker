@@ -13,7 +13,8 @@
    [ol.busker.config :as config]
    [ol.busker.generation :as generation]
    [ol.busker.listen :as listen]
-   [ol.busker.tickets :as tickets])
+   [ol.busker.tickets :as tickets]
+   [taoensso.trove :as trove])
   (:import
    [java.util.concurrent Callable ExecutionException ExecutorService Executors Future
     RejectedExecutionException ThreadFactory TimeUnit]
@@ -286,20 +287,29 @@
     nil))
 
 (defn- begin-drain!
+  "Stops `generation` accepting and returns it with a future that retires it.
+  A failure to stop accepting is logged, and the future retires the generation
+  all the same."
   [server-handle generation]
-  (generation/begin-stop! (:instance generation))
-  (generation/await-stop-accepting! (:instance generation))
+  (try
+    (generation/begin-stop! (:instance generation))
+    (generation/await-stop-accepting! (:instance generation))
+    (catch Throwable t
+      (when (instance? InterruptedException t)
+        (.interrupt (Thread/currentThread)))
+      (trove/log! {:level :error
+                   :id ::stop-accepting-failed
+                   :error t
+                   :data {:generation-id (:generation-id generation)}})))
   (assoc generation
          :drain-future
          (future
-           (let [result
-                 (try
-                   (generation/stop! (:instance generation))
-                   (finalize-draining-generation! server-handle generation)
-                   :ok
-                   (catch Throwable t
-                     t))]
-             result))))
+           (try
+             (generation/stop! (:instance generation))
+             (finalize-draining-generation! server-handle generation)
+             :ok
+             (catch Throwable t
+               t)))))
 
 (defn- await-drain!
   [generation]
@@ -378,34 +388,36 @@
        (let [plan (candidate-plan (:config active)
                                   (:managed-plan active)
                                   user-config
-                                  opts)]
+                                  (cond-> opts
+                                    (generation/failed-worker? (:instance active))
+                                    (assoc :force? true)))]
          (if (= :unchanged (:action plan))
            :unchanged
            (try
-             (let [candidate (build-generation! user-config
-                                                next-generation-id
-                                                listener-pool
-                                                active
-                                                memory-ticket-service)]
-               (try
-                 (let [candidate (update candidate :instance generation/activate-http3-transports!)
-                       candidate (update candidate :instance generation/register-shared-ticket-manager!)
-                       _ (reset! state
-                                 {:phase :running
-                                  :config (:config candidate)
-                                  :next-generation-id (inc next-generation-id)
-                                  :listener-pool listener-pool
-                                  :memory-ticket-service (:memory-ticket-service candidate)
-                                  :active candidate
-                                  :draining draining})
-                       draining-generation (begin-drain! server-handle active)]
-                   (swap! state update :draining conj draining-generation)
-                   :activated)
-                 (catch Throwable t
-                   (cleanup-unpublished-generation! candidate
-                                                    (:cert-automation active)
-                                                    memory-ticket-service)
-                   (throw t))))
+             (let [built (build-generation! user-config
+                                            next-generation-id
+                                            listener-pool
+                                            active
+                                            memory-ticket-service)
+                   candidate (try
+                               (-> built
+                                   (update :instance generation/activate-http3-transports!)
+                                   (update :instance generation/register-shared-ticket-manager!))
+                               (catch Throwable t
+                                 (cleanup-unpublished-generation! built
+                                                                  (:cert-automation active)
+                                                                  memory-ticket-service)
+                                 (throw t)))]
+               (reset! state
+                       {:phase :running
+                        :config (:config candidate)
+                        :next-generation-id (inc next-generation-id)
+                        :listener-pool listener-pool
+                        :memory-ticket-service (:memory-ticket-service candidate)
+                        :active candidate
+                        :draining draining})
+               (swap! state update :draining conj (begin-drain! server-handle active))
+               :activated)
              (catch Throwable t
                (let [data (ex-data t)]
                  (throw (ex-info "Reload failed"
@@ -459,25 +471,35 @@
                    :generations-to-stop   draining
                    :memory-ticket-service (:memory-ticket-service @state)}))))]
       (when generations-to-stop
-        (doseq [generation generations-to-stop]
-          (await-drain! generation))
-        (doseq [cert-runtime (->> generations-to-stop
-                                  (map :cert-automation)
-                                  (remove nil?)
-                                  distinct)]
-          (clave-adapter/stop! cert-runtime))
-        (when memory-ticket-service
-          (tickets/stop-key-service! memory-ticket-service))
-        (locking lifecycle-gate
-          (let [{:keys [next-generation-id listener-pool]} @state]
-            (reset! state
-                    {:phase                 :stopped
-                     :config                config
-                     :next-generation-id    next-generation-id
-                     :listener-pool         listener-pool
-                     :memory-ticket-service nil
-                     :active                nil
-                     :draining              []}))))))
+        (let [failures (into []
+                             (keep (fn [generation]
+                                     (try
+                                       (await-drain! generation)
+                                       nil
+                                       (catch Throwable t
+                                         t))))
+                             generations-to-stop)]
+          (doseq [cert-runtime (->> generations-to-stop
+                                    (map :cert-automation)
+                                    (remove nil?)
+                                    distinct)]
+            (clave-adapter/stop! cert-runtime))
+          (when memory-ticket-service
+            (tickets/stop-key-service! memory-ticket-service))
+          (locking lifecycle-gate
+            (let [{:keys [next-generation-id listener-pool]} @state]
+              (reset! state
+                      {:phase                 :stopped
+                       :config                config
+                       :next-generation-id    next-generation-id
+                       :listener-pool         listener-pool
+                       :memory-ticket-service nil
+                       :active                nil
+                       :draining              []})))
+          (when-let [[^Throwable failure & more] (seq failures)]
+            (doseq [t more]
+              (.addSuppressed failure t))
+            (throw failure))))))
   nil)
 
 (defn stop!

@@ -122,6 +122,8 @@ A generation is a running set of workers, listeners, and native resources.
 During reload, Busker starts a new generation to accept new connections while the previous generation finishes work on its existing connections.
 This lets configuration changes take effect without immediately interrupting active requests.
 
+A reload with an unchanged configuration returns `:unchanged`, unless a worker of the active generation has failed. Then it builds a new generation, since the active one serves with fewer workers than configured. A reload publishes the new generation, then waits up to 60 s for the previous one to stop accepting. If it does not, the reload logs that and still returns `:activated` with the new generation serving, and the previous generation is retired in the background as after any reload. A retry with the same configuration then returns `:unchanged`. A server stop drains every generation, stops each certificate runtime once and stops the in-memory ticket service, and ends stopped even when a generation cannot be retired. It then throws the first retirement error, with any others suppressed, and a later stop throws the same error.
+
 The previous generation stops accepting new connections but must still let its handlers send responses.
 Busker keeps its response queues and native memory available until that work finishes or the shutdown timeout is reached.
 Reaching the timeout does not make memory safe to free. Receiver admission closes first; previously entered producers and native requests retain their generation until publication, discard or cleanup. A producer that ignores interruption can delay release indefinitely. Failed retirement reports and retains the affected arenas and callback stubs instead of invalidating live addresses.

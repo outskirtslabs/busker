@@ -2,6 +2,7 @@
   "Reload, drain and stop after a worker's event loop has failed."
   (:require
    [clojure.test :refer [deftest is use-fixtures]]
+   [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.buffer-pool :as bp]
    [ol.busker.config :as config]
    [ol.busker.generation :as generation]
@@ -38,6 +39,12 @@
                                :tls false}}
           :dispatch [{:handler (fn [_] {:status 200 :body body})}]}
          extra))
+
+(defn- managed-config
+  [port body]
+  (assoc (server-config port body)
+         :tls {:certificates {:manage ["managed.example"]}
+               :issuers [{:directory-url "https://acme.example/directory"}]}))
 
 (defn- active-instance
   [server]
@@ -91,6 +98,10 @@
       true)
     (catch Throwable _
       false)))
+
+(defn- body
+  [port]
+  (:out (util/curl :http :h1 port "/" :max-time 5)))
 
 (defn- open-served-connection!
   "Opens a keep-alive connection to `port` and reads one response on it, so the
@@ -246,3 +257,85 @@
       (is (identical? cause (.get ^AtomicReference (:native-failure_ worker))))
       (is (not-any? #{::generation/worker-failed} @logged_)))
     (is (nil? (generation/stop! instance 5 TimeUnit/SECONDS)))))
+
+(deftest reload-after-a-worker-failed-activates-the-new-generation-and-retires-the-old-test
+  (let [port (util/free-port)
+        server (runtime/start! (server-config port "old"))]
+    (try
+      (is (zero? (:exit (util/wait-for-curl-ready! :http :h1 port "/" :max-time 2))))
+      (let [old (active-instance server)]
+        (fail-idle-worker! old 0)
+        (is (= "old" (body port)))
+        (let [logged_ (atom [])]
+          (with-redefs [trove/*log-fn* (fn [_ns _coords _level id _lazy] (swap! logged_ conj id))]
+            (is (= :activated (runtime/reload! server (server-config port "new" :server-name "new")))))
+          (is (not-any? #{::runtime/stop-accepting-failed} @logged_)
+              "the reload does not wait for the failed worker to stop accepting"))
+        (is (= ["new" "new" "new" "new"] (vec (repeatedly 4 #(body port)))))
+        (is (eventually #(empty? (:draining @(:busker/state server)))))
+        (is (= :stopped @(::generation/phase old)))
+        (is (= :unchanged (runtime/reload! server (server-config port "new" :server-name "new")))))
+      (finally
+        (is (nil? (runtime/stop! server)))))
+    (is (= :stopped (:phase (runtime/state server))))
+    (is (port-bindable? port))))
+
+(deftest reload-with-the-same-configuration-replaces-a-generation-with-a-failed-worker-test
+  (let [port (util/free-port)
+        server (runtime/start! (server-config port "same"))]
+    (try
+      (is (zero? (:exit (util/wait-for-curl-ready! :http :h1 port "/" :max-time 2))))
+      (let [old (active-instance server)]
+        (fail-idle-worker! old 0)
+        (is (= :activated (runtime/reload! server (server-config port "same"))))
+        (is (not (identical? old (active-instance server))))
+        (is (= :unchanged (runtime/reload! server (server-config port "same"))))
+        (is (= "same" (body port)))
+        (is (eventually #(= :stopped @(::generation/phase old)))))
+      (finally
+        (is (nil? (runtime/stop! server)))))))
+
+(deftest reload-keeps-the-candidate-serving-when-the-old-generation-cannot-drain-test
+  (let [port (util/free-port)
+        stopped-runtimes_ (atom [])]
+    (with-redefs [clave-adapter/start! (fn [plan] {:runtime-id (gensym "runtime") :managed-plan plan})
+                  clave-adapter/stop! (fn [cert-runtime]
+                                        (swap! stopped-runtimes_ conj (:runtime-id cert-runtime)))
+                  clave-adapter/wrap-handler (fn [handler _] handler)]
+      (let [server (runtime/start! (server-config port "old"))
+            old (active-instance server)]
+        (try
+          (is (zero? (:exit (util/wait-for-curl-ready! :http :h1 port "/" :max-time 2))))
+          (with-redefs [generation/await-stop-accepting!
+                        (fn [_] (throw (ex-info "simulated drain failure" {})))]
+            (is (= :activated (runtime/reload! server (managed-config port "new")))))
+          (let [{:keys [active]} @(:busker/state server)]
+            (is (= 2 (:generation-id active)))
+            (is (= :running @(::generation/phase (:instance active)))))
+          (is (= "new" (body port)))
+          (is (eventually #(empty? (:draining @(:busker/state server)))))
+          (is (= :stopped @(::generation/phase old)))
+          (is (= :unchanged (runtime/reload! server (managed-config port "new"))))
+          (finally
+            (is (nil? (runtime/stop! server)))))
+        (is (= 1 (count @stopped-runtimes_)))
+        (is (port-bindable? port))))))
+
+(deftest stop-ends-stopped-and-reports-a-generation-it-must-keep-test
+  (let [port (util/free-port)
+        server (runtime/start! (server-config port "held"))
+        instance (active-instance server)]
+    (with-open [_ (open-served-connection! port)]
+      (fail-worker! instance (.indexOf ^java.util.List (connection-counts instance) 1))
+      (let [stop (fn []
+                   (try
+                     (runtime/stop! server)
+                     nil
+                     (catch ExceptionInfo e
+                       (ex-message e))))]
+        (is (= kept-message (stop)))
+        (is (= :stopped (:phase (runtime/state server))))
+        (is (= kept-message (stop)))
+        (is (refuses-connections? port))
+        (is (port-bindable? port))
+        (forget-kept-generation! instance 1)))))
