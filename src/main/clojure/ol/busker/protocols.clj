@@ -41,7 +41,12 @@
 
      A `content-length` header must be a non-negative integer. With `:end? true`
      and a complete body of known length, it must equal that length, or `emit!`
-     throws.
+     throws. Other output that passes the declared length or ends short of it
+     fails the response: HTTP/1.1 closes the connection, HTTP/2 and HTTP/3 reset
+     the stream. No byte past the declared length is sent. An `:end? true`
+     producer sent from a fixed slot throws instead: on an emitter without earlier
+     output, with capacity at most 32768, not for HEAD and not for status 204,
+     205 or 304.
 
      A map without `:body` is header-only; `:body nil` is an empty body write with
      a receipt. Informational statuses 100–199 except 101 reject bodies and `:end?`.

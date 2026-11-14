@@ -293,13 +293,18 @@
                    (.position buffer)))]
     (put-slot-long! slot slot-body-len-offset length)
     (put-slot-long! slot slot-payload-len-offset (+ body-offset length))
-    (when (= -1 (.-content-length plan))
-      (put-slot-long! slot slot-content-length-offset length))))
+    (cond
+      (= -1 (.-content-length plan))
+      (put-slot-long! slot slot-content-length-offset length)
+      (not (== (.-content-length plan) length))
+      (throw (ex-info "Producer output does not match the response content-length"
+                      {:content-length (.-content-length plan) :body-length length})))))
 
 (defn publish-direct-producer!
   "Fills a claimed fixed slot with a synchronous confined native producer.
 
   `plan` has an empty body; content length `-1` selects the produced length.
+  Another content length must equal the produced length, or this throws.
   `cancelled?` checks response closure. Closure must call [[notify-capacity!]].
   `accept!` atomically checks closure and registers the response before calling
   its publication function exactly once, or returns `:closed` without calling it.

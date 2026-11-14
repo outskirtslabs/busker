@@ -592,12 +592,12 @@
                           [:body-len :payload-len :content-length])))
       (is (= [99 97 116] (vec (mem/read-array (mem/slice slot size 3) :byte 3)))))))
 
-(deftest producer-exception-closes-alias-and-preserves-explicit-content-length
+(deftest producer-exception-closes-alias-and-checks-explicit-content-length
   (with-open [arena (mem/shared-arena)]
     (let [size (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t)
           slot (mem/alloc arena (+ size 65))
           alias_ (atom nil)
-          plan (direct-plan 1 1 200 [] 7 0 nil 0)]
+          plan (direct-plan 1 1 200 [] 2 0 nil 0)]
       (is (thrown-with-msg? Exception #"producer failed"
                             (#'fixed-final/write-direct-producer-slot!
                              slot 64 plan 16
@@ -605,9 +605,12 @@
                                (reset! alias_ buffer)
                                (throw (Exception. "producer failed"))))))
       (is (thrown? IllegalStateException (.get ^ByteBuffer @alias_ 0)))
+      (is (thrown-with-msg? Exception #"does not match the response content-length"
+                            (#'fixed-final/write-direct-producer-slot!
+                             slot 64 plan 16 (fn [^ByteBuffer buffer] (.put buffer (byte 1))))))
       (#'fixed-final/write-direct-producer-slot!
-       slot 64 plan 16 (fn [^ByteBuffer buffer] (.put buffer (byte 1))))
-      (is (= {:body-len 1 :content-length 7}
+       slot 64 plan 16 (fn [^ByteBuffer buffer] (.put buffer (byte 1)) (.put buffer (byte 2))))
+      (is (= {:body-len 2 :content-length 2}
              (select-keys (mem/read slot h2o/ffi-clj-fixed-response-slot-data-t)
                           [:body-len :content-length]))))))
 

@@ -10,13 +10,17 @@
    [taoensso.trove :as trove])
   (:import
    [java.io ByteArrayInputStream ByteArrayOutputStream InputStream]
-   [java.net InetSocketAddress Socket]
+   [java.net InetSocketAddress Socket SocketTimeoutException]
    [java.nio ByteBuffer]
    [java.nio.charset StandardCharsets]))
 
 (def ^:private hello (.getBytes "Hello World" StandardCharsets/UTF_8))
 
 (def ^:private no-encoder-type "text/plain; charset=x-JISAutoDetect")
+
+(defn- emit-then [emitter f]
+  (Thread/startVirtualThread f)
+  {:body emitter})
 
 (defn- handler [{:keys [uri] emitter :ol.busker.request/emitter}]
   (case uri
@@ -40,6 +44,18 @@
     "/no-encoder-large" {:status 200 :headers {"content-type" no-encoder-type}
                          :body (apply str (repeat 40000 "é"))}
     "/no-encoder-seq" {:status 200 :headers {"content-type" no-encoder-type} :body (list "ca" "fé")}
+    "/stream-short" {:status 200 :headers {"content-length" "5"} :body (ByteArrayInputStream. hello)}
+    "/stream-long" {:status 200 :headers {"content-length" "20"} :body (ByteArrayInputStream. hello)}
+    "/emit-close" (emit-then emitter
+                             #(do (p/emit! emitter {:status 200 :headers {"content-length" "20"} :body hello})
+                                  (p/close! emitter)))
+    "/emit-producer" (emit-then emitter
+                                #(let [result (try
+                                                (p/emit! emitter {:status 200 :headers {"content-length" "5"}
+                                                                  :body (fn [^ByteBuffer b] (.put b ^bytes hello))}
+                                                         {:end? true :capacity 16})
+                                                (catch Exception _ :threw))]
+                                   (p/emit! emitter {:status 500 :body (str result)} {:end? true})))
     {:status 200 :body "ready"}))
 
 (def ^:private handler-error-paths
@@ -51,6 +67,10 @@
 (def ^:private empty-head-paths
   "Responses whose HEAD answer sends no body and gives the GET length."
   #{"/nil" "/empty-string" "/empty-bytes"})
+
+(def ^:private streamed-mismatch-paths
+  "Responses of unknown length whose body differs from their content length."
+  ["/stream-short" "/stream-long" "/emit-close"])
 
 (defn- start-server []
   (let [port (util/free-port)
@@ -102,6 +122,14 @@
       (assoc head :body (if (= "HEAD" method)
                           ""
                           (String. (.readNBytes in (int content-length)) StandardCharsets/UTF_8))))))
+
+(defn- read-to-eof
+  "Returns the bytes read until the server closes the connection, or `:open`
+  when it stays open for two seconds."
+  [^Socket socket]
+  (.setSoTimeout socket 2000)
+  (try (count (.readAllBytes (.getInputStream socket)))
+       (catch SocketTimeoutException _ :open)))
 
 (defn- keep-alive-pair
   "Sends `method` `path` and then GET /ok on one HTTP/1.1 connection. Returns
@@ -175,3 +203,37 @@
         (is (= {:exit 0 :status 500 :body "Internal Server Error"}
                (curl-exchange proto tls-port path))
             (pr-str [proto path]))))))
+
+(deftest streamed-length-mismatch-closes-the-http1-connection-test
+  (with-server
+    (fn [{:keys [port]}]
+      (doseq [path streamed-mismatch-paths]
+        (with-open [socket (Socket.)]
+          (.connect socket (InetSocketAddress. "127.0.0.1" (int port)) 2000)
+          (.setSoTimeout socket 5000)
+          (send-request! socket "GET" path)
+          (let [{:keys [status content-length]} (read-head (.getInputStream socket))
+                received (read-to-eof socket)]
+            (is (= 200 status) path)
+            (is (number? received) (str path " leaves the connection open"))
+            (when (number? received)
+              (is (< received content-length) path))))))))
+
+;; HTTP/2 and HTTP/3 clients reset these streams without the worker's byte
+;; count too, so this test only guards against a regression.
+(deftest streamed-length-mismatch-resets-http2-and-http3-streams-test
+  (with-server
+    (fn [{:keys [tls-port]}]
+      (doseq [proto [:h2 :h3]
+              path streamed-mismatch-paths]
+        (is (not= 0 (:exit (curl-exchange proto tls-port path))) (pr-str [proto path]))))))
+
+(deftest fixed-producer-length-mismatch-throws-before-output-test
+  (with-server
+    (fn [{:keys [port tls-port]}]
+      (let [[first-response second-response] (keep-alive-pair port "GET" "/emit-producer")]
+        (is (= [500 ":threw"] ((juxt :status :body) first-response)))
+        (is (= [200 "second"] ((juxt :status :body) second-response))))
+      (doseq [proto [:h2 :h3]]
+        (is (= {:exit 0 :status 500 :body ":threw"} (curl-exchange proto tls-port "/emit-producer"))
+            (pr-str proto))))))

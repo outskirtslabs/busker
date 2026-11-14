@@ -582,7 +582,22 @@
        ^MemorySegment (-> record :block :segment) (:bytes record)))
     {:seg seg :veccnt count}))
 
-(defn- next-flight! [st]
+(defn- declared-length
+  "Returns the content length that final `head` declares for body bytes that go
+  on the wire, or -1. HEAD responses and statuses 204, 205 and 304 send none."
+  ^long [st head]
+  (let [length (long (or (:content-length head) -1))]
+    (if (or (neg? length)
+            (= :head (-> st :req :req-ctx :request-method))
+            (contains? #{204 205 304} (:status head)))
+      -1
+      length)))
+
+(defn- next-flight!
+  "Takes the next ready output. Returns a flight, `:local` when it settled empty
+  markers itself, or `::length-mismatch`, taking nothing, when the output would
+  pass the declared content length or end short of it."
+  [st]
   (locking (:lock st)
     (when (runnable? st)
       (let [s @(:state_ st)
@@ -592,16 +607,27 @@
             final? (or (:aborted? s)
                        (and (some? (:end-prefix s))
                             (>= (:consumed s) (:end-prefix s)) (empty? remaining)))
-            bytes (reduce + 0 (map :bytes records))]
-        (swap! (:state_ st) assoc :queued remaining)
-        (if (and (zero? bytes) (not final?))
+            bytes (reduce + 0 (map :bytes records))
+            declared (if (:aborted? s) -1 (declared-length st (:head s)))
+            ^longs sent-bytes (:sent-bytes st)
+            sent (+ (aget sent-bytes 0) (long bytes))]
+        (cond
+          (and (not (neg? declared))
+               (or (> sent declared) (and final? (< sent declared))))
+          ::length-mismatch
+
+          (and (zero? bytes) (not final?))
           (do
+            (swap! (:state_ st) assoc :queued remaining)
             (doseq [record records]
               (release-record! st record)
               (when (:marker? record)
                 (settle-locked! st (:receipt record) {:status :proceeded})))
             :local)
+          :else
           (let [flight {:records records :final? final? :error? (:aborted? s)}]
+            (swap! (:state_ st) assoc :queued remaining)
+            (aset sent-bytes 0 sent)
             (doseq [record records]
               (when-not (compare-and-set! (:resource_ record) :pending :native)
                 (throw (IllegalStateException. "Stream record already released")))
@@ -622,33 +648,39 @@
       (loop [turns 0
              sent? false]
         (if-let [flight (next-flight! st)]
-          (let [local? (= flight :local)]
-            (when-not local?
-              (let [arena (Arena/ofConfined)]
-                (locking (:lock st)
-                  (swap! (:state_ st) assoc-in [:in-flight :arena] arena))
-                (try
-                  (let [{:keys [seg veccnt]} (package-chunks (:records flight) arena)]
-                    (when-not (:started? @(:state_ st))
-                      ((:apply-head! (:req st))
-                       {:status 200 :headers [] :content-length -1 :compress-hint 0} false)
-                      (locking (:lock st)
-                        (swap! (:state_ st) assoc :started? true)))
-                    (when-not (:cleaned? @(:state_ st))
-                      (h2o/sendvec (-> st :req :req-ctx :req) seg veccnt
-                                   (cond (:error? flight) h2o/H2O_SEND_STATE_ERROR
-                                         (:final? flight) h2o/H2O_SEND_STATE_FINAL
-                                         :else h2o/H2O_SEND_STATE_IN_PROGRESS))))
-                  (catch Throwable t
-                    ;; Entry may have reached native code: retain the installed send.
-                    (fail! st t)
-                    (let [worker (-> st :req :worker)]
-                      (when-let [f (:on-native-failure! worker)] (f worker t)))))))
-            ;; Only a synchronous proceed can remove this native flight here.
-            ;; Locally settled markers consume this response's ordinary turn.
-            (if (and (not local?) (< turns 255) (runnable? st))
-              (recur (inc turns) true)
-              (or sent? (not local?))))
+          (if (= ::length-mismatch flight)
+            (let [error (ex-info "Response body length does not match its content-length"
+                                 {:content-length (:content-length (committed-head st))})]
+              (trove/log! {:level :error :id :response/content-length-mismatch :error error})
+              (fail! st error)
+              (recur turns sent?))
+            (let [local? (= flight :local)]
+              (when-not local?
+                (let [arena (Arena/ofConfined)]
+                  (locking (:lock st)
+                    (swap! (:state_ st) assoc-in [:in-flight :arena] arena))
+                  (try
+                    (let [{:keys [seg veccnt]} (package-chunks (:records flight) arena)]
+                      (when-not (:started? @(:state_ st))
+                        ((:apply-head! (:req st))
+                         {:status 200 :headers [] :content-length -1 :compress-hint 0} false)
+                        (locking (:lock st)
+                          (swap! (:state_ st) assoc :started? true)))
+                      (when-not (:cleaned? @(:state_ st))
+                        (h2o/sendvec (-> st :req :req-ctx :req) seg veccnt
+                                     (cond (:error? flight) h2o/H2O_SEND_STATE_ERROR
+                                           (:final? flight) h2o/H2O_SEND_STATE_FINAL
+                                           :else h2o/H2O_SEND_STATE_IN_PROGRESS))))
+                    (catch Throwable t
+                      ;; Entry may have reached native code: retain the installed send.
+                      (fail! st t)
+                      (let [worker (-> st :req :worker)]
+                        (when-let [f (:on-native-failure! worker)] (f worker t)))))))
+              ;; Only a synchronous proceed can remove this native flight here.
+              ;; Locally settled markers consume this response's ordinary turn.
+              (if (and (not local?) (< turns 255) (runnable? st))
+                (recur (inc turns) true)
+                (or sent? (not local?)))))
           sent?))
       (finally
         (.set ^AtomicBoolean (:sending?_ st) false)
@@ -665,8 +697,10 @@
     (when flight (release-native! st flight {:status :proceeded}))
     (send-vecs st)))
 
+;; `sent-bytes` holds the body bytes handed to native sends. Only next-flight!
+;; reads and writes it, under `lock`.
 (defrecord H2OResponseWriter [req lock state_ budget buffer-pool output-buffer-size
-                              drain-state_ sending?_]
+                              drain-state_ sending?_ sent-bytes]
   pi/Stopable
   (stop [this] (on-stop this nil)))
 
@@ -679,7 +713,7 @@
             :accepted 0 :consumed 0 :flush-prefix 0 :end-prefix nil
             :unconsumed (sorted-map) :queued [] :in-flight nil})
      (bbq/byte-budget size lock) (-> req :worker :stream-pool) size
-     (Object.) (AtomicBoolean. false))))
+     (Object.) (AtomicBoolean. false) (long-array 1))))
 
 (defn create-response-writer [req]
   (let [st (new-response-state req)

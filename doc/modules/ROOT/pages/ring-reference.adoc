@@ -234,6 +234,10 @@ The value must equal the byte length of the body.
 Busker does not correct it.
 For a body whose length Busker calculates, a value that differs, or a value that is not a non-negative number, is a handler error: Busker logs it and sends `500 Internal Server Error` instead, on every protocol.
 Statuses 204, 205 and 304, and a HEAD response with an empty body, are not checked, because they send no body.
+For a stream, a sequence or another body of unknown length, Busker counts the bytes it sends and never sends a byte past the value.
+When the body would send more bytes than the value, or ends with fewer, Busker logs it and ends the response as failed: it closes the HTTP/1.1 connection, or resets the HTTP/2 or HTTP/3 stream.
+A body that ends with fewer bytes gives the client an incomplete response.
+A longer body can give the client every declared byte before the failure, and a client can take that as a complete response.
 
 Without an explicit value, Busker calculates the byte length of `String`, `byte[]`, `java.nio.ByteBuffer`, `java.io.File`, and `nil` bodies. ByteBuffer length is its remaining byte count.
 String length and output use the charset in `content-type`, with UTF-8 when the charset is absent or invalid. Malformed or unmappable characters use encoder replacement bytes.
