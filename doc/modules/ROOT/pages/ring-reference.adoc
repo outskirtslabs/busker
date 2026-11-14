@@ -118,6 +118,7 @@ Sequences and input streams can produce data as Busker reads them, as described 
 Busker does not require `ring-core-protocols`.
 Without it, Busker's writer accepts `byte[]`, `String`, `java.nio.ByteBuffer`, `java.io.InputStream`, `nil`, and sequential collections of fallback values.
 The writer encodes a `String` with the response charset, using UTF-8 when the charset is absent or invalid.
+A charset that cannot encode gives `500 Internal Server Error`.
 The writer writes a number as one byte using `OutputStream.write(int)`.
 The writer does not accept `java.io.File` or custom Ring protocol implementations.
 
@@ -226,11 +227,17 @@ This application atom does not replace Busker's writer synchronization. Use `on-
 == Content length
 
 Busker uses an explicit `content-length` response header when present.
-Header lookup is case-insensitive, and the value must be a decimal string or number.
+Header lookup is case-insensitive, and the value must be a non-negative decimal string or number.
 Busker removes that field from the ordinary header map and passes its numeric value to libh2o.
+
+The value must equal the byte length of the body.
+Busker does not correct it.
+For a body whose length Busker calculates, a value that differs, or a value that is not a non-negative number, is a handler error: Busker logs it and sends `500 Internal Server Error` instead, on every protocol.
+Statuses 204, 205 and 304, and a HEAD response with an empty body, are not checked, because they send no body.
 
 Without an explicit value, Busker calculates the byte length of `String`, `byte[]`, `java.nio.ByteBuffer`, `java.io.File`, and `nil` bodies. ByteBuffer length is its remaining byte count.
 String length and output use the charset in `content-type`, with UTF-8 when the charset is absent or invalid. Malformed or unmappable characters use encoder replacement bytes.
+A charset that Java can decode but not encode, such as `x-JISAutoDetect`, is a handler error for a `String` or sequence body: Busker sends `500 Internal Server Error`.
 Applications can extend xref:api/ol-busker-protocols.adoc#SizableResponseBody[`SizableResponseBody`] for another fixed-size type.
 
 Busker leaves the length unknown for streams and sequences.

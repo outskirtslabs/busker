@@ -213,7 +213,7 @@
                 :headers [["content-type" "text/plain"] ["X-After" "1"]]
                 :content-length expected
                 :compress-hint compress-hint}
-               (fixed-head {:body "ok"
+               (fixed-head {:body "Hello"
                             :headers (array-map "content-type" "text/plain"
                                                 header-name value
                                                 "X-After" "1")})))))
@@ -376,9 +376,7 @@
 
 (deftest invalid-ring-response-terminates-transport
   (doseq [headers [{"X-Repeat" (repeat 65 "value")}
-                   {"X-Large" (apply str (repeat 16384 "x"))}
-                   {"Content-Length" "not-a-number"}
-                   {"Content-Length" ["2" "2"]}]
+                   {"X-Large" (apply str (repeat 16384 "x"))}]
           informational? [false true]]
     (let [closed (promise)
           [server port] (start-server

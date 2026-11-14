@@ -39,8 +39,20 @@
 
 (def ^:private byte-array-class (Class/forName "[B"))
 
+(defn- invalid-response
+  "Returns an exception for a response that Busker cannot send as the handler
+  gave it. [[send-ring-response!]] answers it with a 500 when no head is sent."
+  [message data]
+  (ex-info message (assoc data ::invalid-response true)))
+
 (defn- coerce-content-length [value]
-  (if (number? value) (long value) (Long/parseLong value)))
+  (let [length (cond
+                 (number? value) (long value)
+                 (string? value) (try (Long/parseLong value) (catch NumberFormatException _ -1))
+                 :else -1)]
+    (when (neg? length)
+      (throw (invalid-response "Invalid content-length header" {:content-length value})))
+    length))
 
 (defn get-compress-hint [response]
   (get h2o/->compress-hint (:h2o/compress-hint response) h2o/H2O_COMPRESS_HINT_ENABLE))
@@ -50,8 +62,13 @@
     (Charset/forName (or (hdr.util/get-charset response) "utf-8"))
     (catch IllegalArgumentException _ StandardCharsets/UTF_8)))
 
+(defn- encodable ^Charset [^Charset charset]
+  (when-not (.canEncode charset)
+    (throw (invalid-response "Response charset cannot encode" {:charset (.name charset)})))
+  charset)
+
 (defn- encoder ^CharsetEncoder [response]
-  (doto (.newEncoder (response-charset response))
+  (doto (.newEncoder (encodable (response-charset response)))
     (.onMalformedInput CodingErrorAction/REPLACE)
     (.onUnmappableCharacter CodingErrorAction/REPLACE)))
 
@@ -290,6 +307,20 @@
            :compress-hint compress-hint
            :response (when retain-response? (-> response (assoc :status status) (dissoc :body)))})))))
 
+(defn- check-known-length!
+  "Throws when final `head` declares a content length other than `length`, the
+  length of the body. Call it only when the two differ. Statuses 204, 205 and
+  304 and a HEAD response with an empty body are not checked: no body goes out,
+  and the header describes another response (RFC 9110, section 8.6)."
+  [head length request-method]
+  (let [status (:status head)]
+    (when-not (or (= no-content-status status)
+                  (= reset-content-status status)
+                  (= not-modified-status status)
+                  (and (zero? (long length)) (= :head request-method)))
+      (throw (invalid-response "Response content-length does not match its body"
+                               {:content-length (:content-length head) :body-length length})))))
+
 (defn- normalized-head [response length informational?]
   (build-head response length informational? true (get-compress-hint response)))
 
@@ -522,7 +553,12 @@
               (throw (ex-info "Nonblocking body exceeds output-buffer-size"
                               {:bytes validation-length :output-buffer-size buffer-size})))
           _ (when response?
-              (normalized-head data (when (:end? opts) validation-length) info?))
+              (let [head (normalized-head data (when (:end? opts) validation-length) info?)]
+                (when (and (:end? opts) (some? validation-length)
+                           (not (== (long (:content-length head)) (long validation-length))))
+                  (check-known-length! head validation-length (:request-method (:req-ctx req))))))
+          ;; Strings check their charset when their length is computed.
+          _ (when (sequential? body) (encodable (response-charset validation-response)))
           _ (when (and response? (not info?) (p/committed? emitter))
               (throw (ex-info "Final response headers have already been accepted" {})))
           grant (acquire-producer! (.lifecycle-lock emitter) (.lifecycle_ emitter) (:wait? opts))]
@@ -568,7 +604,7 @@
     :else (let [charset (response-charset response)]
             (cond
               (= StandardCharsets/UTF_8 charset) body
-              (<= (.length ^String body) limit) (.getBytes ^String body charset)
+              (<= (.length ^String body) limit) (.getBytes ^String body (encodable charset))
               :else ::ineligible))))
 
 (defn- ordinary-fixed-plan [req response]
@@ -594,7 +630,14 @@
                                      (or (= not-modified-status status)
                                          (= :head (:request-method (:req-ctx req)))))
                 head (build-head response (when-not unknown-length? length) false false hint)]
+            (when-not (== (long (:content-length head)) (long length))
+              (check-known-length! head length (:request-method (:req-ctx req))))
             [head (fixed-plan req head body length)]))))))
+
+(def ^:private internal-error-response
+  {:status 500
+   :headers {"content-type" "text/plain; charset=utf-8"}
+   :body "Internal Server Error"})
 
 (defn send-ring-response! [^H2OResponseEmitter emitter response]
   (let [lock (.lifecycle-lock emitter)
@@ -630,7 +673,11 @@
               (finally (release-producer! (.lifecycle-lock emitter) (.lifecycle_ emitter)))))
           (p/emit! emitter response {:end? true})))
       (catch Throwable error
-        (when-let [writer (ensure-writer! emitter)]
-          (response-queue/fail! writer error {:if-open? true}))
+        ;; The 500 cannot fail this way, so this recursion ends.
+        (if (and (::invalid-response (ex-data error))
+                 (p/open? emitter) (not (p/committed? emitter)))
+          (send-ring-response! emitter internal-error-response)
+          (when-let [writer (ensure-writer! emitter)]
+            (response-queue/fail! writer error {:if-open? true})))
         (trove/log! {:level :error :id ::response-failed :error error})))
     nil))

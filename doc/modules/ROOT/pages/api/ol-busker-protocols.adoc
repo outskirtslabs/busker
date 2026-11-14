@@ -69,7 +69,9 @@ The first three options require booleans. Unknown options and invalid inputs thr
 
 Strings, byte arrays and ByteBuffers work in both modes. Nonblocking input must fit `:output-buffer-size` after encoding; oversized input throws rather than returning full. Blocking calls may consume larger bodies incrementally. ByteBuffer input uses its remaining range without changing its position or limit. Accepted mutable input is copied before return; concurrent mutation during copying is unsupported.
 
-InputStreams, sequences and arbitrary Ring body writers require blocking mode. Nonblocking calls reject them without consumption. Blocking calls preserve ordinary Ring body adapters. Strings use the response charset, with UTF-8 when absent or invalid. Malformed or unmappable characters use encoder replacement bytes.
+InputStreams, sequences and arbitrary Ring body writers require blocking mode. Nonblocking calls reject them without consumption. Blocking calls preserve ordinary Ring body adapters. Strings use the response charset, with UTF-8 when absent or invalid. Malformed or unmappable characters use encoder replacement bytes. A string or sequence in a charset that cannot encode throws.
+
+A `content-length` header must be a non-negative integer. With `:end? true` and a complete body of known length, it must equal that length, or `emit!` throws.
 
 Maps with `:body`, including `nil`, reserve headers and body together for bounded writes. A map without `:body` is a header operation. Statuses 100–199 except 101 reject bodies and `:end? true`; 101 is unsupported. A second final head throws. Rejection or a producer exception does not commit headers. Known complete lengths remain available for content-length handling; unknown lengths use protocol framing. HEAD and bodyless statuses send no payload.
 

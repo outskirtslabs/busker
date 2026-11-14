@@ -36,7 +36,12 @@
      range without changing its position or limit; mutable input is copied before
      return. Streams, sequences and custom Ring body writers require blocking mode.
      Strings use the response charset, with UTF-8 as the default or invalid-charset
-     fallback. Malformed or unmappable characters use encoder replacement bytes.
+     fallback. Malformed or unmappable characters use encoder replacement bytes. A
+     string or sequence in a charset that cannot encode throws.
+
+     A `content-length` header must be a non-negative integer. With `:end? true`
+     and a complete body of known length, it must equal that length, or `emit!`
+     throws.
 
      A map without `:body` is header-only; `:body nil` is an empty body write with
      a receipt. Informational statuses 100–199 except 101 reject bodies and `:end?`.
