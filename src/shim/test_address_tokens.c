@@ -287,15 +287,25 @@ static void test_rotation_and_reload(void) {
 typedef struct {
   clj_ticket_manager_t *mgr;
   atomic_int stop;
+  atomic_uint issued;
 } swapper_t;
 
+/* At most one swap for each token the main thread issues: swaps without a
+   pause can keep one rebuild loop going for seconds. This checks that
+   rebuilds stay correct while keys change. A missing read lock needs a
+   ThreadSanitizer build to find. This test does not catch it. */
 static void *swap_keys(void *arg) {
   swapper_t *swapper = arg;
   clj_session_ticket_t one[] = {ticket(0x01, 1), ticket(0x02, 2)},
                        two[] = {ticket(0x02, 2), ticket(0x01, 1)};
-  for (unsigned i = 0; !atomic_load(&swapper->stop); ++i)
-    CHECK(clj_ticket_manager_set_keys(swapper->mgr, i % 2 ? one : two, 2) ==
-          0);
+  unsigned issued = 0;
+  for (unsigned i = 0; !atomic_load(&swapper->stop); ++i) {
+    CHECK(clj_ticket_manager_set_keys(swapper->mgr, i % 2 ? one : two, 2) == 0);
+    while (atomic_load(&swapper->issued) == issued &&
+           !atomic_load(&swapper->stop))
+      sched_yield();
+    issued = atomic_load(&swapper->issued);
+  }
   return NULL;
 }
 
@@ -316,6 +326,7 @@ static void test_rebuild_during_swaps(void) {
       seen = issuer.generation;
       ++rebuilds;
     }
+    atomic_fetch_add(&swapper.issued, 1);
   }
   atomic_store(&swapper.stop, 1);
   CHECK(pthread_join(thread, NULL) == 0);
@@ -379,6 +390,16 @@ static int bound_udp(quicly_address_t *addr) {
   return fd;
 }
 
+/* A bind to port 0 with SO_REUSEADDR and SO_REUSEPORT, as
+   clj_h2o_http3_open_udp_fd makes it, can get a port that another such
+   socket holds, and the kernel then splits the port's datagrams between
+   the two. A bind without these options gets a port that no socket holds. */
+static uint16_t unused_port(void) {
+  quicly_address_t addr;
+  close(bound_udp(&addr));
+  return ntohs(addr.sin.sin_port);
+}
+
 static void accept_fixture_init(accept_fixture_t *f, const char *cert,
                                 const char *key, clj_ticket_manager_t *mgr) {
   h2o_config_init(&f->config);
@@ -391,7 +412,7 @@ static void accept_fixture_init(accept_fixture_t *f, const char *cert,
   CHECK(server_tls != NULL);
   quicly_context_t *quic = clj_h2o_create_quicly_ctx(server_tls, &f->config);
   CHECK(quic != NULL);
-  int server_fd = clj_h2o_http3_open_udp_fd("127.0.0.1", 0);
+  int server_fd = clj_h2o_http3_open_udp_fd("127.0.0.1", unused_port());
   CHECK(server_fd != -1 && clj_set_fd_nonblock(server_fd) == 0);
   socklen_t len = sizeof(f->server_addr);
   CHECK(getsockname(server_fd, &f->server_addr.sa, &len) == 0);
