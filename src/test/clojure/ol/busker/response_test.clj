@@ -353,6 +353,30 @@
           (is (= "" (second (str/split wire #"\r\n\r\n" 2))))))
       (finally (busker/stop! server)))))
 
+(deftest http1-status-line-reason-phrase
+  (let [[server port] (start-server
+                       (fn [{:keys [uri] emitter :ol.busker.request/emitter}]
+                         (let [[_ path status] (str/split uri #"/")
+                               status (parse-long status)]
+                           (if (= "fixed" path)
+                             {:status status}
+                             (do (protocols/emit! emitter {:status status})
+                                 (protocols/close! emitter)
+                                 {:body emitter})))))]
+    (try
+      (doseq [path ["fixed" "stream"]
+              [status line] [[200 "HTTP/1.1 200 OK"]
+                             [204 "HTTP/1.1 204 No Content"]
+                             [304 "HTTP/1.1 304 Not Modified"]
+                             [404 "HTTP/1.1 404 Not Found"]
+                             [429 "HTTP/1.1 429 Too Many Requests"]
+                             [500 "HTTP/1.1 500 Internal Server Error"]
+                             [503 "HTTP/1.1 503 Service Unavailable"]
+                             [599 "HTTP/1.1 599 "]]]
+        (testing (str path " " status)
+          (is (= line (first (str/split (request-text port "GET" (str "/" path "/" status)) #"\r\n" 2))))))
+      (finally (busker/stop! server)))))
+
 (deftest ordinary-response-rejects-invalid-headers-before-output
   (let [response_ (atom {})
         [server port] (start-server (fn [_] @response_))]

@@ -456,6 +456,64 @@ static void copy_headers_to_response(h2o_req_t *req,
   }
 }
 
+/* Only HTTP/1.1 sends the phrase. The codes are those of RFC 9110
+ * section 18.3, RFC 6585 and RFC 7725. Other codes get an empty phrase,
+ * which RFC 9112 section 4 permits. */
+static const char *status_reason_phrase(int status) {
+  switch (status) {
+  case 100: return "Continue";
+  case 101: return "Switching Protocols";
+  case 200: return "OK";
+  case 201: return "Created";
+  case 202: return "Accepted";
+  case 203: return "Non-Authoritative Information";
+  case 204: return "No Content";
+  case 205: return "Reset Content";
+  case 206: return "Partial Content";
+  case 300: return "Multiple Choices";
+  case 301: return "Moved Permanently";
+  case 302: return "Found";
+  case 303: return "See Other";
+  case 304: return "Not Modified";
+  case 305: return "Use Proxy";
+  case 307: return "Temporary Redirect";
+  case 308: return "Permanent Redirect";
+  case 400: return "Bad Request";
+  case 401: return "Unauthorized";
+  case 402: return "Payment Required";
+  case 403: return "Forbidden";
+  case 404: return "Not Found";
+  case 405: return "Method Not Allowed";
+  case 406: return "Not Acceptable";
+  case 407: return "Proxy Authentication Required";
+  case 408: return "Request Timeout";
+  case 409: return "Conflict";
+  case 410: return "Gone";
+  case 411: return "Length Required";
+  case 412: return "Precondition Failed";
+  case 413: return "Content Too Large";
+  case 414: return "URI Too Long";
+  case 415: return "Unsupported Media Type";
+  case 416: return "Range Not Satisfiable";
+  case 417: return "Expectation Failed";
+  case 421: return "Misdirected Request";
+  case 422: return "Unprocessable Content";
+  case 426: return "Upgrade Required";
+  case 428: return "Precondition Required";
+  case 429: return "Too Many Requests";
+  case 431: return "Request Header Fields Too Large";
+  case 451: return "Unavailable For Legal Reasons";
+  case 500: return "Internal Server Error";
+  case 501: return "Not Implemented";
+  case 502: return "Bad Gateway";
+  case 503: return "Service Unavailable";
+  case 504: return "Gateway Timeout";
+  case 505: return "HTTP Version Not Supported";
+  case 511: return "Network Authentication Required";
+  default: return "";
+  }
+}
+
 void clj_h2o_send_informational(clj_req_ctx_t *ctx, int status,
                                 const clj_header_t *headers,
                                 size_t headers_len) {
@@ -484,7 +542,7 @@ size_t clj_h2o_start_response(
   h2o_req_t *req = ctx->req;
 
   req->res.status = status;
-  req->res.reason = "OK";
+  req->res.reason = status_reason_phrase(status);
 
   req->res.content_length = SIZE_MAX;
   if (content_length != SIZE_MAX) {
@@ -1159,7 +1217,7 @@ static void send_retained_fixed(clj_req_ctx_t *ctx,
                      !h2o_memis(req->input.method.base, req->input.method.len,
                                 H2O_STRLIT("HEAD"));
   req->res.status = data->status;
-  req->res.reason = "OK";
+  req->res.reason = status_reason_phrase(data->status);
   req->res.content_length = data->content_length;
   req->compress_hint = data->compress_hint;
   copy_headers_to_response(req, data->headers, data->headers_len);
