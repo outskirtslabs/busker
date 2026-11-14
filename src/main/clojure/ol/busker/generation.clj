@@ -165,13 +165,26 @@
             (p/wake worker)))
         (recur (inc i))))))
 
+(defn- log-callback-failure!
+  "Logs a failure of a native callback. Never throws, since the callback
+  returns to native code."
+  [id ^Throwable t]
+  (try
+    (when (instance? InterruptedException t)
+      (.interrupt (Thread/currentThread)))
+    (trove/log! {:level :error :id id :error t})
+    (catch Throwable _ nil)))
+
 (defn- create-connection-close-callback
   [active-connection-count_ ^AtomicLongArray counts worker-idx]
   (let [worker-idx (long worker-idx)
         cb (fn [_]
-             (.decrementAndGet ^AtomicLong active-connection-count_)
-             (.decrementAndGet counts (int worker-idx))
-             (h2o/conn-limit-release))]
+             (try
+               (.decrementAndGet ^AtomicLong active-connection-count_)
+               (.decrementAndGet counts (int worker-idx))
+               (h2o/conn-limit-release)
+               (catch Throwable t
+                 (log-callback-failure! ::connection-close-callback-failed t))))]
     {::connection-close-cb cb
      ::connection-close-cb-ptr (mem/callback (mem/auto-arena) cb [:pointer] :void)}))
 
@@ -180,19 +193,22 @@
    ^AtomicLongArray counts workers worker-idx]
   (let [worker-idx (long worker-idx)
         accept-cb (fn [listener-ptr _err-ptr]
-                    (if-not (at-minimum? (.get counts (int worker-idx)) counts)
-                      (h2o/socket-read-stop listener-ptr)
-                      (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
-                        (when-not (mem/null? sock-ptr)
-                          (if (pos? (h2o/conn-limit-try-acquire))
-                            (do
-                              (.incrementAndGet ^AtomicLong active-connection-count_)
-                              (let [own (.incrementAndGet counts (int worker-idx))]
-                                (h2o/socket-set-on-close sock-ptr on-close-callback mem/null)
-                                (h2o/h2o-accept accept-ctx-ptr sock-ptr)
-                                (when (at-minimum? own counts)
-                                  (wake-other-workers! workers worker-idx))))
-                            (h2o/socket-close sock-ptr))))))]
+                    (try
+                      (if-not (at-minimum? (.get counts (int worker-idx)) counts)
+                        (h2o/socket-read-stop listener-ptr)
+                        (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
+                          (when-not (mem/null? sock-ptr)
+                            (if (pos? (h2o/conn-limit-try-acquire))
+                              (do
+                                (.incrementAndGet ^AtomicLong active-connection-count_)
+                                (let [own (.incrementAndGet counts (int worker-idx))]
+                                  (h2o/socket-set-on-close sock-ptr on-close-callback mem/null)
+                                  (h2o/h2o-accept accept-ctx-ptr sock-ptr)
+                                  (when (at-minimum? own counts)
+                                    (wake-other-workers! workers worker-idx))))
+                              (h2o/socket-close sock-ptr)))))
+                      (catch Throwable t
+                        (log-callback-failure! ::accept-callback-failed t))))]
     {::accept-cb accept-cb
      ::accept-cb-ptr (mem/callback (mem/auto-arena) accept-cb [:pointer :pointer] :void)}))
 
@@ -286,13 +302,16 @@
                                                    arena config-ptr index)]))
                                (config/entrypoint-ids config))
         close-callback-dispatch (close-callback-dispatcher close-callback-executor)
-        on-request-cb (fn [req-ctx-ptr req-ctx]
-                        (request/on-request executor
-                                            close-callback-dispatch
-                                            config
-                                            ring-handler
-                                            req-ctx-ptr
-                                            req-ctx))
+        on-request-cb (fn [req-ctx-ptr]
+                        (try
+                          (request/on-request executor
+                                              close-callback-dispatch
+                                              config
+                                              ring-handler
+                                              req-ctx-ptr)
+                          (catch Throwable t
+                            (request/request-callback-failed! ::request/request-callback-failed t)
+                            h2o/CLJ_HANDLER_OVERLOADED)))
         on-request-cleanup-cb request/on-request-cleanup
         handler (h2o/create-handler hostconf-ptr
                                     on-request-cb

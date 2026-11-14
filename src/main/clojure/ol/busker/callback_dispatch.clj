@@ -125,6 +125,17 @@
         (try (trove/log! {:level :error :id ::response-failure-cleanup :error t})
              (catch Throwable _ nil))))))
 
+(defn callback-fault!
+  "Counts a failure of a native callback in `dispatch`, when there is one, and
+  logs it under `id`. Never throws, since the callback returns to native code."
+  [dispatch id ^Throwable t]
+  (try
+    (when (instance? InterruptedException t)
+      (.interrupt (Thread/currentThread)))
+    (when dispatch (increment! dispatch :callback-fault))
+    (trove/log! {:level :error :id id :error t})
+    (catch Throwable _ nil)))
+
 (defn- body-callback!
   [dispatch module-id request-seq chunk-seg chunk-len is-last]
   (try
@@ -139,10 +150,7 @@
          (= 1 is-last))
         (increment! dispatch :malformed)))
     (catch Throwable t
-      (increment! dispatch :callback-fault)
-      (trove/log! {:level :error
-                   :id    ::body-callback-failed
-                   :error t}))))
+      (callback-fault! dispatch ::body-callback-failed t))))
 
 (defn- proceed-callback!
   [dispatch module-id request-seq]
@@ -151,10 +159,7 @@
       (when-let [writer (response/writer-if-created emitter)]
         (response-queue/on-proceed writer)))
     (catch Throwable t
-      (increment! dispatch :callback-fault)
-      (trove/log! {:level :error
-                   :id    ::proceed-callback-failed
-                   :error t}))))
+      (callback-fault! dispatch ::proceed-callback-failed t))))
 
 (defn- stop-callback!
   [dispatch module-id request-seq reason]
@@ -165,10 +170,7 @@
           (response-queue/on-stop writer reason))
         (finally (response/stop-emitter emitter))))
     (catch Throwable t
-      (increment! dispatch :callback-fault)
-      (trove/log! {:level :error
-                   :id    ::stop-callback-failed
-                   :error t}))))
+      (callback-fault! dispatch ::stop-callback-failed t))))
 
 (defn create
   "Creates a worker-affine callback dispatcher in `arena`."

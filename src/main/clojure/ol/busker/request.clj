@@ -131,23 +131,34 @@
     (when (and (int? index) (< -1 (long index) (count ids)))
       (nth ids index))))
 
+(defn request-callback-failed!
+  "Counts a failure of the request or cleanup callback in the current worker's
+  dispatch and logs it under `id`. Never throws, since the callback returns to
+  native code."
+  [id ^Throwable t]
+  (try
+    (callback-dispatch/callback-fault!
+     (:callback-dispatch (worker-context/get-current-worker)) id t)
+    (catch Throwable _ nil)))
+
 (defn on-request
-  [^ExecutorService executor close-callback-dispatch config ring-handler req-ctx-ptr req-ctx]
-  (let [entrypoint (request-entrypoint config (:entrypoint req-ctx))]
-    (cond
-      (not (pi/running? (worker-context/get-current-worker)))
-      h2o/CLJ_HANDLER_SHUTTING_DOWN
+  [^ExecutorService executor close-callback-dispatch config ring-handler req-ctx-ptr]
+  (try
+    (let [req-ctx (h2o/copy-request-context req-ctx-ptr)
+          entrypoint (request-entrypoint config (:entrypoint req-ctx))]
+      (cond
+        (not (pi/running? (worker-context/get-current-worker)))
+        h2o/CLJ_HANDLER_SHUTTING_DOWN
 
-      (nil? entrypoint)
-      (do
-        (h2o/report-almost-fatal-error
-         (str "Rejected a request whose listener has no known entrypoint"
-              " [:ol.busker/unknown-entrypoint index=" (:entrypoint req-ctx) "]")
-         nil)
-        h2o/CLJ_HANDLER_ERROR)
+        (nil? entrypoint)
+        (do
+          (h2o/report-almost-fatal-error
+           (str "Rejected a request whose listener has no known entrypoint"
+                " [:ol.busker/unknown-entrypoint index=" (:entrypoint req-ctx) "]")
+           nil)
+          h2o/CLJ_HANDLER_ERROR)
 
-      :else
-      (try
+        :else
         (let [worker (worker-context/get-current-worker)
               dispatch (:callback-dispatch worker)
               module-id (:module-id dispatch)
@@ -188,16 +199,13 @@
               h2o/CLJ_HANDLER_SHUTTING_DOWN)
             (catch Throwable t
               (callback-dispatch/retire! dispatch module-id request-seq)
-              (throw t))))
-        (catch InterruptedException _
-          (.interrupt (Thread/currentThread))
-          h2o/CLJ_HANDLER_SHUTTING_DOWN)
-        (catch Exception e
-          (h2o/report-almost-fatal-error "The request handler errored with" e)
-          h2o/CLJ_HANDLER_OVERLOADED)
-        (catch Throwable t
-          (h2o/report-almost-fatal-error "The request bridge errored with" t)
-          h2o/CLJ_HANDLER_OVERLOADED)))))
+              (throw t))))))
+    (catch InterruptedException _
+      (.interrupt (Thread/currentThread))
+      h2o/CLJ_HANDLER_SHUTTING_DOWN)
+    (catch Throwable t
+      (request-callback-failed! ::request-callback-failed t)
+      h2o/CLJ_HANDLER_OVERLOADED)))
 
 (defn on-request-cleanup
   "Retires request state using the scalar dispatch identity from native cleanup."
@@ -207,5 +215,5 @@
       (try
         (callback-dispatch/retire! (:callback-dispatch worker) module-id request-seq)
         (finally (fixed-final/notify-capacity! worker))))
-    (catch Exception e
-      (h2o/report-almost-fatal-error "The request cleanup callback errored" e))))
+    (catch Throwable t
+      (request-callback-failed! ::cleanup-callback-failed t))))

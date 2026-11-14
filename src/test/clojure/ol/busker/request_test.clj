@@ -42,12 +42,13 @@
                        (execute [task] (swap! tasks_ conj task)))]
         (with-redefs [pi/running? (constantly true)
                       worker-context/get-current-worker (constantly worker)
+                      h2o/copy-request-context (constantly ctx)
                       h2o/install-request-dispatch
                       (fn [_ _ module-id request-seq _]
                         (reset! installed_ [module-id request-seq])
                         1)]
           (is (= h2o/CLJ_HANDLER_OK
-                 (request/on-request executor identity config identity ffi/null ctx)))
+                 (request/on-request executor identity config identity ffi/null)))
           (let [[module-id request-seq] @installed_
                 [req _] (callback-dispatch/entry dispatch module-id request-seq)]
             (is (= {:worker worker
@@ -79,10 +80,10 @@
                     (doto (ffi/alloc arena h2o/ffi-clj-req-ctx-t)
                       (ffi/write (ffi/place h2o/ffi-clj-req-ctx-t [:meta :connection_id]) id)))
           on-request (fn [ctx-ptr]
-                       (request/on-request executor identity config identity ctx-ptr
-                                           {:has-body 0 :entrypoint 0}))]
+                       (request/on-request executor identity config identity ctx-ptr))]
       (with-redefs [pi/running? (constantly true)
                     worker-context/get-current-worker (constantly worker)
+                    h2o/copy-request-context (constantly {:has-body 0 :entrypoint 0})
                     h2o/install-request-dispatch (constantly 1)]
         (let [first-connection (context 41)]
           (is (= [h2o/CLJ_HANDLER_OK h2o/CLJ_HANDLER_OK h2o/CLJ_HANDLER_OK]
@@ -100,13 +101,13 @@
                      (execute [_] (swap! executed_ inc)))]
       (with-redefs [pi/running? (constantly true)
                     worker-context/get-current-worker (constantly {})
+                    h2o/copy-request-context (constantly {:has-body 0 :entrypoint index})
                     h2o/install-request-dispatch (fn [& _] (swap! installed_ inc) 1)]
         (is (= h2o/CLJ_HANDLER_ERROR
                (binding [*err* (java.io.StringWriter.)]
                  (request/on-request executor identity
                                      {:entrypoints {:http {} :admin {}}}
-                                     identity ffi/null
-                                     {:has-body 0 :entrypoint index})))
+                                     identity ffi/null)))
             (str "index " index))
         (is (= [0 0] [@executed_ @installed_]))))))
 

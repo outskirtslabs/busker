@@ -978,10 +978,11 @@
 (defn create-handler
   "Creates and configures an H2O handler with its request and cleanup callbacks.
 
-  `hostconf-ptr` and `flat-config-ptr` are native configuration pointers; callback
-  functions receive copied request data and request identity respectively; `arena`
-  retains the native callback trampolines. Returns the handler pointer and references
-  that keep both trampolines reachable."
+  `hostconf-ptr` and `flat-config-ptr` are native configuration pointers; the
+  request callback receives the native request context, which it must copy
+  before it returns, and must not throw; the cleanup callback receives the
+  request identity; `arena` retains the native callback trampolines. Returns
+  the handler pointer and references that keep both trampolines reachable."
   [hostconf-ptr on-req-callback on-cleanup-callback flat-config-ptr arena]
   {:pre [(some? hostconf-ptr) (not (ffi/null? hostconf-ptr))
          (fn? on-req-callback)
@@ -989,7 +990,7 @@
          (some? flat-config-ptr) (not (ffi/null? flat-config-ptr))
          (some? arena)]}
   (let [on-request-cb (fn on-request-cb [ctx-ptr]
-                        (int (on-req-callback ctx-ptr (copy-request-context ctx-ptr))))
+                        (int (on-req-callback ctx-ptr)))
         on-request-cb-ptr (ffi/callback arena on-request-cb [:pointer] :int)
         on-request-cleanup-cb (fn on-request-cleanup-cb [module-id request-seq]
                                 (on-cleanup-callback module-id request-seq))

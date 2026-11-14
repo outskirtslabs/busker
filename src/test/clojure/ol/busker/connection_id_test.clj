@@ -16,9 +16,9 @@
   (let [ids_ (atom [])
         on-request request/on-request]
     (with-redefs [request/on-request
-                  (fn [executor close-dispatch config handler req-ctx-ptr req-ctx]
+                  (fn [executor close-dispatch config handler req-ctx-ptr]
                     (swap! ids_ conj (native/request-connection-id req-ctx-ptr))
-                    (on-request executor close-dispatch config handler req-ctx-ptr req-ctx))]
+                    (on-request executor close-dispatch config handler req-ctx-ptr))]
       (mapv (fn [run]
               (reset! ids_ [])
               (run)
