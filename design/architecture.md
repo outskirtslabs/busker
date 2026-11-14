@@ -151,6 +151,8 @@ As in h2o's server, the HTTP/3 context resumes a session only with a new key exc
 
 ### Early data
 
+`:ol.busker/early-data?` is true when the TLS handshake of the request's connection had not finished when Busker handed the request to the handler. The shim reads it from h2o's `h2o_conn_is_early_data`, as h2o's proxy does for `Early-Data: 1`. Such a request arrived in 0-RTT data and may be a replay. A request sent in 0-RTT data reads false when the client's Finished reaches the server before the request is handed over, which is safe: a replayed first flight cannot finish the handshake. HTTP/3 listeners accept up to 8192 bytes of 0-RTT data, as h2o's server does.
+
 TCP listeners accept no early data, since BoringSSL allows it only after `SSL_CTX_set_early_data_enabled`, which Busker does not call. `h2o_conn_is_early_data` reads only picotls state, which BoringSSL sockets lack, so on TCP it always returns false. Before TCP early data is turned on, the flag must therefore come from BoringSSL's `SSL_in_early_data` or `SSL_in_init`.
 
 ### QUIC address tokens

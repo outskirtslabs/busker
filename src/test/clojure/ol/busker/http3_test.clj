@@ -8,6 +8,7 @@
    [ol.busker :as busker]
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.generation :as generation]
+   [ol.busker.middleware :as mw]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as proto]
    [ol.busker.test-utils :as util]
@@ -700,37 +701,6 @@
     ;; If the error contains "does not support", the feature is unavailable
     (not (str/includes? (:err result) "does not support"))))
 
-(defn- curl-0rtt
-  "Make a curl request with session ticket support for 0-RTT testing.
-
-   session-file: path to store/load session tickets
-   early-data?: if true, attempt to send early data with --tls-earlydata
-   proto: :h3 for HTTP/3, :h2 for HTTP/2, :h1 for HTTP/1.1
-
-   Returns map with :exit, :out, :err, and :tls-earlydata (bytes sent as early data)"
-  [session-file early-data? port path & {:keys [proto max-time]
-                                         :or {proto :h3 max-time 10}}]
-  (let [proto-args (case proto
-                     :h1 ["--http1.1"]
-                     :h2 ["--http2"]
-                     :h3 ["--http3-only"]
-                     [])
-        session-args ["--ssl-sessions" session-file]
-        early-args (when early-data? ["--tls-earlydata"])
-        write-out ["-w" "\n%{tls_earlydata}"]
-        default-args ["-k" "-s" "--max-time" (str max-time)]
-        resolve-args ["--resolve" (str tls-sni-host ":" port ":127.0.0.1")]
-        url (str "https://" tls-sni-host ":" port path)
-        curl-args (concat proto-args session-args early-args write-out
-                          default-args resolve-args [url])
-        result (apply p/shell {:out :string :err :string :continue true} "curl" curl-args)
-        lines (str/split-lines (:out result))
-        body (str/join "\n" (butlast lines))
-        tls-earlydata (parse-long (last lines))]
-    (assoc result
-           :body body
-           :tls-earlydata (or tls-earlydata 0))))
-
 (deftest http3-early-data-key-present-test
   (testing "HTTP/3 requests include :ol.busker/early-data? key"
     (let [port (util/free-port)
@@ -761,74 +731,78 @@
         (finally
           (busker/stop! server))))))
 
+(defn- curl-0rtt
+  "Runs one HTTP/3 curl request that offers 0-RTT with the tickets in
+  `session-file`, with curl's qlog written under `qlog-dir`.
+
+  Returns the curl result with the response `:status`, `:qlogs` (the number
+  of qlog files curl wrote) and `:request-in-0rtt?`, true when the qlog shows
+  the whole request stream, up to its end, sent in a 0-RTT packet."
+  [session-file qlog-dir port method path]
+  (.mkdirs (io/file qlog-dir))
+  (let [result (p/shell {:out :string :err :string :continue true
+                         :extra-env {"QLOGDIR" qlog-dir}}
+                        "curl" "--http3-only" "-k" "-s" "--max-time" "10"
+                        "--ssl-sessions" session-file "--tls-earlydata"
+                        "-X" method "-o" "/dev/null" "-w" "%{http_code}"
+                        "--resolve" (str tls-sni-host ":" port ":127.0.0.1")
+                        (str "https://" tls-sni-host ":" port path))
+        qlogs (filter #(str/ends-with? (.getName ^java.io.File %) ".sqlog")
+                      (file-seq (io/file qlog-dir)))]
+    (assoc result
+           :status (parse-long (str/trim (:out result)))
+           :qlogs (count qlogs)
+           :request-in-0rtt? (boolean
+                              (some #(re-find #"\"name\":\"transport:packet_sent\".*\"stream_id\":0,[^}]*\"fin\":true.*\"packet_type\":\"0RTT\""
+                                              (slurp %))
+                                    qlogs)))))
+
 (deftest http3-zero-rtt-test
-  (testing "HTTP/3 0-RTT early data detection"
+  (testing "requests sent in 0-RTT reach the handler flagged as early data"
     (when-not (curl-ssl-sessions-supported?)
       (throw (Exception. "your curl was not compiled with --enable-ssls-export and thus does not support --ssl-sessions")))
     (let [port         (util/free-port)
-          session-file (str (System/getProperty "java.io.tmpdir") "/busker-test-sessions-" port ".txt")
-          ;; Handler returns EDN with early-data? flag
-          handler      (fn [req]
-                         {:status  200
-                          :headers {"content-type" "application/edn"}
-                          :body    (pr-str {:early-data (boolean (:ol.busker/early-data? req))
-                                            :method     (name (:request-method req))})})
+          tmp-dir      (str (System/getProperty "java.io.tmpdir") "/busker-test-0rtt-" port)
+          session-file (str tmp-dir "/sessions.txt")
+          seen         (atom [])
+          record       (fn [req]
+                         (swap! seen conj [(:request-method req) (:uri req)
+                                           (:ol.busker/early-data? req)])
+                         {:status 200 :body "ok"})
+          guarded      (mw/wrap-reject-early-data record)
           server       (busker/start!
                         (util/with-static-tls
                           (util/with-handler
-                            handler
-                            {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
-                                                 :http3? true
-                                                 :tls {:tls-compatibility-mode
-                                                       :modern}}}})))]
+                            (fn [req]
+                              (if (str/starts-with? (:uri req) "/guarded")
+                                (guarded req)
+                                (record req)))
+                            {:entrypoints {:tls {:bind   (str "127.0.0.1:" port)
+                                                 :http3? true}}})))
+          request      (fn [label method path]
+                         (let [result (curl-0rtt session-file (str tmp-dir "/qlog-" label)
+                                                 port method path)]
+                           (is (= 0 (:exit result)) (:err result))
+                           (is (pos? (:qlogs result)) "curl writes a qlog when QLOGDIR is set")
+                           result))]
       (try
-        (Thread/sleep 200)
-
-        ;; Cleanup any existing session file
-        (io/delete-file session-file true)
-
-        ;; HTTP/3 0-RTT requires multiple warmup requests to accumulate session tickets.
-        ;; picotls sends 1 NewSessionTicket per connection by default (max_count=2 is a cap).
-        ;; curl needs 2+ tickets before sending early data. Pattern verified:
-        ;; - Request 1: establishes connection, receives ticket
-        ;; - Request 2: session resumption, receives another ticket
-        ;; - Request 3 with --tls-earlydata: may not send early data yet
-        ;; - Request 4 with --tls-earlydata: sends early data (77 bytes observed)
-
-        ;; Warmup request 1 - establish session
-        (let [result1 (curl-0rtt session-file false port "/")]
-          (is (= 0 (:exit result1))
-              (str "Warmup request 1 should succeed. stderr: " (:err result1))))
-
-        (is (.exists (io/file session-file))
-            "Session file should be created after first request")
-
-        ;; Warmup request 2 - session resumption, accumulates tickets
-        (let [result2 (curl-0rtt session-file false port "/")]
-          (is (= 0 (:exit result2))
-              (str "Warmup request 2 should succeed. stderr: " (:err result2))))
-
-        ;; Warmup request 3 with early data flag - may not send early data yet
-        (let [result3 (curl-0rtt session-file true port "/")]
-          (is (= 0 (:exit result3))
-              (str "Warmup request 3 should succeed. stderr: " (:err result3))))
-
-        ;; Final request - should send early data
-        (let [result4 (curl-0rtt session-file true port "/")]
-          (is (= 0 (:exit result4))
-              (str "Final request should succeed. stderr: " (:err result4)))
-          (when (zero? (:exit result4))
-            ;; The key proof that 0-RTT works: curl sends early data (tls_earlydata > 0).
-            ;; Server-side detection via h2o_conn_is_early_data() is inherently racy -
-            ;; it checks if handshake is in progress, but by the time the handler runs,
-            ;; the QUIC handshake may have completed even though data arrived via 0-RTT.
-            (is (pos? (:tls-earlydata result4))
-                (str "Final request should send early data (0-RTT). Got tls_earlydata="
-                     (:tls-earlydata result4)))))
-
+        (util/wait-for-curl-ready! :https :h3 port "/" :max-time 5)
+        (reset! seen [])
+        (is (= 200 (:status (request "warmup" "GET" "/warmup"))))
+        (doseq [[label method path status] [["get" "GET" "/plain" 200]
+                                            ["guarded-post" "POST" "/guarded" 425]
+                                            ["guarded-get" "GET" "/guarded" 200]]]
+          (let [result (request label method path)]
+            (is (:request-in-0rtt? result)
+                (str "curl sends the " method " " path " request in 0-RTT"))
+            (is (= status (:status result)) (str method " " path))))
+        (is (= [[:get "/warmup" false]
+                [:get "/plain" true]
+                [:get "/guarded" true]]
+               @seen))
         (finally
           (busker/stop! server)
-          (io/delete-file session-file true))))))
+          (run! #(io/delete-file % true) (reverse (file-seq (io/file tmp-dir)))))))))
 
 (defn- curl-h3-handshake
   "Runs one verbose HTTP/3 curl request and returns its exit code with the

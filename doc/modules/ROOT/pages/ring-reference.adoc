@@ -44,7 +44,7 @@ It uses the ASCII comma delimiter for ordinary fields and the ASCII semicolon de
 |===
 | Key | Value | Meaning
 | `:ol.busker/entrypoint` | `Keyword` | The xref:configuration.adoc[entrypoint], a named listener group, whose listener accepted the connection.
-| `:ol.busker/early-data?` | `Boolean` | True when TLS accepted the request as 0-RTT early data.
+| `:ol.busker/early-data?` | `Boolean` | True when the TLS handshake had not finished when the request was handed to the handler. Such a request arrived in 0-RTT early data and may be a replay.
 | `:ol.busker.request/emitter` | xref:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter`] | The response stream for this request.
 |===
 
@@ -53,6 +53,9 @@ The `Host` header and the HTTP/2 or HTTP/3 `:authority` do not change it, so a c
 A request map built by hand without this key, for example in a test that calls the dispatch handler directly, is treated as a request to the first configured entrypoint.
 
 The early-data flag is always present, including on ordinary requests where its value is false.
+A request sent in 0-RTT data reads false when the handshake finished before the request was handed over, because a replayed request cannot finish the handshake.
+Only HTTP/3 accepts 0-RTT data.
+Over TCP the flag is always false.
 Busker's xref:api/ol-busker-middleware.adoc#wrap-reject-early-data[`wrap-reject-early-data`] middleware can reject unsafe methods received through 0-RTT.
 
 == Request bodies
