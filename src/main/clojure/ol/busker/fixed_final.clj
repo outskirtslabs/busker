@@ -30,6 +30,7 @@
    [java.lang System$Logger$Level]
    [java.lang.foreign Arena MemorySegment ValueLayout]
    [java.lang.invoke VarHandle]
+   [java.nio ByteBuffer]
    [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicReference]
    [java.util.concurrent.locks Lock ReentrantReadWriteLock]))
 
@@ -135,6 +136,8 @@
                                             :actual (- end body-start)}))))
         (instance? byte-array-class body)
         (MemorySegment/copy ^bytes body 0 data ValueLayout/JAVA_BYTE body-start (int body-length))
+        (instance? ByteBuffer body)
+        (MemorySegment/copy (MemorySegment/ofBuffer ^ByteBuffer body) 0 data body-start body-length)
         :else
         (throw (ex-info "Unsupported direct fixed response body" {:type (class body)})))
       (put-slot-long! data slot-module-id-offset module-id)

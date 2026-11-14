@@ -4,6 +4,7 @@
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [ol.busker :as busker]
+   [ol.busker.fixed-final :as fixed-final]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as protocols]
    [ol.busker.response :as response]
@@ -295,25 +296,39 @@
                       [:status :headers :content-length]))))
 
 (deftest fixed-path-charset-selection
-  (doseq [[headers fixed?]
-          [[{} true]
-           [{"content-type" "text/plain"} true]
-           [{"content-type" "text/x-charset-free"} true]
-           [{"content-type" "text/plain; charset=utf-8"} true]
-           [{"Content-Type" "text/plain;CHARSET=UTF-8"} true]
-           [{"content-type" "text/plain; charset=\"utf-8\""} true]
-           [{"content-type" "text/plain; charset=not-a-charset"} true]
-           [{"content-type" "text/plain; charset=iso-8859-1"} false]
-           [{"CONTENT-TYPE" "text/plain; Charset=UTF-16"} false]
-           [{"content-type" "text/plain; charset=\"iso-8859-1\""} false]
-           [{"content-type" "text/plain; format=flowed; charset=us-ascii"} false]
+  ;; "é" is 2 bytes in UTF-8, 1 in ISO-8859-1, 4 in UTF-16 (with its byte
+  ;; order mark) and 1 in US-ASCII, as the replacement "?".
+  (doseq [[headers length]
+          [[{} 2]
+           [{"content-type" "text/plain"} 2]
+           [{"content-type" "text/x-charset-free"} 2]
+           [{"content-type" "text/plain; charset=utf-8"} 2]
+           [{"Content-Type" "text/plain;CHARSET=UTF-8"} 2]
+           [{"content-type" "text/plain; charset=\"utf-8\""} 2]
+           [{"content-type" "text/plain; charset=not-a-charset"} 2]
+           [{"content-type" "text/plain; charset=iso-8859-1"} 1]
+           [{"CONTENT-TYPE" "text/plain; Charset=UTF-16"} 4]
+           [{"content-type" "text/plain; charset=\"iso-8859-1\""} 1]
+           [{"content-type" "text/plain; format=flowed; charset=us-ascii"} 1]
            [(array-map "Content-Type" "text/plain; charset=iso-8859-1"
-                       "content-type" "text/plain; charset=utf-8") true]
+                       "content-type" "text/plain; charset=utf-8") 2]
            [(array-map "content-type" "text/plain; charset=iso-8859-1"
-                       "Content-Type" "text/plain; charset=utf-8") false]]]
+                       "Content-Type" "text/plain; charset=utf-8") 1]]]
     (testing (pr-str headers)
-      (is (= fixed? (some? (fixed-head {:body "ok" :headers headers}))))
-      (is (some? (fixed-head {:body (.getBytes "ok" StandardCharsets/UTF_8) :headers headers}))))))
+      (is (= length (:content-length (fixed-head {:body "é" :headers headers}))))
+      (is (= 2 (:content-length (fixed-head {:body (.getBytes "é" StandardCharsets/UTF_8)
+                                             :headers headers})))))))
+
+(deftest fixed-path-body-limit
+  (let [limit fixed-final/response-ring-max-body-bytes
+        latin1 {"content-type" "text/plain; charset=iso-8859-1"}]
+    (is (some? (fixed-head {:body (apply str (repeat limit "é")) :headers latin1})))
+    (is (nil? (fixed-head {:body (apply str (repeat (inc limit) "é")) :headers latin1})))
+    (is (nil? (fixed-head {:body (apply str (repeat limit "é"))
+                           :headers {"content-type" "text/plain; charset=utf-16"}})))
+    (is (some? (fixed-head {:body (ByteBuffer/wrap (byte-array limit))})))
+    (is (nil? (fixed-head {:body (ByteBuffer/wrap (byte-array (inc limit)))})))
+    (is (nil? (fixed-head {:body (ByteArrayInputStream. (byte-array 1))})))))
 
 (deftest ordinary-response-header-normalization
   (let [response_ (atom {})

@@ -829,6 +829,18 @@
 
 (def ^:private hello-bytes (.getBytes "Hello World" StandardCharsets/UTF_8))
 
+;; Shared by every request, so each response must leave their positions and
+;; limits alone. "Hello World" sits between position 2 and limit 13 of 15 bytes.
+(defn- hello-window
+  ^ByteBuffer [^ByteBuffer buffer]
+  (-> buffer
+      (.put (.getBytes "xxHello Worldyy" StandardCharsets/UTF_8))
+      (.limit 13)
+      (.position 2)))
+
+(def ^:private hello-buffer (hello-window (ByteBuffer/allocate 15)))
+(def ^:private hello-direct-buffer (hello-window (ByteBuffer/allocateDirect 15)))
+
 (defn- small-response-handler
   [{:keys [uri]}]
   (case uri
@@ -839,7 +851,13 @@
     "/nil" {:status 200 :headers {"x-case" "nil"}}
     "/nil-length" {:status 200 :headers {"content-length" "11"}}
     "/bytes" {:status 200 :body hello-bytes}
+    "/buffer" {:status 200 :body hello-buffer}
+    "/direct-buffer" {:status 200 :body hello-direct-buffer}
+    "/latin1" {:status 200 :headers {"content-type" "text/plain; charset=ISO-8859-1"} :body "café"}
     "/large-bytes" {:status 200 :body (byte-array 40000 (byte 66))}
+    "/large-buffer" {:status 200 :body (ByteBuffer/wrap (byte-array 40000 (byte 66)))}
+    "/large-latin1" {:status 200 :headers {"content-type" "text/plain; charset=ISO-8859-1"}
+                     :body (apply str (repeat 40000 "é"))}
     "/stream" {:status 200 :body (java.io.ByteArrayInputStream. hello-bytes)}
     {:status 200 :body "ready"}))
 
@@ -877,6 +895,8 @@
         size (parse-long (str/trim (subs out (inc (str/last-index-of out "\n")))))]
     {:exit (:exit result)
      :err (:err result)
+     :body (let [start (str/index-of out "\r\n\r\n")]
+             (when start (subs out (+ 4 start) (str/last-index-of out "\n"))))
      :status (parse-long (second (str/split (first lines) #" ")))
      :headers (into {} (map (fn [line]
                               (let [[k v] (str/split line #":\s*" 2)]
@@ -909,7 +929,12 @@
    ["GET" "/nil" 200 "0" 0]
    ["HEAD" "/nil" 200 nil 0]
    ["HEAD" "/nil-length" 200 "11" 0]
-   ["HEAD" "/bytes" 200 "11" 0]])
+   ["HEAD" "/bytes" 200 "11" 0]
+   ["GET" "/buffer" 200 "11" 11]
+   ["HEAD" "/buffer" 200 "11" 0]
+   ["GET" "/direct-buffer" 200 "11" 11]
+   ["HEAD" "/direct-buffer" 200 "11" 0]
+   ["GET" "/latin1" 200 "4" 4]])
 
 (deftest small-complete-ring-returns-use-fixed-slots-test
   (let [[server port] (small-response-server)]
@@ -924,7 +949,11 @@
           (is (= content-length (get-in result [:headers "content-length"])) (pr-str context))
           (is (nil? (get-in result [:headers "transfer-encoding"])) (pr-str context))
           (is (= size (:size result)) (pr-str context))
+          (when (and (= "GET" method) (#{"/buffer" "/direct-buffer"} path))
+            (is (= "Hello World" (:body result)) (pr-str context)))
           (is (= [1 0] [fixed streaming]) (pr-str context))))
+      (doseq [^ByteBuffer buffer [hello-buffer hello-direct-buffer]]
+        (is (= [2 13] [(.position buffer) (.limit buffer)])))
       (finally
         (busker/stop! server)))))
 
@@ -933,6 +962,8 @@
     (try
       (doseq [proto [:h1 :h2 :h3]
               [path content-length size] [["/large-bytes" "40000" 40000]
+                                          ["/large-buffer" "40000" 40000]
+                                          ["/large-latin1" "40000" 40000]
                                           ["/stream" nil 11]]]
         (let [{:keys [result fixed streaming]}
               (response-paths #(exchange proto port "GET" path))

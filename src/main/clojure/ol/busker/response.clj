@@ -557,20 +557,33 @@
                 {:status :closed})))
           (finally (release-producer! (.lifecycle-lock emitter) (.lifecycle_ emitter))))))))
 
+(defn- fixed-body
+  "Returns `body` in a form a fixed slot takes, or `::ineligible`. A string in a
+  response charset other than UTF-8 becomes its encoded bytes when it has at
+  most `limit` chars."
+  [body response ^long limit]
+  (cond
+    (or (nil? body) (instance? byte-array-class body) (instance? ByteBuffer body)) body
+    (not (string? body)) ::ineligible
+    :else (let [charset (response-charset response)]
+            (cond
+              (= StandardCharsets/UTF_8 charset) body
+              (<= (.length ^String body) limit) (.getBytes ^String body charset)
+              :else ::ineligible))))
+
 (defn- ordinary-fixed-plan [req response]
-  (let [body (:body response)
-        status (or (:status response) 200)
+  (let [status (or (:status response) 200)
         config (:config req)
-        b (:output-buffer-size config)]
-    (when (and (integer? status) (<= 200 status 999)
-               (or (nil? body)
-                   (instance? byte-array-class body)
-                   (and (string? body) (= StandardCharsets/UTF_8 (response-charset response)))))
-      (let [length (cond
+        limit (min (:output-buffer-size config) fixed-final/response-ring-max-body-bytes)]
+    (when (and (integer? status) (<= 200 status 999))
+      (let [body (fixed-body (:body response) response limit)
+            length (cond
                      (nil? body) 0
                      (string? body) (serialization/utf8-length body)
-                     :else (alength ^bytes body))]
-        (when (<= length (min b fixed-final/response-ring-max-body-bytes))
+                     (instance? byte-array-class body) (alength ^bytes body)
+                     (instance? ByteBuffer body) (.remaining ^ByteBuffer body)
+                     :else -1)]
+        (when (<= 0 length limit)
           (let [hint (get-compress-hint response)
                 hint (if (and (= h2o/H2O_COMPRESS_HINT_ENABLE hint)
                               (< length (or (:compress-min-size config) 0)))
@@ -587,7 +600,9 @@
   (let [lock (.lifecycle-lock emitter)
         body (:body response)]
     (try
+      ;; satisfies? allocates several KiB when it misses, so complete bodies skip it.
       (if (and body (not (string? body)) (not (instance? byte-array-class body))
+               (not (instance? ByteBuffer body))
                (satisfies? p/ResponseEmitter body))
         (when (:status response) (p/emit! emitter (dissoc response :body)))
         (if-let [[head plan] (when (and (p/open? emitter) (nil? @(.writer_ emitter)))

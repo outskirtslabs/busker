@@ -73,7 +73,7 @@ Each request retains the generation configuration unchanged and references its w
 ## Responses
 
 Internally there are two paths for responses to take: streaming responses or fixed-final.
-A Ring response returned by a handler is sent down the fixed-final path when nothing has been written to its emitter, its status is 200 to 999, and its body is nil, a byte array, or a string whose response charset is UTF-8, of at most `:output-buffer-size` and 32768 bytes.
+A Ring response returned by a handler is sent down the fixed-final path when nothing has been written to its emitter, its status is 200 to 999, and its body is nil, a byte array, a ByteBuffer, or a string whose encoding in the response charset is at most `:output-buffer-size` and 32768 bytes.
 This is a perf optimization so small requests can be sent in one clj->h2o operation.
 
 Other supported bodies use the streaming path, which sends body data in chunks with backpressure to prevent the application from producing data faster than the client can read it. Every response head, including streaming and informational heads, must fit 64 header pairs and 16384 staging bytes. Excess headers cause an exception before acceptance; streaming does not increase header capacity.
@@ -89,7 +89,7 @@ The term comes about from:
 The fixed-final path uses preallocated slots to reduce per-response allocation and pass complete responses from handler threads to the event-loop worker without waiting for native I/O.
 The slots are `clj_response_slot_t` structs maintained in a ring-buffer in native memory.
 
-When a Ring handler returns a response, Busker claims a slot, copies the headers and body into it.
+When a Ring handler returns a response, Busker claims a slot, copies the headers and body into it. A string in a charset other than UTF-8 is encoded to bytes once when its char count is within the body limit. It streams when its encoding does not fit. A ByteBuffer is copied from its position to its limit, leaving the caller's position unchanged.
 It publishes the slot state, then its index in a capacity-sized ready bitmap, and requests a worker wake.
 The worker detaches each bitmap word before processing its set bits, so publication during a drain remains discoverable without scanning every slot.
 The slot keeps those bytes valid until native request cleanup, including after a final send returns. H2O reads the body directly from the slot; only headers are copied into its request pool. Cleanup detaches the slot reference and checks its claim token before making the slot reusable. Slots being filled survive concurrent disconnects until their producers return.
@@ -100,7 +100,7 @@ An `emit!` producer with `:end? true` on an emitter without earlier output also 
 
 ### Streaming responses
 
-The streaming path handles incremental bodies, supported bodies beyond the fixed-body limits, responses that already sent informational headers, and Ring returns the fixed path does not take, such as ByteBuffers and strings in other charsets. Those Ring returns create a streaming writer and an internal receipt. A platform thread allocates 256 native blocks per worker in a shared FFM arena. Each block has `:output-buffer-size` bytes (B). This reserves 8 MiB per worker at the default B=32768, separately from fixed slots. The worker sends descriptors for these blocks without copying their payloads. Blocking strings and ByteBuffers larger than B are encoded or copied straight into successive blocks; byte arrays are copied in B-sized pieces.
+The streaming path handles incremental bodies, supported bodies beyond the fixed-body limits, and responses that already sent informational headers. Those responses create a streaming writer and an internal receipt. A platform thread allocates 256 native blocks per worker in a shared FFM arena. Each block has `:output-buffer-size` bytes (B). This reserves 8 MiB per worker at the default B=32768, separately from fixed slots. The worker sends descriptors for these blocks without copying their payloads. Blocking strings and ByteBuffers larger than B are encoded or copied straight into successive blocks; byte arrays are copied in B-sized pieces.
 
 Each response admits one producer at a time. A bounded write reserves bytes, a block, a receipt and a mailbox permit before invoking application code. The callback runs synchronously on its calling virtual thread through a confined view of the shared block. Closing that view revokes application access before publication without freeing the backing storage. Neither close nor native cleanup waits for a callback to return while holding a lock.
 
