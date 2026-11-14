@@ -261,3 +261,68 @@
       (is (every? pos? @read-counts))
       (finally
         (busker/stop! server)))))
+
+(defn- read-body
+  "Reads `body` to its end and returns it as a string. Delivers `read-all` once
+  the body read so far is `helloworld`."
+  [^java.io.InputStream body read-all]
+  (let [received (java.io.ByteArrayOutputStream.)
+        chunk (byte-array 64)]
+    (when body
+      (loop []
+        (let [n (.read body chunk)]
+          (when-not (neg? n)
+            (.write received chunk 0 n)
+            (when (and read-all (= "helloworld" (.toString received "UTF-8")))
+              (deliver read-all true))
+            (recur)))))
+    (.toString received "UTF-8")))
+
+(defn- streamed-upload
+  "Uploads `hello` and `world` from curl's standard input and ends the input
+  only after the handler has read both, so the end of the body reaches the
+  server in a separate frame after all data before it was read. Returns the
+  curl result and whether the handler read the data before the end."
+  [proto port read-all]
+  (let [read-before-end? (volatile! false)
+        result (util/curl :https proto port (str "/" (name proto)) :max-time 10
+                          :args ["-T" "-"]
+                          :write-stdin
+                          (fn [^java.io.OutputStream stdin]
+                            (.write stdin (.getBytes "hello" StandardCharsets/UTF_8))
+                            (.flush stdin)
+                            ;; curl sends the data of its first read for an HTTP/3
+                            ;; upload only when it reads again. The pause makes it read
+                            ;; `hello` and `world` separately. If it does not, the
+                            ;; handler cannot read both before the end and the test fails.
+                            (Thread/sleep 300)
+                            (.write stdin (.getBytes "world" StandardCharsets/UTF_8))
+                            (.flush stdin)
+                            (vreset! read-before-end? (deref read-all 5000 false))))]
+    {:read-before-end? @read-before-end?
+     :result result}))
+
+(deftest streamed-upload-is-read-completely-on-every-protocol-test
+  (let [port (util/free-port)
+        read-all {"/h1" (promise) "/h2" (promise) "/h3" (promise)}
+        server (busker/start!
+                (util/with-static-tls
+                  (util/with-handler
+                    (fn [request]
+                      {:status 200
+                       :body (str "got:" (read-body (:body request) (get read-all (:uri request))))})
+                    {:entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                         :http3? true
+                                         :tls {:tls-compatibility-mode :modern}}}})))]
+    (try
+      (util/wait-for-curl-ready! :https :h3 port "/" :max-time 2)
+      (doseq [proto [:h1 :h2 :h3]]
+        (testing (name proto)
+          (let [{:keys [read-before-end? result]}
+                (streamed-upload proto port (get read-all (str "/" (name proto))))]
+            (is read-before-end?
+                "The handler must read helloworld within 5 s, before curl's input ends")
+            (is (= {:exit 0 :out "got:helloworld"} (select-keys result [:exit :out]))
+                (:err result)))))
+      (finally
+        (busker/stop! server)))))

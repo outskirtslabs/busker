@@ -117,7 +117,10 @@
       false)))
 
 (defn curl
-  [scheme proto port path & {:keys [host max-time args unix-socket]
+  "Runs curl and returns its `:exit`, `:out` and `:err`. With `:write-stdin`,
+  calls it with curl's standard input and closes that input when it returns.
+  Java buffers that stream, so the function must flush what curl is to read."
+  [scheme proto port path & {:keys [host max-time args unix-socket write-stdin]
                              :or {host "127.0.0.1" max-time 10}
                              :as opts}]
   (let [scheme (or (:scheme opts) scheme)
@@ -151,9 +154,14 @@
                           sni-resolve-args
                           (or args [])
                           [url])]
-    (apply p/shell {:out :string :err :string :continue true}
-           "curl"
-           curl-args)))
+    (if write-stdin
+      (let [proc (apply p/process {:out :string :err :string} "curl" curl-args)]
+        (with-open [^java.io.OutputStream stdin (:in proc)]
+          (write-stdin stdin))
+        @proc)
+      (apply p/shell {:out :string :err :string :continue true}
+             "curl"
+             curl-args))))
 
 (defn wait-for-curl-ready!
   [scheme proto port path & {:keys [host max-time args unix-socket
