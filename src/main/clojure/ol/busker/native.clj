@@ -1238,6 +1238,15 @@
   "clj_h2o_http3_detach_udp_transport"
   [:pointer] :void)
 
+(defcfn http3-close-worker-sockets
+  "Close the UDP sockets of an HTTP/3 worker context on its listener's port,
+   so that the port can be bound again and gets no datagrams for it. For a
+   context kept after its loop's thread ended. The context and its transport
+   stay valid, and [[http3-free-worker-ctx]] can still free the context.
+   Returns 0, or -1 when the listener socket stays open."
+  "clj_h2o_http3_close_worker_sockets"
+  [:pointer] :int)
+
 (defcfn http3-release-udp-transport
   "Release a pooled UDP transport and close its reservation socket, if present."
   "clj_h2o_http3_release_udp_transport"

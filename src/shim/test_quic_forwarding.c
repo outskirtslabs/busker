@@ -1540,6 +1540,48 @@ static void expect_failure(spread_fixture_t *f, clj_http3_ctx_t *w,
   w->connect_retry_at = 0;
 }
 
+static int port_bindable(int family, uint16_t port) {
+  quicly_address_t addr = address(family, port);
+  int fd = socket(family, SOCK_DGRAM, 0);
+  CHECK(fd != -1);
+  int bound = bind(fd, &addr.sa, quicly_get_socklen(&addr.sa)) == 0;
+  close(fd);
+  return bound;
+}
+
+/* A kept worker's sockets on the port close, and its context can still be
+   disposed, which closes the stand-in socket */
+static void test_close_worker_sockets(int family) {
+  spread_fixture_t f;
+  connected_setup(&f, family);
+  quicly_address_t local = address(family, f.port);
+  quicly_address_t peer = address(family, 40000);
+  CHECK(clj_http3_connect(f.workers[1], fake_conns, &local, &peer));
+  int open = count_fds();
+
+  CHECK(clj_h2o_http3_close_worker_sockets(f.workers[1]) == 0);
+  CHECK(f.workers[1]->num_connected == 0 && transport_connected(&f) == 0 &&
+        clj_h2o_http3_connected_sockets(f.transport, 7, 1) == 0);
+  /* the connected socket, while the stand-in replaces the listener socket */
+  CHECK(count_fds() == open - 1);
+  CHECK(!port_bindable(family, f.port));
+
+  /* Without a stand-in the listener socket stays open */
+  struct rlimit saved;
+  lowest_fd_limit(&saved);
+  CHECK(clj_h2o_http3_close_worker_sockets(f.workers[0]) == -1);
+  CHECK(setrlimit(RLIMIT_NOFILE, &saved) == 0);
+  CHECK(!port_bindable(family, f.port));
+  CHECK(clj_h2o_http3_close_worker_sockets(f.workers[0]) == 0);
+  CHECK(port_bindable(family, f.port));
+
+  clj_h2o_http3_dispose_worker_ctx(f.workers[1]);
+  f.workers[1] = NULL;
+  /* the stand-in and the forwarding channel */
+  CHECK(count_fds() == open - 4);
+  spread_teardown(&f);
+}
+
 static void test_connect_failures(int family) {
   spread_fixture_t f;
   connected_setup(&f, family);
@@ -1707,6 +1749,7 @@ int main(void) {
     test_connected_socket_takes_its_flow(family);
     test_connect_failures(family);
     test_bound_socket_joins_group(family);
+    test_close_worker_sockets(family);
   }
   test_full_listener_keeps_flows();
   test_reading_connected_socket();

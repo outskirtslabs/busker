@@ -516,6 +516,17 @@ void clj_h2o_http3_activate_udp_transport_generation(
  */
 void clj_h2o_http3_detach_udp_transport(clj_http3_ctx_t *ctx);
 
+/* Close the UDP sockets of a worker context on its listener's port, the
+ * listener socket and the sockets connected to clients, so that the port can
+ * be bound again and the kernel sends it no datagrams. For a worker whose
+ * loop has ended and whose context is kept because it still has connections.
+ * Call it from any thread after the loop's thread has ended. The context and
+ * its transport stay valid, and clj_h2o_http3_dispose_worker_ctx can still
+ * free the context. Returns 0, or -1 when no stand-in socket can be opened, in
+ * which case the listener socket stays open.
+ */
+int clj_h2o_http3_close_worker_sockets(clj_http3_ctx_t *ctx);
+
 /* Release the pooled UDP transport and any reservation socket it still owns. */
 void clj_h2o_http3_release_udp_transport(clj_http3_udp_transport_t *transport);
 

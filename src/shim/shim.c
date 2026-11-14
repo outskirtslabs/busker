@@ -4045,6 +4045,30 @@ void clj_h2o_http3_dispose_worker_ctx(clj_http3_ctx_t *ctx) {
   free(ctx);
 }
 
+int clj_h2o_http3_close_worker_sockets(clj_http3_ctx_t *ctx) {
+  if (!ctx)
+    return 0;
+
+  while (ctx->num_connected != 0)
+    clj_http3_close_connected(ctx, ctx->connected);
+
+  /* h2o_quic_dispose_context closes the context's socket, so an unbound one,
+     which holds no port, takes the place of the closed listener socket */
+  h2o_quic_socket_t *listener = &ctx->h3_ctx.super.sock;
+  int fd = socket(listener->addr.ss_family, SOCK_DGRAM, 0);
+  if (fd == -1)
+    return -1;
+  if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
+    close(fd);
+    return -1;
+  }
+  h2o_socket_close(listener->sock);
+  listener->sock = h2o_evloop_socket_create(ctx->h3_ctx.super.loop, fd,
+                                            H2O_SOCKET_FLAG_DONT_READ);
+  ctx->udp_sock = listener->sock;
+  return 0;
+}
+
 void clj_h2o_http3_detach_udp_transport(clj_http3_ctx_t *ctx) {
   clj_h2o_http3_dispose_worker_ctx(ctx);
 }
