@@ -14,11 +14,6 @@
   } while (0)
 #endif
 
-#ifdef CLJ_DEBUG
-#undef _FORTIFY_SOURCE
-#define _FORTIFY_SOURCE 0
-#endif
-
 #include <h2o.h>
 #include <h2o/socket/evloop.h>
 #include <stdatomic.h>
