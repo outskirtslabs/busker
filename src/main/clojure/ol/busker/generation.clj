@@ -1076,7 +1076,12 @@
                            (throw (ex-info "Missing TCP listener claim"
                                            {:listener listener})))
         listener-fd (listen/resource listener-claim)
-        dup-fds (socket/dup-for-threads listener-fd n-workers)
+        dup-fds (try
+                  (socket/dup-for-threads listener-fd n-workers)
+                  (catch Throwable t
+                    (when ssl-ctx-ptr
+                      (h2o/free-ssl-ctx ssl-ctx-ptr))
+                    (throw t)))
         thread-states
         (vec
          (for [thread-idx (range n-workers)]

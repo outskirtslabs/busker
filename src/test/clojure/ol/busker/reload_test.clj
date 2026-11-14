@@ -4,6 +4,7 @@
    [babashka.ffi :as mem]
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.native :as native]
+   [ol.busker.native.socket :as socket]
    [ol.busker.config :as config]
    [ol.busker.generation :as generation]
    [ol.busker.listen :as listen]
@@ -14,6 +15,7 @@
    [ol.clave.acme.solver.http :as http-solver]
    [ol.clave.automation :as automation])
   (:import
+   [java.net ConnectException Socket]
    [java.util.concurrent ExecutorService LinkedBlockingQueue]))
 
 (defn- response-config
@@ -807,6 +809,43 @@
           (catch clojure.lang.ExceptionInfo e
             (is (= :tls-startup (:stage (ex-data e))))))
         (is (.isShutdown ^ExecutorService @request-executor_))))))
+
+(defn- accepts-tcp?
+  [port]
+  (try
+    (with-open [_ (Socket. "127.0.0.1" (int port))]
+      true)
+    (catch ConnectException _
+      false)))
+
+(defn- start-failure
+  [config]
+  (try
+    (runtime/stop! (runtime/start! config))
+    nil
+    (catch clojure.lang.ExceptionInfo e
+      e)))
+
+(deftest failed-startup-closes-listener-duplicates-after-a-dup-failure-test
+  (let [port (util/free-port)
+        dup-fd socket/dup-fd
+        free-ssl-ctx native/free-ssl-ctx
+        dups_ (atom 0)
+        freed_ (atom 0)
+        config (assoc (tls-response-config port (constantly {:status 200}))
+                      :n-workers 2)]
+    (with-redefs [socket/dup-fd (fn [fd]
+                                  (when (pos? @dups_)
+                                    (throw (ex-info "simulated dup failure" {})))
+                                  (swap! dups_ inc)
+                                  (dup-fd fd))
+                  native/free-ssl-ctx (fn [ctx]
+                                        (swap! freed_ inc)
+                                        (free-ssl-ctx ctx))]
+      (is (some? (start-failure config))))
+    (is (= 1 @dups_))
+    (is (= 1 @freed_))
+    (is (not (accepts-tcp? port)))))
 
 (deftest reload-activates-while-managed-certificates-converge-test
   (let [port (util/free-port)

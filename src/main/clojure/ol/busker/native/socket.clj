@@ -155,9 +155,14 @@
     (throw (ex-info "invalid master-fd" {:fd master-fd})))
   (when (or (nil? n) (neg? n))
     (throw (ex-info "n must be >= 0" {:n n})))
-  (vec
-   (for [_ (range n)]
-     (dup-fd master-fd))))
+  (reduce (fn [fds _]
+            (try
+              (conj fds (dup-fd master-fd))
+              (catch Throwable t
+                (run! close fds)
+                (throw t))))
+          []
+          (range n)))
 
 (defn close-fd! [fd]
   (when (pos? fd)
