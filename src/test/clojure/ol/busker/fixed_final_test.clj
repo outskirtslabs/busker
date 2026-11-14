@@ -9,6 +9,7 @@
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.response :as response]
+   [ol.busker.response-queue :as response-queue]
    [ol.busker.test-utils :as util])
   (:import
    [java.lang.foreign MemorySegment ValueLayout]
@@ -823,5 +824,122 @@
     (try
       (is (= "generic" (second (str/split (request-text port "GET") #"\r\n\r\n" 2))))
       (is (= "" (second (str/split (request-text port "HEAD") #"\r\n\r\n" 2))))
+      (finally
+        (busker/stop! server)))))
+
+(def ^:private hello-bytes (.getBytes "Hello World" StandardCharsets/UTF_8))
+
+(defn- small-response-handler
+  [{:keys [uri]}]
+  (case uri
+    "/204" {:status 204 :headers {"x-case" "204"}}
+    "/204-body" {:status 204 :headers {"content-length" "5"} :body "extra"}
+    "/304" {:status 304 :headers {"etag" "\"v1\""}}
+    "/304-length" {:status 304 :headers {"etag" "\"v1\"" "content-length" "11"}}
+    "/nil" {:status 200 :headers {"x-case" "nil"}}
+    "/nil-length" {:status 200 :headers {"content-length" "11"}}
+    "/bytes" {:status 200 :body hello-bytes}
+    "/large-bytes" {:status 200 :body (byte-array 40000 (byte 66))}
+    "/stream" {:status 200 :body (java.io.ByteArrayInputStream. hello-bytes)}
+    {:status 200 :body "ready"}))
+
+(defn- response-paths
+  "Calls `f` and returns how many fixed slots were published and streaming
+  writers created while it ran, with its result under `:result`."
+  [f]
+  (let [published (AtomicInteger.)
+        writers (AtomicInteger.)
+        publish h2o/mt-response-publish
+        create-writer response-queue/create-response-writer]
+    (with-redefs-fn
+      {#'h2o/mt-response-publish
+       (fn [receiver claim-handle]
+         (let [result (publish receiver claim-handle)]
+           (when (= 1 result) (.incrementAndGet published))
+           result))
+       #'response-queue/create-response-writer
+       (fn [req]
+         (.incrementAndGet writers)
+         (create-writer req))}
+      (fn []
+        (let [result (f)]
+          {:result result :fixed (.get published) :streaming (.get writers)})))))
+
+(defn- exchange
+  "Sends `method` for `path` over `proto` with curl. Returns the status, the
+  lower-cased response headers, and the number of body bytes received."
+  [proto port method path]
+  (let [result (util/curl :https proto port path
+                          :args (concat (if (= "HEAD" method) ["-I"] ["-i"])
+                                        ["-w" "\n%{size_download}"]))
+        out (:out result)
+        lines (str/split-lines (first (str/split out #"\r\n\r\n" 2)))
+        size (parse-long (str/trim (subs out (inc (str/last-index-of out "\n")))))]
+    {:exit (:exit result)
+     :err (:err result)
+     :status (parse-long (second (str/split (first lines) #" ")))
+     :headers (into {} (map (fn [line]
+                              (let [[k v] (str/split line #":\s*" 2)]
+                                [(str/lower-case k) v])))
+                    (rest lines))
+     :size size}))
+
+(defn- small-response-server
+  []
+  (let [port (util/free-port)
+        server (busker/start!
+                (util/with-static-tls
+                  (util/with-handler
+                    small-response-handler
+                    {:n-workers 1
+                     :entrypoints {:tls {:bind (str "127.0.0.1:" port)
+                                         :http3? true
+                                         :tls {:tls-compatibility-mode :modern}}}})))]
+    (util/wait-for-curl-ready! :https :h1 port "/")
+    [server port]))
+
+(def ^:private small-response-cases
+  ;; [method path status content-length body-bytes]
+  [["GET" "/204" 204 nil 0]
+   ["GET" "/204-body" 204 nil 0]
+   ["HEAD" "/204" 204 nil 0]
+   ["GET" "/304" 304 nil 0]
+   ["GET" "/304-length" 304 "11" 0]
+   ["HEAD" "/304" 304 nil 0]
+   ["GET" "/nil" 200 "0" 0]
+   ["HEAD" "/nil" 200 nil 0]
+   ["HEAD" "/nil-length" 200 "11" 0]
+   ["HEAD" "/bytes" 200 "11" 0]])
+
+(deftest small-complete-ring-returns-use-fixed-slots-test
+  (let [[server port] (small-response-server)]
+    (try
+      (doseq [proto [:h1 :h2 :h3]
+              [method path status content-length size] small-response-cases]
+        (let [{:keys [result fixed streaming]}
+              (response-paths #(exchange proto port method path))
+              context [proto method path]]
+          (is (= 0 (:exit result)) (pr-str context (:err result)))
+          (is (= status (:status result)) (pr-str context))
+          (is (= content-length (get-in result [:headers "content-length"])) (pr-str context))
+          (is (nil? (get-in result [:headers "transfer-encoding"])) (pr-str context))
+          (is (= size (:size result)) (pr-str context))
+          (is (= [1 0] [fixed streaming]) (pr-str context))))
+      (finally
+        (busker/stop! server)))))
+
+(deftest large-or-unsupported-complete-bodies-still-stream-test
+  (let [[server port] (small-response-server)]
+    (try
+      (doseq [proto [:h1 :h2 :h3]
+              [path content-length size] [["/large-bytes" "40000" 40000]
+                                          ["/stream" nil 11]]]
+        (let [{:keys [result fixed streaming]}
+              (response-paths #(exchange proto port "GET" path))
+              context [proto path]]
+          (is (= 200 (:status result)) (pr-str context))
+          (is (= content-length (get-in result [:headers "content-length"])) (pr-str context))
+          (is (= size (:size result)) (pr-str context))
+          (is (= [0 1] [fixed streaming]) (pr-str context))))
       (finally
         (busker/stop! server)))))

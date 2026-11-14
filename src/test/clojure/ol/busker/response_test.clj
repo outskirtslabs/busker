@@ -235,7 +235,20 @@
     (is (= {:status 205 :headers [] :content-length 0}
            (select-keys (fixed-head {:status 205 :body "cat" :headers headers})
                         [:status :headers :content-length]))))
-  (doseq [status [204 304 101 103 "200"]]
+  (doseq [[response content-length]
+          [[{:status 204} -1]
+           [{:status 204 :body "ok" :headers {"Content-Length" "2"}} -1]
+           [{:status 304} -1]
+           [{:status 304 :body "ok"} 2]
+           [{:status 304 :headers {"Content-Length" "9"}} 9]
+           [{:status 200} 0]]]
+    (is (= content-length (:content-length (fixed-head response))) (pr-str response)))
+  (let [head-request (assoc plan-request :req-ctx {:request-method :head})
+        head-length #(:content-length (first (#'response/ordinary-fixed-plan head-request %)))]
+    (is (= -1 (head-length {:status 200})))
+    (is (= 9 (head-length {:status 200 :headers {"Content-Length" "9"}})))
+    (is (= 2 (head-length {:status 200 :body "ok"}))))
+  (doseq [status [101 103 "200"]]
     (is (nil? (#'response/ordinary-fixed-plan plan-request {:status status :body "ok"})))))
 
 (deftest fixed-head-compress-hint

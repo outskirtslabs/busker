@@ -231,8 +231,10 @@
           (recur (inc i)))))
     (aset pairs n (MapEntry/create header-name (str value)))))
 
-;; A boxed constant, so comparing it with a boxed status allocates nothing.
+;; Boxed constants, so comparing them with a boxed status allocates nothing.
+(def ^:private no-content-status 204)
 (def ^:private reset-content-status 205)
+(def ^:private not-modified-status 304)
 
 (defn- build-head
   "Returns the head of `response` from one pass over its headers.
@@ -241,7 +243,8 @@
   sequential value becomes its own pair; informational heads use lowercase names.
   Content-length headers in any letter case stay out of the pairs. The first
   one with a value gives the content length, otherwise `length` does for a final
-  head, otherwise it is `-1`. Status 205 always has content length 0.
+  head, otherwise it is `-1`. Status 205 always has content length 0 and status
+  204 never has one (RFC 9110, section 8.6).
   `:header-bytes` is the UTF-8 byte count of the pair names and values.
   `compress-hint` is stored as given. `retain-response?` stores the response
   without its body under `:response`, for later body operations that need its
@@ -280,7 +283,10 @@
                        fixed-final/max-header-staging-bytes))
             (throw (ex-info "Response headers exceed bounded header storage" {:header-count n})))
           {:status status :headers pairs :header-bytes header-bytes
-           :content-length (if (= reset-content-status status) 0 content-length)
+           :content-length (cond
+                             (= reset-content-status status) 0
+                             (= no-content-status status) -1
+                             :else content-length)
            :compress-hint compress-hint
            :response (when retain-response? (-> response (assoc :status status) (dissoc :body)))})))))
 
@@ -556,19 +562,25 @@
         status (or (:status response) 200)
         config (:config req)
         b (:output-buffer-size config)]
-    (when (and (integer? status) (<= 200 status 999) (not (contains? #{204 304} status))
-               (or (instance? byte-array-class body)
+    (when (and (integer? status) (<= 200 status 999)
+               (or (nil? body)
+                   (instance? byte-array-class body)
                    (and (string? body) (= StandardCharsets/UTF_8 (response-charset response)))))
-      (let [length (if (string? body)
-                     (serialization/utf8-length body)
-                     (alength ^bytes body))]
+      (let [length (cond
+                     (nil? body) 0
+                     (string? body) (serialization/utf8-length body)
+                     :else (alength ^bytes body))]
         (when (<= length (min b fixed-final/response-ring-max-body-bytes))
           (let [hint (get-compress-hint response)
                 hint (if (and (= h2o/H2O_COMPRESS_HINT_ENABLE hint)
                               (< length (or (:compress-min-size config) 0)))
                        h2o/H2O_COMPRESS_HINT_DISABLE
                        hint)
-                head (build-head response length false false hint)]
+                ;; Without a body, the length a GET or a 200 would carry is unknown.
+                unknown-length? (and (nil? body)
+                                     (or (= not-modified-status status)
+                                         (= :head (:request-method (:req-ctx req)))))
+                head (build-head response (when-not unknown-length? length) false false hint)]
             [head (fixed-plan req head body length)]))))))
 
 (defn send-ring-response! [^H2OResponseEmitter emitter response]
