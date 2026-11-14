@@ -26,6 +26,16 @@
    :not-before not-before
    :not-after not-after})
 
+(deftest start-key-manager-starts-no-rotation-thread-when-attach-fails-test
+  (let [manager (tickets/create-key-manager (tickets/memory-ticket-store)
+                                            ::native
+                                            {:lifetime-seconds 86400})]
+    (with-redefs [tickets/sync-keys-to-native! (fn [_ _]
+                                                 (throw (ex-info "simulated native sync failure" {})))]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (tickets/start-key-manager! manager))))
+    (is (nil? @(:rotation-thread (:service manager))))))
+
 (deftest rotate-keys-drops-newer-key-of-first-byte-collision-test
   (testing "a loaded set with two keys sharing a first name byte keeps the older one, as h2o does"
     (let [now-ms 1000000

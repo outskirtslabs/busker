@@ -560,10 +560,10 @@
       manager-or-service))
 
 (defn start-key-manager!
-  "Start the backing key service and attach the native ticket manager."
+  "Attach the native ticket manager and start the backing key service."
   [{:keys [service native-mgr] :as mgr}]
-  (start-key-service! service)
   (attach-native-manager! service native-mgr)
+  (start-key-service! service)
   mgr)
 
 (defn stop-key-manager!
