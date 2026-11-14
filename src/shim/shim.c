@@ -2149,6 +2149,7 @@ ptls_context_t *clj_h2o_create_ptls_ctx(const char *cert_file,
       .key_exchanges = clj_quic_key_exchanges,
       .cipher_suites = ptls_openssl_cipher_suites,
       .on_client_hello = &wrapper->on_client_hello,
+      .require_dhe_on_psk = 1,
   };
 
   if (has_static_identity) {
