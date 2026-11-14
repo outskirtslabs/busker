@@ -437,13 +437,15 @@
         (is (some? service))
         (is (= 1 (shared-ticket-manager-count service)))
         (with-redefs [ol.busker.generation/init-worker-state
-                      (fn [_]
+                      (fn [_ _]
                         (throw (ex-info "simulated worker init failure" {})))]
           (try
             (runtime/reload! server config-b {:force? true})
             (is false "Reload should fail")
             (catch clojure.lang.ExceptionInfo e
-              (is (= :reload-failed (:reason (ex-data e)))))))
+              (is (= :reload-failed (:reason (ex-data e))))
+              (is (= "simulated worker init failure"
+                     (ex-message (.getCause (.getCause e))))))))
         (is (identical? service
                         (generation-shared-ticket-service
                          (:active @(:busker/state server)))))
