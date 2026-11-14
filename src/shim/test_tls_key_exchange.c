@@ -1,6 +1,7 @@
 /* Drive picotls clients against the HTTP/3 TLS context: the key exchange
    groups it offers, whether a client needs a HelloRetryRequest, whether a
-   ticket from an earlier handshake resumes with early data, and that every
+   ticket from an earlier handshake resumes with early data, whether it
+   resumes without early data when the QUIC settings change, and that every
    resumption has a new key exchange.
    Arguments: certificate and private key PEM files. */
 #include "shim.c"
@@ -275,6 +276,28 @@ static void psk_ke_alone_gets_a_full_handshake(ptls_context_t *server_ctx) {
   ptls_free(server);
 }
 
+/* A ticket issued under other QUIC transport settings resumes without early
+   data, because the client may use the settings it remembers in 0-RTT
+   (RFC 9000 Section 7.4.1). Sets the tag of ticket_mgr. */
+static void changed_quic_tag_resumes_without_early_data(
+    ptls_context_t *server, clj_ticket_manager_t *ticket_mgr) {
+  ptls_key_exchange_algorithm_t *groups[] = {&ptls_openssl_x25519, NULL};
+  ptls_context_t client = client_ctx(groups, 1);
+  quicly_context_t quic = quicly_spec_context;
+  clj_ticket_manager_set_quic_tag(ticket_mgr, &quic);
+
+  handshake(server, &client, 0);
+  handshake_result_t same = handshake(server, &client, 1);
+  CHECK(same.resumed);
+  CHECK(same.early_data == PTLS_EARLY_DATA_ACCEPTED);
+
+  ++quic.transport_params.max_streams_bidi;
+  clj_ticket_manager_set_quic_tag(ticket_mgr, &quic);
+  handshake_result_t changed = handshake(server, &client, 1);
+  CHECK(changed.resumed);
+  CHECK(changed.early_data == PTLS_EARLY_DATA_REJECTED);
+}
+
 int main(int argc, char **argv) {
   CHECK(argc == 3);
   clj_ticket_manager_t *ticket_mgr = clj_ticket_manager_create(3600);
@@ -292,6 +315,7 @@ int main(int argc, char **argv) {
   offers_h2o_server_groups(server);
   psk_ke_beside_psk_dhe_ke_resumes_with_a_key_exchange(server);
   psk_ke_alone_gets_a_full_handshake(server);
+  changed_quic_tag_resumes_without_early_data(server, ticket_mgr);
 
   clj_h2o_free_ptls_ctx(server);
   clj_ticket_manager_destroy(ticket_mgr);
