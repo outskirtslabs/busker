@@ -294,11 +294,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1794563006,
-        "narHash": "sha256-9syNVPe5ft+GsV4ua7CL+WrPLloKm3a3xiWZpKJ0Mpg=",
+        "lastModified": 1794663764,
+        "narHash": "sha256-/AERe9ekqh79ONeVMhWT7W18J0AAptx2yZSQ5ZKK6mA=",
         "owner": "outskirtslabs",
         "repo": "h2o-zig",
-        "rev": "9ca8c1d2aec0a726539b582625cb447c477b4bbf",
+        "rev": "fd667189c26885abd7744d31a023c87a31351d88",
         "type": "github"
       },
       "original": {

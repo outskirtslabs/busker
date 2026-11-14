@@ -6,7 +6,7 @@ This project uses https://www.taoensso.com/break-versioning[*Break Versioning*].
 
 == Unreleased
 
-* Update H2O to `d19f742b0` and BoringSSL to `0.20261105.0`.
+* Update H2O to `d3e43fcf0` and BoringSSL to `0.20261105.0`.
 * Fix HTTP/3 forwarding loop prevention and source-address validation.
 * Require Zig 0.17.1 for native source builds.
 

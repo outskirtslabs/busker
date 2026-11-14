@@ -1,13 +1,13 @@
 {
-  "h2o-0.0.1-7Fp7SvZ8AACHF3exmJa6X6ZuMKr0vYLUhh2YruqI6EnH": {
+  "h2o-0.0.1-7Fp7SuR-AAAbSOYMfMwRgyoAEf5PY0B66iaBHvxgvWMQ": {
     "name": "h2o-zig",
-    "url": "git+https://github.com/outskirtslabs/h2o-zig.git#9ca8c1d2aec0a726539b582625cb447c477b4bbf",
-    "hash": "sha256-T2TUY4Hd6rBgb0Z1DPWk4vuXgd2mDgMnxsUG982NxtY="
+    "url": "git+https://github.com/outskirtslabs/h2o-zig.git#fd667189c26885abd7744d31a023c87a31351d88",
+    "hash": "sha256-eydS4sJSv2gZICYpsSmnVvP/rsDDfTodGW3woUQUD5U="
   },
-  "N-V-__8AAE2nqQH6vL-o2tZMK2oEe2g-BJC5H2f8XL85R1BJ": {
+  "N-V-__8AAE0UqgH8s_ROHnd7IKy9t2hzKsqk4PavH0jwER4g": {
     "name": "h2o",
-    "url": "git+https://github.com/h2o/h2o.git?ref=master#d19f742b00a4bb71207524f2eed99464854d24cd",
-    "hash": "sha256-Q8Gpz66uOA7reTJEGEAsey59k1uI11d3m782wtGbXyM="
+    "url": "git+https://github.com/h2o/h2o.git?ref=master#d3e43fcf00c3e6b17826b95d2d362d646185918a",
+    "hash": "sha256-wj4Sqloqm5QWnWgb0kZwiAm3EGcLA/zAgOj+PITvDHM="
   },
   "N-V-__8AADdLBADNETOk9pvYZ-k7F8a08-U43YCrYSlxu621": {
     "name": "wslay",
