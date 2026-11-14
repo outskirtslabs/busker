@@ -1365,7 +1365,8 @@
                             ::generation/workers [worker]
                             ::generation/worker-states [{:http3-ctxs-guard (#'generation/http3-ctxs-guard)
                                                          :listener-socks []
-                                                         ::generation/listeners-closed?_ (AtomicBoolean. false)}]
+                                                         ::generation/listeners-closed?_ (AtomicBoolean. false)
+                                                         ::generation/http3-sockets-closed?_ (AtomicBoolean. false)}]
                             ::generation/wakeup-receivers [nil]
                             ::generation/listener-runtimes []
                             ::generation/listener-claims {}

@@ -1067,6 +1067,26 @@
       (catch Throwable t
         (.addSuppressed error t)))))
 
+(defn- close-kept-http3-sockets!
+  "Closes the HTTP/3 UDP sockets of each worker of `generation` whose HTTP/3
+  worker contexts are kept, once, so that the UDP ports can be bound again and
+  get no datagrams for those sockets. Call it only after every worker thread
+  has ended. The contexts and the UDP claims stay, because kept connections
+  still point at the contexts and the contexts at their transport. Each socket
+  that stays open is added to `error` as a suppressed exception."
+  [generation ^Throwable error]
+  (doseq [{:keys [http3-ctxs http3-ctxs-guard worker-idx]
+           ::keys [^AtomicBoolean http3-sockets-closed?_]} (::worker-states generation)]
+    (let [{:keys [lock ^AtomicBoolean disposed?]} http3-ctxs-guard]
+      (locking lock
+        (when (and (not (.get disposed?))
+                   (.compareAndSet http3-sockets-closed?_ false true))
+          (doseq [http3-ctx http3-ctxs
+                  :when (and http3-ctx (not (mem/null? http3-ctx)))]
+            (when-not (zero? (h2o/http3-close-worker-sockets http3-ctx))
+              (.addSuppressed error (ex-info "HTTP/3 UDP socket of a kept worker stays open"
+                                             {:worker-idx worker-idx})))))))))
+
 (defn- acquire-listener-claims!
   [pool listeners]
   (reduce (fn [claims claim-key]
@@ -1385,7 +1405,8 @@
                                ::stop-accepting-remaining_ stop-accepting-remaining_
                                ::stopped-accepting_ stopped-accepting_
                                ::stopped-accepting?_ (AtomicBoolean. false)
-                               ::listeners-closed?_ (AtomicBoolean. false)}
+                               ::listeners-closed?_ (AtomicBoolean. false)
+                               ::http3-sockets-closed?_ (AtomicBoolean. false)}
                  _ (vswap! cleanup-state_ update ::worker-states (fnil conj []) worker-state)
                  worker (evloop/start-worker!
                          (fn [worker loop-state]
@@ -1542,7 +1563,7 @@
                            (not-every? #(zero? (bp/checked-out %)) (::stream-pools generation)))
                        {:joined? false
                         :listeners-closed? true
-                        :error (ex-info "Worker threads ended with connections, responses or blocks nothing can finish. TCP and Unix listeners closed. Loops, contexts, HTTP/3 UDP sockets and memory kept."
+                        :error (ex-info "Worker threads ended with connections, responses or blocks nothing can finish. TCP and Unix listeners and HTTP/3 UDP sockets closed. Loops, contexts and memory kept."
                                         {:unfinished-workers (ids-in :unfinished)})}
 
                        :else
@@ -1559,6 +1580,7 @@
                    (p/wake worker))
                  (retain-failed-retirement! generation phase-atom error)
                  (when listeners-closed?
+                   (close-kept-http3-sockets! generation error)
                    (release-socket-listener-claims! (::listener-claims generation) error))
                  (throw error))
                (do

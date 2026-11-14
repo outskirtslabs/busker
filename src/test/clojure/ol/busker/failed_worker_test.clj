@@ -1,6 +1,7 @@
 (ns ol.busker.failed-worker-test
   "Reload, drain and stop after a worker's event loop has failed."
   (:require
+   [babashka.ffi :as mem]
    [clojure.test :refer [deftest is use-fixtures]]
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.buffer-pool :as bp]
@@ -14,7 +15,8 @@
    [taoensso.trove :as trove])
   (:import
    [clojure.lang ExceptionInfo]
-   [java.net ConnectException InetSocketAddress ServerSocket Socket]
+   [java.net BindException ConnectException InetSocketAddress ServerSocket Socket]
+   [java.nio.channels DatagramChannel]
    [java.nio.charset StandardCharsets]
    [java.util.concurrent TimeUnit]
    [java.util.concurrent.atomic AtomicLongArray AtomicReference]))
@@ -99,6 +101,16 @@
     (catch Throwable _
       false)))
 
+(defn- datagram-bindable?
+  "True when a UDP socket without SO_REUSEPORT can bind `port`."
+  [port]
+  (try
+    (with-open [channel (DatagramChannel/open)]
+      (.bind channel (InetSocketAddress. "127.0.0.1" (int port)))
+      true)
+    (catch BindException _
+      false)))
+
 (defn- body
   [port]
   (:out (util/curl :http :h1 port "/" :max-time 5)))
@@ -120,7 +132,7 @@
     socket))
 
 (def ^:private kept-message
-  "Worker threads ended with connections, responses or blocks nothing can finish. TCP and Unix listeners closed. Loops, contexts, HTTP/3 UDP sockets and memory kept.")
+  "Worker threads ended with connections, responses or blocks nothing can finish. TCP and Unix listeners and HTTP/3 UDP sockets closed. Loops, contexts and memory kept.")
 
 (defn- refuses-connections?
   [port]
@@ -339,3 +351,91 @@
         (is (refuses-connections? port))
         (is (port-bindable? port))
         (forget-kept-generation! instance 1)))))
+
+(defn- http3-config
+  [plain-port tls-port body]
+  (util/with-static-tls
+    (server-config plain-port body
+                   :entrypoints {:http {:bind (str "127.0.0.1:" plain-port) :tls false}
+                                 :https {:bind (str "127.0.0.1:" tls-port) :http3? true}})))
+
+(defn- http3-body
+  [port]
+  (:out (util/curl :https :h3 port "/" :max-time 3)))
+
+(defn- http3-connections
+  [instance]
+  (reduce + (for [http3-ctxs (::generation/http3-worker-contexts instance)
+                  http3-ctx http3-ctxs
+                  :when (and http3-ctx (not (mem/null? http3-ctx)))]
+              (h2o/http3-num-connections http3-ctx))))
+
+(deftest stop-closes-the-http3-sockets-of-a-generation-it-must-keep-test
+  (let [plain-port (util/free-port)
+        tls-port (util/free-port)
+        limit-before (h2o/conn-limit-current)
+        server (runtime/start! (http3-config plain-port tls-port "held"))
+        instance (active-instance server)]
+    (is (zero? (:exit (util/wait-for-curl-ready! :https :h3 tls-port "/" :max-time 2))))
+    (is (eventually #(every? zero? (connection-counts instance))))
+    (is (eventually #(zero? (http3-connections instance)))
+        "no QUIC connection is left for the failed worker to keep")
+    (with-open [_ (open-served-connection! plain-port)]
+      (fail-worker! instance (.indexOf ^java.util.List (connection-counts instance) 1))
+      (let [stop (fn []
+                   (try
+                     (runtime/stop! server)
+                     nil
+                     (catch ExceptionInfo e
+                       (ex-message e))))]
+        (is (= kept-message (stop)))
+        (is (= kept-message (stop))))
+      (let [[result ms] (elapsed-ms #(util/curl :https :h3 tls-port "/" :max-time 3))]
+        (is (not (zero? (:exit result))))
+        (is (< ms 2000) "HTTP/3 to the port fails at once and does not time out"))
+      (is (datagram-bindable? tls-port))
+      (let [second-server (runtime/start! (http3-config plain-port tls-port "second"))]
+        (try
+          (is (= (repeat 12 "second") (repeatedly 12 #(http3-body tls-port))))
+          (finally
+            (is (nil? (runtime/stop! second-server))))))
+      (forget-kept-generation! instance 1))
+    (is (= limit-before (h2o/conn-limit-current)))))
+
+(defn- udp-transport-address
+  [instance port]
+  (some (fn [[claim-key claim]]
+          (when (= {:transport :udp :port port} (select-keys claim-key [:transport :port]))
+            (.address ^java.lang.foreign.MemorySegment (listen/resource claim))))
+        (::generation/listener-claims instance)))
+
+(deftest reload-keeps-http3-answering-when-the-old-generation-must-be-kept-test
+  (let [plain-port (util/free-port)
+        tls-port (util/free-port)
+        limit-before (h2o/conn-limit-current)
+        server (runtime/start! (http3-config plain-port tls-port "held"))
+        old (active-instance server)
+        stop (fn []
+               (try
+                 (runtime/stop! server)
+                 nil
+                 (catch ExceptionInfo e
+                   (ex-message e))))]
+    (is (zero? (:exit (util/wait-for-curl-ready! :https :h3 tls-port "/" :max-time 2))))
+    (is (eventually #(every? zero? (connection-counts old))))
+    (is (eventually #(zero? (http3-connections old)))
+        "no QUIC connection is left for the failed worker to keep")
+    (with-open [_ (open-served-connection! plain-port)]
+      (fail-worker! old (.indexOf ^java.util.List (connection-counts old) 1))
+      (is (= :activated (runtime/reload! server (http3-config plain-port tls-port "new"))))
+      (let [new (active-instance server)]
+        (is (= (udp-transport-address old tls-port) (udp-transport-address new tls-port))
+            "the new generation uses the UDP transport of the old one")
+        (is (eventually #(= :retirement-failed @(::generation/phase old))))
+        (is (= (repeat 12 "new") (repeatedly 12 #(http3-body tls-port))))
+        (is (= "new" (body plain-port))))
+      (is (= kept-message (stop)))
+      (is (= :stopped (:phase (runtime/state server))))
+      (is (datagram-bindable? tls-port)))
+    (forget-kept-generation! old 1)
+    (is (= limit-before (h2o/conn-limit-current)))))
