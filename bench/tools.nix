@@ -1,8 +1,18 @@
+# Benchmark tools from the nixpkgs that the flake's root `nixpkgs` input
+# resolves to in flake.lock, so the benchmark host runs the devshell's JDK,
+# Clojure CLI and curl.
 let
   lock = builtins.fromJSON (builtins.readFile ../flake.lock);
-  source = lock.nodes.nixpkgs.locked;
+  source = lock.nodes.${lock.nodes.root.inputs.nixpkgs}.locked;
+  url =
+    if source.type == "tarball" then
+      source.url
+    else if source.type == "github" then
+      "https://github.com/${source.owner}/${source.repo}/archive/${source.rev}.tar.gz"
+    else
+      throw "bench/tools.nix: the root nixpkgs input in flake.lock has type '${source.type}'; only 'tarball' and 'github' are supported";
   pkgs = import (builtins.fetchTarball {
-    url = "https://github.com/NixOS/nixpkgs/archive/${source.rev}.tar.gz";
+    inherit url;
     sha256 = source.narHash;
   }) { };
 in
