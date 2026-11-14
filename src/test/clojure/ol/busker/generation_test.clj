@@ -1421,6 +1421,16 @@
                (fn [retirements]
                  (vec (remove #(identical? generation-state %) retirements))))))))
 
+(deftest a-failed-stop-accepting-wait-leaves-the-generation-stopping-test
+  (let [generation-state {::generation/phase (atom :stopping)
+                          ::generation/stopped-accepting_ (promise)
+                          ::generation/generation-id 3}]
+    (with-redefs-fn {#'generation/stop-accepting-wait-ms 20}
+      #(is (thrown-with-msg? clojure.lang.ExceptionInfo #"did not stop accepting"
+                             (generation/await-stop-accepting! generation-state))))
+    (is (= :stopping @(::generation/phase generation-state)))
+    (is (not-any? #(identical? generation-state %) @@#'generation/failed-retirements_))))
+
 (deftest retirement-of-a-live-worker-thread-times-out-test
   (with-open [arena (mem/shared-arena)]
     (let [release (CountDownLatch. 1)

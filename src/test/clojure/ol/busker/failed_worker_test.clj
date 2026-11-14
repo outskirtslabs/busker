@@ -1,20 +1,35 @@
 (ns ol.busker.failed-worker-test
   "Reload, drain and stop after a worker's event loop has failed."
   (:require
-   [clojure.test :refer [deftest is]]
+   [clojure.test :refer [deftest is use-fixtures]]
    [ol.busker.buffer-pool :as bp]
    [ol.busker.config :as config]
    [ol.busker.generation :as generation]
    [ol.busker.internal.protocols :as p]
    [ol.busker.listen :as listen]
    [ol.busker.native :as h2o]
-   [ol.busker.test-utils :as util])
+   [ol.busker.runtime :as runtime]
+   [ol.busker.test-utils :as util]
+   [taoensso.trove :as trove])
   (:import
    [clojure.lang ExceptionInfo]
    [java.net ConnectException InetSocketAddress ServerSocket Socket]
    [java.nio.charset StandardCharsets]
    [java.util.concurrent TimeUnit]
    [java.util.concurrent.atomic AtomicLongArray AtomicReference]))
+
+(defn- short-lifecycle-waits
+  "Shortens the 60 s lifecycle waits, so a wait that should not happen fails
+  the test in seconds."
+  [f]
+  (let [stop! generation/stop!]
+    (with-redefs-fn {#'generation/stop-accepting-wait-ms 2000
+                     #'generation/stop! (fn
+                                          ([instance] (stop! instance 5 TimeUnit/SECONDS))
+                                          ([instance ^long timeout unit] (stop! instance timeout unit)))}
+      f)))
+
+(use-fixtures :each short-lifecycle-waits)
 
 (defn- server-config
   [port body & {:as extra}]
@@ -23,6 +38,10 @@
                                :tls false}}
           :dispatch [{:handler (fn [_] {:status 200 :body body})}]}
          extra))
+
+(defn- active-instance
+  [server]
+  (:instance (:active @(:busker/state server))))
 
 (defn- eventually
   [f]
@@ -196,3 +215,34 @@
       (is (port-bindable? port))
       (is (retire! failed-pool))
       (forget-kept-generation! instance 0))))
+
+(deftest stop-after-a-worker-failed-completes-test
+  (let [port (util/free-port)
+        server (runtime/start! (server-config port "x"))
+        instance (active-instance server)
+        logged_ (atom [])]
+    (is (zero? (:exit (util/wait-for-curl-ready! :http :h1 port "/" :max-time 2))))
+    (with-redefs [trove/*log-fn* (fn [_ns _coords level id _lazy]
+                                   (swap! logged_ conj [level id]))]
+      (fail-idle-worker! instance 1))
+    (is (= 1 (count (filter #{[:error ::generation/worker-failed]} @logged_))))
+    (is (nil? (runtime/stop! server)))
+    (is (= :stopped (:phase (runtime/state server))))
+    (is (= :stopped @(::generation/phase instance)))
+    (is (port-bindable? port))))
+
+(deftest a-worker-ended-by-a-failed-retirement-logs-no-worker-failure-test
+  (let [port (util/free-port)
+        instance (generation/start! (config/load! (server-config port "x")) nil)
+        logged_ (atom [])]
+    (is (zero? (:exit (util/wait-for-curl-ready! :http :h1 port "/" :max-time 2))))
+    (is (eventually #(every? zero? (connection-counts instance))))
+    (let [worker (first (::generation/workers instance))
+          cause (ex-info "simulated retirement failure" {})]
+      (with-redefs [trove/*log-fn* (fn [_ns _coords _level id _lazy] (swap! logged_ conj id))]
+        (.set ^AtomicReference (:termination-cause_ worker) cause)
+        (p/wake worker)
+        (.join ^Thread (:thread worker) 5000))
+      (is (identical? cause (.get ^AtomicReference (:native-failure_ worker))))
+      (is (not-any? #{::generation/worker-failed} @logged_)))
+    (is (nil? (generation/stop! instance 5 TimeUnit/SECONDS)))))

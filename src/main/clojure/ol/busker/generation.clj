@@ -472,7 +472,9 @@
   (fixed-final/notify-all-capacity! worker))
 
 (defn- worker-native-failure! [worker cause]
-  (.compareAndSet ^AtomicReference (:native-failure_ worker) nil cause)
+  (when (and (.compareAndSet ^AtomicReference (:native-failure_ worker) nil cause)
+             (not (identical? cause (.get ^AtomicReference (:termination-cause_ worker)))))
+    (log-callback-failure! ::worker-failed cause))
   (.set ^AtomicBoolean (:accepting?_ worker) false)
   (.set ^AtomicBoolean (:running?_ worker) false)
   (mailbox/close! (:mailbox worker))
@@ -511,15 +513,22 @@
        (zero? (bp/checked-out (:stream-pool worker)))
        (callback-dispatch/no-live-entries? (:callback-dispatch worker))))
 
+(defn- count-stopped-accepting!
+  "Counts the worker of `worker-state` as stopped accepting, at most once, and
+  delivers the generation's stopped-accepting promise for the last worker."
+  [{::keys [^AtomicBoolean stopped-accepting?_ ^AtomicLong stop-accepting-remaining_
+            stopped-accepting_]}]
+  (when (and (.compareAndSet stopped-accepting?_ false true)
+             (zero? (.decrementAndGet stop-accepting-remaining_)))
+    (deliver stopped-accepting_ true)))
+
 (defn- check-and-initiate-shutdown!
   [loop-state {:keys [shutting-down?] :as state}]
   (let [should-shutdown? (.get ^AtomicBoolean shutting-down?)
         already? (true? (:shutdown-initiated? loop-state))]
     (when (and should-shutdown? (not already?))
       (initiate-worker-shutdown! (assoc state :shutdown-initiated? true))
-      (when-let [remaining (::stop-accepting-remaining_ state)]
-        (when (zero? (.decrementAndGet ^AtomicLong remaining))
-          (deliver (::stopped-accepting_ state) true))))
+      (count-stopped-accepting! state))
     (assoc loop-state :shutdown-initiated? (or already? should-shutdown?))))
 
 (defn- update-receiver-destruction
@@ -1375,6 +1384,7 @@
                                :limit-waiting limit-waiting
                                ::stop-accepting-remaining_ stop-accepting-remaining_
                                ::stopped-accepting_ stopped-accepting_
+                               ::stopped-accepting?_ (AtomicBoolean. false)
                                ::listeners-closed?_ (AtomicBoolean. false)}
                  _ (vswap! cleanup-state_ update ::worker-states (fnil conj []) worker-state)
                  worker (evloop/start-worker!
@@ -1392,7 +1402,8 @@
                                      (int thread-idx) Long/MAX_VALUE)
                                (withdraw-http3-worker! http3-ctxs-guard
                                                        http3-ctxs-for-thread)
-                               (wake-other-workers! accepting-workers thread-idx))))
+                               (wake-other-workers! accepting-workers thread-idx)
+                               (count-stopped-accepting! worker-state))))
                          :discard-command! (fn [[op _ _ st record]]
                                              (when (= :h2o/output op)
                                                (rq/discard-record! st record)))
@@ -1463,12 +1474,16 @@
       (reset! phase :stopping)))
   generation)
 
+(def ^:private stop-accepting-wait-ms 60000)
+
 (defn await-stop-accepting!
-  [{::keys [stopped-accepting_ phase] :as generation}]
-  (when (= ::timeout (deref stopped-accepting_ 60000 ::timeout))
-    (let [error (ex-info "Workers did not stop accepting; generation retained" {})]
-      (retain-failed-retirement! generation phase error)
-      (throw error)))
+  "Waits up to 60 s for every worker of `generation` to stop accepting after
+  [[begin-stop!]] and throws when one has not. It leaves the generation in
+  `:stopping`, so [[stop!]] still waits for its request handlers and workers."
+  [{::keys [stopped-accepting_] :as generation}]
+  (when (= ::timeout (deref stopped-accepting_ stop-accepting-wait-ms ::timeout))
+    (throw (ex-info "Workers did not stop accepting"
+                    {:generation-id (::generation-id generation)})))
   nil)
 
 (defn stop!
