@@ -149,6 +149,10 @@ The HTTP/3 TLS context offers x25519, secp256r1 and secp384r1, in that order, th
 
 As in h2o's server, the HTTP/3 context resumes a session only with a new key exchange (psk_dhe_ke), so a ticket key that leaks later does not expose the data sent after the handshake of a resumed session (0-RTT data depends on the ticket alone in either mode); a client that lists psk_ke alone gets a full handshake.
 
+### Early data
+
+TCP listeners accept no early data, since BoringSSL allows it only after `SSL_CTX_set_early_data_enabled`, which Busker does not call. `h2o_conn_is_early_data` reads only picotls state, which BoringSSL sockets lack, so on TCP it always returns false. Before TCP early data is turned on, the flag must therefore come from BoringSSL's `SSL_in_early_data` or `SSL_in_init`.
+
 ### QUIC address tokens
 
 Address tokens are built as in h2o's server, from the session ticket keys. Each ticket key yields an AES-128-GCM token key: the SHA-256 digest of its cipher and HMAC keys, expanded with the HKDF label `address-token`. The first byte of the ticket key's name prefixes each token. Whenever the ticket key service loads, reseeds or rotates its key set, it drops the newer key of any two that share a first byte and creates a key if none is left active, and it gives every new key a first byte that no retained key uses. New tokens use the newest ticket key; a presented token is decrypted with the retained key its first byte names. Token keys therefore rotate, expire and survive reloads (or, with storage persistence, restarts) exactly as ticket keys do. Each HTTP/3 worker keeps a separate set of cipher contexts for every ticket key, used only on its loop, and rebuilds them when the ticket manager's key generation changes.

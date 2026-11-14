@@ -4429,8 +4429,7 @@ static int clj_ssl_ctx_ticket_key_callback(
 
 void clj_ssl_ctx_set_tickets(
     SSL_CTX *ctx,
-    clj_ticket_manager_t *mgr,
-    uint32_t max_early_data_size)
+    clj_ticket_manager_t *mgr)
 {
     if (!ctx || !mgr) return;
 
@@ -4465,11 +4464,4 @@ void clj_ssl_ctx_set_tickets(
     /* TLS 1.3: Set number of NewSessionTicket messages to send (default is 2).
        BoringSSL uses this to control ticket issuance. */
     SSL_CTX_set_num_tickets(ctx, 2);
-
-    /* Enable early data (0-RTT) - available in OpenSSL 1.1.1+ / BoringSSL */
-#ifdef SSL_CTX_set_max_early_data
-    SSL_CTX_set_max_early_data(ctx, max_early_data_size);
-#else
-    (void)max_early_data_size;  /* Suppress unused warning for older OpenSSL */
-#endif
 }

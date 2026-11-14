@@ -434,7 +434,6 @@ typedef struct clj_http3_udp_transport_t clj_http3_udp_transport_t;
 #define CLJ_TICKET_KEY_NAME_LEN 16   /* bytes */
 #define CLJ_TICKET_AES_KEY_LEN  32   /* bytes (AES-256) */
 #define CLJ_TICKET_HMAC_KEY_LEN 64   /* bytes (SHA-256 block size) */
-#define CLJ_MAX_EARLY_DATA_SIZE 8192 /* bytes, matches h2o */
 
 /* Session ticket key - matches Clojure key map */
 typedef struct clj_session_ticket {
@@ -612,11 +611,10 @@ int clj_ptls_ctx_set_tickets(
     uint32_t ticket_lifetime,
     uint32_t max_early_data_size);
 
-/* Configure SSL_CTX for TCP TLS session tickets and 0-RTT.
+/* Configure SSL_CTX for TCP TLS session tickets.
    Wires the ticket manager into the OpenSSL ticket key callback. */
 void clj_ssl_ctx_set_tickets(
     SSL_CTX *ctx,
-    clj_ticket_manager_t *mgr,
-    uint32_t max_early_data_size);
+    clj_ticket_manager_t *mgr);
 
 #endif /* CLJ_H2O_SHIM_H */

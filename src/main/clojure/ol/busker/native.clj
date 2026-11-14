@@ -1378,7 +1378,7 @@
   [:pointer :pointer :int :int] :int)
 
 (defcfn ssl-ctx-set-tickets
-  "Configure SSL_CTX for TCP TLS session tickets and 0-RTT.
+  "Configure SSL_CTX for TCP TLS session tickets.
    Wires the ticket manager into the OpenSSL ticket key callback."
   "clj_ssl_ctx_set_tickets"
-  [:pointer :pointer :int] :void)
+  [:pointer :pointer] :void)

@@ -1146,7 +1146,7 @@
     (when native-ticket-mgr
       (doseq [ssl-ctx-ptr ssl-ctx-ptrs]
         (when ssl-ctx-ptr
-          (h2o/ssl-ctx-set-tickets ssl-ctx-ptr native-ticket-mgr 8192))))
+          (h2o/ssl-ctx-set-tickets ssl-ctx-ptr native-ticket-mgr))))
     (let [http3-contexts (create-http3-contexts listeners
                                                 config
                                                 config-ptr
