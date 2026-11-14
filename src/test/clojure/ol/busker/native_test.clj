@@ -7,6 +7,7 @@
    [ol.busker.native.loader :as loader])
   (:import
    [java.io File]
+   [java.lang.foreign MemorySegment]
    [java.util.concurrent TimeUnit]
    [java.nio.file Files Path]))
 
@@ -142,6 +143,35 @@
       (is (nil? @seen))
       (is (= [0 0 0 0] (mapv #(ffi/read % :long)
                              [cert-out cert-len-out key-out key-len-out]))))))
+
+(deftest tls-callback-leaves-copies-for-the-shim-to-free-when-key-copy-throws
+  (with-open [arena (ffi/shared-arena)]
+    (let [copy-bytes native/tls-bytes-dup
+          copies (atom [])
+          {:keys [callback-ptr]}
+          (native/build-tls-lookup-callback
+           (constantly {:cert-chain-pem "CERT" :private-key-pem "KEY"}))
+          invoke (ffi/cfn callback-ptr
+                          [:pointer :long :pointer :pointer :pointer :pointer :pointer] :int)
+          [cert-out cert-len-out key-out key-len-out]
+          (repeatedly 4 #(ffi/alloc arena 8))]
+      (try
+        (with-redefs [native/tls-bytes-dup
+                      (fn [value len]
+                        (when (seq @copies)
+                          (throw (OutOfMemoryError. "key copy")))
+                        (let [copy (copy-bytes value len)]
+                          (swap! copies conj copy)
+                          copy))]
+          (is (= -1 (invoke ffi/null 0 cert-out cert-len-out key-out key-len-out ffi/null))))
+        (is (= 1 (count @copies)))
+        (is (= (.address ^MemorySegment (first @copies))
+               (.address ^MemorySegment (ffi/read cert-out :pointer)))
+            "the certificate copy stays in its output, where the shim frees it")
+        (is (= 4 (ffi/read cert-len-out :long)))
+        (is (ffi/null? (ffi/read key-out :pointer)))
+        (finally
+          (run! (ffi/cfn "free" [:pointer] :void) @copies))))))
 
 (deftest native-struct-sizes-match-shim
   (is (= {:header          32

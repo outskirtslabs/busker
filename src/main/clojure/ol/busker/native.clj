@@ -640,22 +640,21 @@
           {:ptr ptr :len len}))
       {:ptr ffi/null :len 0})))
 
+(defn- write-tls-native-output!
+  [ptr-out-seg len-out-seg s]
+  (let [{:keys [ptr len]} (string->tls-native-bytes s)]
+    (ffi/write ptr-out-seg :pointer ptr)
+    (ffi/write len-out-seg :long (long len))
+    (and (not (ffi/null? ptr)) (pos? len))))
+
+;; The shim frees whatever copies the outputs hold when the callback does not
+;; return 1, so each copy is written out before the next one is made.
 (defn- write-tls-native-outputs!
   [cert-out-seg cert-len-out-seg key-out-seg key-len-out-seg
    cert-chain-pem private-key-pem]
-  (let [{cert-ptr :ptr cert-len :len}
-        (string->tls-native-bytes cert-chain-pem)
-        {key-ptr :ptr key-len :len}
-        (string->tls-native-bytes private-key-pem)
-        valid? (and (not (ffi/null? cert-ptr))
-                    (not (ffi/null? key-ptr))
-                    (pos? cert-len)
-                    (pos? key-len))]
-    (ffi/write cert-out-seg :pointer cert-ptr)
-    (ffi/write cert-len-out-seg :long (long cert-len))
-    (ffi/write key-out-seg :pointer key-ptr)
-    (ffi/write key-len-out-seg :long (long key-len))
-    (if valid? 1 -1)))
+  (let [cert? (write-tls-native-output! cert-out-seg cert-len-out-seg cert-chain-pem)
+        key? (write-tls-native-output! key-out-seg key-len-out-seg private-key-pem)]
+    (if (and cert? key?) 1 -1)))
 
 (defn- reset-tls-native-outputs!
   [cert-out-seg cert-len-out-seg key-out-seg key-len-out-seg]
@@ -711,14 +710,6 @@
                                     :id    ::tls-lookup-callback-exception
                                     :ex    t
                                     :data  {:sni-len sni-len}})
-                       (let [cert-out-seg     (ffi/reinterpret cert-out (ffi/sizeof :pointer))
-                             cert-len-out-seg (ffi/reinterpret cert-len-out (ffi/sizeof :long))
-                             key-out-seg      (ffi/reinterpret key-out (ffi/sizeof :pointer))
-                             key-len-out-seg  (ffi/reinterpret key-len-out (ffi/sizeof :long))]
-                         (reset-tls-native-outputs! cert-out-seg
-                                                    cert-len-out-seg
-                                                    key-out-seg
-                                                    key-len-out-seg))
                        (catch Throwable _
                          nil))
                      -1)))
