@@ -59,7 +59,7 @@
   [worker msg first-error second-error reset?]
   (trove/log! {:level :error
                :id    ::mailbox-wakeup-failed
-               :ex    second-error
+               :error second-error
                :data  {:worker-id (:id worker)
                        :message msg
                        :first-error first-error

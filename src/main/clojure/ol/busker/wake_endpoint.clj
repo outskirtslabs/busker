@@ -37,7 +37,7 @@
   [first-error second-error]
   (trove/log! {:level :error
                :id    ::native-wake-failed
-               :ex    second-error
+               :error second-error
                :data  {:first-error first-error}}))
 
 (defn wake-now!

@@ -101,7 +101,7 @@
     (when-some [^InputStream input-stream (-> req :write-req :input-stream)]
       (.close input-stream))
     (catch Throwable t
-      (try (trove/log! {:level :error :id ::input-close-failed :ex t})
+      (try (trove/log! {:level :error :id ::input-close-failed :error t})
            (catch Throwable _ nil)))
     (finally
       (when emitter
@@ -122,7 +122,7 @@
           (response-queue/fail! writer cause))
         (finally (close-entry! entry false)))
       (catch Throwable t
-        (try (trove/log! {:level :error :id ::response-failure-cleanup :ex t})
+        (try (trove/log! {:level :error :id ::response-failure-cleanup :error t})
              (catch Throwable _ nil))))))
 
 (defn- body-callback!
@@ -142,7 +142,7 @@
       (increment! dispatch :callback-fault)
       (trove/log! {:level :error
                    :id    ::body-callback-failed
-                   :ex    t}))))
+                   :error t}))))
 
 (defn- proceed-callback!
   [dispatch module-id request-seq]
@@ -154,7 +154,7 @@
       (increment! dispatch :callback-fault)
       (trove/log! {:level :error
                    :id    ::proceed-callback-failed
-                   :ex    t}))))
+                   :error t}))))
 
 (defn- stop-callback!
   [dispatch module-id request-seq reason]
@@ -168,7 +168,7 @@
       (increment! dispatch :callback-fault)
       (trove/log! {:level :error
                    :id    ::stop-callback-failed
-                   :ex    t}))))
+                   :error t}))))
 
 (defn create
   "Creates a worker-affine callback dispatcher in `arena`."

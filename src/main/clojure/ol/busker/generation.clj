@@ -69,7 +69,7 @@
   (try
     (trove/log! {:level :error
                  :id ::callback-retirement-failed
-                 :ex error
+                 :error error
                  :data {:generation-id (::generation-id generation)}})
     (catch Throwable _ nil)))
 

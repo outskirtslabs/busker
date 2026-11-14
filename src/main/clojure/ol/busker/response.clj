@@ -301,7 +301,7 @@
   (doseq [callback callbacks]
     (try (callback)
          (catch Throwable t
-           (try (trove/log! {:level :error :id ::close-callback-failed :ex t})
+           (try (trove/log! {:level :error :id ::close-callback-failed :error t})
                 (catch Throwable _ nil))))))
 
 (defn- reserve-close-callbacks! [callback-tail_ callbacks]
@@ -605,5 +605,5 @@
       (catch Throwable error
         (when-let [writer (ensure-writer! emitter)]
           (response-queue/fail! writer error {:if-open? true}))
-        (trove/log! {:level :error :id ::response-failed :ex error})))
+        (trove/log! {:level :error :id ::response-failed :error error})))
     nil))

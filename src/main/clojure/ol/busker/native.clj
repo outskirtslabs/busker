@@ -709,7 +709,7 @@
                      (try
                        (trove/log! {:level :error
                                     :id    ::tls-lookup-callback-exception
-                                    :ex    t
+                                    :error t
                                     :data  {:sni-len sni-len}})
                        (catch Throwable _
                          nil))

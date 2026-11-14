@@ -96,7 +96,7 @@
                       (catch Throwable t
                         (trove/log! {:level :error
                                      :id ::certificate-event-watcher-failed
-                                     :ex t}))))]
+                                     :error t}))))]
               {:system system
                :queue queue
                :running? running?
@@ -107,7 +107,7 @@
         (catch Throwable t
           (trove/log! {:level :error
                        :id ::certificate-event-watcher-start-failed
-                       :ex t})
+                       :error t})
           nil)))))
 
 (defn- stop-event-watcher!

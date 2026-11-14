@@ -64,14 +64,14 @@
   ;; Admission is complete. Notification failures cannot change its result.
   (try (pi/wake (-> st :req :worker))
        (catch Throwable t
-         (try (trove/log! {:level :error :id :response/wake-failed :ex t})
+         (try (trove/log! {:level :error :id :response/wake-failed :error t})
               (catch Throwable _ nil)))))
 
 (defn- terminal-callback! [st]
   (when-let [f (-> st :req :on-terminal!)]
     (try (f)
          (catch Throwable t
-           (try (trove/log! {:level :error :id :response/terminal-failed :ex t})
+           (try (trove/log! {:level :error :id :response/terminal-failed :error t})
                 (catch Throwable _ nil))))))
 
 (defn- settle-locked! [st receipt result]
