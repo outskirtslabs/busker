@@ -5,6 +5,7 @@
 #include <openssl/hkdf.h>
 #include <openssl/sha.h>
 #include <dirent.h>
+#include <netinet/ip.h>
 
 #define CHECK(condition)                                                       \
   do {                                                                         \
@@ -496,7 +497,6 @@ static void test_accept(const char *cert, const char *key) {
   CHECK(clj_h2o_conn_limit_current() == before + 1);
 }
 
-#if CLJ_HTTP3_CONNECTED_SOCKETS
 static void receive_all(quicly_conn_t *conn, quicly_context_t *ctx,
                         quicly_address_t *dest, quicly_address_t *src,
                         struct iovec *datagrams, size_t num_datagrams) {
@@ -532,6 +532,56 @@ static void client_reads(accept_fixture_t *f, quicly_conn_t *client) {
   }
 }
 
+static h2o_quic_conn_t *ecn_accepted;
+
+static h2o_quic_conn_t *record_ecn_accept(h2o_quic_ctx_t *ctx,
+                                          quicly_address_t *destaddr,
+                                          quicly_address_t *srcaddr,
+                                          quicly_decoded_packet_t *packet) {
+  return ecn_accepted = clj_on_http3_accept(ctx, destaddr, srcaddr, packet);
+}
+
+/* An Initial marked ECT(0) on the listener's socket is counted by quicly,
+   and the server's acknowledgement reports it, so the client validates ECN */
+static void test_ecn_counted(const char *cert, const char *key) {
+  accept_fixture_t f;
+  accept_fixture_init(&f, cert, key, NULL);
+  clj_http3_ctx_t *w = f.worker;
+  w->h3_ctx.super.acceptor = record_ecn_accept;
+  static quicly_cid_plaintext_t next_cid;
+  ptls_iovec_t alpn = ptls_iovec_init("h3", 2);
+  ptls_handshake_properties_t props = {
+      .client = {.negotiated_protocols = {.list = &alpn, .count = 1}}};
+  quicly_conn_t *client;
+  CHECK(quicly_connect(&client, &f.client_quic, "localhost",
+                       &f.server_addr.sa, NULL, &next_cid,
+                       ptls_iovec_init(NULL, 0), &props, NULL, NULL) == 0);
+  static uint8_t buf[10 * 1500];
+  struct iovec datagrams[10];
+  CHECK(send_all(client, datagrams, buf, sizeof(buf)) == 1);
+  int tos = IPTOS_ECN_ECT0;
+  CHECK(setsockopt(f.client_fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) == 0);
+  CHECK(sendto(f.client_fd, datagrams[0].iov_base, datagrams[0].iov_len, 0,
+               &f.server_addr.sa, sizeof(f.server_addr.sin)) ==
+        (ssize_t)datagrams[0].iov_len);
+
+  h2o_quic_read_socket(&w->h3_ctx.super, w->udp_sock);
+  CHECK(ecn_accepted != NULL);
+  quicly_stats_t stats;
+  CHECK(quicly_get_stats(ecn_accepted->quic, &stats) == 0);
+  CHECK(stats.num_packets.received_ecn_counts[0] == 1 &&
+        stats.num_packets.received_ecn_counts[1] == 0 &&
+        stats.num_packets.received_ecn_counts[2] == 0);
+
+  h2o_quic_send(ecn_accepted);
+  client_reads(&f, client);
+  CHECK(quicly_get_stats(client, &stats) == 0);
+  CHECK(stats.num_packets.acked_ecn_counts[0] == 1);
+  CHECK(stats.num_paths.ecn_validated == 1);
+  quicly_free(client);
+}
+
+#if CLJ_HTTP3_CONNECTED_SOCKETS
 static int connected_sockets(clj_http3_ctx_t *ctx) {
   return (int)ctx->num_connected;
 }
@@ -822,6 +872,7 @@ int main(int argc, char **argv) {
   test_rebuild_during_swaps();
   test_without_keys();
   test_accept(argv[1], argv[2]);
+  test_ecn_counted(argv[1], argv[2]);
 #if CLJ_HTTP3_CONNECTED_SOCKETS
   test_connect_after_handshake(argv[1], argv[2]);
   test_path_change_on_listener_socket(argv[1], argv[2]);

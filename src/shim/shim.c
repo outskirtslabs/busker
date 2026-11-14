@@ -2645,12 +2645,29 @@ static int clj_http3_may_connect(clj_http3_ctx_t *ctx,
   }
 }
 
+/* As h2o's server does (src/main.c, set_quic_sockopts): H2O reads each
+   datagram's ECN bits from the TOS or traffic class control message, and
+   quicly counts them in its acknowledgements. Without the counts clients
+   turn ECN off (RFC 9000, section 13.4.2). */
+static int clj_http3_recv_ecn(int fd, int family) {
+  int on = 1;
+#ifdef IP_RECVTOS
+  if (family == AF_INET)
+    return setsockopt(fd, IPPROTO_IP, IP_RECVTOS, &on, sizeof(on));
+#endif
+#ifdef IPV6_RECVTCLASS
+  if (family == AF_INET6)
+    return setsockopt(fd, IPPROTO_IPV6, IPV6_RECVTCLASS, &on, sizeof(on));
+#endif
+  return 0;
+}
+
 /* SO_REUSEPORT as on the listener's sockets (clj_h2o_http3_open_udp_fd), so
    the socket joins their group: until its connect it takes only its share
    of the port's datagrams, where a socket bound with SO_REUSEADDR alone
    would take them all. Packet info tells H2O each datagram's destination
-   address. No DF bit: H2O sends from the listener's socket, never from
-   this one. */
+   address, and the ECN option its ECN bits. No DF bit: H2O sends from the
+   listener's socket, never from this one. */
 static int clj_http3_bound_fd(const quicly_address_t *local) {
 #if CLJ_HTTP3_CONNECTED_SOCKETS
   int on = 1, family = local->sa.sa_family;
@@ -2666,6 +2683,7 @@ static int clj_http3_bound_fd(const quicly_address_t *local) {
            ? setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &on, sizeof(on))
            : setsockopt(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on,
                         sizeof(on))) != 0 ||
+      clj_http3_recv_ecn(fd, family) != 0 ||
       bind(fd, &local->sa, quicly_get_socklen((struct sockaddr *)&local->sa)) !=
           0) {
     int saved_errno = errno;
@@ -3727,6 +3745,8 @@ static int clj_h2o_http3_open_udp_fd(const char *host, uint16_t port) {
                    sizeof(optval)) != 0)
       goto Next;
 #endif
+    if (clj_http3_recv_ecn(fd, ai->ai_family) != 0)
+      goto Next;
 
     if (bind(fd, ai->ai_addr, ai->ai_addrlen) != 0)
       goto Next;

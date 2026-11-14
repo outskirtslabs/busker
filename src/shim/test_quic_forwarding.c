@@ -1,6 +1,7 @@
 /* Exercise the private callbacks without adding test-only shim exports. */
 #include "shim.c"
 #include <dirent.h>
+#include <netinet/ip.h>
 #include <sys/resource.h>
 
 #define CHECK(condition)                                                       \
@@ -120,6 +121,7 @@ static void test_worker_ctx_send_offload(void) {
 
 static int accept_calls;
 static quicly_address_t accepted_src, accepted_dest;
+static uint8_t accepted_ecn;
 
 static h2o_quic_conn_t *record_accept(h2o_quic_ctx_t *ctx,
                                       quicly_address_t *destaddr,
@@ -128,6 +130,7 @@ static h2o_quic_conn_t *record_accept(h2o_quic_ctx_t *ctx,
   ++accept_calls;
   accepted_src = *srcaddr;
   accepted_dest = *destaddr;
+  accepted_ecn = packet->ecn;
   return NULL;
 }
 
@@ -1268,6 +1271,16 @@ static void test_memory_per_reload(void) {
   clj_h2o_http3_release_udp_transport(transport);
 }
 
+static int udp_client(int family, quicly_address_t *addr) {
+  int fd = socket(family, SOCK_DGRAM, 0);
+  CHECK(fd != -1);
+  *addr = address(family, 0);
+  socklen_t len = quicly_get_socklen(&addr->sa);
+  CHECK(bind(fd, &addr->sa, len) == 0);
+  CHECK(getsockname(fd, &addr->sa, &len) == 0);
+  return fd;
+}
+
 #if CLJ_HTTP3_CONNECTED_SOCKETS
 /* Connections are only keys to the connected sockets */
 static h2o_quic_conn_t fake_conns[CLJ_HTTP3_CONNECTED_MAX + 2];
@@ -1280,16 +1293,6 @@ static int count_fds(void) {
     ++n;
   closedir(dir);
   return n;
-}
-
-static int udp_client(int family, quicly_address_t *addr) {
-  int fd = socket(family, SOCK_DGRAM, 0);
-  CHECK(fd != -1);
-  *addr = address(family, 0);
-  socklen_t len = quicly_get_socklen(&addr->sa);
-  CHECK(bind(fd, &addr->sa, len) == 0);
-  CHECK(getsockname(fd, &addr->sa, &len) == 0);
-  return fd;
 }
 
 static void send_from(int fd, spread_fixture_t *f, int family) {
@@ -1703,6 +1706,54 @@ static void test_full_listener_keeps_flows(void) {
 }
 #endif
 
+/* Sends an Initial marked `ecn` from `client_fd` to `to` */
+static void send_marked(int client_fd, int family, int ecn,
+                        quicly_address_t *to, uint8_t dcid_tag) {
+  int tos = ecn;
+  CHECK(family == AF_INET
+            ? setsockopt(client_fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) == 0
+            : setsockopt(client_fd, IPPROTO_IPV6, IPV6_TCLASS, &tos,
+                         sizeof(tos)) == 0);
+  uint8_t buf[DATAGRAM_MAX];
+  size_t len = quic_datagram(buf, QUICLY_PACKET_TYPE_INITIAL, dcid_tag);
+  CHECK(sendto(client_fd, buf, len, 0, &to->sa, quicly_get_socklen(&to->sa)) ==
+        (ssize_t)len);
+  accept_calls = 0;
+  accepted_ecn = 0xff;
+}
+
+/* H2O passes the ECN bits of a datagram read on the listener's socket, or on
+   a connected socket, to quicly with its packets */
+static void test_ecn_marks(int family) {
+  spread_fixture_t f;
+  spread_init(&f);
+  f.host = family == AF_INET ? "127.0.0.1" : "::1";
+  spread_add(&f, 7, 1);
+  spread_activate(&f, 7);
+  clj_http3_ctx_t *w = f.workers[0];
+  quicly_address_t client, local = address(family, f.port);
+  int client_fd = udp_client(family, &client);
+  static const int marks[] = {IPTOS_ECN_ECT0, IPTOS_ECN_CE};
+
+  for (size_t i = 0; i < 2; ++i) {
+    send_marked(client_fd, family, marks[i], &local, (uint8_t)(1 + i));
+    h2o_quic_read_socket(&w->h3_ctx.super, w->udp_sock);
+    CHECK(accept_calls == 1 && accepted_ecn == marks[i]);
+  }
+#if CLJ_HTTP3_CONNECTED_SOCKETS
+  CHECK(clj_http3_connect(w, fake_conns, &local, &client));
+  for (size_t i = 0; i < 2; ++i) {
+    send_marked(client_fd, family, marks[i], &local, (uint8_t)(3 + i));
+    clj_http3_connected_on_read(w->connected[0]->sock, NULL);
+    CHECK(accept_calls == 1 && accepted_ecn == marks[i]);
+  }
+  clj_http3_disconnect(w, fake_conns);
+#endif
+
+  close(client_fd);
+  spread_teardown(&f);
+}
+
 int main(void) {
   heap_skip = heap_skip_reason();
   if (heap_skip != NULL)
@@ -1743,6 +1794,8 @@ int main(void) {
   test_writes_are_marked(0);
   test_writes_are_marked(1);
   test_memory_per_reload();
+  test_ecn_marks(AF_INET);
+  test_ecn_marks(AF_INET6);
 #if CLJ_HTTP3_CONNECTED_SOCKETS
   for (int i = 0; i < 2; ++i) {
     int family = i == 0 ? AF_INET : AF_INET6;
