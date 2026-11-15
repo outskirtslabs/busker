@@ -53,7 +53,7 @@
                                   org.clojars.jj/ring-http-exchange {:mvn/version "1.4.8"}
                                   http-kit/http-kit                 {:mvn/version "2.9.0-beta4"}
                                   com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
-                                                            :git/sha "f3fe46007267d7f0afe87a768e46b604d2e8f327"}
+                                                            :git/sha "c4b506e269dd6483dc988fa7ca2717d849ba8f4d"}
                                   com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.6"}
                                   com.outskirtslabs.busker/linux-x86-64  {:mvn/version "0.0.6"}
                                   com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.6"}
