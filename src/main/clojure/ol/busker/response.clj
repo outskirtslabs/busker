@@ -603,7 +603,7 @@
                             :suppress-body? (or (= :head (:request-method (:req-ctx req)))
                                                 (contains? #{204 205 304} (:status effective-head))))]
             (if (and (fn? body) (:end? opts) (nil? writer) (not info?) (not large-head?)
-                     (<= capacity fixed-final/response-ring-max-body-bytes)
+                     (<= capacity (long (:fixed-body-limit (:worker req))))
                      (not (:suppress-body? opts)))
               (fixed-producer! emitter effective-head body capacity opts)
               (if-let [writer (ensure-writer! emitter)]
@@ -695,7 +695,7 @@
 (defn- ordinary-fixed-plan [req response]
   (let [status (or (:status response) 200)
         config (:config req)
-        limit (min (long (:output-buffer-size config)) fixed-final/response-ring-max-body-bytes)]
+        limit (long (:fixed-body-limit (:worker req)))]
     (when (and (integer? status) (<= 200 status 999))
       (let [body (fixed-body (:body response) response limit)
             length (cond

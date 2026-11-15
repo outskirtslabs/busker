@@ -456,6 +456,18 @@
    :default 32768})
 (s/def ::output-buffer-size #(and (pos-int? %) (<= % Integer/MAX_VALUE)))
 
+(def fixed-response-max-body-size
+  {:key ::fixed-response-max-body-size
+   :doc "Positive largest body in bytes that a fixed-response slot holds. The fixed body limit is the smaller of this and `:output-buffer-size`."
+   :default 32768})
+(s/def ::fixed-response-max-body-size #(and (pos-int? %) (<= % Integer/MAX_VALUE)))
+
+(def fixed-response-slots
+  {:key ::fixed-response-slots
+   :doc "Fixed-response slots per worker, 1 to 65535."
+   :default 256})
+(s/def ::fixed-response-slots #(and (pos-int? %) (<= % 65535)))
+
 (def server-name
   {:key ::server-name
    :doc "Server identifier for Server response header."
@@ -637,6 +649,8 @@
                    ::request-threads
                    ::max-connections
                    ::output-buffer-size
+                   ::fixed-response-max-body-size
+                   ::fixed-response-slots
                    ::server-name
                    ::proxy-status-identity
                    ::max-request-entity-size
@@ -723,6 +737,8 @@
    request-threads
    max-connections
    output-buffer-size
+   fixed-response-max-body-size
+   fixed-response-slots
    server-name
    proxy-status-identity
    max-request-entity-size
@@ -765,6 +781,8 @@
    :request-threads (:default request-threads)
    :max-connections (:default max-connections)
    :output-buffer-size (:default output-buffer-size)
+   :fixed-response-max-body-size (:default fixed-response-max-body-size)
+   :fixed-response-slots (:default fixed-response-slots)
    :server-name (:default server-name)
    :compress? (:default compress?)
    :compress-min-size (:default compress-min-size)

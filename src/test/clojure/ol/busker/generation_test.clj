@@ -1,6 +1,7 @@
 (ns ol.busker.generation-test
   (:require
    [babashka.ffi :as mem]
+   [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.buffer-pool :as bp]
@@ -446,7 +447,8 @@
    :response-receiver-lock         (ReentrantReadWriteLock.)
    :response-slot-monitor          (Object.)
    :response-slots                 [slot]
-   :response-slot-payload-capacity 1})
+   :response-slot-payload-capacity 1
+   :fixed-body-limit               1})
 
 (defn- unary-long-fn
   [f]
@@ -507,7 +509,8 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo
                             #"Could not create native response receiver"
                             (#'generation/init-core-state
-                             {::generation/config {:output-buffer-size 0}
+                             {::generation/config {:output-buffer-size 1 :fixed-response-max-body-size 1
+                                                   :fixed-response-slots 1}
                               ::generation/n-workers 2
                               ::generation/max-connections 10})))
       (is (= [[:create-response :context-1]
@@ -523,6 +526,54 @@
               [:dispose-config :config]
               :close-arena]
              (drop 2 @events_))))))
+
+;; The sizes reach the native allocation exactly, with no int overflow, also at
+;; the largest option values. The stub refuses each ring, as the native call
+;; does when it cannot allocate one, and startup reports the ring size.
+(deftest response-receiver-sizes-follow-the-fixed-response-options
+  (doseq [[options expected]
+          [[{:output-buffer-size 32768 :fixed-response-max-body-size 32768
+             :fixed-response-slots 256}
+            [256 (+ 16384 32768 1)]]
+           [{:output-buffer-size 4096 :fixed-response-max-body-size 65536
+             :fixed-response-slots 3}
+            [3 (+ 16384 4096 1)]]
+           [{:output-buffer-size Integer/MAX_VALUE :fixed-response-max-body-size 1000
+             :fixed-response-slots 1}
+            [1 (+ 16384 1000 1)]]
+           [{:output-buffer-size Integer/MAX_VALUE
+             :fixed-response-max-body-size Integer/MAX_VALUE
+             :fixed-response-slots 65535}
+            [65535 (+ 16384 Integer/MAX_VALUE 1)]]]]
+    (let [calls_ (atom [])]
+      (with-redefs [mem/shared-arena (constantly (reify java.lang.AutoCloseable (close [_])))
+                    generation/create-server-config
+                    (constantly {::generation/config-ptr :config})
+                    h2o/create-loops (constantly [:loop])
+                    h2o/create-contexts (constantly [:context])
+                    h2o/mt-create-wakeup-receiver (constantly nil)
+                    h2o/mt-create-response-receiver
+                    (receiver-capacities->object-fn
+                     (fn [_ slots storage]
+                       (swap! calls_ conj [slots storage])
+                       nil))
+                    h2o/context-dispose (fn [_])
+                    h2o/evloop-destroy (fn [_])
+                    h2o/config-dispose (fn [_])]
+        (let [[slots storage] expected
+              error (try
+                      (#'generation/init-core-state
+                       {::generation/config options
+                        ::generation/n-workers 1
+                        ::generation/max-connections 10})
+                      nil
+                      (catch clojure.lang.ExceptionInfo e e))]
+          (is (re-find #"Could not create native response receiver of \d+ slots of \d+ bytes"
+                       (ex-message error)))
+          (is (= {:fixed-response-slots slots
+                  :slot-bytes (+ (h2o/mt-response-slot-data-size) storage)}
+                 (ex-data error))))
+        (is (= [expected] @calls_) (pr-str options))))))
 
 (deftest failed-response-receiver-allocation-completes-cleanup-after-a-destructor-error
   (let [events_ (atom [])
@@ -563,13 +614,13 @@
                     (swap! events_ conj [:dispose-config config]))]
       (let [^Throwable failure (try
                                  (#'generation/init-core-state
-                                  {::generation/config {:output-buffer-size 0}
+                                  {::generation/config {:output-buffer-size 1 :fixed-response-max-body-size 1
+                                                        :fixed-response-slots 1}
                                    ::generation/n-workers 2
                                    ::generation/max-connections 10})
                                  (catch clojure.lang.ExceptionInfo error
                                    error))]
-        (is (= "Could not create native response receiver"
-               (ex-message failure)))
+        (is (str/starts-with? (ex-message failure) "Could not create native response receiver"))
         (is (= ["simulated response receiver cleanup failure"]
                (mapv ex-message (.getSuppressed failure))))
         (is (= [[:create-response :context-1]
@@ -894,14 +945,13 @@
          (config/load!
           {:entrypoints {:http {:bind (str "127.0.0.1:" port)
                                 :tls false}}
-           :output-buffer-size (* 4 fixed-final/response-ring-max-body-bytes)
+           :output-buffer-size (* 4 32768)
            :dispatch [{:handler (constantly {:status 200 :body "ring-ready"})}]})
          nil)]
     (try
       (let [worker (first (::generation/workers instance))
             receiver (.get ^AtomicReference (:response-receiver_ worker))]
-        (is (= (inc (+ fixed-final/max-header-staging-bytes
-                       fixed-final/response-ring-max-body-bytes))
+        (is (= (inc (+ fixed-final/max-header-staging-bytes 32768))
                (h2o/mt-response-slot-payload-capacity receiver))))
       (finally
         (generation/stop! instance)))))
@@ -922,12 +972,13 @@
       (is (= {:scalar-handle? true
               :positive? true
               :slot-count 256
-              :payload-capacity (+ fixed-final/max-header-staging-bytes
-                                   fixed-final/response-ring-max-body-bytes)}
+              :payload-capacity (+ fixed-final/max-header-staging-bytes 32768)
+              :body-limit 32768}
              {:scalar-handle? (integer? claim)
               :positive? (and (integer? claim) (pos? claim))
               :slot-count (count (:response-slots worker))
-              :payload-capacity (:response-slot-payload-capacity worker)}))
+              :payload-capacity (:response-slot-payload-capacity worker)
+              :body-limit (:fixed-body-limit worker)}))
       (finally
         (h2o/mt-response-abort receiver claim)
         (generation/stop! instance)))))

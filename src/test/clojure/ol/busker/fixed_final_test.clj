@@ -37,7 +37,8 @@
    :response-receiver-lock         (ReentrantReadWriteLock.)
    :response-slot-monitor          (Object.)
    :response-slots                 response-slots
-   :response-slot-payload-capacity response-slot-payload-capacity})
+   :response-slot-payload-capacity response-slot-payload-capacity
+   :fixed-body-limit               32768})
 
 (defn- unary-long-fn
   [f]
@@ -57,7 +58,7 @@
 ;; from the payload start; the payload window ends two bytes after the payload.
 (def ^:private pinned-data-size (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t))
 (def ^:private pinned-headers-offset (- pinned-data-size (* 64 32)))
-(def ^:private pinned-capacity (+ fixed-final/max-header-staging-bytes fixed-final/response-ring-max-body-bytes))
+(def ^:private pinned-capacity (+ fixed-final/max-header-staging-bytes 32768))
 
 (defn- sha256 [^bytes bs]
   (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest (MessageDigest/getInstance "SHA-256") bs))))
@@ -67,7 +68,7 @@
     (let [^ol.busker.fixed_final.DirectResponsePlan plan
           (#'response/ordinary-fixed-plan
            {:dispatch-module-id 7 :dispatch-request-seq 11
-            :config {:output-buffer-size 32768}}
+            :config {:output-buffer-size 32768} :worker {:fixed-body-limit 32768}}
            response)
           ^MemorySegment slot (mem/alloc arena (+ pinned-data-size pinned-capacity 1))
           _ (.fill slot (unchecked-byte 0xAA))
@@ -639,7 +640,7 @@
       {#'fixed-final/claim-response! (fn [& _] rejection)}
       #(is (= rejection
               (fixed-final/publish-direct-producer!
-               {:response-slot-payload-capacity 64}
+               {:response-slot-payload-capacity 64 :fixed-body-limit 16}
                (direct-plan 1 1 200 [] -1 0 nil 0) 16
                (fn [_] (throw (AssertionError. "rejected producer invoked")))
                false (constantly false)
@@ -1092,3 +1093,77 @@
             (is (= (if callback? 1 0) @closed))
             (is (false? (protocols/open? emitter)))
             (is (false? (protocols/committed? emitter)))))))))
+
+(defn- sized-response-handler
+  "Returns a body of the size in the request path: `/bytes/N` returns N bytes,
+  `/producer/N` emits a producer of capacity N that writes N bytes."
+  [{:keys [uri] emitter :ol.busker.request/emitter}]
+  (let [[_ shape size] (str/split uri #"/")
+        size (parse-long size)]
+    (case shape
+      "bytes" {:status 200 :body (byte-array size (byte 66))}
+      "producer" (do (protocols/emit! emitter
+                                      {:status 200
+                                       :body (fn [^ByteBuffer buffer]
+                                               (.put buffer (byte-array size (byte 66))))}
+                                      {:end? true :capacity size})
+                     {:body emitter}))))
+
+(defn- with-sized-response-server
+  "Calls `f` with the port of a one-worker server that uses `options` and
+  [[sized-response-handler]], and with its worker."
+  [options f]
+  (let [port (util/free-port)
+        server (busker/start! (util/with-handler
+                                sized-response-handler
+                                (merge {:n-workers 1
+                                        :entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                                             :tls false}}}
+                                       options)))]
+    (try
+      (util/wait-for-curl-ready! :http :h1 port "/bytes/1")
+      (f port (first (::generation/workers (:instance (:active @(:busker/state server))))))
+      (finally
+        (busker/stop! server)))))
+
+(deftest configured-fixed-body-limit-selects-the-response-path-test
+  (doseq [[options limit] [[{:fixed-response-max-body-size 1000} 1000]
+                           [{:fixed-response-max-body-size 40000 :output-buffer-size 65536} 40000]
+                           [{:fixed-response-max-body-size 65536 :output-buffer-size 4096} 4096]]]
+    (with-sized-response-server
+      options
+      (fn [port worker]
+        (is (= limit (:fixed-body-limit worker)) (pr-str options))
+        (doseq [shape ["bytes" "producer"]
+                [size paths] [[limit [1 0]] [(inc limit) [0 1]]]
+                :when (or (= "bytes" shape) (<= size (:output-buffer-size options 32768)))]
+          (let [{:keys [result fixed streaming]}
+                (response-paths #(util/curl :http nil port (str "/" shape "/" size)))]
+            (is (= 0 (:exit result)) (pr-str options shape size (:err result)))
+            (is (= size (count (:out result))) (pr-str options shape size))
+            (is (= paths [fixed streaming]) (pr-str options shape size))))))))
+
+(deftest configured-slot-count-limits-claimed-fixed-responses-test
+  (with-sized-response-server
+    {:fixed-response-slots 3}
+    (fn [port worker]
+      (let [receiver (.get ^AtomicReference (:response-receiver_ worker))
+            handles (vec (repeatedly 3 #(h2o/mt-response-try-claim receiver)))]
+        (try
+          (is (= 3 (h2o/mt-response-ring-capacity receiver) (count (:response-slots worker))))
+          (is (every? pos? handles))
+          (is (zero? (h2o/mt-response-try-claim receiver)))
+          (let [{:keys [result fixed streaming]}
+                (response-paths
+                 #(let [request (future (util/curl :http nil port "/bytes/10"))]
+                    (Thread/sleep 300)
+                    (is (not (realized? request)) "a response waits while every slot is claimed")
+                    (h2o/mt-response-abort receiver (first handles))
+                    (fixed-final/notify-capacity! worker)
+                    (deref request 5000 nil)))]
+            (is (= 0 (:exit result)))
+            (is (= [1 0] [fixed streaming])))
+          (finally
+            (doseq [handle (rest handles)]
+              (h2o/mt-response-abort receiver handle))
+            (fixed-final/notify-capacity! worker)))))))

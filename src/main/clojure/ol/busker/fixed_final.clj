@@ -5,10 +5,11 @@
   slot. H2O retains that slot until request cleanup. [[publish-direct-response!]]
   parks for capacity; [[publish-direct-producer!]] parks or returns `:overloaded`.
 
-  Each worker has 256 independently claimable slots. Eligibility allows at most
-  64 header pairs, 16384 bytes of header staging and 32768 body bytes, subject to
-  the response's output-byte limit. Streaming blocks are separate storage.
-  Exhaustion does not allocate overflow payloads.
+  Each worker has `:fixed-response-slots` independently claimable slots.
+  Eligibility allows at most 64 header pairs, 16384 bytes of header staging and
+  the worker's `:fixed-body-limit` body bytes, the smaller of
+  `:fixed-response-max-body-size` and `:output-buffer-size`. Streaming blocks are
+  separate storage. Exhaustion does not allocate overflow payloads.
 
   A producer-use reference protects the receiver during packing without holding
   its admission lock across application code. Producer views are confined to the
@@ -38,8 +39,6 @@
 
 (def ^:const max-header-pairs 64)
 (def ^:const max-header-staging-bytes 16384)
-(def ^:const response-ring-capacity 256)
-(def ^:const response-ring-max-body-bytes 32768)
 (def ^:private response-claim-index-mask 0xffff)
 
 ;; On supported 64-bit targets `clj_header_t` is 32 bytes. Each slot has
@@ -343,7 +342,7 @@
   Returns `:accepted`, `:closed`, or `:overloaded` when `wait?` is false."
   [worker ^DirectResponsePlan plan capacity producer wait? cancelled? accept!]
   (when-not (and (integer? capacity) (pos? capacity)
-                 (<= capacity response-ring-max-body-bytes)
+                 (<= capacity (long (:fixed-body-limit worker)))
                  (<= (+ (.-header-bytes plan) capacity)
                      (long (:response-slot-payload-capacity worker))))
     (throw (ex-info "Invalid fixed producer capacity" {:capacity capacity})))

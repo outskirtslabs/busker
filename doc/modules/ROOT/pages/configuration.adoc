@@ -77,6 +77,8 @@ either use their documented default or remain unset.
 | `:request-threads` | `:per-request` (default) or `:reuse-within-connection`. With `:per-request` every request runs on a new virtual thread. With `:reuse-within-connection` quick requests of one connection can run one after another on the same virtual thread, which can help many quick HTTP/2 and HTTP/3 requests per connection on machines with many CPUs and does not help HTTP/1.1. Anything bound to the thread then stays for the next request of that connection, for example `ThreadLocal` values, the thread's name, context class loader, uncaught-exception handler and identity, a lock left held, or a late interrupt or unpark. A request can wait up to about 1 ms plus one event-loop turn behind another request of its connection, counted from when that connection's thread starts running. Requests of different connections never share a thread. See xref:ROOT:guides/runtime-model.adoc[Runtime model].
 | `:max-connections` | Positive integer connection cap, default `1024`.
 | `:output-buffer-size` | Positive response byte budget and native streaming block size, default `32768`. Zero is invalid.
+| `:fixed-response-max-body-size` | Largest body in bytes that a fixed-response slot takes, `1` to `Integer/MAX_VALUE`, default `32768`. The limit is the smaller of this and `:output-buffer-size`, so raising this alone does not raise it past `:output-buffer-size`. See <<Output storage and backpressure>>.
+| `:fixed-response-slots` | Fixed-response slots per worker, `1` to `65535`, default `256`. See <<Output storage and backpressure>>.
 | `:server-name` | Server header value, default `"ol.busker/dev"`.
 | `:proxy-status-identity` | Optional Proxy-Status identity.
 | `:max-request-entity-size` | Optional positive integer request body byte limit.
@@ -111,7 +113,7 @@ either use their documented default or remain unset.
 
 Each worker reserves 256 * `:output-buffer-size` bytes of native streaming storage at startup: 256 reusable blocks. At the default size of 32768 bytes, this is 8 MiB per worker or 64 MiB for eight workers, separate from fixed-response slots. The size must be a positive integer no larger than `Integer/MAX_VALUE`. Busker manages the pools internally; `:buffer-pool` is not configurable.
 
-Each worker also has 256 fixed-response slots. A fixed body must fit both `:output-buffer-size` and 32768 bytes. Supported bodies beyond those limits use streaming storage.
+Each worker also has `:fixed-response-slots` fixed-response slots (default 256). A fixed body must fit both `:output-buffer-size` and `:fixed-response-max-body-size` (default 32768). Supported bodies beyond those limits use streaming storage. When every slot of a worker is in use, a fixed response waits for a free one. Each slot takes 16384 + L + about 2150 bytes, where L is the smaller of the two sizes, so the default 256 slots take about 12.5 MiB per worker. A reload with other values builds a new generation with new slots, and requests of the previous generation finish with its slots and limits, so both sets are allocated while it drains.
 
 A fixed-response slot holds a head of at most 64 header pairs and 16384 staging bytes. A larger head uses streaming storage and logs a `:ol.busker.response/large-head` warning.
 

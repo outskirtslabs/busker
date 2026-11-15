@@ -46,8 +46,9 @@
      fails the response: HTTP/1.1 closes the connection, HTTP/2 and HTTP/3 reset
      the stream. No byte past the declared length is sent. An `:end? true`
      producer sent from a fixed slot throws instead: on an emitter without earlier
-     output, with capacity at most 32768, not for HEAD and not for status 204,
-     205 or 304.
+     output, with capacity at most the fixed body limit, the smaller of
+     `:fixed-response-max-body-size` and `:output-buffer-size`, not for HEAD and
+     not for status 204, 205 or 304.
 
      A map without `:body` is header-only; `:body nil` is an empty body write with
      a receipt. Informational statuses 100–199 except 101 reject bodies and `:end?`.

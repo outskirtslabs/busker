@@ -5,7 +5,7 @@
   receivers and arenas after active work ends. Lifecycle allocation and disposal
   run on platform threads; handlers and close callbacks use virtual executors.
 
-  Each worker receives 256 fixed-response slots and a separate shared streaming
+  Each worker receives `:fixed-response-slots` fixed-response slots and a separate shared streaming
   arena of 256 * `:output-buffer-size` bytes (8 MiB at the default size).
   Graceful draining leaves admitted responses usable. Receiver admission closes
   before retirement, but entered producers and native sends keep storage valid
@@ -1164,20 +1164,25 @@
         loops (h2o/create-loops n-workers)
         contexts (h2o/create-contexts arena loops config-ptr)
         wakeup-receivers (mapv h2o/mt-create-wakeup-receiver contexts)
-        response-slot-payload-capacity
-        (+ fixed-final/max-header-staging-bytes
-           (min (:output-buffer-size config)
-                fixed-final/response-ring-max-body-bytes))
+        slot-count (long (:fixed-response-slots config))
+        fixed-body-limit (min (long (:output-buffer-size config))
+                              (long (:fixed-response-max-body-size config)))
+        response-slot-payload-capacity (+ fixed-final/max-header-staging-bytes fixed-body-limit)
         ;; MemorySegment.setString writes a trailing NUL outside the logical payload.
         response-slot-storage-capacity (inc response-slot-payload-capacity)
         response-receivers
         (mapv #(h2o/mt-create-response-receiver
                 %
-                fixed-final/response-ring-capacity
+                slot-count
                 response-slot-storage-capacity)
               contexts)
+        response-slot-size (+ (h2o/mt-response-slot-data-size)
+                              response-slot-storage-capacity)
         _ (when (some #(or (nil? %) (mem/null? %)) response-receivers)
-            (let [failure (ex-info "Could not create native response receiver" {})]
+            (let [failure (ex-info (format "Could not create native response receiver of %d slots of %d bytes"
+                                           slot-count response-slot-size)
+                                   {:fixed-response-slots slot-count
+                                    :slot-bytes response-slot-size})]
               (unwind-core-state! failure
                                   arena
                                   config-ptr
@@ -1186,8 +1191,6 @@
                                   wakeup-receivers
                                   response-receivers)
               (throw failure)))
-        response-slot-size (+ (h2o/mt-response-slot-data-size)
-                              response-slot-storage-capacity)
         response-slots
         (mapv (fn [receiver]
                 (mapv (fn [index]
@@ -1195,7 +1198,7 @@
                          (h2o/mt-response-slot-data receiver index)
                          response-slot-size
                          arena))
-                      (range fixed-final/response-ring-capacity)))
+                      (range slot-count)))
               response-receivers)
         on-close-callbacks (mapv #(create-connection-close-callback
                                    active-connection-count_ worker-connection-counts %)
@@ -1212,6 +1215,7 @@
            ::response-receivers response-receivers
            ::response-slots response-slots
            ::response-slot-payload-capacity response-slot-payload-capacity
+           ::fixed-body-limit fixed-body-limit
            ::on-close-callbacks on-close-callbacks)))
 
 (defn- init-tls-http3-state
@@ -1371,7 +1375,7 @@
 (defn- init-worker-state
   [{::keys [config executor n-workers loops contexts listener-runtimes http3-worker-contexts
             max-connections shutting-down? message-handler wakeup-receivers response-receivers
-            response-slots response-slot-payload-capacity stream-pools
+            response-slots response-slot-payload-capacity fixed-body-limit stream-pools
             arena stop-accepting-remaining_ stopped-accepting_
             worker-connection-counts accepting-workers limit-waiting]
     :as state} cleanup-state_]
@@ -1431,6 +1435,7 @@
                          :response-receiver (nth response-receivers thread-idx)
                          :response-slots (nth response-slots thread-idx)
                          :response-slot-payload-capacity response-slot-payload-capacity
+                         :fixed-body-limit fixed-body-limit
                          :callback-dispatch callback-dispatch
                          :request-dispatch reuse
                          :zero-wait-turn! (zero-wait-turn-fn loop-ptr reuse)

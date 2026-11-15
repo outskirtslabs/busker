@@ -181,14 +181,15 @@
       (finally (busker/stop! server)))))
 
 (def ^:private plan-request
-  {:dispatch-module-id 1 :dispatch-request-seq 1 :config {:output-buffer-size 32768}})
+  {:dispatch-module-id 1 :dispatch-request-seq 1 :config {:output-buffer-size 32768}
+   :worker {:fixed-body-limit 32768}})
 
 (defn- staged-pairs
   "Returns the header pairs that `plan` writes into a fixed slot."
   [plan]
   (with-open [arena (mem/confined-arena)]
     (let [data-size (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t)
-          capacity (+ fixed-final/max-header-staging-bytes fixed-final/response-ring-max-body-bytes)
+          capacity (+ fixed-final/max-header-staging-bytes 32768)
           ^MemorySegment slot (mem/alloc arena (+ data-size capacity 1))
           _ (fixed-final/write-direct-response-slot! slot capacity plan)
           i64 #(.get slot ValueLayout/JAVA_LONG_UNALIGNED (long %))
@@ -419,7 +420,7 @@
         (pr-str headers))))
 
 (deftest fixed-path-body-limit
-  (let [limit fixed-final/response-ring-max-body-bytes
+  (let [limit (:fixed-body-limit (:worker plan-request))
         latin1 {"content-type" "text/plain; charset=iso-8859-1"}]
     (is (some? (fixed-head {:body (apply str (repeat limit "é")) :headers latin1})))
     (is (nil? (fixed-head {:body (apply str (repeat (inc limit) "é")) :headers latin1})))
@@ -490,10 +491,7 @@
     (is (thrown? Exception
                  (#'response/normalized-head {:body "ok" :headers headers} 2 false)))
     (is (thrown? Exception
-                 (#'response/ordinary-fixed-plan
-                  {:dispatch-module-id 1 :dispatch-request-seq 1
-                   :config {:output-buffer-size 32768}}
-                  {:body "ok" :headers headers})))))
+                 (#'response/ordinary-fixed-plan plan-request {:body "ok" :headers headers})))))
 
 (deftest invalid-ring-response-terminates-transport
   ;; A header name that is not a string throws a ClassCastException, which is

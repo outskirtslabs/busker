@@ -1,6 +1,7 @@
 (ns ol.busker.reload-test
   (:require
    [clojure.java.io :as io]
+   [clojure.string :as str]
    [clojure.test :refer [deftest is]]
    [babashka.ffi :as mem]
    [ol.busker.clave-adapter :as clave-adapter]
@@ -10,6 +11,7 @@
    [ol.busker.generation :as generation]
    [ol.busker.listen :as listen]
    [ol.busker.protocols :as proto]
+   [ol.busker.response-queue :as response-queue]
    [ol.busker.runtime :as runtime]
    [ol.busker.test-utils :as util]
    [ol.busker.tickets :as tickets]
@@ -20,7 +22,8 @@
    [java.net BindException ConnectException DatagramSocket InetSocketAddress Socket]
    [java.nio.file Files]
    [java.nio.file.attribute FileAttribute]
-   [java.util.concurrent ExecutorService LinkedBlockingQueue TimeUnit]))
+   [java.util.concurrent CountDownLatch ExecutorService LinkedBlockingQueue TimeUnit]
+   [java.util.concurrent.atomic AtomicReference]))
 
 (defn- response-config
   [port handler]
@@ -238,6 +241,71 @@
       (finally
         (deliver old-release true)
         (runtime/stop! server)))))
+
+;; The old generation's requests use its fixed slots and limits after a reload
+;; that changes them: 1000 bytes fit its slots and 1500 bytes stream, while the
+;; new generation puts 1500 bytes in a slot.
+(deftest reload-with-new-fixed-response-options-keeps-old-slots-test
+  (let [port (util/free-port)
+        old-entered (CountDownLatch. 2)
+        old-release (promise)
+        handler (fn [{:keys [uri]}]
+                  (let [[_ phase size] (str/split uri #"/")]
+                    (when (= "old" phase)
+                      (.countDown old-entered)
+                      @old-release)
+                    {:status 200 :body (byte-array (parse-long size) (byte 66))}))
+        config (fn [body-size slots]
+                 (assoc (response-config port handler)
+                        :n-workers 1
+                        :fixed-response-max-body-size body-size
+                        :fixed-response-slots slots))
+        worker #(first (::generation/workers %))
+        receiver #(.get ^AtomicReference (:response-receiver_ %))
+        published_ (atom [])
+        writers_ (atom 0)
+        publish native/mt-response-publish
+        create-writer response-queue/create-response-writer]
+    (with-redefs-fn
+      {#'native/mt-response-publish
+       (fn [receiver claim-handle]
+         (let [result (publish receiver claim-handle)]
+           (when (= 1 result) (swap! published_ conj receiver))
+           result))
+       #'response-queue/create-response-writer
+       (fn [req] (swap! writers_ inc) (create-writer req))}
+      (fn []
+        (let [server (runtime/start! (config 1000 3))]
+          (try
+            (let [old-instance (active-generation-instance server)
+                  old-worker (worker old-instance)
+                  old-receiver (receiver old-worker)
+                  old-requests (mapv #(future (eventually-curl :http nil port (str "/old/" %)))
+                                     [1000 1500])]
+              (is (.await old-entered 5 TimeUnit/SECONDS))
+              (is (= :activated (runtime/reload! server (config 2000 5))))
+              (let [new-worker (worker (active-generation-instance server))
+                    new-receiver (receiver new-worker)]
+                (is (= {:old [1000 3 3] :new [2000 5 5]}
+                       {:old [(:fixed-body-limit old-worker) (count (:response-slots old-worker))
+                              (native/mt-response-ring-capacity old-receiver)]
+                        :new [(:fixed-body-limit new-worker) (count (:response-slots new-worker))
+                              (native/mt-response-ring-capacity new-receiver)]}))
+                (reset! published_ [])
+                (reset! writers_ 0)
+                (let [result (util/curl :http nil port "/new/1500" :max-time 5)]
+                  (is (= [0 1500] [(:exit result) (count (:out result))])))
+                (is (= [[new-receiver] 0] [@published_ @writers_]))
+                (reset! published_ [])
+                (deliver old-release true)
+                (is (= [[0 1000] [0 1500]]
+                       (mapv #(let [result (deref % 10000 nil)]
+                                [(:exit result) (count (:out result))])
+                             old-requests)))
+                (is (= [[old-receiver] 1] [@published_ @writers_]))))
+            (finally
+              (deliver old-release true)
+              (runtime/stop! server))))))))
 
 (deftest memory-session-tickets-survive-reload-test
   (let [port (util/free-port)

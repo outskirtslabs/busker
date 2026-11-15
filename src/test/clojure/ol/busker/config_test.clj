@@ -336,3 +336,27 @@
         (is (some #(= ::cfg/config-spec-invalid (:error %))
                   (load-errors (assoc base :request-threads value)))
             (pr-str value))))))
+
+(deftest fixed-response-options-test
+  (let [base {:entrypoints {:http {:bind ":8080" :tls false}}
+              :dispatch [{}]}]
+    (testing "default to the slot count and body size of the slot layout"
+      (is (= {:fixed-response-max-body-size 32768 :fixed-response-slots 256}
+             (select-keys (cfg/load! base) [:fixed-response-max-body-size :fixed-response-slots])
+             (select-keys (cfg/normalized-snapshot base)
+                          [:fixed-response-max-body-size :fixed-response-slots]))))
+    (testing "accept values from 1 to the largest each takes"
+      (doseq [[k values] {:fixed-response-max-body-size [1 1000 32769 Integer/MAX_VALUE]
+                          :fixed-response-slots [1 3 257 65535]}
+              value values]
+        (is (= value (k (cfg/load! (assoc base k value)))) (pr-str k value))))
+    (testing "reject zero, negative, too large and non-integer values"
+      (doseq [[k values] {:fixed-response-max-body-size
+                          [0 -1 (inc Integer/MAX_VALUE) Long/MAX_VALUE 1.5 "32768" nil
+                           (bigint 32768)]
+                          :fixed-response-slots
+                          [0 -1 65536 (inc Integer/MAX_VALUE) 1.5 "256" nil]}
+              value values]
+        (is (some #(= ::cfg/config-spec-invalid (:error %))
+                  (load-errors (assoc base k value)))
+            (pr-str k value))))))
