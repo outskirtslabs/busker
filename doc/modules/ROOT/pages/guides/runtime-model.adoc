@@ -38,7 +38,7 @@ If validation, listener binding, TLS setup, or another startup stage fails, `sta
 
 Each event loop runs on a dedicated platform thread, an ordinary OS-backed JVM thread, and passes network events to libh2o.
 When a client connects, one of the generation's event loops notices it.
-The xref:ROOT:configuration.adoc[`:n-workers` setting] controls how many event loops a generation has. It defaults to half the processors available to the JVM, at least two and at most eight.
+The xref:ROOT:configuration.adoc[`:n-workers` setting] controls how many event loops a generation has.
 
 The event loops accept connections, negotiate TLS and HTTP versions, read available request data, and send response data when a socket is ready.
 They also enforce connection limits and track how many bytes each HTTP stream or connection may have in flight.
@@ -55,31 +55,27 @@ This is why a synchronous Ring handler can read an upload or wait for a database
 
 === Sharing virtual threads within a connection
 
-Starting a virtual thread for every request often wakes an idle platform thread, which runs a few microseconds of handler work and goes back to sleep.
+Starting a virtual thread for every request often wakes an idle platform thread for a few microseconds of handler work.
 On a machine with many CPUs and many quick requests per connection, those wake-ups, not the handlers, limit the request rate.
 The xref:ROOT:configuration.adoc[`:request-threads` setting] chooses how handlers get their threads:
 
 * `:per-request`, the default, starts a new virtual thread for every request.
 * `:reuse-within-connection` lets quick requests of one connection run one after another on the same virtual thread.
 
-With `:reuse-within-connection`, a request that arrives while no thread runs requests of its connection starts a new virtual thread, as with `:per-request`.
-Requests of that connection that arrive while the thread is busy wait for it and run on it in turn.
-Once the thread has run requests back to back for about a tenth of a millisecond, later requests of its connection get new virtual threads, and the worker gives the requests already waiting new threads at its next check.
-An idle worker checks at least once per millisecond while requests wait, so a request can wait for up to about 1 ms plus one event-loop turn behind another request of its connection, counted from when that connection's thread starts running.
-While that thread still waits for a platform thread to run on, the requests behind it are not moved, and they run on it in turn once it starts.
-Handlers may still block: a slow handler only sends the requests behind it to new threads.
-When a stop or reload begins, each worker gives every waiting request of its connections a new thread at its next event-loop turn, and later requests are handled as with `:per-request`.
-If a worker does not take that turn within one second, or the thread that stops the server is interrupted, the waiting requests of the workers that have not taken that turn run one after another on the thread they wait for.
+With `:reuse-within-connection`, a request that arrives while its connection's thread is busy waits and then runs on that thread.
+Once the thread has run requests back to back for about a tenth of a millisecond, the waiting and later requests of its connection get new threads.
+A request therefore waits at most about 1 ms plus one event-loop turn, counted from when its connection's thread starts running.
+A slow handler only sends the requests behind it to new threads, so handlers may still block.
+A stop or reload waits up to one second in total for the workers to give every waiting request a new thread before it shuts the request executor down. If that time runs out, the waiting requests of a worker that has not done so run one after another on the thread they wait for.
 Requests of different connections never share a thread.
 
-The setting can help when connections carry many quick requests at once, such as HTTP/2 and HTTP/3 clients that multiplex many requests, on machines with many CPUs.
-It does not help HTTP/1.1, where a connection carries one request at a time, so its requests mostly arrive alone, and it can cost HTTP/1.1 a little throughput, most with pipelining, because the second of two requests that arrive together waits for the first.
-On a machine with few CPUs the gain for HTTP/2 and HTTP/3 is small or none.
+The setting can help HTTP/2 and HTTP/3 clients that multiplex many quick requests per connection on machines with many CPUs.
+On a machine with few CPUs the gain is small or none.
+It does not help HTTP/1.1, which carries one request at a time per connection, and can cost it a little throughput, most with pipelining.
 
 The cost is that a request does not start on a fresh thread.
-Anything bound to the thread stays for the next request of the same connection that runs on it.
-For example: `ThreadLocal` values; the thread's name, context class loader and uncaught-exception handler; its identity, so anything keyed by the `Thread` object or its id; a lock the handler left held; and an interrupt or unpark that application code sends to the thread after its request ended, which makes the next request's first blocking call return or throw at once.
-Busker itself binds nothing to the thread per request, and scoped values cannot carry over.
+Anything bound to the thread stays for the next request of the same connection: `ThreadLocal` values, the thread's name, context class loader, uncaught-exception handler and identity, a lock the handler left held, and an interrupt or unpark sent to the thread after its request ended.
+Busker binds nothing to the thread per request, and scoped values cannot carry over.
 Keep `:per-request` if your handlers or libraries keep per-request state on the thread.
 
 CPU intensive work does not park.
@@ -102,7 +98,7 @@ Busker also holds the response data currently in flight through the HTTP engine,
 
 The event loop removes a response chunk from the queue when it can hand that chunk to the HTTP engine.
 It waits for the engine to report progress on the current send before handing over more.
-Once capacity fills, a blocking application write parks until space is available. A nonblocking write returns full without accepting any part of that call. Flush never waits for capacity.
+Once capacity fills, a blocking application write parks until space is available.
 
 For an ordinary Ring body such as an `InputStream` or lazy sequence, the handler's job ends when it returns the response map.
 The request task is not finished, though.
@@ -114,7 +110,7 @@ Underneath, the JVM parks the virtual thread and gives its platform thread other
 The request task stays alive until it has read and queued the complete body.
 
 Long-lived responses use Busker's response emitter so application code can send chunks after the handler returns.
-Backpressure applies to the emitter too. By default, `emit!` parks the calling virtual thread when capacity is full. With `:wait? false`, the call accepts the whole bounded write or returns full. Busker creates no sender thread per connection for nonblocking output. `flush!` and `close!` return without waiting for capacity or producer completion.
+Backpressure applies to the emitter too: `emit!` parks when capacity is full, or with `:wait? false` returns full without accepting any part of the call. `flush!` and `close!` never wait.
 If application code closes an emitter, a final response completes, or libh2o reports request termination, Busker dispatches registered close callbacks on virtual threads.
 The callbacks run after Busker releases blocked response writers, and one failing callback does not suppress later callbacks.
 See the xref:ROOT:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter` API] for callback registration and stream closure details.
@@ -153,7 +149,7 @@ Those protocols keep listening for messages about open streams while a response 
 Suppose the configuration changes while that slow response is still open.
 xref:ROOT:api/ol-busker.adoc#reload-BANG-[`ol.busker/reload!`] does not tear down the running generation and then try to replace it.
 It builds a candidate generation beside the active one while the active generation keeps serving traffic.
-An unchanged configuration snapshot returns `:unchanged` unless the caller requests a forced reload or a worker of the active generation has failed. In that case a reload replaces the generation.
+An unchanged configuration snapshot returns `:unchanged` unless the caller requests a forced reload or a worker of the active generation has failed.
 
 If the candidate cannot start, `reload!` cleans it up, throws an exception, and leaves the active generation serving traffic.
 The old generation has not begun shutting down at this point.
@@ -166,7 +162,7 @@ A request never jumps to the new generation halfway through.
 
 The old generation then drains in the background.
 `reload!` returns after the old generation has stopped accepting work, not after every old request has finished.
-If the old generation does not stop accepting within 60 seconds, `reload!` logs the error and returns with the new generation serving. The old generation is still retired in the background.
+If the old generation does not stop accepting within 60 seconds, `reload!` logs the error and returns with the new generation serving.
 Several generations may be draining after several quick reloads, each with the requests that began while it was active.
 
 == Draining and stopping
@@ -184,7 +180,7 @@ Application code should treat interruption as cancellation and release its resou
 Call `stop!` from an application lifecycle thread or shutdown hook rather than from a request handler, because a handler belongs to the work that `stop!` waits for.
 Calling `stop!` again after the server has stopped is harmless.
 
-A retirement timeout or uncertain native cleanup reports failure; it does not make live memory safe to free. Busker retains affected generation resources while producers or native requests may still access them. A producer that ignores interruption can delay memory reclamation indefinitely.
+A retirement timeout or uncertain native cleanup reports failure but does not free memory that producers or native requests may still use. A producer that ignores interruption can delay that memory's release indefinitely.
 
 == Related documentation
 

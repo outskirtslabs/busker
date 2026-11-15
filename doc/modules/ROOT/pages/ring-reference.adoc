@@ -48,14 +48,12 @@ It uses the ASCII comma delimiter for ordinary fields and the ASCII semicolon de
 | `:ol.busker.request/emitter` | xref:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter`] | The response stream for this request.
 |===
 
-`:ol.busker/entrypoint` names the entrypoint of the listener that accepted the request's connection, for TCP and Unix socket listeners and for HTTP/1.1, HTTP/2 and HTTP/3 alike.
-The `Host` header and the HTTP/2 or HTTP/3 `:authority` do not change it, so a client cannot reach a dispatcher restricted to another entrypoint by naming that entrypoint's port.
+The `Host` header and the HTTP/2 or HTTP/3 `:authority` do not change `:ol.busker/entrypoint`, so a client cannot reach a dispatcher restricted to another entrypoint by naming that entrypoint's port.
 A request map built by hand without this key, for example in a test that calls the dispatch handler directly, is treated as a request to the first configured entrypoint.
 
 The early-data flag is always present, including on ordinary requests where its value is false.
 A request sent in 0-RTT data reads false when the handshake finished before the request was handed over, because a replayed request cannot finish the handshake.
-Only HTTP/3 accepts 0-RTT data.
-Over TCP the flag is always false.
+Only HTTP/3 accepts 0-RTT data, so over TCP the flag is always false.
 Busker's xref:api/ol-busker-middleware.adoc#wrap-reject-early-data[`wrap-reject-early-data`] middleware can reject unsafe methods received through 0-RTT.
 
 == Request bodies
@@ -83,7 +81,7 @@ An ordinary handler response uses the usual Ring shape:
 ----
 
 Ring defines status codes from 100 through 599.
-Busker accepts integer final statuses from 200 through 999, but does not enforce Ring's upper bound.
+Busker accepts integer final statuses from 200 through 999.
 Applications should keep ordinary final statuses in the Ring range of 200 through 599.
 Busker treats an omitted `:headers` map as empty and an omitted or `nil` `:body` as an empty body.
 If a handler returns `nil`, Busker sends a 404 response.
@@ -192,9 +190,8 @@ The first `emit!` sends `103 Early Hints`, allowing the client to preload the st
 The next `emit!` commits the final status and headers.
 Later calls accept body data, and `flush!` makes buffered data ready to send.
 
-By default, `emit!` parks the calling virtual thread when capacity is full. With `{:wait? false}`, it instead returns `{:status :full}` without accepting any part of the call. `flush!` and `close!` never wait for capacity or a producer.
-
-An accepted body write returns `{:status :accepted :progress receipt}`. The promise reports `{:status :proceeded}`, `{:status :closed}` or `{:status :failed :cause error}`. Proceed is transport progress, not client acknowledgement; HTTP/3 may report it during packet preparation. Final sends need not proceed. Close settles pending receipts immediately, separately from releasing native storage.
+`emit!` parks the calling virtual thread when capacity is full. With `{:wait? false}` it returns `{:status :full}` and accepts no part of the call. `flush!` and `close!` never wait.
+An accepted body write returns `{:status :accepted :progress receipt}`, a promise of `{:status :proceeded}`, `{:status :closed}` or `{:status :failed :cause error}`.
 
 The `finally` block closes the emitter whether the producer finishes normally or fails.
 
@@ -206,7 +203,7 @@ See the xref:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter` prot
 
 === Nonblocking events and heartbeats
 
-One application caller can serialize access to a pending-receipt atom and skip writes while its previous output is pending:
+One application caller can keep the last receipt in an atom and skip writes while its output is pending:
 
 [source,clojure]
 ----
@@ -222,7 +219,7 @@ One application caller can serialize access to a pending-receipt atom and skip w
         (:status result)))))
 ----
 
-This application atom does not replace Busker's writer synchronization. Use `on-close!` independently to remove closed connections. A scheduled heartbeat can pass `":\n\n"` to this function; do not queue missed heartbeats. See xref:configuration.adoc#_http1_streaming_timeouts[HTTP/1 streaming timeouts] for what heartbeats are for and how to choose their interval.
+A scheduled heartbeat can pass `":\n\n"` to this function. Do not queue missed heartbeats. Use `on-close!` to remove closed connections. See xref:configuration.adoc#_http1_streaming_timeouts[HTTP/1 streaming timeouts] for what heartbeats are for and how to choose their interval.
 
 == Content length
 
@@ -230,18 +227,15 @@ Busker uses an explicit `content-length` response header when present.
 Header lookup is case-insensitive, and the value must be a non-negative decimal string or number.
 Busker removes that field from the ordinary header map and passes its numeric value to libh2o.
 
-The value must equal the byte length of the body.
-Busker does not correct it.
-For a body whose length Busker calculates, a value that differs, or a value that is not a non-negative number, is a handler error: Busker logs it and sends `500 Internal Server Error` instead, on every protocol.
-Statuses 204, 205 and 304, and a HEAD response with an empty body, are not checked, because they send no body.
-For a stream, a sequence or another body of unknown length, Busker counts the bytes it sends and never sends a byte past the value.
-When the body would send more bytes than the value, or ends with fewer, Busker logs it and ends the response as failed: it closes the HTTP/1.1 connection, or resets the HTTP/2 or HTTP/3 stream.
-A body that ends with fewer bytes gives the client an incomplete response.
-A longer body can give the client every declared byte before the failure, and a client can take that as a complete response.
+The value must equal the byte length of the body, and Busker does not correct it.
+For a body whose length Busker knows, any other value is a handler error: Busker logs it and sends `500 Internal Server Error`.
+Statuses 204, 205 and 304, and a HEAD response with an empty body, are not checked.
+For a body of unknown length, Busker never sends a byte past the value. A longer or shorter body fails the response: Busker logs it and closes the HTTP/1.1 connection or resets the HTTP/2 or HTTP/3 stream.
+A client of a longer body can receive every declared byte before the failure and take it as a complete response.
 
-Without an explicit value, Busker calculates the byte length of `String`, `byte[]`, `java.nio.ByteBuffer`, `java.io.File`, and `nil` bodies. ByteBuffer length is its remaining byte count.
-String length and output use the charset in `content-type`, with UTF-8 when the charset is absent or invalid. Malformed or unmappable characters use encoder replacement bytes.
-A charset that Java can decode but not encode, such as `x-JISAutoDetect`, is a handler error for a `String` or sequence body: Busker sends `500 Internal Server Error`.
+Without an explicit value, Busker calculates the byte length of `String`, `byte[]`, `java.nio.ByteBuffer` (its remaining bytes), `java.io.File`, and `nil` bodies.
+Strings use the charset in `content-type`, or UTF-8 when it is absent or invalid, and malformed or unmappable characters use replacement bytes.
+A charset that Java can decode but not encode, such as `x-JISAutoDetect`, gives `500 Internal Server Error` for a `String` or sequence body.
 Applications can extend xref:api/ol-busker-protocols.adoc#SizableResponseBody[`SizableResponseBody`] for another fixed-size type.
 
 Busker leaves the length unknown for streams and sequences.
@@ -254,7 +248,7 @@ The response headers describe the representation that a corresponding GET reques
 For example, `content-length` on a HEAD response gives the size of the GET response body, not the zero bytes sent for HEAD.
 
 Busker passes the request to the application as `:request-method :head`.
-Busker suppresses payload transmission for HEAD, including the retained fixed-response path. The representation's known length remains available for response headers.
+Busker sends no body bytes for HEAD. A HEAD response with a body of known length, such as a string, byte array, ByteBuffer or File, gets that length as `content-length`.
 
 Ring provides the optional `ring.middleware.head/wrap-head` middleware for applications that want to reuse GET behavior.
 For a HEAD request, `wrap-head` calls the wrapped handler with `:request-method :get` and then replaces the returned body with `nil`.
@@ -262,7 +256,7 @@ This lets an existing GET handler produce the status and headers for HEAD withou
 Applications may also handle HEAD explicitly.
 
 If middleware derives `content-length` from the GET body, it must calculate the length before `wrap-head` replaces the body with `nil`.
-Otherwise Busker sees an empty body and calculates a length of zero.
+Otherwise Busker sees an empty body and sends no `content-length` when the response fits a fixed-response slot, or calculates a length of zero when it does not.
 A HEAD handler can instead provide an explicit `content-length` equal to the number of bytes that the corresponding GET response would send.
 
 == Middleware

@@ -51,11 +51,11 @@ Accepts a Ring response map, body value or native-buffer producer.
 | Option | Default | Meaning
 | `:wait?` | `true` | Park for capacity or producer permission if necessary.
 | `:flush?` | `false` | Make this write and preceding accepted output ready to send.
-| `:end?` | `false` | Stop further output and request a final send after this accepted output; also flushes.
+| `:end?` | `false` | Stop further output and request a final send after this accepted output. Also flushes.
 | `:capacity` | none | Positive maximum byte count for a producer function, at most `:output-buffer-size`.
 |===
 
-The first three options require booleans. Unknown options and invalid inputs throw descriptive exceptions. `:capacity` is valid only for a producer. A call starting after known closure returns `{:status :closed}` before validation.
+The first three options require booleans. Unknown options and invalid inputs throw. `:capacity` is valid only for a producer. A call that starts after a known close returns `{:status :closed}` before validation.
 
 [source,clojure]
 ----
@@ -65,19 +65,17 @@ The first three options require booleans. Unknown options and invalid inputs thr
 {:status :closed}
 ----
 
-`:wait?` controls admission, not transmission. Both modes return after acceptance; they may be mixed on one response. Full or closed rejection accepts no part of the call and leaves its headers unchanged. Pressure may flush earlier accepted output.
+`:wait?` controls admission, not transmission, and the two modes may be mixed on one response. A full or closed result accepts no part of the call and changes no headers. Pressure may flush earlier accepted output.
 
-Strings, byte arrays and ByteBuffers work in both modes. Nonblocking input must fit `:output-buffer-size` after encoding; oversized input throws rather than returning full. Blocking calls may consume larger bodies incrementally. ByteBuffer input uses its remaining range without changing its position or limit. Accepted mutable input is copied before return; concurrent mutation during copying is unsupported.
+Strings, byte arrays and ByteBuffers work in both modes. Nonblocking input must fit `:output-buffer-size` after encoding, and larger input throws. Busker reads a ByteBuffer from its position to its limit and changes neither. Accepted mutable input is copied before return, and mutating it during the call is unsupported. InputStreams, sequences and other Ring body writers require blocking mode, and nonblocking calls reject them without reading them. Strings use the response charset, or UTF-8 when it is absent or invalid, and malformed or unmappable characters use replacement bytes. A string or sequence in a charset that cannot encode throws.
 
-InputStreams, sequences and arbitrary Ring body writers require blocking mode. Nonblocking calls reject them without consumption. Blocking calls preserve ordinary Ring body adapters. Strings use the response charset, with UTF-8 when absent or invalid. Malformed or unmappable characters use encoder replacement bytes. A string or sequence in a charset that cannot encode throws.
+A `content-length` header must be a non-negative integer. With `:end? true` and a complete body of known length it must equal that length, or `emit!` throws. Other output that passes the declared length or ends short of it fails the response: HTTP/1.1 closes the connection, HTTP/2 and HTTP/3 reset the stream. No byte past the declared length is sent. An `:end? true` producer that uses a fixed slot throws instead. It uses one on an emitter without earlier output when its capacity is at most the smaller of `:fixed-response-max-body-size` and `:output-buffer-size`, the method is not HEAD and the status is not 204, 205 or 304.
 
-A `content-length` header must be a non-negative integer. With `:end? true` and a complete body of known length, it must equal that length, or `emit!` throws. Other output that passes the declared length or ends short of it fails the response: HTTP/1.1 closes the connection, HTTP/2 and HTTP/3 reset the stream. No byte past the declared length is sent. An `:end? true` producer sent from a fixed slot throws instead: on an emitter without earlier output, with capacity at most the fixed body limit, the smaller of `:fixed-response-max-body-size` and `:output-buffer-size`, not for HEAD and not for status 204, 205 or 304.
-
-Maps with `:body`, including `nil`, reserve headers and body together for bounded writes. A map without `:body` is a header operation. Statuses 100–199 except 101 reject bodies and `:end? true`; 101 is unsupported. A second final head throws. Rejection or a producer exception does not commit headers. Known complete lengths remain available for content-length handling; unknown lengths use protocol framing. HEAD and bodyless statuses send no payload.
+A map with `:body`, including `nil`, sends headers and body together. A map without `:body` is a header operation. Statuses 100–199 except 101 reject bodies and `:end? true`, and 101 is unsupported. A second final head throws. Rejection or a producer exception does not commit headers. Unknown lengths use protocol framing. HEAD and bodyless statuses send no payload.
 
 ==== Native producers
 
-A producer runs synchronously on the calling virtual thread and finishes before `emit!` returns. It receives one contiguous writable native ByteBuffer whose capacity is the declared maximum. Its final position is the byte count; it must not call `flip`.
+A producer runs synchronously on the calling virtual thread and finishes before `emit!` returns. It receives one contiguous writable native ByteBuffer whose capacity is the declared maximum. Its final position is the byte count, and it must not call `flip`.
 
 [source,clojure]
 ----
@@ -89,15 +87,15 @@ A producer runs synchronously on the calling virtual thread and finishes before 
                 {:capacity 3 :wait? false :flush? true})
 ----
 
-Only one producer prepares output per response at a time. Competing nonblocking calls return full without invoking their producer; blocking calls park. Recursive emission on the same response throws. Different responses remain independent.
+One producer at a time prepares output for a response. A competing nonblocking call returns full without running its producer, and a blocking call parks. Recursive emission on the same response throws.
 
-The buffer, its duplicates and slices are valid only during the callback and on that Java thread. Normal Java access from another thread or after return fails. Busker retains separate backing storage for native sending. Callers must not retain or release the writable view. Unsafe/JNI access that bypasses Java scope checks is outside this API.
+The buffer and its duplicates and slices are valid only during the callback and on that thread. Do not keep or release it. Unsafe or JNI access that bypasses Java scope checks is outside this API.
 
-A throwing producer publishes none of its bytes. Close during preparation can return closed even though the callback ran. Close does not wait for that callback. A producer that never returns can delay native-memory reclamation; a shutdown deadline does not make that memory safe to free.
+A throwing producer publishes none of its bytes. A close during the callback can make the call return closed after the callback ran, and close does not wait for the callback. A producer that never returns can delay native-memory release, also past a shutdown deadline.
 
 ==== Receipts
 
-A receipt is a Clojure promise. Callers may use `realized?`, dereference or timed dereference; they must not deliver it. Its value is always one of:
+A receipt is a Clojure promise. Callers may use `realized?`, dereference or timed dereference, but must not deliver it. Its value is always one of:
 
 [source,clojure]
 ----
@@ -106,29 +104,25 @@ A receipt is a Clojure promise. Callers may use `realized?`, dereference or time
 {:status :failed :cause error}
 ----
 
-Proceed reports transport progress, not client application acknowledgement. HTTP/1.1 and HTTP/2 proceed follow their socket-write paths; HTTP/3 may proceed during packet preparation. Final sends need not produce another proceed. Close and failure settle unresolved receipts independently of native-storage release. An accepted `:end? true` write can return a receipt already settled as closed.
+Proceed reports transport progress, not acknowledgement by the client application. HTTP/1.1 and HTTP/2 proceed after socket writes, and HTTP/3 may proceed during packet preparation. Final sends need not proceed. Close and failure settle pending receipts at once. An accepted `:end? true` write can return a receipt already settled as closed.
 
-One public body call has one receipt, even when it emits several internal chunks. An incremental call can accept a prefix before its source fails or closes. After that first acceptance it returns accepted with its receipt, rather than throwing a false rejection: source failure terminates the response and settles a still-pending receipt as failed; close settles it as closed. A prior settlement remains unchanged.
+One body call has one receipt, even when it sends several chunks. When an incremental source fails or the response closes after part of the call was accepted, the call returns accepted. A source failure ends the response and settles a pending receipt as failed, and a close settles it as closed.
 
-At most 64 body receipts are pending per response, including empty writes. Empty writes are ordered markers, not heartbeat bytes.
-
-Pending bytes are limited to `:output-buffer-size` (B, default 32768), with a separate native send of at most B bytes. Each worker has 256 streaming blocks of B bytes: 8 MiB at the default size, separate from fixed-response slots. A small nonempty write initially uses one block even if it writes fewer than B bytes.
+At most 64 body receipts are pending per response, including empty writes, which are not heartbeats. Pending bytes are limited to `:output-buffer-size` (B, default 32768), with a separate native send of at most B bytes. Each worker has 256 streaming blocks of B bytes. A small nonempty write uses a whole block at first.
 
 [#flush-BANG-]
 === flush!
 
-`(flush! this)` makes the accepted prefix ready without waiting for capacity, transmission or a producer. It returns the last accepted body receipt, or `nil`. Repeated flushes reuse that receipt and coalesce requests. After close it returns the same receipt without scheduling more work. No timer flush is implied.
-
-During an incremental call, flush covers only the chunks already accepted, while the receipt covers the whole logical write and can remain pending until EOF. Flush without body bytes is not a heartbeat.
+`(flush! this)` makes the accepted prefix ready to send without waiting for capacity, transmission or a producer. It returns the last accepted body receipt, or `nil`. Repeated flushes coalesce. After close it returns the same receipt and schedules nothing. During an incremental call, that receipt can stay pending until EOF. A flush without body bytes is not a heartbeat.
 
 [#close-BANG-]
 === close!
 
-`(close! this)` stops admission, wakes blocked callers, settles pending receipts and requests a final send after the accepted prefix. It returns true only on the first close. It never waits for a producer, capacity or transmission. Private producer output and later incremental chunks are discarded if close wins before their acceptance.
+`(close! this)` stops admission, wakes blocked callers, settles pending receipts and requests a final send after the accepted prefix. It returns true only on the first close and never waits. Output not yet accepted is discarded.
 
 [#on-close-BANG-]
 === on-close!
 
-`(on-close! this callback)` registers a zero-argument callback. Callbacks run exactly once on virtual threads after admission closes, in registration order; a failing callback does not suppress later callbacks. Late registration runs promptly. Callbacks are independent of receipt settlement and still run when the last receipt already proceeded.
+`(on-close! this callback)` registers a zero-argument callback. Callbacks run once each on virtual threads after admission closes, in registration order, and a failing callback does not stop later ones. A callback registered after close runs promptly. Callbacks run whatever the receipts report.
 
-Busker must learn of termination from libh2o before reporting a disconnected client. An idle HTTP/1.1 disconnect remains undetected until the application writes again or closes the stream, or, with `:http1-req-io-timeout-while-generating?`, until the request I/O timeout expires. Graceful reload and shutdown let active streams drain rather than closing them prematurely. See xref:configuration.adoc#_http1_streaming_timeouts[HTTP/1 streaming timeouts] for heartbeats.
+Busker learns of a disconnected client only from libh2o. Busker sees an idle HTTP/1.1 disconnect only when the application writes or closes the stream, or, with `:http1-req-io-timeout-while-generating?`, when the request I/O timeout expires. Reload and shutdown let active streams drain. See xref:configuration.adoc#_http1_streaming_timeouts[HTTP/1 streaming timeouts] for heartbeats.

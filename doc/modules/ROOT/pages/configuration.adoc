@@ -72,12 +72,12 @@ either use their documented default or remain unset.
 | `:entrypoints` | Map of entrypoint ids to entrypoint maps (see below).
 | `:dispatch` | Ordered vector of dispatcher maps (see below).
 | `:tls` | Global TLS, certificate, ACME, and session ticket config (see below).
-| `:n-workers` | Positive integer event loop worker count. The default is half the processors the JVM reports as available (`Runtime.availableProcessors`, which follows container CPU limits and CPU affinity), rounded down, at least `2` and at most `8`: up to 5 processors give `2`, 8 give `4`, 16 or more give `8`. Busker computes the default once when it loads and puts the resulting integer in the config snapshot.
-| `:worker-hot-poll-micros` | Non-negative integer, default `0`. Longest time in microseconds that a worker with live requests polls for new work before it sleeps. `0` disables the poll. A positive value such as `50` lowers response latency when handlers finish inside it, at the cost of up to that much worker CPU per idle gap.
-| `:request-threads` | `:per-request` (default) or `:reuse-within-connection`. With `:per-request` every request runs on a new virtual thread. With `:reuse-within-connection` quick requests of one connection can run one after another on the same virtual thread, which can help many quick HTTP/2 and HTTP/3 requests per connection on machines with many CPUs and does not help HTTP/1.1. Anything bound to the thread then stays for the next request of that connection, for example `ThreadLocal` values, the thread's name, context class loader, uncaught-exception handler and identity, a lock left held, or a late interrupt or unpark. A request can wait up to about 1 ms plus one event-loop turn behind another request of its connection, counted from when that connection's thread starts running. Requests of different connections never share a thread. See xref:ROOT:guides/runtime-model.adoc[Runtime model].
+| `:n-workers` | Positive integer event loop worker count. The default is half the processors available to the JVM, rounded down, at least `2` and at most `8`.
+| `:worker-hot-poll-micros` | Non-negative integer, default `0`. Longest time in microseconds that a worker with live requests polls for new work before it sleeps. `0` disables the poll. A positive value such as `50` lowers latency when handlers finish inside it, and costs up to that much worker CPU per idle gap.
+| `:request-threads` | `:per-request` (default) or `:reuse-within-connection`. `:per-request` runs every request on a new virtual thread. `:reuse-within-connection` lets quick requests of one connection run one after another on one virtual thread, which can help many quick HTTP/2 and HTTP/3 requests per connection on machines with many CPUs. Anything bound to the thread then stays for the next request of that connection. See xref:ROOT:guides/runtime-model.adoc#_sharing_virtual_threads_within_a_connection[Sharing virtual threads within a connection].
 | `:max-connections` | Positive integer connection cap, default `1024`.
 | `:output-buffer-size` | Positive response byte budget and native streaming block size, default `32768`. Zero is invalid.
-| `:fixed-response-max-body-size` | Largest body in bytes that a fixed-response slot takes, `1` to `Integer/MAX_VALUE`, default `32768`. The limit is the smaller of this and `:output-buffer-size`, so raising this alone does not raise it past `:output-buffer-size`. See <<Output storage and backpressure>>.
+| `:fixed-response-max-body-size` | Largest body in bytes that a fixed-response slot takes, `1` to `Integer/MAX_VALUE`, default `32768`. The limit is the smaller of this and `:output-buffer-size`. See <<Output storage and backpressure>>.
 | `:fixed-response-slots` | Fixed-response slots per worker, `1` to `65535`, default `256`. See <<Output storage and backpressure>>.
 | `:server-name` | Server header value, default `"ol.busker/dev"`.
 | `:proxy-status-identity` | Optional Proxy-Status identity.
@@ -87,9 +87,9 @@ either use their documented default or remain unset.
 | `:handshake-timeout` | Optional TLS handshake timeout in milliseconds.
 | `:max-spare-pipes` | Optional non-negative idle pipe cache limit.
 | `:http1-req-timeout` | Optional HTTP/1.1 request timeout in milliseconds.
-| `:http1-req-io-timeout` | Optional HTTP/1.1 request I/O timeout in milliseconds. Covers request receipt and response writes, not the wait for the application's next output unless `:http1-req-io-timeout-while-generating?` is `true`; see <<HTTP/1 streaming timeouts>>.
+| `:http1-req-io-timeout` | Optional HTTP/1.1 request I/O timeout in milliseconds. See <<HTTP/1 streaming timeouts>>.
 | `:http1-upgrade?` | Allow h2c upgrade, default `true`.
-| `:http1-req-io-timeout-while-generating?` | Also run `:http1-req-io-timeout` while a response waits for the application's next output, default `false`. With `true`, an HTTP/1.1 stream that stays silent longer than the timeout is closed; see <<HTTP/1 streaming timeouts>>.
+| `:http1-req-io-timeout-while-generating?` | Also run `:http1-req-io-timeout` while a response waits for the application's next output, default `false`. See <<HTTP/1 streaming timeouts>>.
 | `:http2-idle-timeout` | Optional HTTP/2 idle timeout in milliseconds.
 | `:http2-graceful-shutdown-timeout` | Optional HTTP/2 graceful shutdown timeout in milliseconds.
 | `:http2-max-streams` | Optional positive integer concurrent HTTP/2 stream limit.
@@ -111,29 +111,30 @@ either use their documented default or remain unset.
 
 === Output storage and backpressure
 
-Each worker reserves 256 * `:output-buffer-size` bytes of native streaming storage at startup: 256 reusable blocks. At the default size of 32768 bytes, this is 8 MiB per worker or 64 MiB for eight workers, separate from fixed-response slots. The size must be a positive integer no larger than `Integer/MAX_VALUE`. Busker manages the pools internally; `:buffer-pool` is not configurable.
+Each worker reserves 256 blocks of `:output-buffer-size` bytes of native streaming storage at startup: 8 MiB per worker at the default 32768 bytes. The size is at most `Integer/MAX_VALUE`. Busker manages the pools and rejects a `:buffer-pool` key.
+Each response may have at most `:output-buffer-size` pending payload bytes, at most 64 pending body receipts, and one native send of at most that size. A small nonempty write uses a whole block at first.
+Protocol and compression buffers and request metadata cost memory in addition.
 
-Each worker also has `:fixed-response-slots` fixed-response slots (default 256). A fixed body must fit both `:output-buffer-size` and `:fixed-response-max-body-size` (default 32768). Supported bodies beyond those limits use streaming storage. When every slot of a worker is in use, a fixed response waits for a free one. Each slot takes 16384 + L + about 2150 bytes, where L is the smaller of the two sizes, so the default 256 slots take about 12.5 MiB per worker. A reload with other values builds a new generation with new slots, and requests of the previous generation finish with its slots and limits, so both sets are allocated while it drains.
+Each worker also has `:fixed-response-slots` fixed-response slots for complete responses whose body fits both `:output-buffer-size` and `:fixed-response-max-body-size`, and whose head fits 64 header pairs and 16384 staging bytes. Other responses use streaming storage.
+A slot takes about 16384 + L + 2150 bytes, where L is the smaller of the two sizes, so the default 256 slots take about 12.5 MiB per worker.
+When every slot of a worker is in use, a fixed response waits for a free one.
+A reload with other sizes builds new slots, and the previous generation keeps its slots while it drains.
 
-A fixed-response slot holds a head of at most 64 header pairs and 16384 staging bytes. A larger head uses streaming storage and logs a `:ol.busker.response/large-head` warning.
-
-Each response permits at most that many pending payload bytes and a separate native send of at most that size. At most 64 body receipts may remain pending. Small nonempty writes each initially use a block even when they use fewer bytes. Protocol/compression buffers, request metadata and caller-retained input are additional memory costs.
-
-Blocking emitter calls park under pressure; nonblocking calls return full. Pressure can flush older accepted output. Explicit `flush!` and `close!` require no payload block, receipt slot or mailbox permit.
+Blocking emitter calls park under pressure and nonblocking calls return full. `flush!` and `close!` need no block, receipt or mailbox space.
 
 === HTTP/1 streaming timeouts
 
-`:http1-req-io-timeout` (default 5000) limits how long HTTP/1 request I/O may make no progress: receipt of the request and its body, and each write of the response that the client does not read. By default it does not run while the application has nothing to send, so a silent open HTTP/1 stream, such as an SSE stream between events, stays open however long it waits. Increasing it lets these I/O stalls last longer.
+`:http1-req-io-timeout` (default 5000) limits how long HTTP/1 request I/O may make no progress: receipt of the request and its body, and each response write that the client does not read.
+By default it does not run while the application has nothing to send, so a silent HTTP/1 stream, such as an SSE stream between events, stays open.
+With `:http1-req-io-timeout-while-generating?` set to `true`, the timeout also runs while a streaming response waits for the application, so the server closes an HTTP/1 stream that stays silent longer than the timeout. Every HTTP/1 stream that should stay open then needs a heartbeat at least that often.
 
-`:http1-req-io-timeout-while-generating?` (default `false`) makes the same timeout also run while a streaming response waits for the application's next output. Turn it on to have the server close HTTP/1 streams that stay silent longer than `:http1-req-io-timeout`, for example to drop streams whose clients have gone away without waiting for the next write. Every HTTP/1 stream that should stay open then needs a heartbeat at least that often.
+`:http2-idle-timeout` applies only while an HTTP/2 connection has no response waiting for the application, so a silent HTTP/2 stream stays open.
+An HTTP/3 connection closes when it receives no packet for `:http3-idle-timeout` (default 30000) or the client's idle limit, whichever is shorter. A silent HTTP/3 stream stays open only while the client sends packets or acknowledges server heartbeats.
 
-HTTP/2 and HTTP/3 streams follow separate settings. `:http2-idle-timeout` applies only while an HTTP/2 connection has no response waiting for the application, so a silent HTTP/2 stream stays open. An HTTP/3 connection closes when it receives no packet for `:http3-idle-timeout` (default 30000) or the idle limit the client announces, whichever is shorter, so a silent HTTP/3 stream stays open only while the client sends packets, such as keep-alive pings, or the server sends heartbeats that the client acknowledges.
-
-Heartbeats serve other purposes. On an idle HTTP/1 stream, Busker learns that the client has gone away only at the next write, so a heartbeat lets `on-close!` run promptly (see xref:guides/runtime-model.adoc#http1-idle-disconnects[When an idle HTTP/1.1 client disconnects]). Heartbeats also keep HTTP/3 connections inside their idle timeout, and keep proxies, load balancers and clients that close quiet connections after an idle limit from closing the stream; Busker's settings do not change those limits.
-
-SSE heartbeats must send actual comment bytes such as `":\n\n"`, with `{:wait? false :flush? true}`. An empty write or a flush alone is not a heartbeat. Choose the interval from the shortest idle limit between the server and the client.
-
-Do not accumulate heartbeats while output is stalled: keep at most one pending receipt, poll it with `realized?`, and skip this heartbeat when it is pending or admission returns full. Use `on-close!` independently for connection cleanup.
+Heartbeats also let `on-close!` run promptly after an idle HTTP/1 client goes away (see xref:guides/runtime-model.adoc#http1-idle-disconnects[When an idle HTTP/1.1 client disconnects]), and keep proxies and clients with idle limits from closing the stream.
+An SSE heartbeat sends comment bytes such as `":\n\n"` with `{:wait? false :flush? true}`. An empty write or a flush alone is not a heartbeat.
+Choose the interval from the shortest idle limit between the server and the client.
+Keep at most one heartbeat receipt pending, and skip a heartbeat while one is pending or admission returns full.
 
 == Entrypoints (`:entrypoints`)
 
