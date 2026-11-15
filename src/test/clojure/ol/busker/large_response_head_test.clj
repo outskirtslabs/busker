@@ -4,6 +4,7 @@
    [clojure.test :refer [deftest is testing]]
    [ol.busker :as busker]
    [ol.busker.fixed-final :as fixed-final]
+   [ol.busker.generation :as generation]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as protocols]
    [ol.busker.response :as response]
@@ -103,25 +104,37 @@
                    {:body emitter})
       {:status 200 :body "ready"})))
 
-(defn- start-server []
-  (let [tls-port (util/free-port)
-        plain-port (util/free-port)
-        server (busker/start!
-                (util/with-static-tls
-                  (util/with-handler
-                    handler
-                    {:n-workers 1
-                     :compress? false
-                     :entrypoints {:tls {:bind (str "127.0.0.1:" tls-port) :http3? true}
-                                   :plain {:bind (str "127.0.0.1:" plain-port) :tls false}}})))]
-    (util/wait-for-curl-ready! :https :h1 tls-port "/")
-    (util/wait-for-curl-ready! :http :h1 plain-port "/")
-    {:server server :tls-port tls-port :plain-port plain-port}))
+(defn- start-server
+  ([] (start-server {}))
+  ([options]
+   (let [tls-port (util/free-port)
+         plain-port (util/free-port)
+         server (busker/start!
+                 (util/with-static-tls
+                   (util/with-handler
+                     handler
+                     (merge {:n-workers 1
+                             :compress? false
+                             :entrypoints {:tls {:bind (str "127.0.0.1:" tls-port) :http3? true}
+                                           :plain {:bind (str "127.0.0.1:" plain-port) :tls false}}}
+                            options))))]
+     (util/wait-for-curl-ready! :https :h1 tls-port "/")
+     (util/wait-for-curl-ready! :http :h1 plain-port "/")
+     {:server server :tls-port tls-port :plain-port plain-port})))
+
+(defn- log-large-head
+  "Returns a trove log function that adds `[level data]` of each large-head
+  warning to `warnings`."
+  [warnings]
+  (fn [_ns _coords level id lazy_]
+    (when (= ::response/large-head id)
+      (swap! warnings conj [level (:data (force lazy_))]))))
 
 (defn- observe
   "Calls `f` with `redefs` in place and returns its result with the fixed slots
   published, the streaming writers created and the data of each large-head
-  warning while it ran."
+  warning while it ran. Each large head logs unless `redefs` sets the
+  interval."
   ([f] (observe {} f))
   ([redefs f]
    (let [published (AtomicInteger.)
@@ -138,10 +151,8 @@
              result))
          #'response-queue/create-response-writer
          (fn [req] (.incrementAndGet writers) (create-writer req))
-         #'trove/*log-fn*
-         (fn [_ns _coords level id lazy_]
-           (when (= ::response/large-head id)
-             (swap! warnings conj [level (:data (force lazy_))])))}
+         #'response/large-head-interval-nanos 0
+         #'trove/*log-fn* (log-large-head warnings)}
         redefs)
        (fn []
          (let [result (f)]
@@ -169,11 +180,17 @@
   [shape case-name]
   (str "/" shape "/" case-name "?token=secret"))
 
-(defn- warning [status shape case-name]
-  (let [head (heads case-name)]
-    [:warn {:request-method :get :uri (str "/" shape "/" case-name)
-            :status status :header-count (count head)
-            :header-bytes (serialization/header-bytes head)}]))
+(defn- warning
+  ([entrypoint shape case-name] (warning entrypoint shape case-name 1))
+  ([entrypoint shape case-name n]
+   (let [head (heads case-name)]
+     ;; Every case has distinct names of equal size, so the first three names
+     ;; are the largest.
+     [:warn {:request-method :get :uri (str "/" shape "/" case-name) :entrypoint entrypoint
+             :status 200 :header-count (count head)
+             :header-bytes (serialization/header-bytes head)
+             :largest-headers (mapv (fn [[k v]] [k 1 (+ (count k) (count v))]) (take 3 head))
+             :count-since-last-line n}])))
 
 (deftest the-cases-sit-on-either-side-of-the-fixed-header-space
   (is (= 16384 (serialization/header-staging-bytes (heads "bytes-limit"))))
@@ -202,7 +219,7 @@
                  (:heads result))
               context)
           (is (= (if (and fits (#{"fixed" "producer"} shape)) [1 0] [0 1]) paths) context)
-          (is (= (if fits [] [(warning (if (= "info" shape) 103 200) shape case-name)]) warnings)
+          (is (= (if (or fits (= "info" shape)) [] [(warning :tls shape case-name)]) warnings)
               context)))
       (finally
         (busker/stop! server)))))
@@ -246,7 +263,7 @@
           (is (= [version 200 "ok"] [(:version result) (:status result) (:body result)]) context)
           (is (= (multimap (heads "huge")) (:headers result)) context)
           (is (= [0 1] paths) context)
-          (is (= [(warning 200 shape "huge")] warnings) context)))
+          (is (= [(warning :plain shape "huge")] warnings) context)))
       (doseq [shape ["fixed" "producer" "stream"]]
         (let [{:keys [result paths warnings]}
               (observe #(curl-heads :h3 tls-port (request-path shape "curl-huge")))
@@ -255,7 +272,7 @@
           (is (= [[200 (heads "curl-huge")]] (:heads result)) context)
           (is (= "ok" (:body result)) context)
           (is (= [0 1] paths) context)
-          (is (= [(warning 200 shape "curl-huge")] warnings) context)))
+          (is (= [(warning :tls shape "curl-huge")] warnings) context)))
       (finally
         (busker/stop! server)))))
 
@@ -281,7 +298,7 @@
                          #(curl-heads proto tls-port (request-path "retry" "count-over")))]
             (is (= [:full :accepted] @emit-statuses) (pr-str proto))
             (is (= [[200 (heads "count-over")]] (:heads result)) (pr-str proto))
-            (is (= [(warning 200 "retry" "count-over")] warnings) (pr-str proto))))
+            (is (= [(warning :tls "retry" "count-over")] warnings) (pr-str proto))))
         (testing "an emit! that gets :closed"
           (reset! emit-statuses [])
           (let [{:keys [result warnings]}
@@ -310,16 +327,15 @@
   (let [{:keys [server tls-port]} (start-server)
         warnings (atom [])]
     (try
-      (with-redefs [trove/*log-fn* (fn [_ns _coords level id lazy_]
-                                     (when (= ::response/large-head id)
-                                       (swap! warnings conj [level (:data (force lazy_))])))]
+      (with-redefs [response/large-head-interval-nanos 0
+                    trove/*log-fn* (log-large-head warnings)]
         (doseq [proto [:h1 :h2 :h3]]
           (reset! warnings [])
           (let [entered (CountDownLatch. 1)
                 release (CountDownLatch. 1)
                 _ (reset! blocking-body (gated-stream entered release))
                 result (future (curl-heads proto tls-port (request-path "blocking" "count-over")))
-                expected [(warning 200 "blocking" "count-over")]]
+                expected [(warning :tls "blocking" "count-over")]]
             (try
               (is (.await entered 10 TimeUnit/SECONDS) (pr-str proto))
               (is (= expected @warnings) (pr-str proto :while-the-body-blocks))
@@ -329,6 +345,41 @@
               (is (= [[200 (heads "count-over")]] (:heads received)) (pr-str proto))
               (is (= "ok" (:body received)) (pr-str proto)))
             (is (= expected @warnings) (pr-str proto :after-the-body-ends)))))
+      (finally
+        (busker/stop! server)))))
+
+(deftest large-heads-log-at-most-one-line-a-minute
+  (let [{:keys [server tls-port]} (start-server)
+        ^java.util.concurrent.atomic.AtomicLongArray state
+        (:large-head-warnings (first (::generation/workers (:instance (:active @(:busker/state server))))))
+        warnings (atom [])
+        messages (atom [])]
+    (try
+      (with-redefs [trove/*log-fn* (fn [_ns _coords level id lazy_]
+                                     (when (= ::response/large-head id)
+                                       (let [{:keys [msg data]} (force lazy_)]
+                                         (swap! messages conj msg)
+                                         (swap! warnings conj [level data]))))]
+        (curl-heads :h2 tls-port (request-path "fixed" "count-over"))
+        (is (= [(warning :tls "fixed" "count-over")] @warnings) "first head")
+        (is (= ["Large response head: GET /fixed/count-over"] @messages))
+        (curl-heads :h2 tls-port (request-path "stream" "bytes-over"))
+        (is (= 1 (count @warnings)) "inside the minute")
+        ;; Make the minute end now.
+        (.set state 0 (System/nanoTime))
+        (curl-heads :h2 tls-port (request-path "producer" "count-over"))
+        (is (= [(warning :tls "fixed" "count-over") (warning :tls "producer" "count-over" 2)]
+               @warnings)))
+      (finally
+        (busker/stop! server)))))
+
+(deftest large-heads-do-not-log-when-the-warnings-are-off
+  (let [{:keys [server tls-port]} (start-server {:large-response-head-warnings? false})]
+    (try
+      (let [{:keys [result warnings]}
+            (observe #(curl-heads :h2 tls-port (request-path "fixed" "count-over")))]
+        (is (= [[200 (heads "count-over")]] (:heads result)))
+        (is (= [] warnings)))
       (finally
         (busker/stop! server)))))
 

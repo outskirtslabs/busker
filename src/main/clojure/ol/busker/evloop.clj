@@ -137,6 +137,7 @@
             response-slots
             ^long response-slot-payload-capacity
             fixed-body-limit
+            large-head-warnings
             callback-dispatch
             request-dispatch
             ^HashMap requests
@@ -345,6 +346,8 @@
    - :response-slots - generation-scoped native slot views
    - :response-slot-payload-capacity - writable bytes in one slot
    - :fixed-body-limit - largest body in bytes that a slot takes
+   - :large-head-warnings - generation-wide AtomicLongArray of the next time a
+     large-head warning may go out and the count since the last one, or nil
    - :zero-wait-turn! - no-argument function that runs one native loop turn without
      waiting, called while the worker polls before sleep
    - :hot-poll-ns - longest poll before sleep, in nanoseconds; 0 disables the poll
@@ -353,7 +356,7 @@
 
   [loop-fn message-handler wakeup-receiver
    & {:keys [callback-dispatch request-dispatch response-receiver response-slots
-             response-slot-payload-capacity fixed-body-limit thread-name-prefix stream-pool
+             response-slot-payload-capacity fixed-body-limit large-head-warnings thread-name-prefix stream-pool
              on-native-failure! discard-command! zero-wait-turn! hot-poll-ns]
       :or {thread-name-prefix "h2o-evloop"
            hot-poll-ns 0}}]
@@ -399,7 +402,8 @@
                              :response-receiver-lock (ReentrantReadWriteLock.)
                              :response-slots response-slots
                              :response-slot-payload-capacity response-slot-payload-capacity
-                             :fixed-body-limit fixed-body-limit})
+                             :fixed-body-limit fixed-body-limit
+                             :large-head-warnings large-head-warnings})
         thread (Thread. #(run-evloop-on-thread!
                           (assoc worker :thread (Thread/currentThread)))
                         (format "%s-%d" thread-name-prefix id))

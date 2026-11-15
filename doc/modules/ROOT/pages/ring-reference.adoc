@@ -92,7 +92,7 @@ Busker sends scalar strings unchanged and applies `str` to other scalar values.
 It emits each element of a sequential response header value as a separate field line, in sequence order.
 This supports Ring vector values and the sequential `Set-Cookie` values produced by `wrap-cookies` and `wrap-session`.
 
-Busker sets no limit on response headers. A head above 64 header pairs or 16384 staging bytes takes the streaming path and logs a `:ol.busker.response/large-head` warning.
+Busker sets no limit on response headers. A head above 64 header pairs or 16384 staging bytes takes the streaming path. Busker logs at most one `:ol.busker.response/large-head` warning a minute for such heads.
 
 Busker does not infer a response `content-type`; set that header in the response or with middleware.
 

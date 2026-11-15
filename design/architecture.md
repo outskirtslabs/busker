@@ -61,7 +61,7 @@ Internally there are two paths for responses to take: streaming responses or fix
 A returned Ring response takes the fixed-final path when nothing was written to its emitter, its status is 200 to 999, its head fits 64 header pairs and 16384 staging bytes, and its body is nil, a byte array, a ByteBuffer, or a string whose encoding fits the fixed body limit, the smaller of `:output-buffer-size` and `:fixed-response-max-body-size`.
 This is a perf optimization so small requests can be sent in one clj->h2o operation.
 
-Other responses stream. A head that does not fit a slot streams and logs `:ol.busker.response/large-head`.
+Other responses stream. A head that does not fit a slot streams and logs `:ol.busker.response/large-head` at most once a minute per generation.
 
 ### Fixed-final responses
 

@@ -79,6 +79,7 @@ either use their documented default or remain unset.
 | `:output-buffer-size` | Positive response byte budget and native streaming block size, default `32768`. Zero is invalid.
 | `:fixed-response-max-body-size` | Largest body in bytes that a fixed-response slot takes, `1` to `Integer/MAX_VALUE`, default `32768`. The limit is the smaller of this and `:output-buffer-size`. See <<Output storage and backpressure>>.
 | `:fixed-response-slots` | Fixed-response slots per worker, `1` to `65535`, default `256`. See <<Output storage and backpressure>>.
+| `:large-response-head-warnings?` | Boolean, default `true`. Logs at most one `:ol.busker.response/large-head` warning a minute for response heads that do not fit a fixed-response slot.
 | `:server-name` | Server header value, default `"ol.busker/dev"`.
 | `:proxy-status-identity` | Optional Proxy-Status identity.
 | `:max-request-entity-size` | Optional positive integer request body byte limit.

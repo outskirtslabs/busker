@@ -16,6 +16,7 @@
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]
+   [ol.busker.config :as cfg]
    [ol.busker.fixed-final :as fixed-final]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as p]
@@ -31,6 +32,7 @@
    [java.nio ByteBuffer CharBuffer]
    [java.nio.charset Charset CharsetEncoder CodingErrorAction StandardCharsets]
    [java.util Arrays Iterator Map]
+   [java.util.concurrent.atomic AtomicLongArray]
    [clojure.lang MapEntry RT]
    [ol.busker.internal.protocols Request]
    [ol.busker.response_queue BlockOutput]))
@@ -328,18 +330,48 @@
 (defn- normalized-head [response length informational?]
   (build-head response length informational? (get-compress-hint response)))
 
+(def ^:private large-head-interval-nanos (* 60 1000 1000 1000))
+
+(defn- largest-headers
+  "Returns up to 3 header names of `headers` with the most bytes, as
+  `[name count bytes]`."
+  [headers]
+  (->> headers
+       (reduce (fn [m [^String n ^String v]]
+                 (let [[c b] (get m n [0 0])]
+                   (assoc m n [(inc (long c)) (+ (long b) (serialization/utf8-length n)
+                                                 (serialization/utf8-length v))])))
+               {})
+       (sort-by (fn [[n [_ b]]] [(- (long b)) n]))
+       (into [] (comp (take 3) (map (fn [[n [c b]]] [n c b]))))))
+
 (defn- warn-large-head!
-  "Logs that the accepted `head` of the response to `req` does not fit a fixed
-  slot. The URI leaves out the query string, which can hold secrets."
+  "Counts the accepted `head` of the response to `req`, which does not fit a
+  fixed slot. Logs it with the count since the last line when a minute has
+  passed since that line. The URI leaves out the query string, which can hold
+  secrets."
   [req head]
-  (try
-    (let [req-ctx (:req-ctx req)]
-      (trove/log! {:level :warn :id ::large-head
-                   :msg "Response head does not fit the fixed header space and takes the streaming path"
-                   :data {:request-method (:request-method req-ctx) :uri (h2o/request-uri req-ctx)
-                          :status (:status head) :header-count (count (:headers head))
-                          :header-bytes (:header-bytes head)}}))
-    (catch Throwable _ nil)))
+  (when-let [^AtomicLongArray state (:large-head-warnings (:worker req))]
+    (try
+      (.incrementAndGet state 1)
+      (let [now (System/nanoTime)
+            next-at (.get state 0)]
+        (when (and (>= (- now next-at) 0)
+                   (.compareAndSet state 0 next-at (+ now (long large-head-interval-nanos))))
+          (let [req-ctx (:req-ctx req)
+                method (:request-method req-ctx)
+                uri (h2o/request-uri req-ctx)]
+            (trove/log! {:level :warn :id ::large-head
+                         :msg (str "Large response head: " (some-> method name str/upper-case) " " uri)
+                         :data {:request-method method
+                                :uri uri
+                                :entrypoint (nth (cfg/entrypoint-ids (:config req)) (:entrypoint req-ctx) nil)
+                                :status (:status head)
+                                :header-count (count (:headers head))
+                                :header-bytes (:header-bytes head)
+                                :largest-headers (largest-headers (:headers head))
+                                :count-since-last-line (.getAndSet state 1 0)}}))))
+      (catch Throwable _ nil))))
 
 (defn- apply-head! [req head informational?]
   (let [{:keys [status headers content-length compress-hint]} head
@@ -596,8 +628,8 @@
                                     {:bytes capacity :output-buffer-size buffer-size})))
                 head (when (or response? (nil? committed))
                        (normalized-head response (when (:end? opts) length) info?))
-                large-head? (and head (not (fixed-final/head-fits? (count (:headers head))
-                                                                   (:header-bytes head))))
+                large-head? (and head (not info?) (not (fixed-final/head-fits? (count (:headers head))
+                                                                               (:header-bytes head))))
                 effective-head (or head committed (normalized-head response nil false))
                 opts (assoc opts :body? body? :informational? info?
                             :suppress-body? (or (= :head (:request-method (:req-ctx req)))

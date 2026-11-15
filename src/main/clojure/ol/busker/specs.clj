@@ -468,6 +468,12 @@
    :default 256})
 (s/def ::fixed-response-slots #(and (pos-int? %) (<= % 65535)))
 
+(def large-response-head-warnings?
+  {:key ::large-response-head-warnings?
+   :doc "Log at most one warning a minute for response heads that do not fit a fixed-response slot."
+   :default true})
+(s/def ::large-response-head-warnings? boolean?)
+
 (def server-name
   {:key ::server-name
    :doc "Server identifier for Server response header."
@@ -651,6 +657,7 @@
                    ::output-buffer-size
                    ::fixed-response-max-body-size
                    ::fixed-response-slots
+                   ::large-response-head-warnings?
                    ::server-name
                    ::proxy-status-identity
                    ::max-request-entity-size
@@ -739,6 +746,7 @@
    output-buffer-size
    fixed-response-max-body-size
    fixed-response-slots
+   large-response-head-warnings?
    server-name
    proxy-status-identity
    max-request-entity-size
@@ -783,6 +791,7 @@
    :output-buffer-size (:default output-buffer-size)
    :fixed-response-max-body-size (:default fixed-response-max-body-size)
    :fixed-response-slots (:default fixed-response-slots)
+   :large-response-head-warnings? (:default large-response-head-warnings?)
    :server-name (:default server-name)
    :compress? (:default compress?)
    :compress-min-size (:default compress-min-size)

@@ -1168,6 +1168,8 @@
         fixed-body-limit (min (long (:output-buffer-size config))
                               (long (:fixed-response-max-body-size config)))
         response-slot-payload-capacity (+ fixed-final/max-header-staging-bytes fixed-body-limit)
+        large-head-warnings (when (:large-response-head-warnings? config)
+                              (doto (AtomicLongArray. 2) (.set 0 (System/nanoTime))))
         ;; MemorySegment.setString writes a trailing NUL outside the logical payload.
         response-slot-storage-capacity (inc response-slot-payload-capacity)
         response-receivers
@@ -1216,6 +1218,7 @@
            ::response-slots response-slots
            ::response-slot-payload-capacity response-slot-payload-capacity
            ::fixed-body-limit fixed-body-limit
+           ::large-head-warnings large-head-warnings
            ::on-close-callbacks on-close-callbacks)))
 
 (defn- init-tls-http3-state
@@ -1375,7 +1378,7 @@
 (defn- init-worker-state
   [{::keys [config executor n-workers loops contexts listener-runtimes http3-worker-contexts
             max-connections shutting-down? message-handler wakeup-receivers response-receivers
-            response-slots response-slot-payload-capacity fixed-body-limit stream-pools
+            response-slots response-slot-payload-capacity fixed-body-limit large-head-warnings stream-pools
             arena stop-accepting-remaining_ stopped-accepting_
             worker-connection-counts accepting-workers limit-waiting]
     :as state} cleanup-state_]
@@ -1436,6 +1439,7 @@
                          :response-slots (nth response-slots thread-idx)
                          :response-slot-payload-capacity response-slot-payload-capacity
                          :fixed-body-limit fixed-body-limit
+                         :large-head-warnings large-head-warnings
                          :callback-dispatch callback-dispatch
                          :request-dispatch reuse
                          :zero-wait-turn! (zero-wait-turn-fn loop-ptr reuse)
