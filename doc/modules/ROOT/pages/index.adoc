@@ -42,10 +42,10 @@ Add at least one native dependency for your target platform:
 [source,clojure]
 ----
 ;; Choose at least one of the following.
-com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.5"}
-com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.5"}
-com.outskirtslabs.busker/macos-x86-64 {:mvn/version "0.0.5"}
-com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.5"}
+com.outskirtslabs.busker/linux-x86-64 {:mvn/version "0.0.6"}
+com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.6"}
+com.outskirtslabs.busker/macos-x86-64 {:mvn/version "0.0.6"}
+com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.6"}
 ----
 
 If you include multiple native dependencies, Busker chooses the one matching the current platform.

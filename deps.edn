@@ -54,10 +54,10 @@
                                   http-kit/http-kit                 {:mvn/version "2.9.0-beta4"}
                                   com.outskirtslabs/busker {:git/url "https://github.com/outskirtslabs/busker"
                                                             :git/sha "f3fe46007267d7f0afe87a768e46b604d2e8f327"}
-                                  com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.5"}
-                                  com.outskirtslabs.busker/linux-x86-64  {:mvn/version "0.0.5"}
-                                  com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.5"}
-                                  com.outskirtslabs.busker/macos-x86-64  {:mvn/version "0.0.5"}
+                                  com.outskirtslabs.busker/linux-aarch64 {:mvn/version "0.0.6"}
+                                  com.outskirtslabs.busker/linux-x86-64  {:mvn/version "0.0.6"}
+                                  com.outskirtslabs.busker/macos-aarch64 {:mvn/version "0.0.6"}
+                                  com.outskirtslabs.busker/macos-x86-64  {:mvn/version "0.0.6"}
                                   org.eclipse.jetty/jetty-alpn-java-server {:mvn/version "12.1.0"}
                                   org.eclipse.jetty.http2/jetty-http2-server {:mvn/version "12.1.0"}
                                   ring/ring-jetty-adapter           {:mvn/version "1.15.3"}}}

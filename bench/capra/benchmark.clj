@@ -313,10 +313,10 @@
         origin (if (Boolean/getBoolean "busker.bench.local")
                  (local-origin "." source native resource-path)
                  (do
-                   (when-not (and revision native (= "0.0.5" (version ["com.outskirtslabs.busker" artifact])))
-                     (throw (ex-info "Benchmark requires Git Busker and native 0.0.5"
+                   (when-not (and revision native (= "0.0.6" (version ["com.outskirtslabs.busker" artifact])))
+                     (throw (ex-info "Benchmark requires Git Busker and native 0.0.6"
                                      {:source (str source) :native (str native)})))
-                   {:busker-mode :pinned :busker-revision revision :native-version "0.0.5"}))
+                   {:busker-mode :pinned :busker-revision revision :native-version "0.0.6"}))
         digest (MessageDigest/getInstance "SHA-256")]
     (with-open [in (io/input-stream native)]
       (let [buffer (byte-array 65536)]
