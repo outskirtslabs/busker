@@ -368,8 +368,8 @@
                     (#'response/normalized-head {:status 103 :headers headers} nil true)]]
         (is (= [header-count header-bytes] [(count (:headers head)) (:header-bytes head)]))))))
 
-(deftest informational-head-lowercases-names-and-drops-content-length
-  (is (= {:status 103 :headers [["link" "</a.css>; rel=preload"] ["x-two" "1"] ["x-two" "2"]]
+(deftest informational-head-drops-content-length
+  (is (= {:status 103 :headers [["Link" "</a.css>; rel=preload"] ["X-Two" "1"] ["X-Two" "2"]]
           :content-length 3}
          (select-keys (#'response/normalized-head
                        {:status 103 :headers (array-map "Link" "</a.css>; rel=preload"

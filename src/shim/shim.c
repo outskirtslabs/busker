@@ -521,8 +521,21 @@ static void clj_generator_stop(h2o_generator_t *gen, h2o_req_t *req) {
   }
 }
 
+/* Copies `len` bytes of `src` to `dst` in lower case and returns whether any
+ * byte changed. */
+static bool copy_lower_case(char *dst, const char *src, size_t len) {
+  bool changed = false;
+  for (size_t i = 0; i < len; ++i) {
+    dst[i] = h2o_tolower(src[i]);
+    changed |= dst[i] != src[i];
+  }
+  return changed;
+}
+
 /* Copy headers from clj_header_t array to h2o_req_t response headers using pool
- * allocation */
+ * allocation. Names go to H2O in lower case: HTTP/2 and HTTP/3 reject other
+ * names (RFC 9113 section 8.2.1, RFC 9114 section 4.2), and H2O tokens are
+ * lower case. */
 static void copy_headers_to_response(h2o_req_t *req,
                                      const clj_header_t *headers,
                                      size_t headers_len) {
@@ -538,15 +551,19 @@ static void copy_headers_to_response(h2o_req_t *req,
     memcpy(pool_value, value_data, value_len);
     pool_value[value_len] = '\0';
 
+    char *pool_name = NULL;
+    if (token == NULL) {
+      pool_name = h2o_mem_alloc_pool(&req->pool, char, name_len + 1);
+      if (copy_lower_case(pool_name, name_data, name_len))
+        token = h2o_lookup_token(pool_name, name_len);
+      pool_name[name_len] = '\0';
+    }
     if (token != NULL) {
       h2o_add_header(&req->pool, &req->res.headers, token, NULL, pool_value,
                      value_len);
     } else {
-      char *pool_name = h2o_mem_alloc_pool(&req->pool, char, name_len + 1);
-      memcpy(pool_name, name_data, name_len);
-      pool_name[name_len] = '\0';
       h2o_add_header_by_str(&req->pool, &req->res.headers, pool_name, name_len,
-                            0, pool_name, pool_value, value_len);
+                            0, NULL, pool_value, value_len);
     }
   }
 }

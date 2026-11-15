@@ -270,7 +270,7 @@
   "Returns the head of `response` from one pass over its headers.
 
   Pairs keep header order. Names and values pass through `str`; each item of a
-  sequential value becomes its own pair; informational heads use lowercase names.
+  sequential value becomes a separate pair.
   Content-length headers in any letter case stay out of the pairs. The first
   one with a value gives the content length, otherwise `length` does for a final
   head, otherwise it is `-1`. Status 205 always has content length 0 and status
@@ -293,9 +293,7 @@
             (recur pairs n (if (nil? header-length) value header-length))
             (let [needed (+ n (if (sequential? value) (long (count value)) 1))
                   pairs (with-capacity pairs needed)]
-              (put-header-pairs! pairs n
-                                 (if informational? (str/lower-case (str header-name)) (str header-name))
-                                 value)
+              (put-header-pairs! pairs n (str header-name) value)
               (recur pairs needed header-length))))
         (let [pairs (cond
                       (zero? n) []

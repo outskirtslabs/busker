@@ -43,7 +43,7 @@ See the xref:ROOT:api/ol-busker-protocols.adoc#ResponseEmitter[`ResponseEmitter`
 == Compatibility depends on the application
 
 Synchronous middleware can wrap a Busker handler, but it must produce request and response forms that Busker supports.
-For example, HTTP/2 and HTTP/3 require lowercase response header names. Busker suppresses payload bytes for `HEAD`; Ring's `wrap-head` middleware can also reuse a GET handler's representation headers.
+Busker suppresses payload bytes for `HEAD`; Ring's `wrap-head` middleware can also reuse a GET handler's representation headers.
 Busker also leaves form and multipart parsing to application middleware.
 
 The optional `ring-core-protocols` library supplies Ring's body-writing protocol and implementations for additional body types.

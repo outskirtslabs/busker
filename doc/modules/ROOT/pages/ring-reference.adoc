@@ -88,9 +88,8 @@ Applications should keep ordinary final statuses in the Ring range of 200 throug
 Busker treats an omitted `:headers` map as empty and an omitted or `nil` `:body` as an empty body.
 If a handler returns `nil`, Busker sends a 404 response.
 
-Response header names must be lowercase strings.
-Busker does not normalize ordinary final response header names before passing them to libh2o, while HTTP/2 and HTTP/3 require lowercase field names.
-Title-case response headers from an application or middleware are therefore unsupported for HTTP/2 and HTTP/3.
+Response header names are strings in any letter case.
+Busker sends them in lowercase on every protocol, as HTTP/2 and HTTP/3 require.
 Busker sends scalar strings unchanged and applies `str` to other scalar values.
 It emits each element of a sequential response header value as a separate field line, in sequence order.
 This supports Ring vector values and the sequential `Set-Cookie` values produced by `wrap-cookies` and `wrap-session`.
@@ -269,5 +268,3 @@ A HEAD handler can instead provide an explicit `content-length` equal to the num
 Synchronous Ring middleware works when it produces the request and response forms supported on this page.
 You can wrap the application handler yourself, or list wrappers in a dispatcher's `:middleware` vector.
 The xref:configuration.adoc[configuration reference] accepts a wrapper function, a qualified symbol, or `[wrapper options]`.
-Middleware responses must keep header names lowercase for HTTP/2 and HTTP/3.
-Ring's `wrap-cookies` and `wrap-session` emit a title-case `Set-Cookie` name, so their response path remains limited to HTTP/1.1 unless the application lowercases that name.

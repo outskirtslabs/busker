@@ -37,7 +37,7 @@ Tests must show that:
 - command data contains Java values rather than native segments;
 - native staging matches the shim header layout;
 - execution outside the request worker fails before native use;
-- repeated header values and informational lowercase names remain exact;
+- repeated header values stay exact;
 - stale commands never touch a native request; and
 - streaming and informational response ordering remains exact.
 
