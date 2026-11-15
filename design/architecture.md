@@ -81,7 +81,7 @@ An `emit!` producer with `:end? true` on an emitter without earlier output also 
 
 ### Content length
 
-On both paths the content length is the handler's `content-length` header, or else the body's length. On the fixed path, a HEAD or 304 response with a nil body carries none unless the handler sets one. On the streaming path, such a response gets 0. A 204 response never carries one and a 205 response carries 0. HEAD, 204, 205 and 304 responses send no body bytes. A `content-length` that is not a non-negative integer, or that differs from a known complete body length, makes the response invalid. Busker never corrects it. Statuses 204, 205 and 304 and a HEAD response with an empty body are not checked. A string or sequence body in a charset that Java can name but not encode is also invalid. An `emit!` producer on a fixed slot whose output differs from the head's content length throws before publication.
+On both paths the content length is the handler's `content-length` header, or else the body's length. A HEAD or 304 response with a nil body carries none unless the handler sets one. A 204 response never carries one and a 205 response carries 0. HEAD, 204, 205 and 304 responses send no body bytes. A `content-length` that is not a non-negative integer, or that differs from a known complete body length, makes the response invalid. Busker never corrects it. Statuses 204, 205 and 304 and a HEAD response with an empty body are not checked. A string or sequence body in a charset that Java can name but not encode is also invalid. An `emit!` producer on a fixed slot whose output differs from the head's content length throws before publication.
 
 ### Streaming responses
 

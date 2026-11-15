@@ -268,6 +268,13 @@
 (def ^:private reset-content-status 205)
 (def ^:private not-modified-status 304)
 
+(defn- bodiless-length-unknown?
+  "True when a HEAD or 304 response has a nil `body`. The length a GET or a
+  200 would carry is then unknown."
+  [body status request-method]
+  (and (nil? body)
+       (or (= not-modified-status status) (= :head request-method))))
+
 (defn- build-head
   "Returns the head of `response` from one pass over its headers.
 
@@ -626,8 +633,9 @@
                 _ (when (and (not (:wait? opts)) (> capacity buffer-size))
                     (throw (ex-info "Nonblocking body exceeds output-buffer-size"
                                     {:bytes capacity :output-buffer-size buffer-size})))
+                unknown-length? (bodiless-length-unknown? body status (:request-method (:req-ctx req)))
                 head (when (or response? (nil? committed))
-                       (normalized-head response (when (:end? opts) length) info?))
+                       (normalized-head response (when (and (:end? opts) (not unknown-length?)) length) info?))
                 large-head? (and head (not info?) (not (fixed-final/head-fits? (count (:headers head))
                                                                                (:header-bytes head))))
                 effective-head (or head committed (normalized-head response nil false))
@@ -743,9 +751,7 @@
                               (< length (long (or (:compress-min-size config) 0))))
                        h2o/H2O_COMPRESS_HINT_DISABLE
                        hint)
-                ;; Without a body, the length a GET or a 200 would carry is unknown.
-                unknown-length? (and (nil? body)
-                                     (or (= not-modified-status status) (= :head request-method)))]
+                unknown-length? (bodiless-length-unknown? body status request-method)]
             ;; The slot write stages a vector as normalized pairs, so header
             ;; shapes other than a map, such as entry vectors, take build-head.
             (if-let [^FixedHead head (let [headers (:headers response)]

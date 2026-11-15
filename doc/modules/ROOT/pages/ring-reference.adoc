@@ -256,7 +256,7 @@ This lets an existing GET handler produce the status and headers for HEAD withou
 Applications may also handle HEAD explicitly.
 
 If middleware derives `content-length` from the GET body, it must calculate the length before `wrap-head` replaces the body with `nil`.
-Otherwise Busker sees an empty body and sends no `content-length` when the response fits a fixed-response slot, or calculates a length of zero when it does not.
+Otherwise Busker sees an empty body and sends no `content-length`.
 A HEAD handler can instead provide an explicit `content-length` equal to the number of bytes that the corresponding GET response would send.
 
 == Middleware
