@@ -18,6 +18,7 @@
    [ring.middleware.session :as ring-session])
   (:import
    java.io.File
+   [java.net InetSocketAddress Socket]
    java.nio.file.Files
    [java.security.cert CertificateFactory X509Certificate]))
 
@@ -420,6 +421,38 @@
           (is (= "::1" (:server-name req)))
           (is (= port (:server-port req)))
           (is (contains? #{"::1" "0:0:0:0:0:0:0:1"} (:remote-addr req))))))))
+
+(defn- http1-get-body
+  "Sends a keep-alive GET on `socket` and returns the response body as a string."
+  [^Socket socket]
+  (let [^java.io.OutputStream out (.getOutputStream socket)
+        ^java.io.InputStream in (.getInputStream socket)]
+    (.write out (.getBytes "GET / HTTP/1.1\r\nhost: localhost\r\n\r\n" "US-ASCII"))
+    (.flush out)
+    (let [head (loop [acc (StringBuilder.)]
+                 (if (str/ends-with? (str acc) "\r\n\r\n")
+                   (str acc)
+                   (recur (.append acc (char (.read in))))))
+          length (parse-long (second (re-find #"(?i)content-length: (\d+)" head)))]
+      (String. (.readNBytes in (int length)) "US-ASCII"))))
+
+(deftest remote-addr-follows-the-connection-test
+  (testing "requests of connections from three peer addresses on one worker each get the address of their connection as :remote-addr"
+    (let [port (util/free-port)]
+      (with-server [_server (busker/start!
+                             (util/with-handler
+                               (fn [req] {:status 200 :body (:remote-addr req)})
+                               {:n-workers 1
+                                :entrypoints {:v4 {:bind (str "127.0.0.1:" port) :http3? false :tls false}
+                                              :v6 {:bind (str "[::1]:" port) :http3? false :tls false}}}))]
+        (with-open [v4 (Socket. "127.0.0.1" (int port))
+                    ;; Same family and address length as v4, other address bytes.
+                    v4b (doto (Socket.)
+                          (.bind (InetSocketAddress. "127.0.0.2" 0))
+                          (.connect (InetSocketAddress. "127.0.0.1" (int port))))
+                    v6 (Socket. "::1" (int port))]
+          (is (= ["127.0.0.1" "127.0.0.2" "127.0.0.1" "::1" "127.0.0.2" "127.0.0.2" "::1"]
+                 (mapv http1-get-body [v4 v4b v4 v6 v4b v4b v6]))))))))
 
 (deftest persistent-session-ticket-keys-survive-restart-test
   (testing "top-level tls storage persists session ticket keys across restart"

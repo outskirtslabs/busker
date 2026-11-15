@@ -570,6 +570,40 @@ static int clj_h2o_req_has_body(h2o_req_t *req) {
   return (req->proceed_req != NULL || req->entity.base != NULL) ? 1 : 0;
 }
 
+typedef struct {
+  struct sockaddr_storage addr;
+  socklen_t addr_len; /* 0 when text is not valid */
+  size_t len;
+  char text[NI_MAXHOST];
+} clj_peer_text_t;
+
+/* The numeric text of the last peer address this worker thread formatted.
+   The requests of a connection come in runs, mostly on HTTP/2 and HTTP/3, so
+   one entry saves getnameinfo for most of them. The text depends only on the
+   address bytes, which also change when an HTTP/3 connection migrates. */
+static __thread clj_peer_text_t tls_peer_text;
+
+static const clj_peer_text_t *peer_text(h2o_conn_t *conn) {
+  struct sockaddr_storage addr;
+  socklen_t addr_len =
+      conn->callbacks->get_peername(conn, (struct sockaddr *)&addr);
+  if (addr_len == 0)
+    return NULL;
+
+  clj_peer_text_t *peer = &tls_peer_text;
+  if (peer->addr_len == addr_len && memcmp(&peer->addr, &addr, addr_len) == 0)
+    return peer;
+
+  peer->addr_len = 0;
+  if (getnameinfo((struct sockaddr *)&addr, addr_len, peer->text,
+                  sizeof(peer->text), NULL, 0, NI_NUMERICHOST) != 0)
+    return NULL;
+  memcpy(&peer->addr, &addr, addr_len);
+  peer->addr_len = addr_len;
+  peer->len = strlen(peer->text);
+  return peer;
+}
+
 static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
   meta->method = (const uint8_t *)req->method.base;
   meta->method_len = req->method.len;
@@ -611,31 +645,16 @@ static void clj_h2o_extract_req_meta(h2o_req_t *req, clj_req_meta_t *meta) {
     meta->scheme_len = 0;
   }
 
-  /* Extract remote address from connection socket peername */
+  meta->remote_addr = NULL;
+  meta->remote_addr_len = 0;
   if (req->conn && req->conn->callbacks && req->conn->callbacks->get_peername) {
-    struct sockaddr_storage sa;
-    socklen_t salen =
-        req->conn->callbacks->get_peername(req->conn, (struct sockaddr *)&sa);
-    if (salen != 0) {
-      char addrbuf[NI_MAXHOST];
-      if (getnameinfo((struct sockaddr *)&sa, salen, addrbuf, sizeof(addrbuf),
-                      NULL, 0, NI_NUMERICHOST) == 0) {
-        size_t addr_len = strlen(addrbuf);
-        char *remote = h2o_mem_alloc_pool(&req->pool, char, addr_len + 1);
-        memcpy(remote, addrbuf, addr_len + 1);
-        meta->remote_addr = (const uint8_t *)remote;
-        meta->remote_addr_len = (int32_t)addr_len;
-      } else {
-        meta->remote_addr = NULL;
-        meta->remote_addr_len = 0;
-      }
-    } else {
-      meta->remote_addr = NULL;
-      meta->remote_addr_len = 0;
+    const clj_peer_text_t *peer = peer_text(req->conn);
+    if (peer != NULL) {
+      char *remote = h2o_mem_alloc_pool(&req->pool, char, peer->len);
+      memcpy(remote, peer->text, peer->len);
+      meta->remote_addr = (const uint8_t *)remote;
+      meta->remote_addr_len = peer->len;
     }
-  } else {
-    meta->remote_addr = NULL;
-    meta->remote_addr_len = 0;
   }
 }
 
