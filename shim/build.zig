@@ -84,30 +84,24 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Test native callbacks and fixed-slot lifetime");
     const native_tests = [_][]const u8{ "quic_forwarding", "address_tokens", "fixed_retention", "socket_write_completion", "tls_cleanup", "tls_key_exchange" };
     for (native_tests) |test_name| {
-        const forwarding_test = b.addExecutable(.{
-            .name = b.fmt("test-{s}", .{test_name}),
-            .root_module = b.createModule(.{
-                .target = b.graph.host,
-                .optimize = optimize,
-                .link_libc = true,
-            }),
-        });
-        forwarding_test.root_module.addCSourceFile(.{
-            .file = b.path(b.fmt("../src/shim/test_{s}.c", .{test_name})),
-            .flags = &.{ "-std=c17", "-D_GNU_SOURCE", "-DH2O_USE_LIBUV=0", "-DCLJ_DEBUG=0" },
-        });
-        forwarding_test.root_module.addIncludePath(test_h2o.getEmittedIncludeTree());
-        forwarding_test.root_module.linkLibrary(test_h2o);
-        forwarding_test.root_module.linkSystemLibrary("pthread", .{});
-        forwarding_test.root_module.linkSystemLibrary("dl", .{});
-        forwarding_test.root_module.linkSystemLibrary("m", .{});
-        const run_forwarding_test = b.addRunArtifact(forwarding_test);
-        if (std.mem.eql(u8, test_name, "address_tokens") or std.mem.eql(u8, test_name, "tls_cleanup") or std.mem.eql(u8, test_name, "tls_key_exchange")) {
-            run_forwarding_test.addFileArg(b.path("../src/test/fixtures/server.crt"));
-            run_forwarding_test.addFileArg(b.path("../src/test/fixtures/server.key"));
+        const run_test = addNativeTest(b, test_h2o, optimize, test_name, false);
+        test_step.dependOn(&run_test.step);
+        b.getInstallStep().dependOn(&run_test.step);
+    }
+
+    const tsan_step = b.step("test-tsan", "Run the native tests that use several threads under ThreadSanitizer (Linux x86-64)");
+    const host = b.graph.host.result;
+    if (host.os.tag == .linux and host.cpu.arch == .x86_64) {
+        const threaded_tests = [_][]const u8{ "quic_forwarding", "address_tokens" };
+        for (threaded_tests) |test_name| {
+            const run_test = addNativeTest(b, test_h2o, optimize, test_name, true);
+            run_test.setEnvironmentVariable("TSAN_OPTIONS", "halt_on_error=1");
+            // TSan replaces malloc, so the heap statistics do not follow allocations.
+            run_test.setEnvironmentVariable("CLJ_SKIP_HEAP_TESTS", "1");
+            tsan_step.dependOn(&run_test.step);
         }
-        test_step.dependOn(&run_forwarding_test.step);
-        b.getInstallStep().dependOn(&run_forwarding_test.step);
+    } else {
+        tsan_step.dependOn(&b.addFail("test-tsan runs only on Linux x86-64").step);
     }
 
     const compile_flags_step = b.step("compile-flags", "Generate compile_flags.txt for LSP");
@@ -139,6 +133,33 @@ pub fn build(b: *std.Build) void {
 
     compile_flags_cmd.addArg(compile_flags_script);
     compile_flags_step.dependOn(&compile_flags_cmd.step);
+}
+
+fn addNativeTest(b: *std.Build, h2o: *std.Build.Step.Compile, optimize: std.builtin.OptimizeMode, test_name: []const u8, sanitize_thread: bool) *std.Build.Step.Run {
+    const exe = b.addExecutable(.{
+        .name = b.fmt("test-{s}{s}", .{ test_name, if (sanitize_thread) "-tsan" else "" }),
+        .root_module = b.createModule(.{
+            .target = b.graph.host,
+            .optimize = optimize,
+            .link_libc = true,
+            .sanitize_thread = sanitize_thread,
+        }),
+    });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path(b.fmt("../src/shim/test_{s}.c", .{test_name})),
+        .flags = &.{ "-std=c17", "-D_GNU_SOURCE", "-DH2O_USE_LIBUV=0", "-DCLJ_DEBUG=0" },
+    });
+    exe.root_module.addIncludePath(h2o.getEmittedIncludeTree());
+    exe.root_module.linkLibrary(h2o);
+    exe.root_module.linkSystemLibrary("pthread", .{});
+    exe.root_module.linkSystemLibrary("dl", .{});
+    exe.root_module.linkSystemLibrary("m", .{});
+    const run = b.addRunArtifact(exe);
+    if (std.mem.eql(u8, test_name, "address_tokens") or std.mem.eql(u8, test_name, "tls_cleanup") or std.mem.eql(u8, test_name, "tls_key_exchange")) {
+        run.addFileArg(b.path("../src/test/fixtures/server.crt"));
+        run.addFileArg(b.path("../src/test/fixtures/server.key"));
+    }
+    return run;
 }
 
 fn buildShimForTarget(b: *std.Build, target_config: TargetConfig, optimize: std.builtin.OptimizeMode) void {

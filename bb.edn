@@ -125,6 +125,10 @@
                    :depends [build:shim]
                    :task (clojure "-J-Xmx2g" "-J-Xms2g" "-M:dev:test:kaocha" "--no-capture-output" "--focus" "ol.busker.large-payload-test")}
 
+                  test:tsan
+                  {:doc  "Run the shim's native tests that use several threads under ThreadSanitizer"
+                   :task (build/test-shim-tsan!)}
+
                   test:all
                   {:doc     "Run all the tests"
                    :depends [test test:large-payloads]}
@@ -192,7 +196,7 @@
 
                   qa
                   {:doc     "Run full quality assurance: format, lint, and test"
-                   :depends [fmt:check lint build test:all test]}
+                   :depends [fmt:check lint build test:tsan test:all test]}
 
                   gen-docs
                   {:doc  "Generate all Antora documentation"

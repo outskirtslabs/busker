@@ -292,8 +292,8 @@ typedef struct {
 
 /* At most one swap for each token the main thread issues: swaps without a
    pause can keep one rebuild loop going for seconds. This checks that
-   rebuilds stay correct while keys change. A missing read lock needs a
-   ThreadSanitizer build to find. This test does not catch it. */
+   rebuilds stay correct while keys change. Only `zig build test-tsan`
+   catches a missing read lock. */
 static void *swap_keys(void *arg) {
   swapper_t *swapper = arg;
   clj_session_ticket_t one[] = {ticket(0x01, 1), ticket(0x02, 2)},

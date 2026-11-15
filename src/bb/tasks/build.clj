@@ -161,6 +161,15 @@
 (defn build-shim! []
   (t/shell {:dir "shim"} (str "zig build -Doptimize=" (zig-optimize))))
 
+(defn test-shim-tsan!
+  "Runs the shim's native tests that use several threads under
+  ThreadSanitizer. Skips them on hosts other than Linux x86-64."
+  []
+  (if (and (= "Linux" (System/getProperty "os.name"))
+           (= "amd64" (System/getProperty "os.arch")))
+    (t/shell {:dir "shim"} (str "zig build test-tsan -Dall-targets=false -Doptimize=" (zig-optimize)))
+    (println "test:tsan skipped: ThreadSanitizer runs only on Linux x86-64")))
+
 (defn lib-clean! [dir]
   (t/clojure {:dir dir} "-T:build clean"))
 
