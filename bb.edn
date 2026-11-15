@@ -7,6 +7,7 @@
  :pods           {clj-kondo/clj-kondo {:version "2026.01.19"}}
  :tasks          {:requires ([babashka.fs :as fs]
                              [tasks.build  :as build]
+                             [tasks.docs   :as docs]
                              [tasks.hcloud :as hcloud]
                              [tasks.pebble :as pebble]
                              [tasks.smoke  :as smoke]
@@ -14,7 +15,9 @@
                              [babashka.tasks :refer [shell]]
                              [ol.bb-tasks.gen-docs :as gen-docs]
                              [ol.bb-tasks.publish-clojars :as publish-clojars])
-                  :init     (do (def paths ["src" "dev"]))
+                  :init     (do (def paths ["src" "dev"])
+                                (def docs-opts {:git-branch               "main"
+                                                :external-api-index-paths (filterv fs/exists? ["../clave/doc/api-index.edn"])}))
 
                   build:shim
                   {:doc  "Compile C shim library as ReleaseSafe; bb -Dbusker.zig.optimize=Debug <task> picks another mode"
@@ -196,11 +199,15 @@
 
                   qa
                   {:doc     "Run full quality assurance: format, lint, and test"
-                   :depends [fmt:check lint build test:tsan test:all test]}
+                   :depends [fmt:check lint docs:check build test:tsan test:all test]}
 
                   gen-docs
                   {:doc  "Generate all Antora documentation"
-                   :task (gen-docs/generate! {:external-api-index-paths ["../clave/doc/api-index.edn"]})}
+                   :task (gen-docs/generate! docs-opts)}
+
+                  docs:check
+                  {:doc  "Check that the committed API pages match what gen-docs writes"
+                   :task (docs/check-api-pages! docs-opts)}
 
                   ci
                   {:doc     "Ran by the CI"
