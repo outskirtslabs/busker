@@ -42,8 +42,9 @@ run during normal shim builds, including `bb build:shim` and Nix packaging.
 
 `test-tsan` (`bb test:tsan`, part of `bb qa`) runs on Linux x86-64 only. It
 runs the two native tests that start threads under ThreadSanitizer: ticket key
-replacement during address token rebuilds, and QUIC worker registration, worker
-sets and forwarding. It reports a race in the shim code these tests run from two
+replacement during address token rebuilds, QUIC tag changes during ticket
+encryption and decryption, and QUIC worker registration, worker sets and
+forwarding. It reports a race in the shim code these tests run from two
 threads, such as a missing lock, even when the threads do not collide in the
 run. It does not check the response slot ring, the wake receiver, the
 connection counters, the session cache or the ticket key callback, which only

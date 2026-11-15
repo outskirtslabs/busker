@@ -4593,6 +4593,15 @@ static int clj_encrypt_ticket_cb(
     clj_encrypt_ticket_t *self = (clj_encrypt_ticket_t *)_self;
     clj_ticket_manager_t *mgr = self->mgr;
 
+    uint8_t tag[8];
+    int has_tag = 0;
+    if (self->is_quic) {
+        pthread_rwlock_rdlock(&mgr->rwlock);
+        has_tag = mgr->quic_tp_tag_valid;
+        memcpy(tag, mgr->quic_tp_tag, 8);
+        pthread_rwlock_unlock(&mgr->rwlock);
+    }
+
     /* Pass manager to callback via thread-local */
     tls_current_mgr = mgr;
 
@@ -4601,16 +4610,14 @@ static int clj_encrypt_ticket_cb(
         ptls_iovec_t plaintext = src;
         uint8_t *buf = NULL;
 
-        if (self->is_quic && mgr->quic_tp_tag_valid) {
+        if (has_tag) {
             buf = malloc(src.len + 8);
             if (!buf) {
                 tls_current_mgr = NULL;
                 return PTLS_ERROR_NO_MEMORY;
             }
             memcpy(buf, src.base, src.len);
-            pthread_rwlock_rdlock(&mgr->rwlock);
-            memcpy(buf + src.len, mgr->quic_tp_tag, 8);
-            pthread_rwlock_unlock(&mgr->rwlock);
+            memcpy(buf + src.len, tag, 8);
             plaintext = (ptls_iovec_t){buf, src.len + 8};
         }
 
@@ -4632,17 +4639,13 @@ static int clj_encrypt_ticket_cb(
             return ret;
 
         /* Validate and strip QUIC tag if present */
-        if (self->is_quic && mgr->quic_tp_tag_valid) {
+        if (has_tag) {
             size_t decrypted_len = dst->off - start_off;
             if (decrypted_len < 8)
                 return PTLS_ALERT_DECODE_ERROR;
 
             dst->off -= 8;
-            pthread_rwlock_rdlock(&mgr->rwlock);
-            int tag_match = (memcmp(dst->base + dst->off, mgr->quic_tp_tag, 8) == 0);
-            pthread_rwlock_unlock(&mgr->rwlock);
-
-            if (!tag_match)
+            if (memcmp(dst->base + dst->off, tag, 8) != 0)
                 return PTLS_ERROR_REJECT_EARLY_DATA;  /* Config changed, reject 0-RTT */
         }
 

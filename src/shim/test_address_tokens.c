@@ -336,6 +336,58 @@ static void test_rebuild_during_swaps(void) {
   clj_ticket_manager_destroy(swapper.mgr);
 }
 
+/* Sets a new QUIC tag for each round of the main thread */
+static void *set_tags(void *arg) {
+  swapper_t *swapper = arg;
+  quicly_context_t quic = quicly_spec_context;
+  unsigned issued = 0;
+  for (unsigned i = 0; !atomic_load(&swapper->stop); ++i) {
+    quic.transport_params.max_streams_bidi = i % 2 + 1;
+    clj_ticket_manager_set_quic_tag(swapper->mgr, &quic);
+    while (atomic_load(&swapper->issued) == issued &&
+           !atomic_load(&swapper->stop))
+      sched_yield();
+    issued = atomic_load(&swapper->issued);
+  }
+  return NULL;
+}
+
+/* Tickets stay correct while a generation sets the QUIC tag. Only
+   `zig build test-tsan` catches a read of the tag without the lock. */
+static void test_tickets_during_tag_changes(void) {
+  clj_session_ticket_t key = ticket(0x77, 5);
+  swapper_t swapper = {.mgr = manager(&key, 1)};
+  quicly_context_t quic = quicly_spec_context;
+  clj_ticket_manager_set_quic_tag(swapper.mgr, &quic);
+  clj_encrypt_ticket_t *enc =
+      clj_ticket_manager_create_encrypt_ticket(swapper.mgr, 1);
+  CHECK(enc != NULL);
+  pthread_t thread;
+  CHECK(pthread_create(&thread, NULL, set_tags, &swapper) == 0);
+  uint8_t session[32];
+  memset(session, 0x5a, sizeof(session));
+  for (int i = 0; i < 2000; ++i) {
+    uint8_t sealed_buf[256], opened_buf[256];
+    ptls_buffer_t sealed, opened;
+    ptls_buffer_init(&sealed, sealed_buf, sizeof(sealed_buf));
+    ptls_buffer_init(&opened, opened_buf, sizeof(opened_buf));
+    CHECK(enc->super.cb(&enc->super, NULL, 1, &sealed,
+                        ptls_iovec_init(session, sizeof(session))) == 0);
+    int ret = enc->super.cb(&enc->super, NULL, 0, &opened,
+                            ptls_iovec_init(sealed.base, sealed.off));
+    CHECK(ret == 0 || ret == PTLS_ERROR_REJECT_EARLY_DATA);
+    CHECK(opened.off == sizeof(session) &&
+          memcmp(opened.base, session, sizeof(session)) == 0);
+    ptls_buffer_dispose(&sealed);
+    ptls_buffer_dispose(&opened);
+    atomic_fetch_add(&swapper.issued, 1);
+  }
+  atomic_store(&swapper.stop, 1);
+  CHECK(pthread_join(thread, NULL) == 0);
+  free(enc);
+  clj_ticket_manager_destroy(swapper.mgr);
+}
+
 static void test_without_keys(void) {
   clj_session_ticket_t key = ticket(0x55, 3);
   clj_ticket_manager_t *mgr = manager(&key, 1), *empty = manager(NULL, 0);
@@ -976,6 +1028,7 @@ int main(int argc, char **argv) {
   test_validation();
   test_rotation_and_reload();
   test_rebuild_during_swaps();
+  test_tickets_during_tag_changes();
   test_without_keys();
   test_accept(argv[1], argv[2]);
   test_ecn_counted(argv[1], argv[2]);
