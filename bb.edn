@@ -3,7 +3,7 @@
  :deps           {borkdude/rewrite-edn   {:mvn/version "0.4.9"}
                   lambdaisland/kaocha    {:mvn/version "1.91.1392"}
                   outskirtslabs/bb-tasks {:git/url "https://github.com/outskirtslabs/bb-tasks"
-                                          :git/sha "9dbc6d77384b51ffde69007e98a0420b3cf6a0a7"}}
+                                          :git/sha "8b2b33290230e8fea64d35e925d7ff509d06473b"}}
  :pods           {clj-kondo/clj-kondo {:version "2026.01.19"}}
  :tasks          {:requires ([babashka.fs :as fs]
                              [tasks.build  :as build]
