@@ -16,6 +16,8 @@
 
 (def ^:private hello (.getBytes "Hello World" StandardCharsets/UTF_8))
 
+(def ^:private large-body-size (* 2 1024 1024))
+
 (def ^:private no-encoder-type "text/plain; charset=x-JISAutoDetect")
 
 (defn- emit-then [emitter f]
@@ -69,6 +71,10 @@
     "/no-encoder-seq" {:status 200 :headers {"content-type" no-encoder-type} :body (list "ca" "fé")}
     "/stream-short" {:status 200 :headers {"content-length" "5"} :body (ByteArrayInputStream. hello)}
     "/stream-long" {:status 200 :headers {"content-length" "20"} :body (ByteArrayInputStream. hello)}
+    "/large-stream-short" {:status 200 :headers {"content-length" "1000000"}
+                           :body (ByteArrayInputStream. (byte-array large-body-size (byte 66)))}
+    "/large-stream-long" {:status 200 :headers {"content-length" "3000000"}
+                          :body (ByteArrayInputStream. (byte-array large-body-size (byte 66)))}
     "/emit-close" (emit-then emitter
                              #(do (p/emit! emitter {:status 200 :headers {"content-length" "20"} :body hello})
                                   (p/close! emitter)))
@@ -93,7 +99,7 @@
 
 (def ^:private streamed-mismatch-paths
   "Responses of unknown length whose body differs from their content length."
-  ["/stream-short" "/stream-long" "/emit-close"])
+  ["/stream-short" "/stream-long" "/large-stream-short" "/large-stream-long" "/emit-close"])
 
 (defn- start-server []
   (let [port (util/free-port)
@@ -265,14 +271,18 @@
             (when (number? received)
               (is (< received content-length) path))))))))
 
-;; HTTP/2 and HTTP/3 clients reset these streams without the worker's byte
-;; count too, so this test only guards against a regression.
+;; curl exits 18 on a reset after part of a declared length, so its message
+;; shows the reset.
 (deftest streamed-length-mismatch-resets-http2-and-http3-streams-test
   (with-server
     (fn [{:keys [tls-port]}]
-      (doseq [proto [:h2 :h3]
+      (doseq [[proto reset] [[:h2 "HTTP/2 stream 1 reset by server"]
+                             [:h3 "HTTP/3 stream 0 reset by server (error 0x102"]]
               path streamed-mismatch-paths]
-        (is (not= 0 (:exit (curl-exchange proto tls-port path))) (pr-str [proto path]))))))
+        (is (str/includes? (:err (util/curl :https proto tls-port path :max-time 10
+                                            :args ["-S" "-o" "/dev/null"]))
+                           reset)
+            (pr-str [proto path]))))))
 
 (deftest fixed-producer-length-mismatch-throws-before-output-test
   (with-server

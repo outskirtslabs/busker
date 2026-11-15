@@ -1133,11 +1133,52 @@ void clj_h2o_proceed_req(h2o_req_t *req) {
     req->proceed_req(req, NULL);
 }
 
+/* The request stream of an HTTP/3 request whose send side is open, or NULL.
+   H2O's get_tracer returns quicly_get_tracer(quic), a field of quicly's public
+   connection header, which leads back to the quicly connection. */
+static quicly_stream_t *open_http3_stream(h2o_req_t *req) {
+  if (req->version < 0x300 || req->conn->callbacks->get_tracer == NULL)
+    return NULL;
+  quicly_conn_t *quic = (quicly_conn_t *)H2O_STRUCT_FROM_MEMBER(
+      struct _st_quicly_conn_public_t, tracer,
+      req->conn->callbacks->get_tracer(req->conn));
+  int same_conn = h2o_http3_get_connection(quic) == req->conn;
+#if CLJ_DEBUG
+  assert(same_conn);
+#endif
+  if (!same_conn)
+    return NULL;
+  quicly_stream_t *stream = quicly_get_stream(
+      quic, (quicly_stream_id_t)req->conn->callbacks->get_req_id(req));
+  return stream != NULL && quicly_sendstate_is_open(&stream->sendstate)
+             ? stream
+             : NULL;
+}
+
+/* h2o_sendvec. H2O's HTTP/3 server ends the stream with FIN on an error send
+   (lib/http3/server.c, do_send). Reset the stream after that send, which
+   expects an open send side, so that an HTTP/3 client sees the failure. */
+void clj_h2o_sendvec(h2o_req_t *req, h2o_sendvec_t *bufs, size_t bufcnt,
+                     h2o_send_state_t state) {
+  quicly_stream_t *stream =
+      state == H2O_SEND_STATE_ERROR ? open_http3_stream(req) : NULL;
+  if (stream == NULL) {
+    h2o_sendvec(req, bufs, bufcnt, state);
+    return;
+  }
+  quicly_conn_t *quic = stream->conn;
+  quicly_stream_id_t stream_id = stream->stream_id;
+  h2o_sendvec(req, bufs, bufcnt, state);
+  stream = quicly_get_stream(quic, stream_id);
+  if (stream != NULL && !quicly_sendstate_transfer_complete(&stream->sendstate))
+    quicly_reset_stream(stream, H2O_HTTP3_ERROR_INTERNAL);
+}
+
 int clj_h2o_cancel_request(clj_req_ctx_t *ctx) {
   if (!ctx || !ctx->req)
     return 0;
   if (ctx->req->_generator != NULL) {
-    h2o_send(ctx->req, NULL, 0, H2O_SEND_STATE_ERROR);
+    clj_h2o_sendvec(ctx->req, NULL, 0, H2O_SEND_STATE_ERROR);
   }
   return 1;
 }

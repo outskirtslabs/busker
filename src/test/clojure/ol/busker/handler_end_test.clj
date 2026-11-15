@@ -26,6 +26,13 @@
     "/head-then-map" (do (head! emitter) {:status 200 :body "late"})
     "/head-then-exception" (do (head! emitter) (throw (ex-info "handler failed" {})))
     "/head-then-error" (do (head! emitter) (throw (AssertionError. "handler failed")))
+    "/body-then-exception" (do (head! emitter)
+                               (p/emit! emitter "partial" {:flush? true})
+                               (throw (ex-info "handler failed" {})))
+    "/large-body-then-exception" (do (head! emitter)
+                                     (p/emit! emitter (byte-array (* 2 1024 1024) (byte 66))
+                                              {:flush? true})
+                                     (throw (ex-info "handler failed" {})))
     "/error" (throw (AssertionError. "handler failed"))
     "/handoff" (do (head! emitter)
                    (Thread/startVirtualThread
@@ -37,7 +44,8 @@
 
 (def ^:private abandoned-paths
   "Handlers that end after a head without closing the emitter or returning it."
-  ["/emit-throws" "/head-then-map" "/head-then-exception" "/head-then-error"])
+  ["/emit-throws" "/head-then-map" "/head-then-exception" "/head-then-error"
+   "/body-then-exception" "/large-body-then-exception"])
 
 (defn- with-server [f]
   (let [port (util/free-port)
@@ -102,13 +110,16 @@
         ;; curl exits 92 on an HTTP/2 stream error.
         (is (= 92 (:exit (curl-exchange :https :h2 tls-port path))) path)))))
 
-;; H2O's HTTP/3 server ends a stream with FIN for an error send, not with a
-;; reset (lib/http3/server.c, do_send), so curl sees a complete empty body.
-(deftest abandoned-emitter-ends-the-http3-stream-test
+(deftest abandoned-emitter-resets-the-http3-stream-test
   (with-server
     (fn [_ tls-port]
       (doseq [path abandoned-paths]
-        (is (= {:exit 0 :status 200 :body ""} (curl-exchange :https :h3 tls-port path)) path)))))
+        ;; curl exits 18 when body bytes came before the reset, so its message
+        ;; shows the reset.
+        (is (str/includes? (:err (util/curl :https :h3 tls-port path :max-time 5
+                                            :args ["-S" "-o" "/dev/null"]))
+                           "HTTP/3 stream 0 reset by server (error 0x102")
+            path)))))
 
 (deftest handler-error-before-output-sends-500-test
   (with-server

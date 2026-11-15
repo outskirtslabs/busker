@@ -324,6 +324,8 @@ int clj_h2o_install_request_dispatch(
 void clj_h2o_proceed_req(h2o_req_t *req);
 
 int clj_h2o_cancel_request(clj_req_ctx_t *ctx);
+void clj_h2o_sendvec(h2o_req_t *req, h2o_sendvec_t *bufs, size_t bufcnt,
+                     h2o_send_state_t state);
 
 clj_mt_receiver_t *clj_h2o_mt_create_wakeup_receiver(h2o_context_t *ctx);
 clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(

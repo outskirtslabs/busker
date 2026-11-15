@@ -374,8 +374,8 @@
   [:pointer :pointer :long] :void)
 
 (defcfn sendvec
-  "Send response data using sendvec"
-  "h2o_sendvec"
+  "Send response data using sendvec. An error send resets an HTTP/3 stream."
+  "clj_h2o_sendvec"
   [:pointer :pointer :long :int] :void)
 
 (defcfn start-response
