@@ -1575,10 +1575,10 @@
                       (record! :stop))
                     (on-stop st reason))
                   request/on-request-cleanup
-                  (fn [module-id request-seq]
+                  (fn [module-id request-seqs n]
                     (.set cleanup?_ true)
                     (try
-                      (on-request-cleanup module-id request-seq)
+                      (on-request-cleanup module-id request-seqs n)
                       (finally
                         (record! :cleanup)
                         (.set cleanup?_ false))))]
@@ -1672,6 +1672,54 @@
                                                   active-events)})))
           (finally
             (deliver release-active_ true)
+            (generation/stop! instance)))))))
+
+(deftest request-cleanups-reach-the-jvm-in-batches-inside-native-turns-test
+  (let [port (util/free-port)
+        n 100
+        in-turn (ThreadLocal.)
+        batches_ (atom [])
+        evloop-run h2o/evloop-run
+        ring-drain h2o/mt-response-ring-drain
+        on-request-cleanup request/on-request-cleanup
+        in-turn! (fn [f]
+                   (.set in-turn true)
+                   (try (f) (finally (.set in-turn false))))]
+    (with-redefs [h2o/evloop-run (fn [loop-ptr max-wait]
+                                   (in-turn! #(evloop-run loop-ptr max-wait)))
+                  h2o/mt-response-ring-drain (fn [receiver]
+                                               (in-turn! #(ring-drain receiver)))
+                  request/on-request-cleanup
+                  (fn [module-id request-seqs n-seqs]
+                    (swap! batches_ conj
+                           {:in-turn? (true? (.get in-turn))
+                            :seqs (mapv #(h2o/request-seq-at request-seqs %) (range n-seqs))})
+                    (on-request-cleanup module-id request-seqs n-seqs))]
+      (let [instance (generation/start!
+                      (config/load!
+                       {:n-workers 1
+                        :entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                        :dispatch [{:handler (fn [_] {:status 200 :body "ok"})}]})
+                      nil)
+            url (str "http://127.0.0.1:" port "/")]
+        (try
+          (let [result (util/curl :http nil port "/"
+                                  :max-time 10
+                                  :args (concat ["--http2-prior-knowledge" "--parallel"
+                                                 "--parallel-max" (str n)]
+                                                (repeat (dec n) url)))]
+            (is (= 0 (:exit result)) (:err result))
+            (is (= (apply str (repeat n "ok")) (:out result))))
+          (let [deadline (+ (System/currentTimeMillis) 5000)]
+            (while (and (< (count (mapcat :seqs @batches_)) n)
+                        (< (System/currentTimeMillis) deadline))
+              (Thread/sleep 10)))
+          (let [batches @batches_
+                seqs (mapcat :seqs batches)]
+            (is (every? :in-turn? batches) "each delivery happens before the native turn returns")
+            (is (= n (count seqs) (count (distinct seqs))) "each request is retired once")
+            (is (some #(< 1 (count (:seqs %))) batches) "a turn delivers several requests at once"))
+          (finally
             (generation/stop! instance)))))))
 
 (deftest repeated-start-stop-releases-native-callback-state-test

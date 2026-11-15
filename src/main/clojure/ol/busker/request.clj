@@ -218,13 +218,24 @@
       (request-callback-failed! ::request-callback-failed t)
       h2o/CLJ_HANDLER_OVERLOADED)))
 
+(defn- retire-request!
+  [dispatch module-id request-seq]
+  (try
+    (callback-dispatch/retire! dispatch module-id request-seq)
+    (catch Throwable t
+      (request-callback-failed! ::cleanup-callback-failed t))))
+
 (defn on-request-cleanup
-  "Retires request state using the scalar dispatch identity from native cleanup."
-  [module-id request-seq]
+  "Retires the state of the `n` requests whose sequences native cleanup passes
+  in `request-seqs`, then wakes fixed-slot waiters once. A failed retirement
+  does not stop the others."
+  [module-id request-seqs n]
   (try
     (when-let [worker (worker-context/get-current-worker)]
-      (try
-        (callback-dispatch/retire! (:callback-dispatch worker) module-id request-seq)
-        (finally (fixed-final/notify-capacity! worker))))
+      (let [dispatch (:callback-dispatch worker)]
+        (try
+          (dotimes [i n]
+            (retire-request! dispatch module-id (h2o/request-seq-at request-seqs i)))
+          (finally (fixed-final/notify-capacity! worker)))))
     (catch Throwable t
       (request-callback-failed! ::cleanup-callback-failed t))))

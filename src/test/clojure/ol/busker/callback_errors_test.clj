@@ -94,6 +94,15 @@
       (finally
         (generation/stop! instance)))))
 
+(defn- request-seqs
+  "A native array of `seqs` in `arena`, as the shim passes it to the cleanup
+  callback."
+  [arena seqs]
+  (let [^java.lang.foreign.MemorySegment segment (ffi/alloc arena (* 8 (count seqs)))]
+    (dotimes [i (count seqs)]
+      (.setAtIndex segment java.lang.foreign.ValueLayout/JAVA_LONG (long i) (long (nth seqs i))))
+    segment))
+
 (deftest request-cleanup-callback-contains-errors
   (with-open [arena (ffi/shared-arena)]
     (let [dispatch (bound-dispatch arena)
@@ -103,26 +112,45 @@
           (with-redefs [callback-dispatch/retire! (fn [_ _ _] (throw failure))
                         fixed-final/notify-capacity! (fn [_] (swap! capacity-notified inc))]
             (with-worker-context {:callback-dispatch dispatch}
-              #(capture-logs (fn [] (request/on-request-cleanup 1 1)))))]
+              #(capture-logs (fn [] (request/on-request-cleanup 1 (request-seqs arena [1]) 1)))))]
       (is (nil? result))
       (is (= 1 @capacity-notified))
       (is (= [{:id ::request/cleanup-callback-failed :error failure}] events))
       (is (= 1 (faults dispatch))))))
 
+(deftest request-cleanup-callback-retires-the-rest-of-a-batch-after-a-failure
+  (with-open [arena (ffi/shared-arena)]
+    (let [failure (AssertionError. "retire failed")
+          retired (atom [])
+          capacity-notified (atom 0)
+          [_ events]
+          (with-redefs [callback-dispatch/retire! (fn [_ _ request-seq]
+                                                    (swap! retired conj request-seq)
+                                                    (when (= 2 request-seq) (throw failure)))
+                        fixed-final/notify-capacity! (fn [_] (swap! capacity-notified inc))]
+            (with-worker-context {:callback-dispatch nil}
+              #(capture-logs (fn [] (request/on-request-cleanup 1 (request-seqs arena [1 2 3]) 3)))))]
+      (is (= [1 2 3] @retired))
+      (is (= 1 @capacity-notified))
+      (is (= [{:id ::request/cleanup-callback-failed :error failure}] events)))))
+
 (deftest request-cleanup-callback-contains-a-failing-report
-  (with-redefs [callback-dispatch/retire! (fn [_ _ _] (throw (AssertionError. "retire failed")))
-                fixed-final/notify-capacity! (fn [_] nil)]
-    (with-worker-context {:callback-dispatch nil}
-      #(is (nil? (failing-log-backend (fn [] (request/on-request-cleanup 1 1))))))))
+  (with-open [arena (ffi/shared-arena)]
+    (with-redefs [callback-dispatch/retire! (fn [_ _ _] (throw (AssertionError. "retire failed")))
+                  fixed-final/notify-capacity! (fn [_] nil)]
+      (with-worker-context {:callback-dispatch nil}
+        #(is (nil? (failing-log-backend
+                    (fn [] (request/on-request-cleanup 1 (request-seqs arena [1]) 1)))))))))
 
 (deftest cleanup-callback-keeps-the-interrupt-status
-  (with-redefs [callback-dispatch/retire! (fn [_ _ _] (throw (InterruptedException.)))
-                fixed-final/notify-capacity! (fn [_] nil)]
-    (try
-      (with-worker-context {:callback-dispatch nil}
-        #(request/on-request-cleanup 1 1))
-      (is (Thread/interrupted))
-      (finally (Thread/interrupted)))))
+  (with-open [arena (ffi/shared-arena)]
+    (with-redefs [callback-dispatch/retire! (fn [_ _ _] (throw (InterruptedException.)))
+                  fixed-final/notify-capacity! (fn [_] nil)]
+      (try
+        (with-worker-context {:callback-dispatch nil}
+          #(request/on-request-cleanup 1 (request-seqs arena [1]) 1))
+        (is (Thread/interrupted))
+        (finally (Thread/interrupted))))))
 
 ;; Accept and connection-close callbacks
 

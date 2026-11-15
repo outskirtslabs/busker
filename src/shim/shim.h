@@ -104,8 +104,11 @@ struct clj_entrypoint_hosts_t {
 typedef struct clj_req_ctx_t clj_req_ctx_t;
 typedef struct clj_mt_receiver_t clj_mt_receiver_t;
 typedef struct clj_response_slot_t clj_response_slot_t;
+/* Called on the worker with the sequences of `count` requests of `module_id`
+   that H2O disposed. `request_seqs` is valid only during the call. */
 typedef void (*clj_request_cleanup_cb)(uint64_t module_id,
-                                       uint64_t request_seq);
+                                       const uint64_t *request_seqs,
+                                       size_t count);
 /* Returns 0 when the chunk was delivered; any other value fails the request
    body, and nothing calls proceed for it. */
 typedef int (*clj_request_body_chunk_cb)(uint64_t module_id,
@@ -280,6 +283,10 @@ h2o_headers_t *clj_h2o_req_get_res_headers(h2o_req_t *req);
 /* Standard tokens and generator for responses */
 h2o_token_t *clj_h2o_get_content_type_token(void);
 h2o_generator_t *clj_h2o_get_static_generator(void);
+
+/* Runs h2o_evloop_run. The request cleanups of the turn reach the cleanup
+   callback in batches, all of them before this returns. */
+int clj_h2o_evloop_run(h2o_evloop_t *loop, int32_t max_wait);
 
 /* Event loop and context state access */
 uint64_t clj_h2o_evloop_now(h2o_evloop_t *loop);

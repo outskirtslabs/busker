@@ -212,6 +212,268 @@ static void test_cancel_full(h2o_context_t *context) {
   clj_h2o_mt_destroy_response_receiver(receiver);
 }
 
+#define BATCH_REQUESTS (CLJ_CLEANUP_BATCH_CAPACITY + 1)
+
+static struct {
+  clj_mt_receiver_t *receiver;
+  clj_req_ctx_t *contexts;
+  size_t calls;
+  size_t counts[8];
+  uint64_t seqs[BATCH_REQUESTS];
+  size_t delivered;
+  int reenter;
+  int nest;
+  int in_timer;
+  size_t upcall_calls;
+  uint64_t upcall_seq;
+  size_t upcalls;
+} cleanups;
+
+/* Native cleanup is complete before the JVM part arrives: the request has left
+   the receiver table and its slot is free. */
+static void record_cleanups(uint64_t module_id, const uint64_t *request_seqs,
+                            size_t count) {
+  CHECK(module_id == 1);
+  CHECK(!cleanups.in_timer);
+  if (cleanups.calls < 8)
+    cleanups.counts[cleanups.calls] = count;
+  ++cleanups.calls;
+  for (size_t i = 0; i < count; ++i) {
+    uint64_t seq = request_seqs[i];
+    clj_req_ctx_t *ctx = &cleanups.contexts[seq - 1];
+    CHECK(ctx->cleanup && ctx->fixed_slot == NULL);
+    CHECK(find_response_request(cleanups.receiver, seq) == NULL);
+    cleanups.seqs[cleanups.delivered++] = seq;
+  }
+  if (cleanups.reenter) {
+    cleanups.reenter = 0;
+    size_t calls = cleanups.calls;
+    cleanup_request(&cleanups.contexts[BATCH_REQUESTS - 1]);
+    CHECK(cleanups.calls == calls + 1);
+  }
+  if (cleanups.nest) {
+    cleanups.nest = 0;
+    size_t calls = cleanups.calls;
+    bool started = begin_cleanup_batch();
+    CHECK(started);
+    cleanup_request(&cleanups.contexts[BATCH_REQUESTS - 1]);
+    end_cleanup_batch(started);
+    CHECK(cleanups.calls == calls + 1);
+  }
+}
+
+static void reset_cleanups(clj_mt_receiver_t *receiver,
+                           clj_req_ctx_t *contexts) {
+  memset(&cleanups, 0, sizeof(cleanups));
+  cleanups.receiver = receiver;
+  cleanups.contexts = contexts;
+  for (size_t i = 0; i < BATCH_REQUESTS; ++i) {
+    uint64_t claim = publish(receiver, i + 1, 200);
+    clj_response_slot_t *slot = response_slot_from_handle(receiver, claim);
+    contexts[i] = (clj_req_ctx_t){.on_request_cleanup = record_cleanups,
+                                  .response_receiver = receiver,
+                                  .fixed_slot = slot,
+                                  .fixed_claim = claim,
+                                  .dispatch_module_id = 1,
+                                  .dispatch_request_seq = i + 1};
+    CHECK(register_response_request(receiver, &contexts[i], i + 1));
+    size_t index = (claim & CLJ_RESPONSE_HANDLE_INDEX_MASK) - 1;
+    atomic_fetch_and(&receiver->ready_words[index / 64],
+                     ~(UINT64_C(1) << (index % 64)));
+    atomic_store(&slot->state, CLJ_RESPONSE_SLOT_IN_NATIVE);
+    atomic_fetch_add(&receiver->ring_retained, 1);
+    atomic_fetch_sub(&receiver->ring_ready, 1);
+  }
+}
+
+static void check_delivered_once(size_t count) {
+  CHECK(cleanups.delivered == count);
+  for (size_t i = 0; i < count; ++i)
+    for (size_t j = i + 1; j < count; ++j)
+      CHECK(cleanups.seqs[i] != cleanups.seqs[j]);
+}
+
+static void release_all(clj_mt_receiver_t *receiver,
+                              clj_req_ctx_t *contexts) {
+  for (size_t i = 0; i < BATCH_REQUESTS; ++i)
+    cleanup_request(&contexts[i]);
+  CHECK(clj_h2o_response_ring_retained(receiver) == 0);
+  CHECK(receiver->request_size == 0);
+}
+
+static void cleanup_on_timer(h2o_timer_t *timer) {
+  (void)timer;
+  cleanups.in_timer = 1;
+  for (size_t i = 0; i < 3; ++i)
+    cleanup_request(&cleanups.contexts[i]);
+  cleanups.in_timer = 0;
+}
+
+/* Every upcall that names a request sees the cleanups that waited before it,
+   and collection is off while it runs. */
+static void expect_cleanups_delivered(void) {
+  CHECK(cleanups.calls == cleanups.upcall_calls + 1);
+  CHECK(cleanups.seqs[cleanups.delivered - 1] == cleanups.upcall_seq);
+  CHECK(!tls_cleanup_batch.collecting && tls_cleanup_batch.count == 0);
+  ++cleanups.upcalls;
+}
+
+static int request_upcall(clj_req_ctx_t *ctx) {
+  (void)ctx;
+  expect_cleanups_delivered();
+  return CLJ_HANDLER_DECLINED;
+}
+
+static int body_upcall(uint64_t module_id, uint64_t request_seq, char *chunk,
+                       size_t chunk_len, int is_end_stream) {
+  (void)module_id, (void)request_seq, (void)chunk, (void)chunk_len,
+      (void)is_end_stream;
+  expect_cleanups_delivered();
+  return 0;
+}
+
+static void proceed_upcall(uint64_t module_id, uint64_t request_seq) {
+  (void)module_id, (void)request_seq;
+  expect_cleanups_delivered();
+}
+
+static void stop_upcall(uint64_t module_id, uint64_t request_seq,
+                        clj_complete_reason_t reason) {
+  (void)module_id, (void)request_seq, (void)reason;
+  expect_cleanups_delivered();
+}
+
+/* Leaves the request of `seq` cleaned up and waiting in an open batch. */
+static void wait_cleanup(uint64_t seq) {
+  CHECK(tls_cleanup_batch.collecting);
+  cleanups.upcall_calls = cleanups.calls;
+  cleanups.upcall_seq = seq;
+  cleanup_request(&cleanups.contexts[seq - 1]);
+  CHECK(cleanups.calls == cleanups.upcall_calls);
+}
+
+static void test_upcalls_receive_waiting_cleanups(clj_mt_receiver_t *receiver,
+                                                  clj_req_ctx_t *contexts) {
+  reset_cleanups(receiver, contexts);
+  bool started = begin_cleanup_batch();
+
+  h2o_globalconf_t globalconf = {0};
+  h2o_context_t context = {.globalconf = &globalconf};
+  clj_entrypoint_hosts_t entrypoint = {.entrypoint = 0};
+  entrypoint.self = &entrypoint;
+  h2o_conn_callbacks_t callbacks = {0};
+  h2o_conn_t conn = {.ctx = &context,
+                     .hosts = entrypoint.hosts,
+                     .callbacks = &callbacks};
+  h2o_req_t req = {.conn = &conn};
+  h2o_mem_init_pool(&req.pool);
+  clj_h2o_handler_t handler = {.on_request = request_upcall};
+  wait_cleanup(1);
+  CHECK(request_handler(&handler.super, &req) == -1);
+
+  clj_req_ctx_t named = {.req = &req,
+                         .dispatch_module_id = 1,
+                         .dispatch_request_seq = 1000,
+                         .on_request_body_chunk = body_upcall,
+                         .on_response_generator_proceed = proceed_upcall,
+                         .on_response_generator_stop = stop_upcall};
+  wait_cleanup(2);
+  CHECK(deliver_body_chunk(&named, 1) == 0);
+  wait_cleanup(3);
+  clj_generator_proceed(&named.generator, &req);
+  wait_cleanup(4);
+  clj_generator_stop(&named.generator, &req);
+  CHECK(cleanups.upcalls == 4);
+  CHECK(tls_cleanup_batch.collecting);
+
+  end_cleanup_batch(started);
+  h2o_mem_clear_pool(&req.pool);
+  release_all(receiver, contexts);
+  check_delivered_once(BATCH_REQUESTS);
+}
+
+static void test_cleanup_batch(h2o_evloop_t *loop, h2o_context_t *context) {
+  clj_mt_receiver_t *receiver =
+      clj_h2o_mt_create_response_receiver(context, 128, 3);
+  CHECK(receiver != NULL);
+  clj_req_ctx_t contexts[BATCH_REQUESTS];
+
+  /* Outside a native turn each cleanup goes out at once. */
+  reset_cleanups(receiver, contexts);
+  cleanup_request(&contexts[0]);
+  cleanup_request(&contexts[0]);
+  CHECK(cleanups.calls == 1 && cleanups.counts[0] == 1);
+  release_all(receiver, contexts);
+  check_delivered_once(BATCH_REQUESTS);
+
+  /* A turn delivers its cleanups once, before it returns. */
+  reset_cleanups(receiver, contexts);
+  h2o_timer_t timer;
+  h2o_timer_init(&timer, cleanup_on_timer);
+  h2o_timer_link(loop, 0, &timer);
+  CHECK(clj_h2o_evloop_run(loop, 0) == 0);
+  CHECK(!h2o_timer_is_linked(&timer));
+  CHECK(cleanups.calls == 1 && cleanups.counts[0] == 3);
+  CHECK(!tls_cleanup_batch.collecting && tls_cleanup_batch.count == 0);
+  release_all(receiver, contexts);
+  check_delivered_once(BATCH_REQUESTS);
+
+  /* A nested begin neither starts nor ends the batch. An upcall that names a
+     request first receives the pending cleanups, and a cleanup during that
+     upcall or during a delivery goes out at once. A full batch goes out
+     before the next cleanup is added. */
+  reset_cleanups(receiver, contexts);
+  bool started = begin_cleanup_batch();
+  CHECK(started);
+  cleanup_request(&contexts[0]);
+  bool nested = begin_cleanup_batch();
+  CHECK(!nested);
+  end_cleanup_batch(nested);
+  CHECK(cleanups.calls == 0);
+  bool collecting = pause_cleanup_batch();
+  CHECK(cleanups.calls == 1 && cleanups.counts[0] == 1);
+  cleanup_request(&contexts[1]);
+  CHECK(cleanups.calls == 2 && cleanups.counts[1] == 1);
+  resume_cleanup_batch(collecting);
+  for (size_t i = 2; i < BATCH_REQUESTS - 1; ++i)
+    cleanup_request(&contexts[i]);
+  CHECK(cleanups.calls == 2);
+  cleanups.reenter = 1;
+  end_cleanup_batch(started);
+  CHECK(cleanups.calls == 4);
+  CHECK(cleanups.counts[2] == BATCH_REQUESTS - 3 && cleanups.counts[3] == 1);
+  check_delivered_once(BATCH_REQUESTS);
+
+  reset_cleanups(receiver, contexts);
+  started = begin_cleanup_batch();
+  for (size_t i = 0; i < BATCH_REQUESTS; ++i)
+    cleanup_request(&contexts[i]);
+  CHECK(cleanups.calls == 1 &&
+        cleanups.counts[0] == CLJ_CLEANUP_BATCH_CAPACITY);
+  end_cleanup_batch(started);
+  CHECK(cleanups.calls == 2 && cleanups.counts[1] == 1);
+  check_delivered_once(BATCH_REQUESTS);
+  CHECK(clj_h2o_response_ring_retained(receiver) == 0);
+
+  /* A batch started inside a delivery neither delivers that delivery's
+     sequences again nor writes into the array the callback reads. */
+  reset_cleanups(receiver, contexts);
+  started = begin_cleanup_batch();
+  for (size_t i = 0; i < 3; ++i)
+    cleanup_request(&contexts[i]);
+  cleanups.nest = 1;
+  end_cleanup_batch(started);
+  CHECK(cleanups.calls == 2 && cleanups.counts[0] == 3 &&
+        cleanups.counts[1] == 1);
+  release_all(receiver, contexts);
+  check_delivered_once(BATCH_REQUESTS);
+
+  test_upcalls_receive_waiting_cleanups(receiver, contexts);
+
+  CHECK(clj_h2o_mt_response_pending(receiver) == 0);
+  clj_h2o_mt_destroy_response_receiver(receiver);
+}
+
 int main(void) {
   h2o_evloop_t *loop = h2o_evloop_create();
   h2o_context_t context = {.queue = h2o_multithread_create_queue(loop)};
@@ -235,6 +497,7 @@ int main(void) {
   test_discovery(&context, 65);
   test_discovery(&context, UINT16_MAX);
   test_cancel_full(&context);
+  test_cleanup_batch(loop, &context);
   h2o_multithread_destroy_queue(context.queue);
   h2o_evloop_destroy(loop);
   return 0;

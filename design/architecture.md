@@ -68,6 +68,7 @@ The entrypoint of a request is the entrypoint of the listener that accepted its 
 The request metadata also carries H2O's connection id (`h2o_conn_t.id`), which H2O takes from one process-wide counter for HTTP/1, HTTP/2 and HTTP/3 connections and never reuses; a connection's address can be reused while Busker still runs a handler of the closed connection. Clojure reads the id from the native context as a primitive long, outside the request copy.
 Streaming request bodies use a `java.nio.channels.ReadableByteChannel` and native proceed callbacks.
 Callback-dispatch maps module and request sequence identifiers to live requests until cleanup.
+The shim's request cleanup frees the request's fixed slot, removes the request from the receiver table and clears its native callbacks at once. The JVM retires the requests of an event-loop turn or ring drain in batches of at most 64, delivered before the turn returns to Java and before any request, body, proceed or stop callback. A cleanup outside a turn or ring drain, or during one of those callbacks, reaches the JVM at once.
 Each request retains the generation configuration unchanged and references its worker. Streaming writers read the block pool and command services from that worker, passing the worker explicitly to each service.
 
 ## Responses

@@ -230,11 +230,12 @@
 
 (defcfn evloop-run
   "Runs the event loop once. Returns 0 if successful, -1 on error (typically EINTR).
+   The request cleanups of the turn reach the cleanup callback before it returns.
 
    Parameters:
    - loop: pointer to h2o_evloop_t
    - max-wait: maximum time to wait in milliseconds (int32)"
-  "h2o_evloop_run"
+  "clj_h2o_evloop_run"
   [:pointer :int] :int)
 
 (defcfn globalconf-size
@@ -969,6 +970,12 @@
      :bytes bytes
      :ends ends}))
 
+(defn ^:no-doc request-seq-at
+  "Returns sequence `i` of the array `request-seqs` that the shim passes to the
+  cleanup callback. Valid only during that callback."
+  ^long [^MemorySegment request-seqs ^long i]
+  (read-native-long (+ (.address request-seqs) (* 8 i))))
+
 (defn ^:no-doc request-connection-id
   "Returns H2O's id of the connection of the request whose native context is
   `ctx-ptr`. Valid only on the worker thread inside the request callback."
@@ -978,10 +985,11 @@
 (defn create-handler
   "Creates and configures an H2O handler with its request and cleanup callbacks.
 
-  `hostconf-ptr` and `flat-config-ptr` are native configuration pointers; the
+  `hostconf-ptr` and `flat-config-ptr` are native configuration pointers. The
   request callback receives the native request context, which it must copy
-  before it returns, and must not throw; the cleanup callback receives the
-  request identity; `arena` retains the native callback trampolines. Returns
+  before it returns, and must not throw. The cleanup callback receives the
+  module id, an array of request sequences (see [[request-seq-at]]) and their
+  count. `arena` holds the native callback trampolines. Returns
   the handler pointer and references that keep both trampolines reachable."
   [hostconf-ptr on-req-callback on-cleanup-callback flat-config-ptr arena]
   {:pre [(some? hostconf-ptr) (not (ffi/null? hostconf-ptr))
@@ -992,10 +1000,10 @@
   (let [on-request-cb (fn on-request-cb [ctx-ptr]
                         (int (on-req-callback ctx-ptr)))
         on-request-cb-ptr (ffi/callback arena on-request-cb [:pointer] :int)
-        on-request-cleanup-cb (fn on-request-cleanup-cb [module-id request-seq]
-                                (on-cleanup-callback module-id request-seq))
+        on-request-cleanup-cb (fn on-request-cleanup-cb [module-id request-seqs n]
+                                (on-cleanup-callback module-id request-seqs n))
         on-request-cleanup-cb-ptr
-        (ffi/callback arena on-request-cleanup-cb [:long :long] :void)]
+        (ffi/callback arena on-request-cleanup-cb [:long :pointer :long] :void)]
     {::on-request-cb on-request-cb
      ::on-request-cleanup-cb on-request-cleanup-cb
      ::on-request-cb-ptr on-request-cb-ptr

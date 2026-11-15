@@ -385,6 +385,95 @@ h2o_token_t *clj_h2o_get_content_type_token(void) {
   return H2O_TOKEN_CONTENT_TYPE;
 }
 
+#define CLJ_CLEANUP_BATCH_CAPACITY 64
+
+/* Request cleanups that the worker thread collects during a native turn. The
+   native part of each cleanup is already done, so only the JVM part waits. It
+   reaches the JVM before the turn returns and before a request, body, proceed
+   or stop upcall, during which collection is off. The JVM code that can run
+   while cleanups wait (accept, connection-close and TLS lookup callbacks)
+   reads no native request memory. */
+typedef struct {
+  bool collecting;
+  clj_request_cleanup_cb cb;
+  uint64_t module_id;
+  size_t count;
+  uint64_t request_seqs[CLJ_CLEANUP_BATCH_CAPACITY];
+} clj_cleanup_batch_t;
+
+static __thread clj_cleanup_batch_t tls_cleanup_batch;
+
+/* The callback gets a copy and the batch is empty before it runs, so a
+   cleanup or a batch inside the callback cannot deliver these sequences again
+   or change the array the JVM reads. Collection is off during the call, so a
+   cleanup inside it goes out at once. */
+static void deliver_cleanups(clj_cleanup_batch_t *batch) {
+  size_t count = batch->count;
+  if (count == 0)
+    return;
+  uint64_t request_seqs[CLJ_CLEANUP_BATCH_CAPACITY];
+  memcpy(request_seqs, batch->request_seqs, count * sizeof(request_seqs[0]));
+  batch->count = 0;
+  clj_request_cleanup_cb cb = batch->cb;
+  uint64_t module_id = batch->module_id;
+  bool collecting = batch->collecting;
+  batch->collecting = false;
+  cb(module_id, request_seqs, count);
+  batch->collecting = collecting;
+}
+
+static void report_cleanup(clj_request_cleanup_cb cb, uint64_t module_id,
+                           uint64_t request_seq) {
+  clj_cleanup_batch_t *batch = &tls_cleanup_batch;
+  if (!batch->collecting) {
+    cb(module_id, &request_seq, 1);
+    return;
+  }
+  if (batch->count == CLJ_CLEANUP_BATCH_CAPACITY ||
+      (batch->count > 0 &&
+       (batch->cb != cb || batch->module_id != module_id)))
+    deliver_cleanups(batch);
+  batch->cb = cb;
+  batch->module_id = module_id;
+  batch->request_seqs[batch->count++] = request_seq;
+}
+
+/* Returns true when this call starts collecting. */
+static bool begin_cleanup_batch(void) {
+  if (tls_cleanup_batch.collecting)
+    return false;
+  tls_cleanup_batch.collecting = true;
+  return true;
+}
+
+static void end_cleanup_batch(bool started) {
+  if (!started)
+    return;
+  deliver_cleanups(&tls_cleanup_batch);
+  tls_cleanup_batch.collecting = false;
+}
+
+/* Before an upcall that names a request: deliver, then stop collecting until
+   resume_cleanup_batch. */
+static bool pause_cleanup_batch(void) {
+  clj_cleanup_batch_t *batch = &tls_cleanup_batch;
+  deliver_cleanups(batch);
+  bool collecting = batch->collecting;
+  batch->collecting = false;
+  return collecting;
+}
+
+static void resume_cleanup_batch(bool collecting) {
+  tls_cleanup_batch.collecting = collecting;
+}
+
+int clj_h2o_evloop_run(h2o_evloop_t *loop, int32_t max_wait) {
+  bool started = begin_cleanup_batch();
+  int ret = h2o_evloop_run(loop, max_wait);
+  end_cleanup_batch(started);
+  return ret;
+}
+
 uint64_t clj_h2o_evloop_now(h2o_evloop_t *loop) { return loop->_now_millisec; }
 
 size_t clj_h2o_context_get_active_conns(h2o_context_t *ctx) {
@@ -407,9 +496,12 @@ static void clj_generator_proceed(h2o_generator_t *gen, h2o_req_t *req) {
   clj_req_ctx_t *ctx = H2O_STRUCT_FROM_MEMBER(clj_req_ctx_t, generator, gen);
   if (ctx != NULL && ctx->dispatch_module_id != 0 &&
       ctx->dispatch_request_seq != 0 &&
-      ctx->on_response_generator_proceed != NULL)
+      ctx->on_response_generator_proceed != NULL) {
+    bool collecting = pause_cleanup_batch();
     ctx->on_response_generator_proceed(ctx->dispatch_module_id,
                                        ctx->dispatch_request_seq);
+    resume_cleanup_batch(collecting);
+  }
 }
 
 static void clj_generator_stop(h2o_generator_t *gen, h2o_req_t *req) {
@@ -420,10 +512,13 @@ static void clj_generator_stop(h2o_generator_t *gen, h2o_req_t *req) {
   clj_req_ctx_t *ctx = H2O_STRUCT_FROM_MEMBER(clj_req_ctx_t, generator, gen);
   if (ctx != NULL && ctx->dispatch_module_id != 0 &&
       ctx->dispatch_request_seq != 0 &&
-      ctx->on_response_generator_stop != NULL)
+      ctx->on_response_generator_stop != NULL) {
+    bool collecting = pause_cleanup_batch();
     ctx->on_response_generator_stop(ctx->dispatch_module_id,
                                     ctx->dispatch_request_seq,
                                     CLJ_COMPLETE_RESET);
+    resume_cleanup_batch(collecting);
+  }
 }
 
 /* Copy headers from clj_header_t array to h2o_req_t response headers using pool
@@ -791,7 +886,7 @@ static void cleanup_request(void *ptr) {
   ctx->generator.proceed = NULL;
   ctx->generator.stop = NULL;
   if (cleanup != NULL && module_id != 0 && request_seq != 0)
-    cleanup(module_id, request_seq);
+    report_cleanup(cleanup, module_id, request_seq);
 
   ctx->dispatch_module_id = 0;
   ctx->dispatch_request_seq = 0;
@@ -835,15 +930,16 @@ static void fail_body_after_handler(h2o_req_t *req) {
 
 static int deliver_body_chunk(clj_req_ctx_t *ctx, int is_end_stream) {
   h2o_req_t *req = ctx->req;
-  if (req->entity.base != NULL && req->entity.len > 0)
-    return ctx->on_request_body_chunk(ctx->dispatch_module_id,
-                                      ctx->dispatch_request_seq,
-                                      req->entity.base, req->entity.len,
-                                      is_end_stream ? 1 : 0);
-  if (is_end_stream)
-    return ctx->on_request_body_chunk(ctx->dispatch_module_id,
-                                      ctx->dispatch_request_seq, NULL, 0, 1);
-  return 0;
+  bool has_chunk = req->entity.base != NULL && req->entity.len > 0;
+  if (!has_chunk && !is_end_stream)
+    return 0;
+  bool collecting = pause_cleanup_batch();
+  int ret = ctx->on_request_body_chunk(
+      ctx->dispatch_module_id, ctx->dispatch_request_seq,
+      has_chunk ? req->entity.base : NULL, has_chunk ? req->entity.len : 0,
+      is_end_stream ? 1 : 0);
+  resume_cleanup_batch(collecting);
+  return ret;
 }
 
 /**
@@ -896,8 +992,9 @@ static int request_handler(h2o_handler_t *self, h2o_req_t *req) {
   if (handler->on_request_cleanup)
     ctx->on_request_cleanup = handler->on_request_cleanup;
 
-  // upcall to the jvm's on-request-callback
+  bool collecting = pause_cleanup_batch();
   int ret = handler->on_request(ctx);
+  resume_cleanup_batch(collecting);
 
   if (ret == CLJ_HANDLER_OVERLOADED) {
     h2o_send_error_503(req, "Service Unavailable", "Server overloaded", 0);
@@ -1258,6 +1355,7 @@ size_t clj_h2o_response_ring_drain(clj_mt_receiver_t *receiver) {
       atomic_load_explicit(&receiver->ring_ready, memory_order_acquire) == 0)
     return 0;
 
+  bool started = begin_cleanup_batch();
   size_t drained = 0;
   for (size_t word = 0; word < receiver->ready_word_count; ++word) {
     /* Detach before sending: synchronous cleanup can republish the same index.
@@ -1295,6 +1393,7 @@ size_t clj_h2o_response_ring_drain(clj_mt_receiver_t *receiver) {
       }
     }
   }
+  end_cleanup_batch(started);
   return drained;
 }
 
