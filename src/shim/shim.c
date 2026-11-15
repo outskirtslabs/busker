@@ -568,6 +568,13 @@ static void copy_headers_to_response(h2o_req_t *req,
   }
 }
 
+/* RFC 9110 section 6.6.1: an origin server with a clock sends Date. H2O's
+ * string is cached per event loop and second. */
+static void add_date_unless_set(h2o_req_t *req) {
+  if (h2o_find_header(&req->res.headers, H2O_TOKEN_DATE, -1) == -1)
+    h2o_resp_add_date_header(req);
+}
+
 /* Only HTTP/1.1 sends the phrase. The codes are those of RFC 9110
  * section 18.3, RFC 6585 and RFC 7725. Other codes get an empty phrase,
  * which RFC 9112 section 4 permits. */
@@ -662,6 +669,7 @@ size_t clj_h2o_start_response(
   }
 
   copy_headers_to_response(req, headers, headers_len);
+  add_date_unless_set(req);
 
   req->compress_hint = compress_hint;
   ctx->generator.proceed = clj_generator_proceed;
@@ -1354,6 +1362,7 @@ static void send_retained_fixed(clj_req_ctx_t *ctx,
   req->res.content_length = data->content_length;
   req->compress_hint = data->compress_hint;
   copy_headers_to_response(req, data->headers, data->headers_len);
+  add_date_unless_set(req);
   ctx->generator.proceed = NULL;
   ctx->generator.stop = NULL;
   ctx->on_response_generator_proceed = NULL;

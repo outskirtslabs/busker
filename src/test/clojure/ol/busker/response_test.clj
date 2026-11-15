@@ -792,7 +792,7 @@
         (let [response (String. (.readAllBytes (.getInputStream socket)) StandardCharsets/US_ASCII)]
           (is (= 2 (count (re-seq #"HTTP/1\.1 200 OK" response))) response)
           (is (= 1 (count (re-seq #"hello" response))) response)
-          (is (str/includes? response "text/plain\r\n\r\nHTTP/1.1 200 OK") response)))
+          (is (str/includes? response "\r\n\r\nHTTP/1.1 200 OK") response)))
       (finally (busker/stop! server)))))
 
 (deftest stop-of-a-closed-emitter-does-not-take-its-lock-test

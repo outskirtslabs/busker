@@ -24,10 +24,10 @@ static uint64_t publish(clj_mt_receiver_t *receiver, uint64_t sequence,
 static void final_send(h2o_ostream_t *stream, h2o_req_t *req,
                        h2o_sendvec_t *bufs, size_t count,
                        h2o_send_state_t state) {
-  (void)req;
   test_output_t *output = (test_output_t *)stream;
   clj_response_slot_t *slot = output->ctx->fixed_slot;
   CHECK(state == H2O_SEND_STATE_FINAL);
+  CHECK(h2o_find_header(&req->res.headers, H2O_TOKEN_DATE, -1) != -1);
   CHECK(clj_h2o_response_ring_ready(output->receiver) == 0);
   CHECK(clj_h2o_response_ring_retained(output->receiver) == 1);
   CHECK(clj_h2o_response_try_claim(output->receiver) == 0);
@@ -64,9 +64,10 @@ static uint64_t publish(clj_mt_receiver_t *receiver, uint64_t sequence,
   return claim;
 }
 
-static void test_final(clj_mt_receiver_t *receiver, int reentrant,
-                       const char *method, int status) {
-  h2o_req_t req = {0};
+static void test_final(h2o_context_t *context, clj_mt_receiver_t *receiver,
+                       int reentrant, const char *method, int status) {
+  h2o_conn_t conn = {.ctx = context};
+  h2o_req_t req = {.conn = &conn};
   h2o_mem_init_pool(&req.pool);
   req.input.method = h2o_iovec_init(method, strlen(method));
   clj_req_ctx_t ctx = {.req = &req,
@@ -476,19 +477,20 @@ static void test_cleanup_batch(h2o_evloop_t *loop, h2o_context_t *context) {
 
 int main(void) {
   h2o_evloop_t *loop = h2o_evloop_create();
-  h2o_context_t context = {.queue = h2o_multithread_create_queue(loop)};
+  h2o_context_t context = {.loop = loop,
+                           .queue = h2o_multithread_create_queue(loop)};
   clj_mt_receiver_t *receiver = clj_h2o_mt_create_response_receiver(&context, 1, 64);
   CHECK(receiver != NULL);
   CHECK(clj_h2o_response_use_acquire(receiver) == 1);
   CHECK(clj_h2o_mt_response_pending(receiver) == 1);
   clj_h2o_response_use_release(receiver);
-  test_final(receiver, 0, "GET", 200);
-  test_final(receiver, 1, "GET", 200);
-  test_final(receiver, 2, "GET", 200);
-  test_final(receiver, 1, "HEAD", 200);
-  test_final(receiver, 0, "GET", 204);
-  test_final(receiver, 0, "GET", 205);
-  test_final(receiver, 0, "GET", 304);
+  test_final(&context, receiver, 0, "GET", 200);
+  test_final(&context, receiver, 1, "GET", 200);
+  test_final(&context, receiver, 2, "GET", 200);
+  test_final(&context, receiver, 1, "HEAD", 200);
+  test_final(&context, receiver, 0, "GET", 204);
+  test_final(&context, receiver, 0, "GET", 205);
+  test_final(&context, receiver, 0, "GET", 304);
   publish(receiver, 99, 200);
   CHECK(clj_h2o_response_ring_drain(receiver) == 1);
   CHECK(clj_h2o_mt_response_pending(receiver) == 0);
@@ -498,6 +500,7 @@ int main(void) {
   test_discovery(&context, UINT16_MAX);
   test_cancel_full(&context);
   test_cleanup_batch(loop, &context);
+  h2o_mem_release_shared(context._timestamp_cache.value);
   h2o_multithread_destroy_queue(context.queue);
   h2o_evloop_destroy(loop);
   return 0;
