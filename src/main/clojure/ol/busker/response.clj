@@ -605,7 +605,7 @@
               (throw (ex-info "Nonblocking output requires a bounded body" {:type (class body)})))
           current-head (when-let [writer @(.writer_ emitter)] (response-queue/committed-head writer))
           validation-response (if response? data (or (:response current-head) {:status 200}))
-          validation-length (when (and body? (not (fn? body))) (known-length body validation-response))
+          validation-length (when-not (fn? body) (known-length body validation-response))
           _ (when (and (not (:wait? opts)) validation-length (> validation-length buffer-size))
               (throw (ex-info "Nonblocking body exceeds output-buffer-size"
                               {:bytes validation-length :output-buffer-size buffer-size})))
@@ -628,7 +628,7 @@
                 _ (when (and response? (not info?) committed)
                     (throw (ex-info "Final response headers have already been accepted" {})))
                 response (if response? data (or (:response committed) {:status 200 :headers {}}))
-                length (when (and body? (not (fn? body))) (known-length body response))
+                length (when-not (fn? body) (known-length body response))
                 capacity (if (fn? body) (:capacity opts) (or length 0))
                 _ (when (and (not (:wait? opts)) (> capacity buffer-size))
                     (throw (ex-info "Nonblocking body exceeds output-buffer-size"

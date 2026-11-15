@@ -64,9 +64,10 @@
   `:fixed-response-max-body-size` and `:output-buffer-size`, not for HEAD and
   not for status 204, 205 or 304.
 
-  A map without `:body` is header-only. `:body nil` is an empty body write with
-  a receipt. Informational statuses 100–199 except 101 reject bodies and `:end?`.
-  Status 101 throws. Final headers commit once. Body-first output commits status
+  A map without `:body` is header-only. With `:end? true` it has an empty
+  body, so a `content-length` that does not match throws. `:body nil` is an
+  empty body write with a receipt. Informational statuses 100–199 except 101
+  reject bodies and `:end?`. Status 101 throws. Final headers commit once. Body-first output commits status
   200. A second final head throws. Unknown lengths use protocol framing. HEAD
   responses and statuses 204, 205 and 304 send no body bytes.
 

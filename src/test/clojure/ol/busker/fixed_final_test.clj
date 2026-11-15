@@ -875,7 +875,9 @@
   {"nil" {:status 200 :body nil}
    "nil-length" {:status 200 :headers {"content-length" "11"} :body nil}
    "304" {:status 304 :headers {"etag" "\"v1\""} :body nil}
-   "304-length" {:status 304 :headers {"etag" "\"v1\"" "content-length" "11"} :body nil}})
+   "304-length" {:status 304 :headers {"etag" "\"v1\"" "content-length" "11"} :body nil}
+   "absent" {:status 200}
+   "absent-length" {:status 200 :headers {"content-length" "11"}}})
 
 ;; 65 pairs do not fit a fixed slot.
 (def ^:private large-head-headers
@@ -884,11 +886,16 @@
 (defn- small-response-handler
   [{:keys [uri] emitter :ol.busker.request/emitter}]
   (case uri
-    ("/large/nil" "/large/nil-length" "/large/304" "/large/304-length")
+    ("/large/nil" "/large/nil-length" "/large/304" "/large/304-length" "/large/absent"
+                  "/large/absent-length")
     (update (bodiless-responses (subs uri 7)) :headers merge large-head-headers)
-    ("/emit/nil" "/emit/nil-length" "/emit/304" "/emit/304-length")
-    (do (protocols/emit! emitter (bodiless-responses (subs uri 6)) {:end? true})
-        {:body emitter})
+    ("/emit/nil" "/emit/nil-length" "/emit/304" "/emit/304-length" "/emit/absent"
+                 "/emit/absent-length")
+    (try
+      (protocols/emit! emitter (bodiless-responses (subs uri 6)) {:end? true})
+      {:body emitter}
+      (catch clojure.lang.ExceptionInfo e
+        {:status 500 :body (ex-message e)}))
     "/204" {:status 204 :headers {"x-case" "204"}}
     "/204-body" {:status 204 :headers {"content-length" "5"} :body "extra"}
     "/304" {:status 304 :headers {"etag" "\"v1\""}}
@@ -1013,7 +1020,10 @@
                                                        ["GET" "304" 304 nil]
                                                        ["HEAD" "304" 304 nil]
                                                        ["GET" "304-length" 304 "11"]
-                                                       ["HEAD" "304-length" 304 "11"]]]
+                                                       ["HEAD" "304-length" 304 "11"]
+                                                       ["GET" "absent" 200 "0"]
+                                                       ["HEAD" "absent" 200 nil]
+                                                       ["HEAD" "absent-length" 200 "11"]]]
         (let [path (str "/" shape "/" response)
               {:keys [result fixed streaming]}
               (response-paths #(exchange proto port method path))
@@ -1021,8 +1031,22 @@
           (is (= 0 (:exit result)) (pr-str context (:err result)))
           (is (= status (:status result)) (pr-str context))
           (is (= content-length (get-in result [:headers "content-length"])) (pr-str context))
+          (is (nil? (get-in result [:headers "transfer-encoding"])) (pr-str context))
           (is (= 0 (:size result)) (pr-str context))
           (is (= [0 1] [fixed streaming]) (pr-str context))))
+      ;; A content-length without a body is invalid: the large head becomes the
+      ;; fixed 500, and emit! throws before it sends anything.
+      (doseq [proto [:h1 :h2 :h3]
+              [shape body] [["large" "Internal Server Error"]
+                            ["emit" "Response content-length does not match its body"]]]
+        (let [path (str "/" shape "/absent-length")
+              {:keys [result fixed streaming]}
+              (response-paths #(exchange proto port "GET" path))
+              context [proto path]]
+          (is (= 0 (:exit result)) (pr-str context (:err result)))
+          (is (= 500 (:status result)) (pr-str context))
+          (is (= body (:body result)) (pr-str context))
+          (is (= [1 0] [fixed streaming]) (pr-str context))))
       (finally
         (busker/stop! server)))))
 
