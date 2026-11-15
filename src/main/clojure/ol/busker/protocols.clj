@@ -15,8 +15,9 @@
 (defprotocol ResponseEmitter
   "Accepts ordered output for one HTTP response and reports transport progress.
 
-  The response closes on [[close!]], an accepted end operation or native request
-  termination. Graceful generation draining leaves active responses usable.
+  The response closes on [[close!]], an accepted end operation, native request
+  termination or the end of a handler that does not return this emitter as
+  `:body`. Graceful generation draining leaves active responses usable.
   [[on-close!]] runs application cleanup independently of receipt settlement."
   (open? [this]
     "Returns whether this response accepts output.")

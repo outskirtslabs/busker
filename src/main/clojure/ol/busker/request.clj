@@ -124,7 +124,7 @@
           {:status 503
            :headers {"content-type" "text/plain; charset=utf-8"}
            :body "Server shutting down"})
-        (catch Exception e
+        (catch Throwable e
           (println "Handler error:" (.getMessage e))
           (.printStackTrace e)
           {:status 500

@@ -154,6 +154,8 @@ After the final response is committed, its status and headers cannot change.
 
 The emitter is available in the request under `:ol.busker.request/emitter`.
 A handler uses it by returning it as the response body.
+The response then continues until the application closes or ends it.
+If the handler returns another response or throws after the emitter accepted final headers, Busker ends the response as failed.
 
 In the example below, the handler starts a virtual thread to send the informational response, final response, and body data.
 
