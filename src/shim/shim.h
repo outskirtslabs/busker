@@ -357,6 +357,9 @@ int clj_h2o_response_abort(clj_mt_receiver_t *receiver,
                            uint64_t claim_handle);
 size_t clj_h2o_response_ring_drain(clj_mt_receiver_t *receiver);
 
+/* The socket helpers below return the negative errno on failure.
+   FFM callers cannot read errno reliably after the call returns. */
+
 /* Open a nonblocking CLOEXEC TCP listener for IPv4 or IPv6.
    `host` may be NULL or empty only when the caller intentionally wants the
    platform default implied by the supplied bind host string. */
@@ -372,8 +375,11 @@ int clj_h2o_open_unix_listener(const char *path, int backlog, int nonblock,
 
 /* Unlink `path` only if it currently exists and is still a socket.
    Returns 1 when a socket path was removed, 0 when cleanup was skipped,
-   and -1 on lstat/unlink errors. */
+   and the negative errno on lstat or unlink errors. */
 int clj_h2o_unlink_unix_socket_if_still_socket(const char *path);
+
+/* Duplicate `fd` with FD_CLOEXEC set on the duplicate. */
+int clj_h2o_dup_cloexec(int fd);
 
 /* Create, initialize, and configure a new h2o_globalconf_t.
  * Allocates memory, calls h2o_config_init, and applies flat config if provided.

@@ -9,18 +9,11 @@
   - [[ol.busker.listen]] manages listener resources.
   - [[ol.busker.native]] supplies other shim calls."
   (:require
-   [babashka.ffi :as ffi :refer [defcfn]]
+   [babashka.ffi :refer [defcfn]]
    [ol.busker.native.loader]))
 
 (set! *warn-on-reflection* true)
 
-(def ^:private F_SETFD 2)
-(def ^:private FD_CLOEXEC 1)
-
-;; libc bindings (thin)
-
-(defcfn fcntl "fcntl" [:int :int :int] :int)
-(defcfn dup "dup" [:int] :int)
 (defcfn close "close" [:int] :int)
 (defcfn strerror "strerror" [:int] :string)
 (defcfn open-tcp-listener* "clj_h2o_open_tcp_listener"
@@ -29,17 +22,7 @@
   [:string :int :int :int] :int)
 (defcfn unlink-unix-socket-if-still-socket* "clj_h2o_unlink_unix_socket_if_still_socket"
   [:string] :int)
-;; helpers
-
-(def ^:private errno-location-symbols
-  ["__errno_location" "__error"])
-
-(def ^:private errno-location-fn
-  (delay
-    (some (fn [sym]
-            (when-let [addr (ffi/find-symbol sym)]
-              (ffi/cfn addr [] :pointer)))
-          errno-location-symbols)))
+(defcfn dup-cloexec* "clj_h2o_dup_cloexec" [:int] :int)
 
 (def ^:private errno->keyword
   {9 :ebadf
@@ -54,40 +37,23 @@
    98 :eaddrinuse
    99 :eaddrnotavail})
 
-(defn- errno-details
-  []
-  (if-let [get-errno* @errno-location-fn]
-    (let [errno-ptr (get-errno*)
-          errno-int (if (and errno-ptr (not (ffi/null? errno-ptr)))
-                      (ffi/read (ffi/reinterpret errno-ptr 4) :int)
-                      -1)
-          errno-key (get errno->keyword errno-int :unknown-errno)
-          errno-msg (try
-                      (strerror errno-int)
-                      (catch Throwable _
-                        nil))]
-      {:errno-int errno-int
-       :errno errno-key
-       :errno-message errno-msg})
-    {:errno-int nil
-     :errno :unknown-errno
-     :errno-message nil}))
-
 (defn- ex-info-with-errno
-  [message data]
-  (let [{:keys [errno errno-int errno-message]} (errno-details)
-        msg (if errno-message
-              (str message " (" errno-message ")")
-              message)]
-    (ex-info msg
+  "Returns an ex-info for a shim call that failed with return code `rc`.
+  The shim returns the negative errno. The JVM can change errno before a
+  later downcall reads it."
+  [message rc data]
+  (let [errno-int (- rc)
+        errno-message (try
+                        (strerror errno-int)
+                        (catch Throwable _
+                          nil))]
+    (ex-info (if errno-message
+               (str message " (" errno-message ")")
+               message)
              (merge data
-                    {:errno errno
+                    {:errno (get errno->keyword errno-int :unknown-errno)
                      :errno-int errno-int
                      :errno-message errno-message}))))
-
-(defn- set-cloexec! [fd]
-  (when (neg? (fcntl fd F_SETFD FD_CLOEXEC))
-    (throw (ex-info-with-errno "fcntl(F_SETFD,FD_CLOEXEC) failed" {:fd fd}))))
 
 (defn open-master-listener
   "Create a master TCP socket, set NB/CLOEXEC and options, bind + listen.
@@ -114,6 +80,7 @@
     (when (neg? fd)
       (throw (ex-info-with-errno
               (str "failed to open TCP listener for " host ":" port)
+              fd
               {:host host
                :port port
                :backlog backlog})))
@@ -134,6 +101,7 @@
     (when (neg? fd)
       (throw (ex-info-with-errno
               (str "failed to open unix listener for " path)
+              fd
               {:path path
                :backlog backlog})))
     fd))
@@ -141,10 +109,9 @@
 (defn dup-fd
   "Duplicate `fd` and set FD_CLOEXEC on the duplicate."
   [fd]
-  (let [d (dup fd)]
+  (let [d (dup-cloexec* fd)]
     (when (neg? d)
-      (throw (ex-info-with-errno "dup() failed" {:fd fd})))
-    (set-cloexec! d)
+      (throw (ex-info-with-errno "dup() failed" d {:fd fd})))
     d))
 
 (defn dup-for-threads
@@ -178,6 +145,7 @@
     (when (neg? rc)
       (throw (ex-info-with-errno
               (str "failed to safely unlink unix socket path " path)
+              rc
               {:path path})))
     (pos? rc)))
 

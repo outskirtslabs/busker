@@ -145,11 +145,8 @@ int clj_h2o_open_tcp_listener(const char *host, uint16_t port, int backlog,
 
   snprintf(servname, sizeof(servname), "%u", (unsigned)port);
   gai_err = getaddrinfo(lookup_host, servname, &hints, &res);
-  if (gai_err != 0) {
-    if (gai_err != EAI_SYSTEM)
-      errno = EINVAL;
-    return -1;
-  }
+  if (gai_err != 0)
+    return gai_err == EAI_SYSTEM && errno != 0 ? -errno : -EINVAL;
 
   for (ai = res; ai != NULL; ai = ai->ai_next) {
     fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
@@ -201,8 +198,7 @@ int clj_h2o_open_tcp_listener(const char *host, uint16_t port, int backlog,
   }
 
   freeaddrinfo(res);
-  errno = saved_errno;
-  return -1;
+  return -saved_errno;
 }
 
 int clj_h2o_open_unix_listener(const char *path, int backlog, int nonblock,
@@ -213,8 +209,7 @@ int clj_h2o_open_unix_listener(const char *path, int backlog, int nonblock,
   int cleanup_path = 0;
 
   if (path == NULL || path[0] == '\0') {
-    errno = EINVAL;
-    return -1;
+    return -EINVAL;
   }
 
   memset(&addr, 0, sizeof(addr));
@@ -224,30 +219,26 @@ int clj_h2o_open_unix_listener(const char *path, int backlog, int nonblock,
 #if defined(__linux__)
     size_t name_len = strlen(path + 1);
     if (name_len == 0 || name_len > sizeof(addr.sun_path) - 1) {
-      errno = ENAMETOOLONG;
-      return -1;
+      return -ENAMETOOLONG;
     }
     memcpy(addr.sun_path + 1, path + 1, name_len);
     addrlen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 +
                           name_len);
 #else
-    errno = EAFNOSUPPORT;
-    return -1;
+    return -EAFNOSUPPORT;
 #endif
   } else {
     struct stat st;
     size_t path_len = strlen(path);
     if (path_len >= sizeof(addr.sun_path)) {
-      errno = ENAMETOOLONG;
-      return -1;
+      return -ENAMETOOLONG;
     }
 
     if (lstat(path, &st) == 0) {
       if (S_ISSOCK(st.st_mode)) {
         unlink(path);
       } else {
-        errno = EADDRINUSE;
-        return -1;
+        return -EADDRINUSE;
       }
     }
 
@@ -259,7 +250,7 @@ int clj_h2o_open_unix_listener(const char *path, int backlog, int nonblock,
 
   fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd == -1)
-    return -1;
+    return -errno;
 
   if (cloexec && clj_set_fd_cloexec(fd) != 0)
     goto Error;
@@ -278,8 +269,7 @@ Error:
     close(fd);
     if (cleanup_path)
       unlink(path);
-    errno = saved_errno;
-    return -1;
+    return -saved_errno;
   }
 }
 
@@ -287,26 +277,27 @@ int clj_h2o_unlink_unix_socket_if_still_socket(const char *path) {
   struct stat st;
 
   if (path == NULL || path[0] == '\0') {
-    errno = EINVAL;
-    return -1;
+    return -EINVAL;
   }
 
   if (path[0] == '@')
     return 0;
 
-  if (lstat(path, &st) != 0) {
-    if (errno == ENOENT)
-      return 0;
-    return -1;
-  }
+  if (lstat(path, &st) != 0)
+    return errno == ENOENT ? 0 : -errno;
 
   if (!S_ISSOCK(st.st_mode))
     return 0;
 
   if (unlink(path) != 0)
-    return -1;
+    return -errno;
 
   return 1;
+}
+
+int clj_h2o_dup_cloexec(int fd) {
+  int dup_fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+  return dup_fd == -1 ? -errno : dup_fd;
 }
 
 int clj_h2o_socket_is_reading(h2o_socket_t *sock) {

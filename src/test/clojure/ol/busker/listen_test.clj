@@ -269,6 +269,36 @@
         (finally
           (.delete file))))))
 
+(deftest socket-errors-report-the-errno-of-the-failing-call-test
+  (testing "A later errno change on the same thread does not change the reported cause"
+    (let [file (File/createTempFile "busker-listen-test-regular-file-" ".sock")
+          open-unix-listener* @#'socket/open-unix-listener*
+          _ (spit file "not-a-socket")]
+      (try
+        (with-redefs [socket/open-unix-listener*
+                      (fn [& args]
+                        (let [rc (apply open-unix-listener* args)]
+                          ;; close(-1) sets errno to EBADF on this thread.
+                          (socket/close -1)
+                          rc))]
+          (let [error (try
+                        (socket/open-unix-listener {:path (.getAbsolutePath file)})
+                        nil
+                        (catch clojure.lang.ExceptionInfo e
+                          e))]
+            (is (= :eaddrinuse (:errno (ex-data error)))
+                "The cause should come from the failing call")))
+        (finally
+          (.delete file)))))
+  (testing "A failed duplicate reports the errno of the dup call"
+    (let [error (try
+                  (socket/dup-fd -1)
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+      (is (= :ebadf (:errno (ex-data error)))
+          "Duplicating an invalid fd should report EBADF"))))
+
 (deftest pooled-unix-final-cleanup-skips-replacement-nonsocket-file-test
   (testing "Final unix cleanup leaves a replacement non-socket file alone"
     (let [open-pool (requiring-resolve 'ol.busker.listen/open-pool)
