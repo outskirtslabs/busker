@@ -11,9 +11,13 @@
    [ol.busker.fixed-final :as fixed-final]
    [ol.busker.worker-context :as worker-context]
    [ol.busker.generation :as generation]
+   [ol.busker.generation.effects :as effects]
    [ol.busker.generation.accept :as accept]
    [ol.busker.internal.protocols :as p]
+   [ol.busker.lifecycle.generation :as gen]
+   [ol.busker.listen :as listen]
    [ol.busker.native :as h2o]
+   [ol.busker.native.socket :as socket]
    [ol.busker.protocols :as protocols]
    [ol.busker.request :as request]
    [ol.busker.request-dispatch :as request-dispatch]
@@ -26,7 +30,7 @@
    [java.nio.charset StandardCharsets]
    [java.util.concurrent AbstractExecutorService CountDownLatch ExecutorService Executors
     TimeUnit]
-   [java.util.concurrent.atomic AtomicBoolean AtomicReference AtomicReferenceArray]
+   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference AtomicReferenceArray]
    [java.util.concurrent.locks ReentrantReadWriteLock]))
 
 (defrecord RetirementWorker
@@ -39,6 +43,23 @@
   (count-msgs [_] 0)
   (add-req [_ _ _] nil)
   (reap-req [_ _] nil))
+
+(defn- acquired
+  "Returns the progress atom of a generation map built by hand, with `ids`
+  acquired."
+  [ids]
+  (atom {:nodes (zipmap ids (repeat :acquired))}))
+
+(defn- generation-map
+  "Returns a generation map built by hand, with `n-workers`, the progress atom
+  `progress_` and the entries of `more`."
+  [n-workers progress_ & {:as more}]
+  (merge {::generation/progress_ progress_
+          ::generation/n-workers n-workers
+          ::generation/stop-lock (Object.)
+          ::generation/shutting-down? (AtomicBoolean.)
+          ::generation/active-connection-count_ (AtomicLong.)}
+         more))
 
 (defn- retirement-worker
   [dispatch receiver_ thread send-fn]
@@ -283,10 +304,9 @@
                    (awaitTermination [n unit] (.awaitTermination real n unit)))
         dispatch (request-dispatch/create executor)
         done (CountDownLatch. 5)
-        generation {::generation/progress_ (atom {})
-                    ::generation/stop-lock (Object.)
-                    ::generation/executor executor
-                    ::generation/workers [{:callback-dispatch nil :request-dispatch dispatch}]}]
+        generation (generation-map 1 (atom {})
+                                   ::generation/executor executor
+                                   ::generation/workers [{:callback-dispatch nil :request-dispatch dispatch}])]
     (try
       (dotimes [_ 5]
         (request-dispatch/dispatch! dispatch 1 (fn []
@@ -308,79 +328,53 @@
 
 (deftest interrupted-stop-shuts-the-executor-down-without-waiting-for-sweeps
   (let [executor (Executors/newVirtualThreadPerTaskExecutor)
-        generation {::generation/progress_ (atom {})
-                    ::generation/stop-lock (Object.)
-                    ::generation/executor executor
-                    ::generation/workers [{:callback-dispatch nil
-                                           :request-dispatch (request-dispatch/create executor)}
-                                          {:callback-dispatch nil
-                                           :request-dispatch (request-dispatch/create executor)}]}]
+        generation (generation-map 2 (atom {})
+                                   ::generation/executor executor
+                                   ::generation/workers [{:callback-dispatch nil
+                                                          :request-dispatch (request-dispatch/create executor)}
+                                                         {:callback-dispatch nil
+                                                          :request-dispatch (request-dispatch/create executor)}])]
     (try
       (with-redefs [callback-dispatch/begin-drain! identity
                     evloop/broadcast-wake! (fn [_])]
-        (.interrupt (Thread/currentThread))
-        (let [start (System/nanoTime)
-              _ (generation/begin-stop! generation)
-              ms (/ (- (System/nanoTime) start) 1e6)
-              interrupted? (Thread/interrupted)]
-          (is (< ms 300) (str "an interrupted stop took " ms " ms with workers that never sweep"))
-          (is (.isShutdown executor))
-          (is (= :stopping (generation/phase generation)))
-          (is interrupted? "the interrupt stays set for the caller")))
+        (let [result_ (promise)
+              start (System/nanoTime)
+              stopper (Thread. #(do (generation/begin-stop! generation)
+                                    (deliver result_ [(System/nanoTime) (Thread/interrupted)])))]
+          (.start stopper)
+          (Thread/sleep 50)
+          (.interrupt stopper)
+          (let [[end interrupted?] (deref result_ 5000 [(System/nanoTime) false])
+                ms (/ (- end start) 1e6)]
+            (is (< ms 350) (str "an interrupted stop took " ms " ms with workers that never sweep"))
+            (is (.isShutdown executor))
+            (is (= :stopping (generation/phase generation)))
+            (is interrupted? "the interrupt stays set for the caller"))))
       (finally
-        (Thread/interrupted)
         (.shutdownNow executor)))))
 
-(deftest wake-receiver-retires-on-event-loop-worker-test
-  (let [events_ (atom [])
-        receiver (mem/segment 1)
-        receiver_ (AtomicReference. receiver)
-        worker {:wake-endpoint ::endpoint
-                :wakeup-receiver_ receiver_}]
-    (.set worker-context/worker-context worker)
-    (try
-      (with-redefs [wake-endpoint/quiesce-endpoint!
-                    (fn [endpoint]
-                      (is (= ::endpoint endpoint))
-                      (swap! events_ conj :quiesce))
-                    h2o/mt-destroy-wakeup-receiver
-                    (fn [actual-receiver]
-                      (is (identical? receiver actual-receiver))
-                      (is (false? (.isVirtual (Thread/currentThread))))
-                      (swap! events_ conj :destroy))]
-        (generation/evloop-msg-processor :h2o/retire-wakeup-receiver []))
-      (is (= [:quiesce :destroy] @events_))
-      (is (nil? (.get receiver_)))
-      (finally
-        (.remove worker-context/worker-context)))))
-(deftest startup-receiver-without-worker-retires-on-lifecycle-platform-test
+(deftest a-stop-frees-the-receivers-of-a-worker-that-never-started-before-its-context-test
   (let [wakeup-receiver (mem/segment 1)
         response-receiver (mem/segment 2)
-        destroyed_ (atom {:wakeup [] :response []})
         events_ (atom [])
-        generation-state {::generation/progress_ (atom {})
-                          ::generation/stop-lock (Object.)
-                          ::generation/workers []
-                          ::generation/wakeup-receivers [wakeup-receiver]
-                          ::generation/response-receivers [response-receiver]
-                          ::generation/contexts [:startup-context]
-                          ::generation/listener-runtimes []
-                          ::generation/listener-claims {}
-                          ::generation/config {}}]
-    (with-redefs [h2o/context-dispose (fn [_] (swap! events_ conj :context))
-                  h2o/mt-destroy-wakeup-receiver
-                  (fn [receiver]
-                    (swap! events_ conj :wakeup)
-                    (swap! destroyed_ update :wakeup conj receiver))
-                  h2o/mt-destroy-response-receiver
-                  (fn [receiver]
-                    (swap! events_ conj :response)
-                    (swap! destroyed_ update :response conj receiver))]
+        generation-state (generation-map 1 (acquired [[:context 0] [:response-receiver 0]]) ::generation/executor (Executors/newVirtualThreadPerTaskExecutor)
+                                         ::generation/workers []
+                                         ::generation/wakeup-receivers [wakeup-receiver]
+                                         ::generation/response-receivers [response-receiver]
+                                         ::generation/contexts [:startup-context]
+                                         ::generation/listener-claims {}
+                                         ::generation/config {})]
+    (with-redefs [h2o/context-dispose #(swap! events_ conj [:context %])
+                  h2o/mt-destroy-wakeup-receiver #(swap! events_ conj [:receiver %])
+                  h2o/mt-destroy-response-receiver #(swap! events_ conj [:receiver %])]
       (generation/stop! generation-state))
-    (is (= {:wakeup [wakeup-receiver]
-            :response [response-receiver]}
-           @destroyed_))
-    (is (= [:response :wakeup :context] @events_))
+    (let [events @events_
+          pos #(.indexOf ^java.util.List events %)]
+      (is (= {[:receiver wakeup-receiver] 1 [:receiver response-receiver] 1
+              [:context :startup-context] 1}
+             (frequencies events)))
+      (is (< (max (pos [:receiver wakeup-receiver]) (pos [:receiver response-receiver]))
+             (pos [:context :startup-context]))))
     (is (= :stopped (generation/phase generation-state)))))
 
 (deftest response-ring-claim-is-bounded-and-reusable-from-a-virtual-thread
@@ -460,63 +454,6 @@
     (invoke [receiver capacity payload-capacity]
       (f receiver capacity payload-capacity))))
 
-(deftest failed-response-receiver-allocation-unwinds-core-startup
-  (let [events_ (atom [])
-        response-receivers_ (atom [:response-1 nil])
-        arena (reify java.lang.AutoCloseable
-                (close [_] (swap! events_ conj :close-arena)))
-        create-wakeup (fn [context]
-                        (keyword "wakeup" (name context)))
-        create-response (receiver-capacities->object-fn
-                         (fn [context _ _]
-                           (swap! events_ conj [:create-response context])
-                           (let [receiver (first @response-receivers_)]
-                             (swap! response-receivers_ rest)
-                             receiver)))]
-    (with-redefs [mem/shared-arena (constantly arena)
-                  mem/null? (constantly false)
-                  generation/create-server-config
-                  (constantly {::generation/config-ptr :config})
-                  h2o/create-loops (constantly [:loop-1 :loop-2])
-                  h2o/create-contexts (constantly [:context-1 :context-2])
-                  h2o/mt-create-wakeup-receiver create-wakeup
-                  h2o/mt-create-response-receiver create-response
-                  h2o/mt-destroy-response-receiver
-                  (fn [receiver]
-                    (swap! events_ conj [:destroy-response receiver]))
-                  h2o/mt-destroy-wakeup-receiver
-                  (fn [receiver]
-                    (swap! events_ conj [:destroy-wakeup receiver]))
-                  h2o/context-dispose
-                  (fn [context]
-                    (swap! events_ conj [:dispose-context context]))
-                  h2o/evloop-destroy
-                  (fn [loop]
-                    (swap! events_ conj [:destroy-loop loop]))
-                  h2o/config-dispose
-                  (fn [config]
-                    (swap! events_ conj [:dispose-config config]))]
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                            #"Could not create native response receiver"
-                            (#'generation/init-core-state
-                             {::generation/config {:output-buffer-size 1 :fixed-response-max-body-size 1
-                                                   :fixed-response-slots 1}
-                              ::generation/n-workers 2
-                              ::generation/max-connections 10})))
-      (is (= [[:create-response :context-1]
-              [:create-response :context-2]]
-             (take 2 @events_)))
-      (is (= [[:destroy-response :response-1]
-              [:destroy-wakeup :wakeup/context-2]
-              [:destroy-wakeup :wakeup/context-1]
-              [:dispose-context :context-2]
-              [:dispose-context :context-1]
-              [:destroy-loop :loop-2]
-              [:destroy-loop :loop-1]
-              [:dispose-config :config]
-              :close-arena]
-             (drop 2 @events_))))))
-
 ;; The sizes reach the native allocation exactly, with no int overflow, also at
 ;; the largest option values. The stub refuses each ring, as the native call
 ;; does when it cannot allocate one, and startup reports the ring size.
@@ -536,26 +473,16 @@
              :fixed-response-slots 65535}
             [65535 (+ 16384 Integer/MAX_VALUE 1)]]]]
     (let [calls_ (atom [])]
-      (with-redefs [mem/shared-arena (constantly (reify java.lang.AutoCloseable (close [_])))
-                    generation/create-server-config
-                    (constantly {::generation/config-ptr :config})
-                    h2o/create-loops (constantly [:loop])
-                    h2o/create-contexts (constantly [:context])
-                    h2o/mt-create-wakeup-receiver (constantly nil)
-                    h2o/mt-create-response-receiver
+      (with-redefs [h2o/mt-create-response-receiver
                     (receiver-capacities->object-fn
                      (fn [_ slots storage]
                        (swap! calls_ conj [slots storage])
-                       nil))
-                    h2o/context-dispose (fn [_])
-                    h2o/evloop-destroy (fn [_])
-                    h2o/config-dispose (fn [_])]
+                       nil))]
         (let [[slots storage] expected
               error (try
-                      (#'generation/init-core-state
-                       {::generation/config options
-                        ::generation/n-workers 1
-                        ::generation/max-connections 10})
+                      ((:acquire (:response-receiver effects/table))
+                       {::generation/config options ::generation/contexts [:context]}
+                       0)
                       nil
                       (catch clojure.lang.ExceptionInfo e e))]
           (is (re-find #"Could not create native response receiver of \d+ slots of \d+ bytes"
@@ -565,66 +492,448 @@
                  (ex-data error))))
         (is (= [expected] @calls_) (pr-str options))))))
 
-(deftest failed-response-receiver-allocation-completes-cleanup-after-a-destructor-error
-  (let [events_ (atom [])
-        response-receivers_ (atom [:response-1 nil])
-        arena (reify java.lang.AutoCloseable
-                (close [_] (swap! events_ conj :close-arena)))
-        create-wakeup (fn [context]
-                        (keyword "wakeup" (name context)))
-        create-response (receiver-capacities->object-fn
-                         (fn [context _ _]
-                           (swap! events_ conj [:create-response context])
-                           (let [receiver (first @response-receivers_)]
-                             (swap! response-receivers_ rest)
-                             receiver)))]
-    (with-redefs [mem/shared-arena (constantly arena)
-                  mem/null? (constantly false)
-                  generation/create-server-config
-                  (constantly {::generation/config-ptr :config})
-                  h2o/create-loops (constantly [:loop-1 :loop-2])
-                  h2o/create-contexts (constantly [:context-1 :context-2])
-                  h2o/mt-create-wakeup-receiver create-wakeup
-                  h2o/mt-create-response-receiver create-response
+(deftest a-null-ticket-manager-fails-the-acquire-test
+  (doseq [created [nil mem/null]]
+    (with-redefs [h2o/ticket-manager-create (fn [_] created)]
+      (let [config {:tls {:session-tickets {:lifetime-seconds 3600}} :listeners [{:tls {}}]}
+            error (try
+                    ((:acquire (:ticket-manager effects/table)) {::generation/config config} nil)
+                    nil
+                    (catch clojure.lang.ExceptionInfo e e))]
+        (is (= "Could not create native ticket manager" (ex-message error)))
+        (is (= {:lifetime-seconds 3600} (ex-data error)))))))
+
+(defn- counting-node-effects
+  "Returns [[generation/node-effects]] with the acquire of node `target`
+  throwing `error`, and each acquire and each release that ends with `:ok`
+  added as a node id to `acquired_` and `released_`."
+  [target error acquired_ released_]
+  (into {}
+        (map (fn [[kind {:keys [acquire release]}]]
+               [kind {:acquire (fn [g i]
+                                 (let [id (if i [kind i] kind)]
+                                   (when (= target id) (throw error))
+                                   (let [g (acquire g i)]
+                                     (swap! acquired_ conj id)
+                                     g)))
+                      :release (fn [x timeout-ns]
+                                 (let [outcome (release x timeout-ns)
+                                       id (if-let [i (:worker-idx x)] [kind i] kind)]
+                                   (when-not (= :not-yet outcome) (swap! released_ conj id))
+                                   outcome))}]))
+        generation/node-effects))
+
+(deftest a-failed-start-at-each-acquire-releases-what-it-acquired-test
+  (let [port (util/free-port)
+        config (config/load! {:n-workers 2
+                              :entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                              :dispatch [{:handler (constantly {:status 200})}]})
+        boom (ex-info "simulated acquire failure" {})
+        kept-before (count @@#'generation/failed-retirements_)]
+    (doseq [target (gen/acquire-order 2)]
+      (testing (str target)
+        (let [acquired_ (atom [])
+              released_ (atom [])]
+          (with-redefs [generation/node-effects (counting-node-effects target boom acquired_ released_)]
+            (is (identical? boom (try (generation/start! config nil) nil (catch Throwable t t)))))
+          (is (= (sort-by str @acquired_) (sort-by str @released_)))
+          (is (= (count @released_) (count (set @released_)))))))
+    (is (= kept-before (count @@#'generation/failed-retirements_)))
+    (testing "the port can be bound again"
+      (generation/stop! (generation/start! config nil)))))
+
+(deftest a-failed-start-whose-unwind-fails-is-kept-until-a-later-stop-test
+  (let [port (util/free-port)
+        config (config/load! {:n-workers 2
+                              :entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                              :dispatch [{:handler (constantly {:status 200})}]})
+        boom (ex-info "simulated wake receiver failure" {})
+        stop-error (ex-info "simulated stop signal failure" {})
+        create-receiver h2o/mt-create-wakeup-receiver
+        receivers_ (atom 0)
+        signal-stop! effects/signal-stop!
+        signals_ (atom 0)
+        kept-before (set @@#'generation/failed-retirements_)
+        error (with-redefs [h2o/mt-create-wakeup-receiver (fn [ctx]
+                                                            (if (= 2 (swap! receivers_ inc))
+                                                              (throw boom)
+                                                              (create-receiver ctx)))
+                            effects/signal-stop! (fn [g]
+                                                   (when (= 1 (swap! signals_ inc)) (throw stop-error))
+                                                   (signal-stop! g))]
+                (try (generation/start! config nil) nil (catch Throwable t t)))
+        kept (remove kept-before @@#'generation/failed-retirements_)]
+    (is (identical? boom error))
+    (is (= [stop-error] (vec (.getSuppressed ^Throwable error))))
+    (is (= 1 (count kept)) "the generation is recorded as kept")
+    (testing "a later stop releases it"
+      (generation/stop! (first kept))
+      (is (= :stopped (generation/phase (first kept))))
+      (is (not-any? #(identical? (first kept) %) @@#'generation/failed-retirements_))
+      (generation/stop! (generation/start! config nil)))))
+
+(deftest a-throw-after-an-acquire-keeps-the-node-for-a-later-stop-test
+  (let [port (util/free-port)
+        config (config/load! {:n-workers 1
+                              :entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                              :dispatch [{:handler (constantly {:status 200})}]})
+        boom (ex-info "simulated observe failure" {})
+        observe @#'generation/observe
+        thrown_ (atom false)
+        arenas_ (atom [])
+        shared-arena mem/shared-arena
+        kept-before (set @@#'generation/failed-retirements_)
+        error (with-redefs-fn {#'mem/shared-arena (fn [] (let [a (shared-arena)] (swap! arenas_ conj a) a))
+                               #'generation/observe (fn [g nodes]
+                                                      (if (and (::generation/arena g)
+                                                               (compare-and-set! thrown_ false true))
+                                                        (throw boom)
+                                                        (observe g nodes)))}
+                #(try (generation/start! config nil) nil (catch Throwable t t)))
+        g (first (remove kept-before @@#'generation/failed-retirements_))]
+    (is (identical? boom error))
+    (is (some? g) "the generation is recorded as kept")
+    (generation/stop! g)
+    (is (= :stopped (generation/phase g)))
+    (is (not (.isAlive (.scope ^Arena (first @arenas_)))) "a later stop closes the arena")))
+
+(deftest a-throw-in-the-unwind-keeps-the-start-error-and-the-release-errors-test
+  (let [port (util/free-port)
+        config (config/load! {:n-workers 1
+                              :entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                              :dispatch [{:handler (constantly {:status 200})}]})
+        boom (ex-info "simulated wake receiver failure" {})
+        release-error (ex-info "simulated loop release failure" {})
+        observe-error (ex-info "simulated observe failure" {})
+        observe @#'generation/observe
+        destroy h2o/evloop-destroy
+        thrown_ (atom false)
+        kept-before (set @@#'generation/failed-retirements_)
+        error (with-redefs-fn {#'h2o/mt-create-wakeup-receiver (fn [_] (throw boom))
+                               #'h2o/evloop-destroy (fn [l] (destroy l) (throw release-error))
+                               #'generation/observe (fn [g nodes]
+                                                      (if (and (= :unfinished (nodes :loops))
+                                                               (compare-and-set! thrown_ false true))
+                                                        (throw observe-error)
+                                                        (observe g nodes)))}
+                #(try (generation/start! config nil) nil (catch Throwable t t)))
+        g (first (remove kept-before @@#'generation/failed-retirements_))]
+    (is (identical? boom error))
+    (is (= [observe-error release-error] (vec (.getSuppressed ^Throwable error))))
+    (is (some? g) "the generation is recorded as kept")
+    (testing "a later stop releases the rest and keeps the loops"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"A native release threw" (generation/stop! g)))
+      (generation/stop! (generation/start! config nil)))
+    (swap! @#'generation/failed-retirements_
+           (fn [retirements] (vec (remove #(identical? g %) retirements))))))
+
+(deftest an-interrupted-acquire-does-not-stop-the-waits-of-the-unwind-test
+  (let [port (util/free-port)
+        config (config/load! {:n-workers 2
+                              :entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                              :dispatch [{:handler (constantly {:status 200})}]})
+        interrupt (InterruptedException. "simulated interrupt")
+        start-worker evloop/start-worker!
+        starts_ (atom 0)
+        arenas_ (atom [])
+        shared-arena mem/shared-arena
+        kept-before (count @@#'generation/failed-retirements_)
+        error (with-redefs [evloop/start-worker! (fn [& args]
+                                                   (if (= 2 (swap! starts_ inc))
+                                                     (throw interrupt)
+                                                     (apply start-worker args)))
+                            mem/shared-arena (fn [] (let [a (shared-arena)] (swap! arenas_ conj a) a))]
+                (try (generation/start! config nil) nil (catch Throwable t t)))
+        interrupted? (Thread/interrupted)]
+    (is (identical? interrupt error))
+    (is interrupted? "the interrupt is set again for the caller")
+    (is (= kept-before (count @@#'generation/failed-retirements_)))
+    (is (not (.isAlive (.scope ^Arena (first @arenas_)))) "the generation arena is closed")
+    (generation/stop! (generation/start! config nil))))
+
+(deftest an-interrupt-set-before-a-stop-does-not-reach-its-actions-test
+  (let [port (util/free-port)
+        config (config/load! {:n-workers 1
+                              :entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                              :dispatch [{:handler (constantly {:status 200})}]})
+        instance (generation/start! config nil)
+        result (do (.interrupt (Thread/currentThread))
+                   (generation/stop! instance))]
+    (is (Thread/interrupted) "the interrupt is set again for the caller")
+    (is (nil? result))
+    (is (= :stopped (generation/phase instance)))
+    (testing "the port can be bound again"
+      (generation/stop! (generation/start! config nil)))))
+
+(deftest a-listener-acquire-that-cannot-free-its-work-closes-the-other-listeners-test
+  (let [[port-a port-b] [(util/free-port) (util/free-port)]
+        config (config/load! {:n-workers 1
+                              :entrypoints {:a {:bind (str "127.0.0.1:" port-a) :tls false}
+                                            :b {:bind (str "127.0.0.1:" port-b) :tls false}}
+                              :dispatch [{:handler (constantly {:status 200})}]})
+        read-start h2o/socket-read-start
+        close-socket h2o/socket-close
+        socks_ (atom [])
+        closed_ (atom [])
+        boom (ex-info "simulated read start failure" {})
+        close-error (ex-info "simulated socket close failure" {})
+        kept-before (set @@#'generation/failed-retirements_)
+        error (with-redefs [h2o/socket-read-start (fn [sock-ptr cb]
+                                                    (if (= 2 (count (swap! socks_ conj sock-ptr)))
+                                                      (throw boom)
+                                                      (read-start sock-ptr cb)))
+                            h2o/socket-close (fn [sock-ptr]
+                                               (if (= sock-ptr (second @socks_))
+                                                 (throw close-error)
+                                                 (do (swap! closed_ conj sock-ptr)
+                                                     (close-socket sock-ptr))))]
+                (try (generation/start! config nil) nil (catch Throwable t t)))
+        g (first (remove kept-before @@#'generation/failed-retirements_))]
+    (is (identical? boom error))
+    (is (some? g) "the generation is recorded as kept")
+    (is (= [(first @socks_)] @closed_) "the socket of the other listener is closed")
+    (close-socket (second @socks_))
+    (run! listen/release! (vals (::generation/listener-claims g)))
+    (swap! @#'generation/failed-retirements_
+           (fn [retirements] (vec (remove #(identical? g %) retirements))))))
+
+(deftest a-worker-that-dies-in-its-release-closes-its-listener-once-test
+  (doseq [[case-name die!]
+          [["in a release batch"
+            (fn [closes_ thrown_]
+              (let [next-release gen/next-release]
+                {#'gen/next-release (fn [nodes obs releaser not-yet]
+                                      (when (and (number? releaser) (pos? @closes_)
+                                                 (compare-and-set! thrown_ false true))
+                                        (throw (StackOverflowError. "simulated VM error")))
+                                      (next-release nodes obs releaser not-yet))}))]
+           ["after a release ends"
+            (fn [closes_ thrown_]
+              (let [release-state gen/release-state]
+                {#'gen/release-state (fn [outcome]
+                                       (when (and (pos? @closes_)
+                                                  (str/starts-with? (.getName (Thread/currentThread))
+                                                                    "h2o-evloop")
+                                                  (compare-and-set! thrown_ false true))
+                                         (throw (StackOverflowError. "simulated VM error")))
+                                       (release-state outcome))}))]]]
+    (testing case-name
+      (let [port (util/free-port)
+            instance (generation/start!
+                      (config/load! {:n-workers 1
+                                     :entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                                     :dispatch [{:handler (constantly {:status 200})}]})
+                      nil)
+            sock (-> instance ::generation/listener-sockets (get 0) first :socket)
+            close-socket h2o/socket-close
+            closes_ (atom 0)
+            thrown_ (atom false)]
+        (with-redefs-fn (assoc (die! closes_ thrown_)
+                               #'h2o/socket-close (fn [sock-ptr]
+                                                    (when (= sock sock-ptr) (swap! closes_ inc))
+                                                    (when (or (not= sock sock-ptr) (= 1 @closes_))
+                                                      (close-socket sock-ptr))))
+          (fn []
+            (try (generation/stop! instance 5 TimeUnit/SECONDS) (catch Throwable _ nil))
+            (is @thrown_ "the worker thread died")
+            (is (= 1 @closes_) "the stopping thread does not close the listener again")
+            (try (generation/stop! instance 5 TimeUnit/SECONDS) (catch Throwable _ nil))
+            (is (= 1 @closes_) "a later stop does not close the listener again")))
+        (swap! @#'generation/failed-retirements_
+               (fn [retirements] (vec (remove #(identical? instance %) retirements))))))))
+
+(deftest a-start-that-fails-late-releases-each-native-resource-once-in-order-test
+  (let [port (util/free-port)
+        config (config/load! {:n-workers 2
+                              :entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                              :dispatch [{:handler (constantly {:status 200})}]})
+        events_ (atom [])
+        arenas_ (atom [])
+        contexts_ (atom [])
+        dispatches_ (atom [])
+        receiver-context_ (atom {})
+        record (fn [f kind] (fn [x & more] (swap! events_ conj [kind x]) (apply f x more)))
+        created (fn [f made!] (fn [& args] (let [x (apply f args)] (made! x args) x)))
+        start-worker evloop/start-worker!
+        starts_ (atom 0)
+        shared-arena mem/shared-arena
+        boom (ex-info "simulated late start failure" {})]
+    (with-redefs [evloop/start-worker! (fn [& args]
+                                         (if (= 2 (swap! starts_ inc))
+                                           (throw boom)
+                                           (apply start-worker args)))
+                  mem/shared-arena (fn [] (let [a (shared-arena)] (swap! arenas_ conj a) a))
+                  h2o/create-context (created h2o/create-context
+                                              (fn [ctx _] (swap! contexts_ conj ctx)))
+                  callback-dispatch/create (created callback-dispatch/create
+                                                    (fn [d _] (swap! dispatches_ conj d)))
+                  h2o/mt-create-wakeup-receiver (created h2o/mt-create-wakeup-receiver
+                                                         (fn [r [ctx]] (swap! receiver-context_ assoc r ctx)))
+                  h2o/mt-create-response-receiver (let [create h2o/mt-create-response-receiver]
+                                                    (receiver-capacities->object-fn
+                                                     (fn [ctx capacity payload-capacity]
+                                                       (let [r (create ctx capacity payload-capacity)]
+                                                         (swap! receiver-context_ assoc r ctx)
+                                                         r))))
+                  h2o/socket-close (record h2o/socket-close :socket)
+                  h2o/mt-destroy-response-receiver (record h2o/mt-destroy-response-receiver :receiver)
+                  h2o/mt-destroy-wakeup-receiver (record h2o/mt-destroy-wakeup-receiver :receiver)
+                  h2o/context-dispose (record h2o/context-dispose :context)
+                  callback-dispatch/finish! (record callback-dispatch/finish! :dispatch)
+                  h2o/evloop-destroy (record h2o/evloop-destroy :loops)
+                  h2o/config-dispose (record h2o/config-dispose :config)
+                  listen/release! (record listen/release! :claim)]
+      (is (identical? boom (try (generation/start! config nil) nil (catch Throwable t t)))))
+    (let [events @events_
+          pos #(.indexOf ^java.util.List events %)
+          worker-kinds #{:socket :receiver :context :dispatch}
+          positions (fn [pred] (keep-indexed (fn [i [kind]] (when (pred kind) i)) events))]
+      (is (= (count events) (count (distinct events))) "each resource is released once")
+      (is (= 2 (count @contexts_) (count @dispatches_)))
+      (doseq [[ctx dispatch] (map vector @contexts_ @dispatches_)]
+        (testing "each worker frees its receivers before its context, and the context before its dispatch"
+          (let [receivers (keep (fn [[r c]] (when (= ctx c) [:receiver r])) @receiver-context_)]
+            (is (= 2 (count receivers)))
+            (is (every? #(< -1 (pos %) (pos [:context ctx])) receivers))
+            (is (< (pos [:context ctx]) (pos [:dispatch dispatch])))))
+        (is (= 1 (count (filter #{[:dispatch dispatch]} events))) "each dispatch finishes once"))
+      (testing "the generation frees its nodes after every worker node"
+        (is (seq (positions #{:loops :config :claim})))
+        (is (< (apply max (positions worker-kinds)) (apply min (positions #{:loops :config :claim})))))
+      (is (not (.isAlive (.scope ^Arena (first @arenas_)))) "the generation arena is closed"))))
+
+(deftest an-acquire-that-cannot-free-its-partial-work-keeps-the-generation-test
+  (let [port (util/free-port)
+        config (config/load! {:n-workers 1
+                              :entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                              :dispatch [{:handler (constantly {:status 200})}]})
+        arenas_ (atom [])
+        shared-arena mem/shared-arena
+        freed_ (atom [])
+        boom (ex-info "simulated wake receiver failure" {})
+        cleanup-error (ex-info "simulated context cleanup failure" {})
+        kept-before (set @@#'generation/failed-retirements_)
+        error (with-redefs [mem/shared-arena (fn [] (let [a (shared-arena)] (swap! arenas_ conj a) a))
+                            h2o/mt-create-wakeup-receiver (fn [_] (throw boom))
+                            h2o/context-dispose (fn [_] (throw cleanup-error))
+                            h2o/config-dispose (fn [_] (swap! freed_ conj :config))
+                            h2o/evloop-destroy (fn [_] (swap! freed_ conj :loops))]
+                (try (generation/start! config nil) nil (catch Throwable t t)))
+        kept (remove kept-before @@#'generation/failed-retirements_)
+        g (first kept)]
+    (is (identical? boom error) "the first error is reported")
+    (is (= [cleanup-error] (vec (.getSuppressed ^Throwable error))))
+    (is (= 1 (count kept)) "the generation is recorded as kept")
+    (is (= [] @freed_) "the config and the loops that the context needs stay")
+    (is (.isAlive (.scope ^Arena (first @arenas_))) "the arena stays")
+    (testing "a later stop reports the acquire and the error again"
+      (let [stop-error (try (generation/stop! g) nil (catch Throwable t t))]
+        (is (= "A native release threw or an acquire could not free its work. Its resources and the resources that they need are kept."
+               (ex-message stop-error)))
+        (is (= [boom] (vec (.getSuppressed ^Throwable stop-error))))
+        (is (= 1 (count (filter #(identical? g %) @@#'generation/failed-retirements_)))
+            "the kept generation is listed once")))
+    (testing "the ports are free, because the listener node was never acquired"
+      (generation/stop! (generation/start! config nil)))
+    ;; The kept context, config, loops and arena stay allocated in this JVM:
+    ;; the context is only part made, and nothing frees it safely.
+    (swap! @#'generation/failed-retirements_
+           (fn [retirements] (vec (remove #(identical? g %) retirements))))))
+
+(deftest a-server-config-that-fails-disposes-the-global-config-once-test
+  (let [port (util/free-port)
+        dispose h2o/config-dispose
+        disposed_ (atom 0)
+        boom (ex-info "simulated handler failure" {})]
+    (with-redefs [h2o/create-handler (fn [& _] (throw boom))
+                  h2o/config-dispose (fn [config-ptr]
+                                       (swap! disposed_ inc)
+                                       (dispose config-ptr))]
+      (is (identical? boom
+                      (try
+                        (generation/start!
+                         (config/load! {:entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                                        :dispatch [{:handler (constantly {:status 200})}]})
+                         nil)
+                        nil
+                        (catch Throwable t t)))))
+    (is (= 1 @disposed_))))
+
+(deftest a-listener-socket-that-fails-closes-what-the-worker-opened-before-test
+  (let [[port-a port-b] [(util/free-port) (util/free-port)]
+        config (config/load! {:n-workers 1
+                              :entrypoints {:a {:bind (str "127.0.0.1:" port-a) :tls false}
+                                            :b {:bind (str "127.0.0.1:" port-b) :tls false}}
+                              :dispatch [{:handler (constantly {:status 200})}]})
+        create-socket h2o/create-socket-for-loop
+        close-socket h2o/socket-close
+        close-fd! socket/close-fd!
+        sockets_ (atom 0)
+        closed_ (atom [])
+        boom (ex-info "simulated socket failure" {})]
+    (with-redefs [h2o/create-socket-for-loop (fn [loop-ptr fd flags]
+                                               (if (= 2 (swap! sockets_ inc))
+                                                 (throw boom)
+                                                 (create-socket loop-ptr fd flags)))
+                  h2o/socket-close (fn [sock-ptr]
+                                     (swap! closed_ conj :socket)
+                                     (close-socket sock-ptr))
+                  socket/close-fd! (fn [fd]
+                                     (swap! closed_ conj :fd)
+                                     (close-fd! fd))]
+      (is (identical? boom (try (generation/start! config nil) nil (catch Throwable t t)))))
+    (is (= #{:fd :socket} (set @closed_)) "the failed duplicate and the socket made before close")
+    (testing "both ports can be bound again"
+      (generation/stop! (generation/start! config nil)))))
+
+(deftest receivers-are-cleared-before-the-native-free-test
+  (let [receiver (mem/segment 1)
+        worker (assoc (response-receiver-worker receiver nil)
+                      :wake-endpoint ::endpoint
+                      :wakeup-receiver_ (AtomicReference. receiver))
+        events_ (atom [])
+        held (fn [k] (.get ^AtomicReference (k worker)))]
+    (with-redefs [fixed-final/notify-all-capacity! (constantly nil)
+                  h2o/mt-response-pending (unary-long-fn (constantly 0))
+                  wake-endpoint/quiesce-endpoint! (fn [endpoint] (swap! events_ conj [:quiesce endpoint]))
                   h2o/mt-destroy-response-receiver
-                  (fn [receiver]
-                    (swap! events_ conj [:destroy-response receiver])
-                    (throw (ex-info "simulated response receiver cleanup failure" {})))
+                  (fn [r] (swap! events_ conj [:response r (held :response-receiver_)]))
                   h2o/mt-destroy-wakeup-receiver
-                  (fn [receiver]
-                    (swap! events_ conj [:destroy-wakeup receiver]))
-                  h2o/context-dispose
-                  (fn [context]
-                    (swap! events_ conj [:dispose-context context]))
-                  h2o/evloop-destroy
-                  (fn [loop]
-                    (swap! events_ conj [:destroy-loop loop]))
-                  h2o/config-dispose
-                  (fn [config]
-                    (swap! events_ conj [:dispose-config config]))]
-      (let [^Throwable failure (try
-                                 (#'generation/init-core-state
-                                  {::generation/config {:output-buffer-size 1 :fixed-response-max-body-size 1
-                                                        :fixed-response-slots 1}
-                                   ::generation/n-workers 2
-                                   ::generation/max-connections 10})
-                                 (catch clojure.lang.ExceptionInfo error
-                                   error))]
-        (is (str/starts-with? (ex-message failure) "Could not create native response receiver"))
-        (is (= ["simulated response receiver cleanup failure"]
-               (mapv ex-message (.getSuppressed failure))))
-        (is (= [[:create-response :context-1]
-                [:create-response :context-2]
-                [:destroy-response :response-1]
-                [:destroy-wakeup :wakeup/context-2]
-                [:destroy-wakeup :wakeup/context-1]
-                [:dispose-context :context-2]
-                [:dispose-context :context-1]
-                [:destroy-loop :loop-2]
-                [:destroy-loop :loop-1]
-                [:dispose-config :config]
-                :close-arena]
-               @events_))))))
+                  (fn [r] (swap! events_ conj [:wakeup r (held :wakeup-receiver_)]))]
+      (is (true? (effects/destroy-response-receiver! worker)))
+      (effects/retire-wakeup-receiver! worker))
+    (is (= [[:response receiver nil] [:quiesce ::endpoint] [:wakeup receiver nil]] @events_))))
+
+(deftest an-ended-worker-reads-no-response-receiver-that-a-release-may-have-freed-test
+  (let [instance (generation/start!
+                  (config/load! {:n-workers 1
+                                 :entrypoints {:http {:bind (str "127.0.0.1:" (util/free-port))
+                                                      :tls false}}
+                                 :dispatch [{:handler (constantly {:status 200})}]})
+                  nil)
+        destroy h2o/mt-destroy-response-receiver
+        pending h2o/mt-response-pending
+        release-state gen/release-state
+        freed_ (atom #{})
+        freed-reads_ (atom 0)
+        thrown_ (atom false)]
+    (with-redefs [h2o/mt-destroy-response-receiver (fn [r] (swap! freed_ conj r) (destroy r))
+                  h2o/mt-response-pending (unary-long-fn (fn [r]
+                                                           (if (@freed_ r)
+                                                             (do (swap! freed-reads_ inc) 0)
+                                                             (pending r))))
+                  gen/release-state (fn [outcome]
+                                      (when (and (seq @freed_)
+                                                 (str/starts-with? (.getName (Thread/currentThread))
+                                                                   "h2o-evloop")
+                                                 (compare-and-set! thrown_ false true))
+                                        (throw (StackOverflowError. "simulated VM error")))
+                                      (release-state outcome))]
+      (try (generation/stop! instance 5 TimeUnit/SECONDS) (catch Throwable _ nil)))
+    (is @thrown_ "the worker thread died after it freed its response receiver")
+    (is (zero? @freed-reads_) "the stop reads no freed receiver")
+    (swap! @#'generation/failed-retirements_
+           (fn [retirements] (vec (remove #(identical? instance %) retirements))))))
 
 (deftest response-receiver-destruction-waits-for-producer-before-claim
   (with-open [arena (mem/shared-arena)]
@@ -662,7 +971,7 @@
                     (deliver result_ {:error error}))))]
           (try
             (is (true? (deref claim-entered_ 5000 false)))
-            (let [destroyed? (#'generation/destroy-response-receiver! worker)]
+            (let [destroyed? (#'effects/destroy-response-receiver! worker)]
               (is (= {:receiver-present? true
                       :admission-open?  false
                       :destroyed?        false
@@ -685,7 +994,7 @@
                    (let [{:keys [result error]} (deref result_ 5000 ::timeout)]
                      {:result result
                       :error  (some-> error class .getName)})))
-            (is (true? (#'generation/destroy-response-receiver! worker)))
+            (is (true? (#'effects/destroy-response-receiver! worker)))
             (is (= [receiver] @destroyed_))
             (is (nil? (.get ^AtomicReference (:response-receiver_ worker))))
             (finally
@@ -741,7 +1050,7 @@
             (is (= 1 (h2o/mt-response-pending receiver)))
             (is (= {:destroyed?        false
                     :receiver-present? true}
-                   {:destroyed?        (boolean (#'generation/destroy-response-receiver! worker))
+                   {:destroyed?        (boolean (#'effects/destroy-response-receiver! worker))
                     :receiver-present? (some? (.get ^AtomicReference (:response-receiver_ worker)))})
                 "The producer reference protects the claim-accounting interval.")
             (deliver release-claim_ true)
@@ -751,10 +1060,10 @@
                      {:result result
                       :error  (some-> error class .getName)})))
             (is (zero? @uses_))
-            (is (false? (#'generation/destroy-response-receiver! worker)))
+            (is (false? (#'effects/destroy-response-receiver! worker)))
             (is (empty? @destroyed_))
             (reset! ready_ 0)
-            (is (true? (#'generation/destroy-response-receiver! worker)))
+            (is (true? (#'effects/destroy-response-receiver! worker)))
             (is (= [receiver] @destroyed_))
             (finally
               (deliver release-claim_ true)
@@ -809,7 +1118,7 @@
             (is (true? (deref writer-entered_ 5000 false)))
             (is (zero? (.getReadLockCount ^ReentrantReadWriteLock (:response-receiver-lock worker))))
             (is (= 1 @uses_))
-            (is (false? (#'generation/destroy-response-receiver! worker)))
+            (is (false? (#'effects/destroy-response-receiver! worker)))
             (is (= [] @destroyed_))
             (deliver release-writer_ true)
             (is (= {:result nil
@@ -818,7 +1127,7 @@
                      {:result result
                       :error  (some-> error class .getName)})))
             (is (= 1 @aborts_))
-            (is (true? (#'generation/destroy-response-receiver! worker)))
+            (is (true? (#'effects/destroy-response-receiver! worker)))
             (is (= [receiver] @destroyed_))
             (is (nil? (.get ^AtomicReference (:response-receiver_ worker))))
             (finally
@@ -921,7 +1230,7 @@
             (is (= [] @disposed_))
             (is (some? (.get ^AtomicReference (:response-receiver_ worker))))
             (reset! pending_ 0)
-            (is (true? (#'generation/destroy-response-receiver! worker)))
+            (is (true? (#'effects/destroy-response-receiver! worker)))
             (is (= [receiver] @destroyed_))
             (finally
               (deliver release-claim_ true)
@@ -1403,15 +1712,14 @@
   (with-open [arena (mem/shared-arena)]
     (let [dispatch (callback-dispatch/create arena)
           worker (retirement-worker dispatch (AtomicReference.) (Thread.) (constantly :accepted))
-          generation-state {::generation/progress_ (atom {})
-                            ::generation/stop-lock (Object.)
-                            ::generation/workers [worker]
-                            ::generation/worker-statuses (AtomicReferenceArray. 1)
-                            ::generation/wakeup-receivers [nil]
-                            ::generation/listener-runtimes []
-                            ::generation/listener-claims {}
-                            ::generation/config {}
-                            ::generation/arena arena}
+          generation-state (generation-map 1 (acquired [:arena [:pool 0] [:callback-dispatch 0] [:thread 0]]) ::generation/executor (Executors/newVirtualThreadPerTaskExecutor) ::generation/callback-dispatches [(:callback-dispatch worker)]
+                                           ::generation/workers [worker]
+                                           ::generation/stream-pools [(:stream-pool worker)]
+                                           ::generation/worker-statuses (AtomicReferenceArray. 1)
+                                           ::generation/wakeup-receivers [nil]
+                                           ::generation/listener-claims {}
+                                           ::generation/config {}
+                                           ::generation/arena arena)
           block (bp/try-borrow! (:stream-pool worker))]
       (try
         (.set ^AtomicReference (:native-failure_ worker)
@@ -1432,15 +1740,14 @@
   (let [arena (mem/shared-arena)
         dispatch (callback-dispatch/create arena)
         worker (retirement-worker dispatch (AtomicReference.) (Thread.) (constantly :accepted))
-        generation-state {::generation/progress_ (atom {})
-                          ::generation/stop-lock (Object.)
-                          ::generation/workers [worker]
-                          ::generation/worker-statuses (AtomicReferenceArray. 1)
-                          ::generation/wakeup-receivers [nil]
-                          ::generation/listener-runtimes []
-                          ::generation/listener-claims {}
-                          ::generation/config {}
-                          ::generation/arena arena}
+        generation-state (generation-map 1 (acquired [:arena [:pool 0] [:callback-dispatch 0] [:thread 0]]) ::generation/executor (Executors/newVirtualThreadPerTaskExecutor) ::generation/callback-dispatches [(:callback-dispatch worker)]
+                                         ::generation/workers [worker]
+                                         ::generation/stream-pools [(:stream-pool worker)]
+                                         ::generation/worker-statuses (AtomicReferenceArray. 1)
+                                         ::generation/wakeup-receivers [nil]
+                                         ::generation/listener-claims {}
+                                         ::generation/config {}
+                                         ::generation/arena arena)
         permit (mailbox/reserve! (:mailbox worker) false (constantly false))]
     (try
       (with-redefs [evloop/broadcast-wake! (constantly nil)]
@@ -1462,15 +1769,35 @@
                (fn [retirements]
                  (vec (remove #(identical? generation-state %) retirements))))))))
 
-(deftest a-failed-stop-accepting-wait-leaves-the-generation-stopping-test
-  (let [generation-state {::generation/progress_ (atom {:signalled? true})
-                          ::generation/stopped-accepting_ (promise)
-                          ::generation/generation-id 3}]
-    (with-redefs-fn {#'generation/stop-accepting-wait-ms 20}
-      #(is (thrown-with-msg? clojure.lang.ExceptionInfo #"did not stop accepting"
-                             (generation/await-stop-accepting! generation-state))))
-    (is (= :stopping (generation/phase generation-state)))
-    (is (not-any? #(identical? generation-state %) @@#'generation/failed-retirements_))))
+(deftest workers-stop-accepting-only-after-they-close-their-listeners-test
+  (let [port (util/free-port)
+        instance (generation/start!
+                  (config/load! {:n-workers 1
+                                 :entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                                 :dispatch [{:handler (constantly {:status 200})}]})
+                  nil)
+        close-socket h2o/socket-close
+        closing (promise)
+        release (CountDownLatch. 1)]
+    (with-redefs [h2o/socket-close (fn [sock-ptr]
+                                     (deliver closing true)
+                                     (.await release)
+                                     (close-socket sock-ptr))]
+      (try
+        (generation/begin-stop! instance)
+        (is (true? (deref closing 5000 false)) "the worker closes its listener")
+        (testing "a wait that ends while the close is held fails and leaves the generation stopping"
+          (with-redefs-fn {#'generation/stop-accepting-wait-ms 20}
+            #(is (thrown-with-msg? clojure.lang.ExceptionInfo #"did not stop accepting"
+                                   (generation/await-stop-accepting! instance))))
+          (is (= :stopping (generation/phase instance)))
+          (is (not-any? #(identical? instance %) @@#'generation/failed-retirements_)))
+        (.countDown release)
+        (is (nil? (generation/await-stop-accepting! instance)) "the wait returns after the close")
+        (finally
+          (.countDown release))))
+    (generation/stop! instance)
+    (is (= :stopped (generation/phase instance)))))
 
 (deftest retirement-of-a-live-worker-thread-times-out-test
   (with-open [arena (mem/shared-arena)]
@@ -1479,15 +1806,14 @@
           worker (assoc (retirement-worker (callback-dispatch/create arena) (AtomicReference.)
                                            thread (constantly :accepted))
                         :id 7)
-          generation-state {::generation/progress_ (atom {})
-                            ::generation/stop-lock (Object.)
-                            ::generation/workers [worker]
-                            ::generation/worker-statuses (AtomicReferenceArray. 1)
-                            ::generation/wakeup-receivers [nil]
-                            ::generation/listener-runtimes []
-                            ::generation/listener-claims {}
-                            ::generation/config {}
-                            ::generation/arena arena}]
+          generation-state (generation-map 1 (acquired [:arena [:pool 0] [:callback-dispatch 0] [:thread 0]]) ::generation/executor (Executors/newVirtualThreadPerTaskExecutor) ::generation/callback-dispatches [(:callback-dispatch worker)]
+                                           ::generation/workers [worker]
+                                           ::generation/stream-pools [(:stream-pool worker)]
+                                           ::generation/worker-statuses (AtomicReferenceArray. 1)
+                                           ::generation/wakeup-receivers [nil]
+                                           ::generation/listener-claims {}
+                                           ::generation/config {}
+                                           ::generation/arena arena)]
       (try
         (with-redefs [evloop/broadcast-wake! (constantly nil)]
           (let [error (try
@@ -1797,15 +2123,16 @@
                      (if (= 1 (swap! attempts inc))
                        (throw (InterruptedException. "simulated"))
                        true)))
-        generation-state {::generation/progress_ (atom {})
-                          ::generation/stop-lock (Object.)
-                          ::generation/executor executor
-                          ::generation/workers []
-                          ::generation/wakeup-receivers []
-                          ::generation/listener-runtimes []
-                          ::generation/listener-claims {}
-                          ::generation/config {}}]
-    (is (thrown? InterruptedException (generation/stop! generation-state)))
-    (is (= :stopping (generation/phase generation-state)))
+        generation-state (generation-map 0 (acquired [])
+                                         ::generation/executor executor
+                                         ::generation/workers []
+                                         ::generation/wakeup-receivers []
+                                         ::generation/listener-claims {}
+                                         ::generation/config {})]
+    (let [error (try (generation/stop! generation-state) nil (catch InterruptedException e e))
+          interrupted? (Thread/interrupted)]
+      (is (instance? InterruptedException error))
+      (is interrupted? "the interrupt is set again for the caller"))
+    (is (= :kept (generation/phase generation-state)))
     (generation/stop! generation-state)
     (is (= :stopped (generation/phase generation-state)))))

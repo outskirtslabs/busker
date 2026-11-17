@@ -17,25 +17,24 @@
   (assoc serving :thread :ended :failure (ex-info "loop threw" {})))
 
 (def ^:private failed-holding
-  (assoc failed-idle :drained? false))
+  (assoc failed-idle :facts {:context-connections? true}))
 
 (def ^:private never-started {:thread :none})
 
 (defn- world [& statuses]
-  {:workers (vec statuses) :releases [] :kept-actions []})
+  {:workers (vec statuses) :releases [] :kept-actions [] :signals 0 :interrupts 0})
 
 (defn- worker-releases
   "Releases, on worker `idx`, each node that the worker may release now."
   [world idx]
   (loop [world world]
-    (let [nodes (update-keys (get-in world [:workers idx :nodes]) #(vector % idx))]
-      (if-let [id (gen/next-release nodes world idx #{})]
+    (let [status (get-in world [:workers idx])]
+      (if-let [kind (gen/worker-release status (:drained? status))]
         (recur (-> world
-                   (assoc-in [:workers idx :nodes (first id)] :released)
-                   (update :releases conj [idx id])))
+                   (assoc-in [:workers idx :nodes kind] :released)
+                   (update :releases conj [idx [kind idx]])))
         (cond-> world
-          (= :released (get-in world [:workers idx :nodes :context]))
-          (assoc-in [:workers idx :stage] :released))))))
+          (gen/worker-released? status) (assoc-in [:workers idx :stage] :released))))))
 
 (defn- run-worker
   "Runs the turns of worker `idx` until it waits or its thread ends."
@@ -54,7 +53,7 @@
 
 (defn- start-worker [world progress idx]
   (assoc-in world [:workers idx]
-            (assoc serving :nodes (into {:callback-dispatch :acquired}
+            (assoc serving :nodes (into {:thread :acquired}
                                         (keep (fn [[[kind i] _]] (when (= i idx) [kind :acquired])))
                                         (filter (comp vector? key) (:nodes progress))))))
 
@@ -65,13 +64,15 @@
   (let [outcome (get outcomes action :ok)]
     [(case op
        :acquire (cond-> world
-                  (and (vector? arg) (= :ok outcome)) (start-worker progress (second arg)))
-       :signal-stop (update world :workers
-                            (partial mapv #(cond-> % (= :alive (:thread %))
-                                                   (assoc :stop-requested? true))))
+                  (and (= :thread (gen/kind-of arg)) (= :ok outcome)) (start-worker progress (second arg)))
+       :signal-stop (cond-> (update world :workers
+                                    (partial mapv #(cond-> % (= :alive (:thread %))
+                                                           (assoc :stop-requested? true))))
+                      (= :ok outcome) (update :signals inc))
+       :interrupt-handlers (cond-> world (= :ok outcome) (update :interrupts inc))
        :join-workers (reduce run-worker world (range (count (:workers world))))
        :release (cond-> world (= :ok outcome) (update :releases conj [:stopping arg]))
-       :when-kept (update world :kept-actions conj arg)
+       :close-kept-udp (update world :kept-actions conj arg)
        world)
      outcome]))
 
@@ -80,12 +81,12 @@
   progress, world and the actions in order."
   ([world progress] (run world progress {}))
   ([world progress outcomes]
-   (loop [p (gen/step progress world nil) world world actions []]
+   (loop [p (gen/step progress world) world world actions []]
      (let [action (:action p)]
        (if (or (= :done (first action)) (< 300 (count actions)))
          {:progress p :world world :actions (conj actions action)}
          (let [[world outcome] (perform world p action outcomes)]
-           (recur (gen/step p world outcome) world (conj actions action))))))))
+           (recur (gen/step (gen/record p outcome) world) world (conj actions action))))))))
 
 (defn- started
   "Returns the progress of a started generation of `n` workers, ready to retire."
@@ -101,71 +102,15 @@
 (defn- all-nodes [n]
   (set (gen/release-order n)))
 
-(defn- needed-closure [id]
+(defn- needed-closure
+  "Returns the nodes that node `id` needs, directly or through other nodes."
+  [id]
   (loop [todo (vec (gen/needs id)) seen #{}]
     (if-let [[x & more] (seq todo)]
       (if (seen x)
         (recur (vec more) seen)
         (recur (into (vec more) (gen/needs x)) (conj seen x)))
       seen)))
-
-;;; Worker
-
-(deftest worker-turn-covers-every-input-test
-  (doseq [stage [:serving :draining :released]
-          stop? [false true]
-          drained? [false true]]
-    (is (= (case stage
-             :serving (if stop? :begin-drain :serve)
-             :draining (if drained? :release :wait)
-             :released :idle)
-           (gen/worker-turn stage stop? drained?)))))
-
-(deftest a-failed-worker-stops-accepting-at-once-test
-  (is (gen/stopped-accepting? {:stage :serving :failure boom}))
-  (is (gen/stopped-accepting? {:stage :draining}))
-  (is (not (gen/stopped-accepting? {:stage :serving})))
-  (is (not (gen/all-stopped-accepting? [{:stage :serving :failure boom} {:stage :serving}])))
-  (is (gen/all-stopped-accepting? [{:stage :serving :failure boom} {:stage :draining}])))
-
-(deftest a-worker-releases-nothing-of-the-generation-test
-  (let [w (world (assoc serving :stage :draining) serving)]
-    (doseq [id (gen/release-order 2)
-            :when (not= 0 (and (vector? id) (second id)))]
-      (is (not (gen/quiet? w 0 id)) (str id)))
-    (is (not (gen/quiet? w 0 [:callback-dispatch 0])))))
-
-;;; Resource table
-
-(def ^:private todays-stop-order
-  "Today's release order in ol.busker.generation for worker 0 that stops
-  normally (dispose-context-if-ready), failed worker 1 (release-failed-worker!)
-  and context 2 that has no worker thread (the release branch of stop!)."
-  (concat [[:listeners 0] [:response-receiver 0] [:pool 0] [:h3 0] [:context 0]]
-          [[:listeners 1] [:response-receiver 1] [:pool 1] [:h3 1] [:context 1]]
-          [[:callback-dispatch 0] [:callback-dispatch 1] :close-executor
-           [:listeners 2] [:h3 2] [:response-receiver 2] [:context 2]
-           :h3-contexts :ticket-manager :loops :config :ssl-ctxs [:pool 2]
-           :socket-claims :udp-claims :arena]))
-
-(deftest todays-release-orders-respect-the-resource-table-test
-  (let [acquired (disj (all-nodes 3) [:callback-dispatch 2])]
-    (testing "a stop that releases everything"
-      (is (= acquired (set todays-stop-order)))
-      (is (= (count acquired) (count todays-stop-order)))
-      (is (empty? (gen/order-violations acquired todays-stop-order))))
-    (testing "a stop that keeps failed worker 1 with a connection"
-      (let [kept-order (concat (take 5 todays-stop-order) [[:listeners 1] :socket-claims])]
-        (is (empty? (gen/order-violations (all-nodes 2) kept-order)))
-        (testing "releases the socket claims while a context without a thread holds its listener"
-          (is (= [[:socket-claims [:listeners 2]]] (gen/order-violations acquired kept-order))))))))
-
-(deftest the-core-release-order-respects-the-resource-table-test
-  (doseq [n [1 2 3]]
-    (is (empty? (gen/order-violations (all-nodes n) (gen/release-order n))))))
-
-(deftest the-order-check-finds-a-wrong-order-test
-  (is (= [[:arena :config]] (gen/order-violations #{:arena :config} [:arena :config]))))
 
 ;;; Retirement
 
@@ -176,11 +121,11 @@
     (is (= :stopped (gen/phase (:progress r))))
     (is (= (all-nodes 2) (set releases)))
     (is (= (count releases) (count (set releases))))
-    (is (= #{[:callback-dispatch 0] [:callback-dispatch 1]
-             :close-executor :h3-contexts :ticket-manager :loops :config :ssl-ctxs
-             :socket-claims :udp-claims :arena}
-           (released-by :stopping r)))
-    (is (= [[:signal-stop] [:await-handlers] [:join-workers]] (take 3 (:actions r))))))
+    (testing "each worker releases its nodes that it may release before its thread ends"
+      (doseq [i [0 1]
+              [kind {:keys [release-at]}] gen/resources
+              :when (#{:drain :drained} release-at)]
+        (is (contains? (released-by i r) [kind i]) (str [kind i]))))))
 
 (deftest stop-releases-a-failed-worker-that-left-nothing-test
   (let [r (run (world failed-idle serving) (started 2))]
@@ -191,31 +136,28 @@
 
 (deftest stop-keeps-a-generation-whose-failed-worker-holds-a-connection-test
   (let [r (run (world failed-holding serving) (started 2))
-        result (gen/result (:progress r))]
+        result (gen/result (:progress r))
+        worker-0 (filter #(= 0 (gen/worker-of %)) (all-nodes 2))]
     (testing "TCP and Unix listeners and their claims are released"
-      (is (= #{[:listeners 0] [:callback-dispatch 1] :socket-claims} (released-by :stopping r))))
-    (testing "UDP claims stay, and the UDP sockets of the kept HTTP/3 node close"
-      (is (contains? (states r :acquired) :udp-claims))
-      (is (= [[:h3 0]] (:kept-actions (:world r))))
-      (is (some #{[:when-kept [:h3 0]]} (:actions r))))
-    (testing "what the failed worker holds and what it needs stays"
-      (is (= (conj (set (map #(vector % 0) (rest gen/worker-release-order)))
-                   :close-executor :h3-contexts :ticket-manager :loops :config :ssl-ctxs
-                   :udp-claims :arena)
-             (states r :acquired))))
+      (is (every? (states r :released) [[:listeners 0] [:listeners 1] :socket-claims])))
+    (testing "the UDP sockets of the kept HTTP/3 node close"
+      (is (= [[:h3 0]] (:kept-actions (:world r)))))
+    (testing "only what the failed worker holds and what it needs stays"
+      (is (contains? (states r :acquired) [:context 0]))
+      (is (every? (into (set worker-0) (mapcat needed-closure) worker-0)
+                  (states r :acquired))))
     (is (= {:outcome :kept :unfinished-workers [0] :errors []} result))
     (is (= :kept (gen/phase (:progress r))))
     (testing "a later stop releases nothing again and closes no socket again"
       (let [r2 (run (:world r) (gen/retire (:progress r)))]
         (is (= (:releases (:world r)) (:releases (:world r2))))
         (is (= [[:h3 0]] (:kept-actions (:world r2))))
-        (is (= result (gen/result (:progress r2))))
-        (is (= [:join-workers] (first (:actions r2))))))))
+        (is (= result (gen/result (:progress r2))))))))
 
 (deftest stop-keeps-a-generation-whose-failed-worker-pool-cannot-retire-test
   (let [r (run (world failed-idle serving) (started 2) {[:release [:pool 0]] :not-yet})]
-    (is (= #{[:listeners 0] [:response-receiver 0] [:callback-dispatch 1] :socket-claims}
-           (released-by :stopping r)))
+    (is (every? (states r :released) [[:listeners 0] [:listeners 1] :socket-claims]))
+    (is (= :acquired (get-in r [:progress :nodes [:pool 0]])))
     (is (= [[:h3 0]] (:kept-actions (:world r))))
     (is (= :kept (:outcome (gen/result (:progress r)))))
     (testing "a later stop releases the rest once the pool retires"
@@ -228,25 +170,26 @@
 (deftest a-claim-release-that-throws-still-keeps-the-generation-test
   (let [r (run (world failed-holding serving) (started 2) {[:release :socket-claims] {:error boom}})]
     (is (= {:outcome :kept :unfinished-workers [0] :errors [boom]} (gen/result (:progress r))))
-    (is (= :leaked (get-in r [:progress :nodes :socket-claims])))
-    (is (= [[:h3 0]] (:kept-actions (:world r))))))
+    (is (= :unfinished (get-in r [:progress :nodes :socket-claims])))
+    (is (= [[:h3 0]] (:kept-actions (:world r))))
+    (testing "a later stop still reports the release error"
+      (is (= {:outcome :kept :unfinished-workers [0] :errors [boom]}
+             (gen/result (:progress (run (:world r) (gen/retire (:progress r))))))))))
 
 (deftest a-worker-alive-at-the-deadline-keeps-everything-until-a-later-stop-test
   (let [stuck (assoc serving :drained? false)
         r (run (world serving stuck) (started 2))]
-    (is (= [[:signal-stop] [:await-handlers] [:join-workers] [:force-fail-workers [1]]
-            [:done {:outcome :not-joined :alive-workers [1]}]]
-           (:actions r)))
+    (is (= {:outcome :not-joined :alive-workers [1]} (gen/result (:progress r))))
     (is (empty? (released-by :stopping r)))
     (is (= :kept (gen/phase (:progress r))))
-    (testing "a later stop starts at the join and releases everything once"
+    (testing "a later stop releases everything once and signals no second stop"
       (let [w (assoc-in (:world r) [:workers 1 :drained?] true)
             r2 (run w (gen/retire (:progress r)))
             releases (map second (:releases (:world r2)))]
-        (is (= [:join-workers] (first (:actions r2))))
         (is (= {:outcome :stopped} (gen/result (:progress r2))))
         (is (= (all-nodes 2) (set releases)))
-        (is (= (count releases) (count (set releases))))))))
+        (is (= (count releases) (count (set releases))))
+        (is (= 1 (:signals (:world r2))))))))
 
 (deftest an-interrupted-join-keeps-everything-test
   (let [r (run (world failed-idle serving) (started 2) {[:join-workers] {:error boom}})]
@@ -255,21 +198,39 @@
 
 (deftest handlers-that-do-not-end-in-time-are-interrupted-test
   (let [r (run (world serving serving) (started 2) {[:await-handlers] :timed-out})]
-    (is (= [[:signal-stop] [:await-handlers] [:interrupt-handlers] [:join-workers]]
-           (take 4 (:actions r))))
+    (is (= 1 (:interrupts (:world r))))
     (is (= {:outcome :stopped} (gen/result (:progress r))))))
+
+(deftest a-handler-interrupt-that-throws-ends-the-run-with-its-error-test
+  (let [r (run (world serving serving) (started 2)
+               {[:await-handlers] :timed-out [:interrupt-handlers] {:error boom}})]
+    (is (= {:outcome :failed :error boom} (gen/result (:progress r))))
+    (is (= :kept (gen/phase (:progress r))))
+    (testing "a later run without the throw stops the generation"
+      (is (= {:outcome :stopped}
+             (gen/result (:progress (run (:world r) (gen/retire (:progress r))))))))))
+
+(deftest a-worker-release-that-did-not-finish-keeps-the-node-test
+  (let [w (world (assoc-in failed-idle [:nodes :pool] :unfinished) serving)
+        r (run w (started 2))]
+    (is (= :unfinished (get-in r [:progress :nodes [:pool 0]])))
+    (is (not (contains? (released-by :stopping r) [:pool 0])))
+    (is (= {:outcome :kept :unfinished-workers [] :errors []} (gen/result (:progress r))))))
 
 (deftest a-stop-signal-that-throws-ends-the-run-before-any-release-test
   (let [r (run (world serving serving) (started 2) {[:signal-stop] {:error boom}})]
-    (is (= [[:signal-stop] [:done {:outcome :failed :error boom}]] (:actions r)))
-    (is (= :running (gen/phase (:progress r))))
-    (is (= [:signal-stop] (first (:actions (run (:world r) (gen/retire (:progress r)))))))))
+    (is (= {:outcome :failed :error boom} (gen/result (:progress r))))
+    (is (empty? (:releases (:world r))))
+    (is (= :kept (gen/phase (:progress r))))
+    (testing "a later run without the throw stops the generation"
+      (is (= {:outcome :stopped}
+             (gen/result (:progress (run (:world r) (gen/retire (:progress r))))))))))
 
 (deftest a-release-that-throws-at-any-node-test
   (doseq [id (gen/release-order 2)]
     (testing (str id)
       (let [r (run (world failed-idle failed-idle) (started 2) {[:release id] {:error boom}})]
-        (is (= #{id} (states r :leaked)))
+        (is (= #{id} (states r :unfinished)))
         (is (= (needed-closure id) (states r :acquired)))
         (is (= (disj (all-nodes 2) id) (into (states r :released) (needed-closure id))))
         (is (= [boom] (:errors (gen/result (:progress r)))))
@@ -278,27 +239,95 @@
             (is (= (:releases (:world r)) (:releases (:world r2))))
             (is (= :kept (:outcome (gen/result (:progress r2)))))))))))
 
+;;; Ended workers
+
+(deftest an-ended-worker-is-released-only-when-it-left-nothing-to-finish-test
+  (let [outcome (fn [status]
+                  (:outcome (gen/result (:progress (run (world status serving) (started 2))))))
+        ended (assoc serving :thread :ended)]
+    (is (= :stopped (outcome ended)))
+    (doseq [fact [:commands? :responses? :blocks?]]
+      (is (= :kept (outcome (assoc ended :facts {fact true}))) (str fact))
+      (is (= :kept (outcome (assoc ended :failure boom :facts {fact true}))) (str fact)))
+    (testing "connections count only for a failed worker, whose loop cannot close them"
+      (doseq [fact [:generation-connections? :context-connections? :h3-connections?]]
+        (is (= :stopped (outcome (assoc ended :facts {fact true}))) (str fact))
+        (is (= :kept (outcome (assoc ended :failure boom :facts {fact true}))) (str fact))))))
+
+(deftest native-counts-are-read-only-from-nodes-nothing-freed-test
+  (is (gen/readable? {[:context 0] :acquired} {} :context 0))
+  (is (gen/readable? {[:context 0] :acquired} {:nodes {:context :acquired}} :context 0))
+  (is (not (gen/readable? {[:context 0] :acquired} {:nodes {:context :unfinished}} :context 0)))
+  (is (not (gen/readable? {[:context 0] :acquired} {:nodes {:context :released}} :context 0)))
+  (is (not (gen/readable? {[:context 0] :unfinished} {} :context 0)))
+  (is (not (gen/readable? {} {} :context 0))))
+
+(deftest the-worker-releases-its-nodes-in-stage-order-test
+  (is (= :listeners (gen/worker-release {:stage :draining} false)))
+  (is (nil? (gen/worker-release {:stage :serving} true)))
+  (is (nil? (gen/worker-release {:stage :draining :nodes {:listeners :released}} false)))
+  (is (= :response-receiver (gen/worker-release {:stage :draining :nodes {:listeners :released}} true)))
+  (testing "a node that did not finish keeps what it needs"
+    (is (= :pool (gen/worker-release {:stage :draining
+                                      :nodes {:listeners :released :response-receiver :unfinished}}
+                                     true))))
+  (let [statuses (for [stage [:serving :draining :released]
+                       states (reduce (fn [acc kind]
+                                        (for [m acc state [:acquired :released :unfinished]]
+                                          (assoc m kind state)))
+                                      [{}]
+                                      gen/worker-release-order)]
+                   {:stage stage :nodes states})]
+    (testing "while the receiver or the pool waits, the worker frees no node the drain check reads"
+      (is (empty? (for [status statuses
+                        :when (some #(= :acquired (get-in status [:nodes %])) [:response-receiver :pool])
+                        drained? [false true]
+                        :when (#{:h3 :context} (gen/worker-release status drained?))]
+                    status))))
+    (testing "the worker never releases its callback dispatch or its thread"
+      (is (empty? (for [status statuses
+                        drained? [false true]
+                        :when (#{:callback-dispatch :thread} (gen/worker-release status drained?))]
+                    status)))))
+  (is (not (gen/worker-released? {:nodes {:listeners :released}})))
+  (is (gen/worker-released? {:nodes {:context :released}})))
+
+(deftest an-acquire-that-could-not-free-its-partial-work-keeps-the-generation-test
+  (let [steps (:steps (gen/start 2))
+        k (.indexOf ^java.util.List steps [:acquire [:context 1]])
+        r (run (world never-started never-started) (gen/start 2)
+               {[:acquire [:context 1]] {:error boom :unfinished? true}})
+        acquired (set (keep (fn [[op id]] (when (= :acquire op) id)) (take k steps)))]
+    (is (= :unfinished (get-in r [:progress :nodes [:context 1]])))
+    (testing "what the node needs stays, everything else is released"
+      (is (= (needed-closure [:context 1]) (states r :acquired)))
+      (is (= (apply disj acquired (needed-closure [:context 1])) (states r :released))))
+    (testing "no worker counts as unfinished, and the error counts as a release error"
+      (is (= {:outcome :kept :unfinished-workers [] :errors [boom]} (gen/result (:progress r))))
+      (is (= boom (get-in r [:progress :start-error]))))
+    (is (= :kept (gen/phase (:progress r))))))
+
+(deftest a-throw-outside-an-action-fails-the-run-and-a-later-run-goes-on-test
+  (let [p (-> (started 2) (assoc-in [:nodes [:pool 0]] :unfinished) (gen/fail boom))]
+    (is (= {:outcome :failed :error boom} (gen/result p)))
+    (is (= :kept (gen/phase p)))
+    (testing "the node that the throw left unfinished stays acquired"
+      (let [r2 (run (world failed-idle serving) (gen/retire p))]
+        (is (= :unfinished (get-in r2 [:progress :nodes [:pool 0]])))
+        (is (not (contains? (released-by :stopping r2) [:pool 0])))))))
+
 ;;; Start
 
-(deftest a-start-acquires-every-node-in-order-test
-  (let [r (run (world never-started never-started) (gen/start 2))]
-    (is (= {:outcome :started} (gen/result (:progress r))))
-    (is (= :running (gen/phase (:progress r))))
-    (is (= (all-nodes 2) (set (keys (:nodes (:progress r))))))
-    (is (= (map #(vector :acquire (first %)) (gen/acquire-steps 2)) (butlast (:actions r))))))
+(deftest every-node-needs-only-nodes-acquired-before-it-test
+  (let [order (vec (gen/acquire-order 3))
+        before (fn [id] (set (subvec order 0 (.indexOf ^java.util.List order id))))]
+    (doseq [id order
+            needed (gen/needs id)]
+      (is (contains? (before id) needed) (str id " needs " needed)))))
 
-(deftest a-failed-start-at-any-step-releases-exactly-what-it-acquired-test
-  (let [steps (gen/acquire-steps 2)]
-    (doseq [k (range (count steps))]
-      (testing (str (first (nth steps k)))
-        (let [acquired (set (mapcat second (take k steps)))
-              r (run (world never-started never-started) (gen/start 2)
-                     {[:acquire (first (nth steps k))] {:error boom}})
-              releases (map second (:releases (:world r)))]
-          (is (= {:outcome :stopped :start-error boom} (gen/result (:progress r))))
-          (is (= acquired (set releases)))
-          (is (= (count releases) (count (set releases))))
-          (testing "the stopping thread releases contexts whose worker thread never started"
-            (doseq [i [0 1]
-                    :when (and (acquired [:context i]) (not (acquired [:callback-dispatch i])))]
-              (is (contains? (released-by :stopping r) [:context i])))))))))
+(deftest every-node-is-in-release-order-before-the-nodes-it-needs-test
+  (let [order (vec (gen/release-order 3))
+        after (fn [id] (set (subvec order (inc (.indexOf ^java.util.List order id)))))]
+    (doseq [id order
+            needed (gen/needs id)]
+      (is (contains? (after id) needed) (str id " needs " needed)))))

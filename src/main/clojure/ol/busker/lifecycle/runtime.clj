@@ -1,16 +1,19 @@
 (ns ^:no-doc ol.busker.lifecycle.runtime
-  "Pure transitions for runtime reload and server stop.
+  "Pure transitions for server start, runtime reload, server stop and the drain
+  of one generation.
 
-  [[begin-reload]] and [[begin-stop]] return a progress value with the first
-  action under `:action`. The shell does that action and gives its outcome to
-  [[step]], which returns the progress with the next action, until the action
-  is `[:done result]`. An outcome or a result is `{:value v}` or
-  `{:error throwable}`. A stop result can also have `:suppressed`.
+  [[begin-start]], [[begin-reload]], [[begin-stop]] and [[begin-drain]] return
+  a progress value with the first action under `:action`. The shell does that
+  action and gives its outcome to [[step]], which returns the progress with
+  the next action, until the action is `[:done result]`. An outcome or a
+  result is `{:value v}` or `{:error throwable}`. A failed result can also
+  have `:suppressed`.
 
   A generation entry, a certificate runtime and a ticket service are opaque
   values. The core compares entries by `:generation-id` and services by
-  identity. `[:swap f & args]` asks the shell to `swap!` the state atom with
-  `f`. Its outcome value is the new state.")
+  identity. A new entry reuses a service of the old one when it has the same
+  `:cert-plan` or `:ticket-policy`. `[:swap f & args]` asks the shell to
+  `swap!` the state atom with `f`. Its outcome value is the new state.")
 
 (set! *warn-on-reflection* true)
 
@@ -40,15 +43,23 @@
     active (update :draining conj active)))
 
 (defn end-stopped
-  "Sets the phase to `:stopped` and keeps `result` for a later stop."
-  [state result]
-  (assoc state :phase :stopped :draining [] :stop-result result))
+  "Sets the phase to `:stopped`. Of the draining list, it keeps the generations
+  whose id is in `kept`, because they did not drain."
+  [state kept]
+  (-> state
+      (assoc :phase :stopped)
+      (update :draining (partial filterv #(contains? kept (:generation-id %))))))
 
 (defn attach-drain
   "Puts the drain `handle` on draining generation `id` if it is still listed."
   [state id handle]
   (update state :draining
           (partial mapv #(cond-> % (= id (:generation-id %)) (assoc :drain handle)))))
+
+(defn drained
+  "Takes draining generation `id` off the list."
+  [state id]
+  (update state :draining (partial filterv #(not= id (:generation-id %)))))
 
 (defn- service-stops
   "Returns stop actions for the services of `generations` that no generation in
@@ -62,19 +73,15 @@
           :when (not-any? #(identical? service (k %)) users)]
       [action service]))))
 
-(defn drained
-  "Takes draining generation `id` off the list. Returns `{:state s :stop actions}`.
-  While the phase is `:running`, `:stop` has a stop action for each service of
-  that generation that no listed generation has. During a server stop it is
-  empty, because the stop stops the services of every generation it drains."
-  [state id]
-  (let [generation (first (filter #(= id (:generation-id %)) (:draining state)))
-        next-state (update state :draining
-                           (partial filterv #(not= id (:generation-id %))))]
-    {:state next-state
-     :stop (when (and generation (= :running (:phase state)))
-             (service-stops [generation]
-                            (cons (:active next-state) (:draining next-state))))}))
+(defn drained-stops
+  "Returns the stop actions that follow the drain of `generation`, from
+  `state`, the result of [[drained]]. While the phase is `:running`, that is a
+  stop action for each service of `generation` that no listed generation has.
+  During a server stop it is empty, because the stop stops the services of
+  every generation it drains."
+  [state generation]
+  (when (= :running (:phase state))
+    (service-stops [generation] (cons (:active state) (:draining state)))))
 
 (defn- go
   [progress stage action]
@@ -84,64 +91,152 @@
   [progress result]
   (go progress :done [:done result]))
 
+(defn- wrap-error
+  "Returns an error with `message` and `data` that wraps `t`. It has the data of
+  `t`, and the stage of `t` or else `stage`."
+  [message data stage t]
+  (let [t-data (ex-data t)]
+    (ex-info message (merge data {:stage (or (:stage t-data) stage)} t-data) t)))
+
 (defn- reload-failure
-  [t]
-  (let [data (ex-data t)]
-    {:error (ex-info "Reload failed"
-                     (merge {:reason :reload-failed
-                             :stage (or (:stage data) :activation)}
-                            data)
-                     t)}))
+  ([t] (reload-failure t :activation))
+  ([t stage]
+   {:error (wrap-error "Reload failed" {:reason :reload-failed} stage t)}))
+
+(defn- reused
+  "Returns the service under `k` that the candidate gets without a start: none
+  when it needs none, the service of the old generation when that one has the
+  same need under `need-k`, or else `::start`."
+  [{:keys [old candidate]} k need-k]
+  (let [need (need-k candidate)]
+    (cond
+      (nil? need) nil
+      (= need (need-k old)) (k old)
+      :else ::start)))
+
+(defn- start-generation
+  [{:keys [candidate compiled-config] :as progress}]
+  (go progress :start-generation [:start-generation candidate compiled-config]))
+
+(defn- start-ticket-service
+  [{:keys [old compiled-config] :as progress}]
+  (let [service (reused progress :memory-ticket-service :ticket-policy)]
+    (if (= ::start service)
+      (go progress :start-tickets
+          [:start-ticket-service (:memory-ticket-service old) compiled-config])
+      (start-generation (assoc-in progress [:candidate :memory-ticket-service] service)))))
+
+(defn- start-cert-runtime
+  [progress]
+  (let [runtime (reused progress :cert-automation :cert-plan)]
+    (if (= ::start runtime)
+      (go progress :start-cert [:start-cert-runtime (get-in progress [:candidate :cert-plan])])
+      (start-ticket-service (assoc-in progress [:candidate :cert-automation] runtime)))))
+
+(defn- build
+  "Builds the candidate, generation `id`: compiles the configuration and makes
+  its normalized snapshot, starts or reuses the certificate runtime and the
+  ticket service, starts the generation and activates it."
+  [progress id]
+  (go (assoc progress :candidate {:generation-id id})
+      :compile [:compile-config]))
+
+(defn begin-start
+  "Returns the progress of the start of a server. The result value is the
+  generation entry for [[initial-state]]."
+  []
+  (build {:op :start} 1))
 
 (defn begin-reload
   "Returns the progress of a reload from the observation `{:state s :snapshot c
-  :force? b :failed-worker? b}`. `:snapshot` is the normalized next
-  configuration. `:failed-worker?` tells if a worker of the active generation
-  has failed."
-  [{:keys [state snapshot force? failed-worker?]}]
+  :snapshot-error t :force? b :failed-worker? b}`. `:snapshot` is the
+  normalized next configuration, or `:snapshot-error` is the error that its
+  normalization threw. `:failed-worker?` tells if a worker of the active
+  generation has failed."
+  [{:keys [state snapshot snapshot-error force? failed-worker?]}]
   (let [{:keys [phase active next-generation-id]} state
         progress {:op :reload :old active}]
     (cond
       (not= :running phase)
       (done progress {:error (ex-info "Server is stopping" {:reason :server-stopping})})
 
+      snapshot-error
+      (done progress (reload-failure snapshot-error :validation))
+
       (and (not force?) (not failed-worker?) (= snapshot (:config active)))
       (done progress {:value :unchanged})
 
       :else
-      (go progress :build [:build next-generation-id]))))
+      (build progress next-generation-id))))
 
 (defn begin-stop
-  "Returns the progress of a server stop of `state`. A stop of a stopped
-  runtime gives the result of the first stop."
+  "Returns the progress of a server stop of `state`."
   [state]
-  (if (= :stopped (:phase state))
-    (done {:op :stop} (:stop-result state))
-    (go {:op :stop :old (:active state) :failures []}
-        :begin-stopping [:swap begin-stopping])))
+  (go {:op :stop :old (:active state) :failures [] :kept #{}}
+      :begin-stopping [:swap begin-stopping]))
+
+(defn begin-drain
+  "Returns the progress of the drain of `generation` after it stopped
+  accepting. The drain stops it, takes it off the list and stops the services
+  that [[drained-stops]] gives."
+  [generation]
+  (go {:op :drain :generation generation}
+      :drain-stop [:stop-generation generation]))
 
 (defn- next-discard
-  [{:keys [to-discard error] :as progress}]
+  [{:keys [op to-discard error failures] :as progress}]
   (if-let [action (first to-discard)]
     (go (update progress :to-discard rest) :discard action)
-    (done progress (reload-failure error))))
+    (done progress (assoc (if (= :start op) {:error error} (reload-failure error))
+                          :suppressed failures))))
+
+(defn- discard
+  "Stops what the candidate started and does not share with the old generation,
+  then fails with `error` and the errors of these stops as `:suppressed`. A
+  reload wraps `error` in its reload error."
+  [{:keys [old candidate] :as progress} error]
+  (next-discard (assoc progress
+                       :error error
+                       :failures []
+                       :to-discard (into (if (:instance candidate)
+                                           [[:stop-generation candidate]]
+                                           [])
+                                         (service-stops [candidate] [old])))))
+
+(defn- failures-result
+  [[failure & more]]
+  (if failure
+    {:error failure :suppressed (vec more)}
+    {:value nil}))
 
 (defn- next-stop-step
   "Awaits each generation, then stops each service, then ends the stop with the
-  first failure and the others as `:suppressed`."
-  [{:keys [to-await to-stop failures] :as progress}]
+  first failure and the others as `:suppressed`. A generation without a drain
+  thread is stopped in place of the await."
+  [{:keys [to-await to-stop kept] :as progress}]
   (cond
     (seq to-await)
-    (go (update progress :to-await rest) :await [:await-drain (first to-await)])
+    (let [generation (first to-await)]
+      (go (assoc progress :to-await (rest to-await) :awaiting generation)
+          :await
+          (if (:drain generation)
+            [:await-drain generation]
+            [:stop-generation generation])))
 
     (seq to-stop)
     (go (update progress :to-stop rest) :stop-service (first to-stop))
 
     :else
-    (let [result (if (seq failures)
-                   {:error (first failures) :suppressed (vec (rest failures))}
-                   {:value nil})]
-      (go (assoc progress :result result) :end-stopped [:swap end-stopped result]))))
+    (go progress :end-stopped [:swap end-stopped kept])))
+
+(defn- next-drain-stop
+  "Stops each service, then ends the drain. A failed service stop is logged and
+  is not in the result, because no stop waits for a generation that is off
+  the list while the phase is `:running`."
+  [{:keys [to-stop] :as progress}]
+  (if (seq to-stop)
+    (go (update progress :to-stop rest) :drain-service (first to-stop))
+    (done progress {:value nil})))
 
 (defn- drain-begun
   "Continues after the old generation began to drain: a reload is done, a
@@ -153,58 +248,115 @@
 
 (defn step
   "Applies `outcome` of the action under `:action` in `progress`. Returns the
-  progress with the next action under `:action`. Nothing is undone after
-  `:activate` succeeds."
-  [{:keys [stage old candidate] :as progress} {:keys [value error]}]
+  progress with the next action under `:action`. Nothing is undone after the
+  candidate is published."
+  [{:keys [stage old generation] :as progress} {:keys [value error]}]
   (case stage
-    :build
+    :compile
     (if error
-      (done progress (reload-failure error))
-      (go (assoc progress :candidate value) :activate [:activate value]))
+      (discard progress (wrap-error "Failed to compile generation config" {} :validation error))
+      (start-cert-runtime (-> progress
+                              (assoc :compiled-config (:compiled-config value))
+                              (update :candidate assoc
+                                      :config (:snapshot value)
+                                      :cert-plan (:cert-plan value)
+                                      :ticket-policy (:ticket-policy value)))))
+
+    :start-cert
+    (if error
+      (discard progress (wrap-error "Failed to start certificate automation" {}
+                                    :automation-startup error))
+      (start-ticket-service (assoc-in progress [:candidate :cert-automation] value)))
+
+    :start-tickets
+    (if error
+      (discard progress (wrap-error "Failed to start in-memory session tickets" {}
+                                    :activation error))
+      (start-generation (assoc-in progress [:candidate :memory-ticket-service] value)))
+
+    :start-generation
+    (if error
+      (discard progress (wrap-error "Failed to start generation" {} :activation error))
+      (let [candidate (assoc (:candidate progress) :instance value)]
+        (go (assoc progress :candidate candidate) :activate [:activate candidate])))
 
     :activate
-    (if error
-      (next-discard (assoc progress
-                           :error error
-                           :to-discard (into [[:stop-generation candidate]]
-                                             (service-stops [candidate] [old]))))
-      (go (assoc progress :candidate value) :publish [:swap publish value]))
+    (cond
+      error (discard progress error)
+      (= :start (:op progress)) (done progress {:value (:candidate progress)})
+      :else (go progress :publish [:swap publish (:candidate progress)]))
 
     :discard
-    (next-discard progress)
+    (next-discard (cond-> progress error (update :failures conj error)))
 
     :publish
-    (go progress :stop-accepting [:stop-accepting old])
+    (if error
+      (discard progress error)
+      (go progress :stop-accepting [:stop-accepting old]))
 
     :stop-accepting
     (if error
-      (go progress :log [:log-stop-accepting-failed old error])
+      (go progress :log-stop-accepting
+          [:log-failure :ol.busker.runtime/stop-accepting-failed old error])
       (go progress :retire [:retire old]))
 
-    :log
+    :log-stop-accepting
     (go progress :retire [:retire old])
 
     :retire
     (if error
-      (drain-begun progress)
+      (go progress :log-retire
+          [:log-failure :ol.busker.runtime/retire-failed old error])
       (go (assoc-in progress [:old :drain] value)
           :attach [:swap attach-drain (:generation-id old) value]))
 
+    :log-retire
+    (drain-begun progress)
+
+    ;; An error leaves the list entry without its drain handle. The drain
+    ;; still runs, and a stop has the handle in `:old`.
     :attach
     (drain-begun progress)
 
+    ;; An error leaves the state as it was, so nothing is drained or stopped.
     :begin-stopping
-    (let [generations (:draining value)
-          progress (assoc progress
-                          :to-await (filterv #(not= (:generation-id old) (:generation-id %))
-                                             generations)
-                          :to-stop (service-stops generations []))]
-      (if old
-        (go progress :stop-accepting [:stop-accepting old])
-        (next-stop-step progress)))
+    (if error
+      (done progress {:error error})
+      (let [generations (:draining value)
+            progress (assoc progress
+                            :to-await (filterv #(not= (:generation-id old) (:generation-id %))
+                                               generations)
+                            :to-stop (service-stops generations []))]
+        (if old
+          (go progress :stop-accepting [:stop-accepting old])
+          (next-stop-step progress))))
 
-    (:await :stop-service)
+    :await
+    (next-stop-step (cond-> progress
+                      error (-> (update :failures conj error)
+                                (update :kept conj (:generation-id (:awaiting progress))))))
+
+    :stop-service
     (next-stop-step (cond-> progress error (update :failures conj error)))
 
     :end-stopped
-    (done progress (:result progress))))
+    (done progress (failures-result (cond-> (:failures progress) error (conj error))))
+
+    :drain-stop
+    (if error
+      (done progress {:error error})
+      (go progress :drained [:swap drained (:generation-id generation)]))
+
+    :drained
+    (if error
+      (done progress {:error error})
+      (next-drain-stop (assoc progress :to-stop (drained-stops value generation))))
+
+    :drain-service
+    (if error
+      (go progress :log-service
+          [:log-failure :ol.busker.runtime/service-stop-failed generation error])
+      (next-drain-stop progress))
+
+    :log-service
+    (next-drain-stop progress)))

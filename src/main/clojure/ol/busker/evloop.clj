@@ -415,31 +415,6 @@
     (.start thread)
     worker))
 
-(defn join-worker!
-  "Join a worker thread without sending stop messages. Assumes the worker will
-   exit after draining."
-  [worker]
-  (when-let [^Thread t (:thread worker)]
-    (.join t)
-    (.set ^AtomicReference (:wakeup-receiver_ worker) nil)))
-
-(defn join-all!
-  "Join all workers without signalling stop."
-  [workers]
-  (doseq [w workers]
-    (join-worker! w)))
-
-(defn broadcast!
-  "Send a control message to all workers.
-
-   Parameters:
-   - workers: a seq of workers
-   - msg: message to broadcast"
-  [workers msg]
-  (mapv (fn [^Worker worker]
-          (p/send-required-msg worker msg))
-        workers))
-
 (defn broadcast-wake!
   "Wake all workers.
 

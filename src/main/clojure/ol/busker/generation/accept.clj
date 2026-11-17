@@ -17,7 +17,7 @@
 (set! *warn-on-reflection* true)
 
 ;; Connection spread. `counts` holds each worker's TCP and Unix socket
-;; connections; only that worker writes its slot, from its accept and close
+;; connections. Only that worker writes its slot, from its accept and close
 ;; callbacks. A worker reads its listeners only while [[at-minimum?]] holds.
 ;; It decides in every loop turn before it blocks, and an accept that raises the
 ;; minimum wakes the others, so a worker that became eligible decides again.
@@ -84,18 +84,36 @@
   [f]
   (try (f) (catch Throwable _ nil)))
 
-(defn- undo-failed-accept!
-  "Gives back what an accept took before it failed at `stage`. From `:closable`
-  on, closing the socket runs its close callback, which releases the slot and
-  the counts; at `:handed` H2O has the socket and nothing is given back."
-  [stage sock-ptr ^AtomicLong active-connection-count_ ^AtomicLongArray counts worker-idx]
-  (when (= :counted stage)
-    (attempt! #(.decrementAndGet active-connection-count_))
-    (attempt! #(.decrementAndGet counts (int worker-idx))))
-  (when (#{:limited :counted} stage)
-    (attempt! h2o/conn-limit-release))
-  (when (#{:accepted :limited :counted :closable} stage)
-    (attempt! #(h2o/socket-close sock-ptr))))
+(defn- count-connection!
+  "Counts the connection `sock-ptr` of the worker at `worker-idx` and sets its
+  close callback, which gives back the counts and the limit slot. When the
+  close callback cannot be set, it gives them back itself."
+  [sock-ptr close-cb-ptr ^AtomicLong active-connection-count_ ^AtomicLongArray counts worker-idx]
+  (.incrementAndGet active-connection-count_)
+  (.incrementAndGet counts (int worker-idx))
+  (try
+    (h2o/socket-set-on-close sock-ptr close-cb-ptr mem/null)
+    (catch Throwable t
+      (attempt! #(.decrementAndGet active-connection-count_))
+      (attempt! #(.decrementAndGet counts (int worker-idx)))
+      (attempt! h2o/conn-limit-release)
+      (throw t))))
+
+(defn- admit-connection!
+  "Hands the accepted socket `sock-ptr` to H2O. Returns false when the global
+  connection limit refuses it, else true. On a throw it closes the socket,
+  which gives back the counts once the close callback is set."
+  [accept-ctx-ptr sock-ptr close-cb-ptr active-connection-count_ counts worker-idx]
+  (try
+    (if (pos? (h2o/conn-limit-try-acquire))
+      (do
+        (count-connection! sock-ptr close-cb-ptr active-connection-count_ counts worker-idx)
+        (h2o/h2o-accept accept-ctx-ptr sock-ptr)
+        true)
+      false)
+    (catch Throwable t
+      (attempt! #(h2o/socket-close sock-ptr))
+      (throw t))))
 
 (defn- end-accept-failure-run!
   [{:keys [^AtomicLong started ^AtomicBoolean failed-worker?]}]
@@ -125,37 +143,21 @@
 (defn create-accept-callback
   [accept-ctx-ptr {::keys [connection-close-cb-ptr accept-failure-run]}
    active-connection-count_ ^AtomicLongArray counts workers worker-idx]
-  (let [worker-idx (long worker-idx)
-        accept-cb (fn [listener-ptr _err-ptr]
-                    (let [stage_ (volatile! nil)
-                          sock_ (volatile! nil)]
-                      (try
-                        (if-not (at-minimum? (.get counts (int worker-idx)) counts)
-                          (h2o/socket-read-stop listener-ptr)
-                          (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
-                            (when-not (mem/null? sock-ptr)
-                              (vreset! sock_ sock-ptr)
-                              (vreset! stage_ :accepted)
-                              (if (pos? (h2o/conn-limit-try-acquire))
-                                (do
-                                  (vreset! stage_ :limited)
-                                  (.incrementAndGet ^AtomicLong active-connection-count_)
-                                  (let [own (.incrementAndGet counts (int worker-idx))]
-                                    (vreset! stage_ :counted)
-                                    (h2o/socket-set-on-close sock-ptr connection-close-cb-ptr mem/null)
-                                    (vreset! stage_ :closable)
-                                    (h2o/h2o-accept accept-ctx-ptr sock-ptr)
-                                    (vreset! stage_ :handed)
-                                    (end-accept-failure-run! accept-failure-run)
-                                    (when (at-minimum? own counts)
-                                      (wake-other-workers! workers worker-idx))))
-                                (do
-                                  (vreset! stage_ nil)
-                                  (h2o/socket-close sock-ptr))))))
-                        (catch Throwable t
-                          (undo-failed-accept! @stage_ @sock_ active-connection-count_
-                                               counts worker-idx)
-                          (accept-failed! workers worker-idx accept-failure-run listener-ptr t)))))]
+  (let [accept-cb (fn [listener-ptr _err-ptr]
+                    (try
+                      (if-not (at-minimum? (.get counts (int worker-idx)) counts)
+                        (h2o/socket-read-stop listener-ptr)
+                        (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
+                          (when-not (mem/null? sock-ptr)
+                            (if (admit-connection! accept-ctx-ptr sock-ptr connection-close-cb-ptr
+                                                   active-connection-count_ counts worker-idx)
+                              (do
+                                (end-accept-failure-run! accept-failure-run)
+                                (when (at-minimum? (.get counts (int worker-idx)) counts)
+                                  (wake-other-workers! workers worker-idx)))
+                              (h2o/socket-close sock-ptr)))))
+                      (catch Throwable t
+                        (accept-failed! workers worker-idx accept-failure-run listener-ptr t))))]
     {::accept-cb accept-cb
      ::accept-cb-ptr (mem/callback (mem/auto-arena) accept-cb [:pointer :pointer] :void)}))
 

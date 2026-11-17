@@ -392,7 +392,8 @@
 
 (defn- start-server
   [config handler]
-  (generation/start! (config/load! (util/with-handler handler config)) nil))
+  (generation/activate-http3-transports!
+   (generation/start! (config/load! (util/with-handler handler config)) nil)))
 
 (defn- dispatch-of [instance]
   (:callback-dispatch (first (::generation/workers instance))))

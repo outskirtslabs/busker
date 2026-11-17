@@ -2,7 +2,6 @@
   (:require
    [clojure.test :refer [deftest is testing]]
    [ol.busker.clave-adapter :as clave-adapter]
-   [ol.busker.config :as config]
    [ol.busker.generation :as generation]
    [ol.busker.runtime :as runtime]
    [ol.busker.test-utils :as util]))
@@ -129,35 +128,6 @@
     (is (.isShutdown ^java.util.concurrent.ExecutorService
          (:busker/lifecycle-executor server)))))
 
-(deftest cert-automation-reuse-and-replacement-test
-  (let [started (atom [])
-        current-runtime {:managed-plan {:subject-names ["a.example"]
-                                        :clave-config {:issuer :acme}}
-                         :system ::current}
-        acquire! #'ol.busker.runtime/acquire-cert-automation!]
-    (with-redefs [clave-adapter/start! (fn [managed-plan]
-                                         (swap! started conj managed-plan)
-                                         {:managed-plan managed-plan
-                                          :system ::started})]
-      (let [reused (acquire! current-runtime
-                             {:subject-names ["a.example"]
-                              :clave-config {:issuer :acme}})
-            replaced (acquire! current-runtime
-                               {:subject-names ["b.example"]
-                                :clave-config {:issuer :acme}})]
-        (is (= current-runtime (:runtime reused)))
-        (is (true? (:reused? reused)))
-        (is (nil? (:superseded reused)))
-        (is (= {:managed-plan {:subject-names ["b.example"]
-                               :clave-config {:issuer :acme}}
-                :system ::started}
-               (:runtime replaced)))
-        (is (false? (:reused? replaced)))
-        (is (= current-runtime (:superseded replaced)))
-        (is (= [{:subject-names ["b.example"]
-                 :clave-config {:issuer :acme}}]
-               @started))))))
-
 (deftest runtime-start-fails-when-automation-startup-fails-test
   (let [lifecycle-threads-before (lifecycle-thread-count)]
     (with-redefs [clave-adapter/build-managed-plan
@@ -186,64 +156,23 @@
                   (Thread/sleep 10)
                   (recur (dec remaining))))))))))
 
-(deftest candidate-plan-skips-unchanged-snapshots-unless-forced-test
-  (let [port (util/free-port)
-        user-config {:entrypoints {:http {:bind (str "127.0.0.1:" port)
-                                          :tls false}}
-                     :dispatch [{:handler (fn [_]
-                                            {:status 200
-                                             :body "unchanged"})}]}
-        snapshot (config/normalized-snapshot user-config)
-        plan! #'ol.busker.runtime/candidate-plan]
-    (is (= {:action :unchanged
-            :snapshot snapshot}
-           (plan! snapshot nil user-config {})))
-    (is (= :activate
-           (:action (plan! snapshot nil user-config {:force? true}))))
-    (is (true? (:force? (plan! snapshot nil user-config {:force? true}))))))
+(deftest start-of-a-config-that-is-not-a-map-reports-the-validation-stage-test
+  (let [e (try (runtime/start! "not-a-map") nil (catch Throwable t t))]
+    (is (= "Failed to compile generation config" (ex-message e)))
+    (is (= :validation (:stage (ex-data e))))))
 
-(deftest candidate-plan-computes-listener-and-automation-deltas-test
-  (let [current-port (util/free-port)
-        next-port (util/free-port)
-        current-config {:tls {:certificates {:manage ["a.example"]}
-                              :issuers [{:directory-url
-                                         "https://acme.example/directory"}]}
-                        :entrypoints {:https {:bind (str "127.0.0.1:" current-port)
-                                              :tls {:tls-compatibility-mode
-                                                    :modern}}}
-                        :dispatch [{:handler (fn [_]
-                                               {:status 200
-                                                :body "current"})}]}
-        next-config {:tls {:certificates {:manage ["b.example"]}
-                           :issuers [{:directory-url
-                                      "https://acme.example/directory"}]}
-                     :entrypoints {:https {:bind (str "127.0.0.1:" next-port)
-                                           :tls {:tls-compatibility-mode
-                                                 :modern}}}
-                     :dispatch [{:handler (fn [_]
-                                            {:status 200
-                                             :body "next"})}]}
-        current-snapshot (config/normalized-snapshot current-config)
-        current-managed-plan (clave-adapter/build-managed-plan current-snapshot)
-        plan! #'ol.busker.runtime/candidate-plan
-        plan (plan! current-snapshot current-managed-plan next-config {})]
-    (is (= :activate (:action plan)))
-    (is (= {:action :replace
-            :managed-plan {:subject-names ["b.example"]
-                           :clave-config {:issuers [{:directory-url
-                                                     "https://acme.example/directory"}]}}}
-           (:automation-plan plan)))
-    (is (= {:reuse []
-            :acquire [{:transport :tcp
-                       :host "127.0.0.1"
-                       :port next-port}
-                      {:transport :udp
-                       :host "127.0.0.1"
-                       :port next-port}]
-            :release [{:transport :tcp
-                       :host "127.0.0.1"
-                       :port current-port}
-                      {:transport :udp
-                       :host "127.0.0.1"
-                       :port current-port}]}
-           (:listener-plan plan)))))
+(deftest a-start-error-that-its-cleanup-throws-again-is-not-suppressed-in-itself-test
+  (let [e (ex-info "simulated" {})
+        stop! generation/stop!
+        stopped_ (atom [])
+        error (with-redefs [generation/register-shared-ticket-manager! (fn [_] (throw e))
+                            generation/stop! (fn [g & _] (swap! stopped_ conj g) (throw e))]
+                (try
+                  (runtime/start! {:entrypoints {:http {:bind (str "127.0.0.1:" (util/free-port))
+                                                        :tls false}}
+                                   :dispatch [{:handler (constantly {:status 200})}]})
+                  nil
+                  (catch Throwable t t)))]
+    (run! stop! @stopped_)
+    (is (identical? e error))
+    (is (not-any? #(identical? e %) (.getSuppressed ^Throwable e)))))

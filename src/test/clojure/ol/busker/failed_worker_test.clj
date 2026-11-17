@@ -231,7 +231,8 @@
                     (generation/stop! instance 5 TimeUnit/SECONDS)
                     nil
                     (catch ExceptionInfo e e)))]
-      (is (= kept-message (ex-message error)))
+      (is (= (str kept-message " A native release threw or an acquire could not free its work. Its resources and the resources that they need are kept.")
+             (ex-message error)))
       (is (= [release-error] (vec (.getSuppressed ^Throwable error))))
       (is (= :kept (generation/phase instance)))
       (is (some #(identical? instance %) @@#'generation/failed-retirements_))
@@ -254,6 +255,18 @@
     (is (= :stopped (:phase (runtime/state server))))
     (is (= :stopped (generation/phase instance)))
     (is (port-bindable? port))))
+
+(deftest a-failed-worker-publishes-its-failure-before-it-wakes-other-workers-test
+  (let [port (util/free-port)
+        instance (generation/start! (config/load! (server-config port "x")) nil)]
+    (is (zero? (:exit (util/wait-for-curl-ready! :http :h1 port "/" :max-time 2))))
+    (with-redefs [accept/wake-other-workers! (fn [_ ^long _] (throw (ex-info "simulated wake failure" {})))]
+      (fail-idle-worker! instance 1))
+    (generation/begin-stop! instance)
+    (is (nil? (with-redefs-fn {#'generation/stop-accepting-wait-ms 5000}
+                #(generation/await-stop-accepting! instance)))
+        "the generation stops accepting, because the failure is published")
+    (is (nil? (generation/stop! instance 5 TimeUnit/SECONDS)))))
 
 (deftest a-worker-ended-by-a-failed-retirement-logs-no-worker-failure-test
   (let [port (util/free-port)

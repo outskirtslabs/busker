@@ -3,9 +3,10 @@
   resource table, generation start and generation retirement.
 
   Functions take and return plain values. A node id is a kind keyword for a
-  generation node and `[kind worker-idx]` for a worker node. An observation
-  is `{:workers [status ...]}`, one status per worker index:
-  `{:thread :none|:alive|:ended, :stage ..., :drained? ..., :nodes {kind state}}`.")
+  generation node and `[kind worker-idx]` for a worker node. A node state is
+  `:acquired`, `:released` or `:unfinished`, a release that started and did
+  not end. An observation is `{:workers [status ...]}`, one status per worker
+  index: `{:thread :none|:alive|:ended, :stage ..., :drained? ..., :nodes {kind state}}`.")
 
 (set! *warn-on-reflection* true)
 
@@ -17,16 +18,6 @@
     :draining (if drained? :release :wait)
     :released :idle))
 
-(defn stopped-accepting?
-  "Returns true when the worker with `status` accepts no new connection."
-  [status]
-  (or (some? (:failure status)) (not= :serving (:stage status))))
-
-(defn all-stopped-accepting?
-  "Returns true when every worker status in `statuses` stopped accepting."
-  [statuses]
-  (every? stopped-accepting? statuses))
-
 (def resources
   "The native resource nodes of a generation.
 
@@ -35,32 +26,40 @@
   - `:release-at`: for a worker node, when its worker may release it:
     `:drain` (stop accepting), `:drained` (no connection left) or
     `:thread-end` (only the stopping thread, after the worker thread ended).
-  - `:when-kept`: what the stopping thread does to a node it cannot release."
+
+  `:thread` is the worker thread. It needs no node, because the worker
+  thread releases the nodes of that worker while it runs, and its release does nothing,
+  because the join ends the thread."
   {:socket-claims {}
    :udp-claims {}
    :arena {}
    :close-executor {}
-   :config {:needs #{:arena}}
+   :config {:needs #{:arena :close-executor}}
    :loops {}
-   :ssl-ctxs {}
    :ticket-manager {}
-   :h3-contexts {:needs #{:config :ticket-manager}}
+   :ssl-ctxs {:needs #{:ticket-manager}}
+   :h3-contexts {:needs #{:config :ticket-manager :ssl-ctxs}}
    :callback-dispatch {:release-at :thread-end :needs #{:close-executor :arena}}
    :context {:release-at :drained
              :needs #{:config :loops :ssl-ctxs :arena :callback-dispatch}}
    :response-receiver {:release-at :drained :needs #{:context}}
    :pool {:release-at :drained}
-   :listeners {:release-at :drain :needs #{:socket-claims :loops :context}}
-   :h3 {:release-at :drained :needs #{:context :h3-contexts :udp-claims}
-        :when-kept :close-udp-sockets}})
+   :listeners {:release-at :drain :needs #{:socket-claims :loops :context :ssl-ctxs}}
+   :h3 {:release-at :drained :needs #{:context :h3-contexts :udp-claims}}
+   :thread {:release-at :thread-end}})
 
 (def worker-release-order
-  "The release order of the nodes of one worker."
-  [:listeners :response-receiver :pool :h3 :context :callback-dispatch])
+  "The release order of the nodes of one worker. [[resources]] decides first,
+  and the order breaks ties. The order also keeps the drain check of the
+  worker safe. That check reads the HTTP/3 and context counts with no
+  [[readable?]] check. The releases that can return not yet,
+  `:response-receiver` and `:pool`, come before `:h3` and `:context`. So while
+  the worker waits for them, nothing has freed the nodes that the check reads."
+  [:listeners :response-receiver :pool :h3 :context :callback-dispatch :thread])
 
 (def generation-release-order
   "The release order of the generation nodes, after every worker node."
-  [:close-executor :h3-contexts :ticket-manager :loops :config :ssl-ctxs
+  [:h3-contexts :ssl-ctxs :ticket-manager :loops :config :close-executor
    :socket-claims :udp-claims :arena])
 
 (defn release-order
@@ -69,9 +68,25 @@
   (concat (for [i (range n-workers) kind worker-release-order] [kind i])
           generation-release-order))
 
-(defn- kind-of [id] (if (vector? id) (first id) id))
+(defn acquire-order
+  "Returns the node ids that a start of `n-workers` workers acquires, in order."
+  [n-workers]
+  (let [each (fn [kind] (map #(vector kind %) (range n-workers)))]
+    (concat [:socket-claims :udp-claims :close-executor :arena :config :loops :ticket-manager
+             :ssl-ctxs]
+            (mapcat each [:callback-dispatch :context :response-receiver :pool :listeners])
+            [:h3-contexts]
+            (mapcat each [:h3 :thread]))))
 
-(defn- worker-of [id] (when (vector? id) (second id)))
+(defn kind-of
+  "Returns the kind of node `id`."
+  [id]
+  (if (vector? id) (first id) id))
+
+(defn worker-of
+  "Returns the worker index of node `id`, or nil for a generation node."
+  [id]
+  (when (vector? id) (second id)))
 
 (defn needs
   "Returns the ids of the nodes that node `id` needs."
@@ -79,19 +94,29 @@
   (for [kind (:needs (resources (kind-of id)))]
     (if (:release-at (resources kind)) [kind (worker-of id)] kind)))
 
-(defn order-violations
-  "Returns the `[id dependent]` pairs where `order` releases `id` while
-  `dependent`, a node in `acquired` that needs `id`, is not released yet.
-  An empty result means that `order` respects [[resources]]."
-  [acquired order]
-  (first
-   (reduce (fn [[bad released] id]
-             [(into bad (for [d acquired
-                              :when (and (not (released d)) (some #{id} (needs d)))]
-                          [id d]))
-              (conj released id)])
-           [[] #{}]
-           order)))
+(defn readable?
+  "Returns true when the stopping thread may read the native counts of node
+  `kind` of the ended worker at `i`: the node is acquired in the progress
+  `nodes` and in the worker's `status`, so nothing freed it."
+  [nodes status kind i]
+  (and (= :acquired (nodes [kind i]))
+       (contains? #{nil :acquired} (get-in status [:nodes kind]))))
+
+(defn ended-drained?
+  "Returns true when the ended worker with `status` left nothing that a loop
+  turn must finish. `:facts` of the status holds what the stopping thread
+  read: `:commands?`, `:responses?` and `:blocks?` pending, and the open
+  connections `:generation-connections?`, `:context-connections?` and
+  `:h3-connections?`. A worker that ended without failure closed its
+  connections itself, so only a failed worker is checked for them."
+  [{:keys [failure facts]}]
+  (not (or (:commands? facts)
+           (:responses? facts)
+           (:blocks? facts)
+           (and (some? failure)
+                (or (:generation-connections? facts)
+                    (:context-connections? facts)
+                    (:h3-connections? facts))))))
 
 (defn quiet?
   "Returns true when `releaser`, `:stopping` or a worker index, may release
@@ -99,7 +124,7 @@
   while it runs. The stopping thread releases a worker's nodes after that
   thread ended or when it never started, and generation nodes only while no
   worker thread runs. An ended worker that is not drained keeps every node
-  except its listeners."
+  except its listeners. See [[ended-drained?]]."
   [obs releaser id]
   (let [idx (worker-of id)
         at (:release-at (resources (kind-of id)))
@@ -109,7 +134,7 @@
       (case (:thread status)
         :alive false
         :none true
-        (or (= :drain at) (boolean (:drained? status))))
+        (or (= :drain at) (ended-drained? status)))
 
       (= :stopping releaser)
       (not-any? #(= :alive (:thread %)) (:workers obs))
@@ -140,57 +165,66 @@
                 (map #(vector % releaser) worker-release-order))]
     (first (filter #(releasable? nodes obs releaser not-yet %) order))))
 
+(defn worker-release
+  "Returns the kind of the next node that the worker thread may release, by
+  the `status` of that worker and `drained?`, or nil. A node that is not in the
+  `:nodes` of `status` is acquired."
+  [status drained?]
+  (let [nodes (into {} (map (fn [kind] [[kind 0] (get (:nodes status) kind :acquired)]))
+                    worker-release-order)]
+    (kind-of (next-release nodes {:workers [(assoc status :drained? drained?)]} 0 #{}))))
+
+(defn worker-released?
+  "Returns true when the worker with `status` released every node it
+  releases itself, so that its loop may end."
+  [status]
+  (= :released (get-in status [:nodes :context])))
+
 (defn release-state
   "Returns the node state after a release with `outcome`: `:ok`, `:not-yet`
-  or `{:error t}`. A release that throws leaks the node."
+  or `{:error t}`. A release that throws is not tried again."
   [outcome]
   (case outcome
     :ok :released
     :not-yet :acquired
-    :leaked))
-
-(defn acquire-steps
-  "Returns the start steps for `n-workers` workers in order, as
-  `[step node-ids]` pairs. Each step acquires its nodes or none of them."
-  [n-workers]
-  (let [each (fn [& kinds] (for [kind kinds i (range n-workers)] [kind i]))]
-    (-> [[:claims [:socket-claims :udp-claims]]
-         [:executors [:close-executor]]
-         [:tls-lookup []]
-         [:core (into [:arena :config :loops] (each :context :response-receiver))]
-         [:pools (vec (each :pool))]
-         [:listeners (into [:ssl-ctxs] (each :listeners))]
-         [:http3 (into [:ticket-manager :h3-contexts] (each :h3))]]
-        (into (map (fn [i] [[:worker i] [[:callback-dispatch i]]])) (range n-workers))
-        (conj [:activate-http3 []]))))
+    :unfinished))
 
 (defn start
-  "Returns the progress value of a generation that starts `n-workers` workers."
+  "Returns the progress value of a generation that starts `n-workers`
+  workers."
   [n-workers]
-  {:steps (acquire-steps n-workers) :nodes {}})
+  {:steps (mapv #(vector :acquire %) (acquire-order n-workers))
+   :nodes {}})
 
 (defn retire
   "Returns `progress` ready for a new retirement run. Node states, the stop
-  signal, the handler wait and the kept actions done carry over. A stopped
-  progress stays stopped."
+  signal, the handler wait, the kept actions done and the release errors
+  carry over. A stopped progress stays stopped."
   [progress]
   (if (= :stopped (:outcome (:result progress)))
     (dissoc progress :action)
-    (dissoc progress :result :start-error :joined? :join-error :not-yet :errors :action)))
+    (select-keys progress [:nodes :signalled? :handlers :kept-done :errors])))
+
+(defn fail
+  "Returns `progress` ended with the result `{:outcome :failed :error t}`, for
+  a throw outside an action. The progress keeps `:start-error` and
+  `:errors`."
+  [progress t]
+  (let [result {:outcome :failed :error t}]
+    (assoc progress :result result :action [:done result])))
 
 (defn- alive-workers [obs]
   (vec (keep-indexed (fn [i status] (when (= :alive (:thread status)) i)) (:workers obs))))
 
-(defn- later-state [a b]
-  (let [rank {nil -1 :acquired 0 :releasing 1 :released 2 :leaked 2}]
-    (if (>= (rank a) (rank b)) a b)))
-
 (defn- merge-ended-workers
-  "Takes the node states that ended worker threads published."
+  "Takes the node states that ended worker threads published, for each node
+  that the progress has as acquired."
   [nodes obs]
   (reduce-kv (fn [nodes idx status]
                (if (= :ended (:thread status))
-                 (reduce-kv (fn [nodes kind state] (update nodes [kind idx] later-state state))
+                 (reduce-kv (fn [nodes kind state]
+                              (cond-> nodes
+                                (= :acquired (nodes [kind idx])) (assoc [kind idx] state)))
                             nodes (:nodes status))
                  nodes))
              nodes (vec (:workers obs))))
@@ -200,78 +234,98 @@
     (update progress :errors (fnil conj []) e)
     progress))
 
-(defn- record [progress obs outcome]
+(defn record
+  "Applies `outcome` of the action under `:action` in `progress`. Outcomes
+  are `:ok`, `:timed-out`, `:not-yet` or `{:error t}`. An acquire that could
+  not free its partial work has the outcome `{:error t :unfinished? true}`,
+  and its node stays as `:unfinished`. Its error counts as a release error."
+  [progress outcome]
   (let [[op arg] (:action progress)
         p (dissoc progress :action)
         e (:error outcome)]
     (case op
       (nil :done) p
-      :acquire (if e
-                 (-> p (dissoc :steps) (assoc :start-error e))
-                 (let [p (-> p
-                             (update :nodes into (map #(vector % :acquired)) (second (first (:steps p))))
-                             (update :steps rest))]
-                   (if (seq (:steps p))
-                     p
-                     (-> p (dissoc :steps) (assoc :result {:outcome :started})))))
+      :acquire
+      (if e
+        (cond-> (-> p (dissoc :steps) (assoc :start-error e))
+          (:unfinished? outcome) (-> (assoc-in [:nodes arg] :unfinished) (add-error outcome)))
+        (let [p (-> p (update :steps subvec 1) (assoc-in [:nodes arg] :acquired))]
+          (if (seq (:steps p))
+            p
+            (-> p (dissoc :steps) (assoc :result {:outcome :started})))))
       :signal-stop (if e (assoc p :result {:outcome :failed :error e}) (assoc p :signalled? true))
       :await-handlers (cond
                         e (assoc p :result {:outcome :failed :error e})
                         (= :timed-out outcome) (assoc p :handlers :timed-out)
                         :else (assoc p :handlers :done))
-      :interrupt-handlers (assoc p :handlers :done)
-      :join-workers (if e
-                      (assoc p :joined? true :join-error e)
-                      (-> p (assoc :joined? true) (update :nodes merge-ended-workers obs)))
-      :force-fail-workers (assoc p :result (cond-> {:outcome :not-joined :alive-workers arg}
-                                             (:join-error p) (assoc :error (:join-error p))))
+      :interrupt-handlers (if e (assoc p :result {:outcome :failed :error e}) (assoc p :handlers :done))
+      :join-workers (cond-> (assoc p :joined? true) e (assoc :join-error e))
+      :force-fail-workers (assoc p :result arg)
       :release (-> p
                    (assoc-in [:nodes arg] (release-state outcome))
                    (add-error outcome)
                    (cond-> (= :not-yet outcome)
                      (update :not-yet (fnil conj #{}) (or (worker-of arg) arg))))
-      :when-kept (-> p (update :kept-done (fnil conj #{}) arg) (add-error outcome)))))
+      :close-kept-udp (-> p (update :kept-done (fnil conj #{}) arg) (add-error outcome)))))
 
-(defn- sweep-result [{:keys [nodes errors]}]
+(defn- needed-by-unfinished
+  "Returns the ids of the nodes that the `:unfinished` nodes in `nodes` need,
+  directly or through other nodes."
+  [nodes]
+  (loop [todo (keep (fn [[id state]] (when (= :unfinished state) id)) nodes)
+         needed #{}]
+    (if-let [[id & more] (seq todo)]
+      (let [new (remove needed (needs id))]
+        (recur (concat more new) (into needed new)))
+      needed)))
+
+(defn- sweep-result
+  "Returns the result of a run that released all it could. The unfinished
+  workers hold an acquired node that no `:unfinished` node needs. The errors
+  are of the releases that threw and the acquires that could not free their
+  work."
+  [{:keys [nodes errors]}]
   (if (every? #{:released} (vals nodes))
     {:outcome :stopped}
-    {:outcome :kept
-     :unfinished-workers (->> nodes
-                              (keep (fn [[id state]] (when (not= :released state) (worker-of id))))
-                              distinct sort vec)
-     :errors (or errors [])}))
+    (let [needed (needed-by-unfinished nodes)]
+      {:outcome :kept
+       :unfinished-workers (->> nodes
+                                (keep (fn [[id state]]
+                                        (when (and (= :acquired state) (not (needed id)))
+                                          (worker-of id))))
+                                distinct sort vec)
+       :errors (or errors [])})))
 
-(defn- next-action [p obs]
-  (let [act #(assoc p :action %)
+(defn step
+  "Returns `progress` with the next action under `:action`, chosen by
+  observation `obs`, after it took the node states that ended worker threads
+  published. A node that the next action releases is `:unfinished` already."
+  [progress obs]
+  (let [p (update progress :nodes merge-ended-workers obs)
+        act #(assoc p :action %)
         alive (alive-workers obs)]
     (cond
-      (:result p) (act [:done (cond-> (:result p)
-                                (:start-error p) (assoc :start-error (:start-error p)))])
-      (:steps p) (act [:acquire (ffirst (:steps p))])
+      (:result p) (act [:done (:result p)])
+      (:steps p) (act (first (:steps p)))
       (not (:signalled? p)) (act [:signal-stop])
       (nil? (:handlers p)) (act [:await-handlers])
       (= :timed-out (:handlers p)) (act [:interrupt-handlers])
       (not (:joined? p)) (act [:join-workers])
-      (or (seq alive) (:join-error p)) (act [:force-fail-workers alive])
+      (or (seq alive) (:join-error p))
+      (act [:force-fail-workers (cond-> {:outcome :not-joined :alive-workers alive}
+                                  (:join-error p) (assoc :error (:join-error p)))])
       :else
-      (let [nodes (:nodes p)
-            n (count (:workers obs))]
+      (let [nodes (:nodes p)]
         (if-let [id (next-release nodes obs :stopping (:not-yet p #{}))]
-          (-> p (assoc-in [:nodes id] :releasing) (assoc :action [:release id]))
-          (if-let [id (first (filter #(and (= :acquired (nodes %))
-                                           (:when-kept (resources (kind-of %)))
+          (-> p (assoc-in [:nodes id] :unfinished) (assoc :action [:release id]))
+          ;; The UDP sockets of a kept HTTP/3 node close, so that the port can
+          ;; be bound again. Its contexts stay.
+          (if-let [id (first (filter #(and (= :h3 (kind-of %))
+                                           (= :acquired (nodes %))
                                            (not (contains? (:kept-done p) %)))
-                                     (release-order n)))]
-            (act [:when-kept id])
+                                     (release-order (count (:workers obs)))))]
+            (act [:close-kept-udp id])
             (recur (assoc p :result (sweep-result p)) obs)))))))
-
-(defn step
-  "Applies `outcome` of the action under `:action` in `progress`, then returns
-  the progress with the next action under `:action`, chosen by observation
-  `obs`. A node that the next action releases is `:releasing` already.
-  Outcomes are `:ok`, `:timed-out`, `:not-yet` or `{:error t}`."
-  [progress obs outcome]
-  (next-action (record progress obs outcome) obs))
 
 (defn result
   "Returns the result of the last finished run of `progress`, or nil."
@@ -279,15 +333,19 @@
   (when (= :done (first (:action progress)))
     (second (:action progress))))
 
+(defn kept?
+  "Returns true when `result` keeps native resources of the generation. A run
+  that failed keeps them until a later run releases them."
+  [result]
+  (contains? #{:kept :not-joined :failed} (:outcome result)))
+
 (defn phase
-  "Returns the phase of `progress`: `:starting`, `:running`, `:stopping`,
-  `:retiring`, `:kept` or `:stopped`."
+  "Returns the phase of `progress` after a run: `:running`, `:stopping` (the
+  stop signal went out and the stop did not end), `:kept` or `:stopped`."
   [progress]
   (let [outcome (:outcome (:result progress))]
     (cond
       (= :stopped outcome) :stopped
-      (#{:kept :not-joined} outcome) :kept
-      (:steps progress) :starting
+      (kept? (:result progress)) :kept
       (not (:signalled? progress)) :running
-      (not= :done (:handlers progress)) :stopping
-      :else :retiring)))
+      :else :stopping)))

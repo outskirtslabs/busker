@@ -6,6 +6,7 @@
    [ol.busker :as busker]
    [ol.busker.fixed-final :as fixed-final]
    [ol.busker.generation :as generation]
+   [ol.busker.generation.effects :as effects]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as protocols]
@@ -737,7 +738,7 @@
                             results)]
           (try
             (is (await-count (:response-slot-waiters worker) 4))
-            (#'generation/close-response-receiver-admission! worker)
+            (#'effects/close-response-receiver-admission! worker)
             (is (= [:closed :closed :closed :closed]
                    (mapv #(deref % 2000 :timeout) results)))
             (is (zero? (.get ^AtomicInteger (:response-slot-waiters worker))))

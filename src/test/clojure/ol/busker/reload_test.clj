@@ -5,6 +5,7 @@
    [clojure.test :refer [deftest is]]
    [babashka.ffi :as mem]
    [ol.busker.clave-adapter :as clave-adapter]
+   [ol.busker.evloop :as evloop]
    [ol.busker.native :as native]
    [ol.busker.native.socket :as socket]
    [ol.busker.config :as config]
@@ -17,7 +18,8 @@
    [ol.busker.tickets :as tickets]
    [ol.clave.acme.solver.http :as http-solver]
    [ol.clave.automation :as automation]
-   [ol.clave.storage.file :as file-storage])
+   [ol.clave.storage.file :as file-storage]
+   [taoensso.trove :as trove])
   (:import
    [java.net BindException ConnectException DatagramSocket InetSocketAddress Socket]
    [java.nio.file Files]
@@ -103,99 +105,6 @@
 (defn- shared-ticket-manager-count
   [service]
   (count @(:native-mgrs-atom service)))
-
-(deftest reload-publishes-candidate-before-old-generation-begins-drain-test
-  (let [old-generation {:generation-id 1
-                        :config {:version :old}
-                        :managed-plan nil
-                        :instance ::old-instance}
-        candidate {:generation-id 2
-                   :config {:version :new}
-                   :managed-plan nil
-                   :instance ::new-instance}
-        state-atom (atom {:phase :running
-                          :config (:config old-generation)
-                          :next-generation-id 2
-                          :listener-pool ::listener-pool
-                          :active old-generation
-                          :draining []})
-        server {:busker/lifecycle-gate (Object.)
-                :busker/state state-atom}
-        events (atom [])]
-    (with-redefs-fn {#'ol.busker.runtime/candidate-plan
-                     (fn [_ _ _ _]
-                       {:action :activate})
-                     #'ol.busker.runtime/build-generation!
-                     (fn [_ generation-id listener-pool active memory-ticket-service]
-                       (swap! events conj :candidate-built)
-                       (is (= 2 generation-id))
-                       (is (= ::listener-pool listener-pool))
-                       (is (= old-generation active))
-                       (is (nil? memory-ticket-service))
-                       candidate)
-                     #'ol.busker.runtime/begin-drain!
-                     (fn [server-handle generation]
-                       (swap! events conj :begin-drain)
-                       (is (= candidate (:active @(:busker/state server-handle))))
-                       (is (= (:config candidate) (:config @(:busker/state server-handle))))
-                       (is (= old-generation generation))
-                       (assoc generation
-                              :drain-future
-                              (future :ok)))}
-      (fn []
-        (is (= :activated
-               (@#'ol.busker.runtime/reload-on-lifecycle!
-                server ::next-config {:force? true})))
-        (is (= [:candidate-built :begin-drain] @events))
-        (is (= candidate (:active @state-atom)))
-        (is (= [1] (mapv :generation-id (:draining @state-atom))))))))
-
-(deftest begin-drain-waits-for-stop-accepting-before-background-stop-test
-  (let [events (atom [])
-        stop-accepting-release (promise)
-        server {:busker/lifecycle-gate (Object.)
-                :busker/state (atom {:phase :running
-                                     :draining []})}
-        generation {:generation-id 1
-                    :cert-automation nil
-                    :instance ::old-instance}]
-    (with-redefs-fn {#'ol.busker.generation/begin-stop!
-                     (fn [instance]
-                       (is (= ::old-instance instance))
-                       (swap! events conj :begin-stop)
-                       instance)
-                     #'ol.busker.generation/await-stop-accepting!
-                     (fn [instance]
-                       (is (= ::old-instance instance))
-                       (swap! events conj :await-stop-accepting)
-                       (deref stop-accepting-release 5000 true)
-                       (swap! events conj :stopped-accepting)
-                       nil)
-                     #'ol.busker.generation/stop!
-                     (fn [instance]
-                       (is (= ::old-instance instance))
-                       (swap! events conj :stop)
-                       nil)
-                     #'ol.busker.runtime/finalize-draining-generation!
-                     (fn [_ _]
-                       (swap! events conj :finalize)
-                       nil)}
-      (fn []
-        (let [drain-fut (future (#'runtime/begin-drain! server generation))]
-          (is (= ::timeout (deref drain-fut 200 ::timeout)))
-          (is (= [:begin-stop :await-stop-accepting]
-                 @events))
-          (deliver stop-accepting-release true)
-          (let [draining-generation (deref drain-fut 1000 ::timeout)]
-            (is (map? draining-generation))
-            (is (contains? draining-generation :drain-future))
-            @(:drain-future draining-generation)
-            (is (= [:begin-stop
-                    :await-stop-accepting
-                    :stopped-accepting
-                    :stop
-                    :finalize]
-                   @events))))))))
 
 (deftest reload-activates-new-generation-and-drains-old-test
   (let [port (util/free-port)
@@ -504,8 +413,8 @@
       (let [service (generation-shared-ticket-service (:active @(:busker/state server)))]
         (is (some? service))
         (is (= 1 (shared-ticket-manager-count service)))
-        (with-redefs [ol.busker.generation/init-worker-state
-                      (fn [_ _]
+        (with-redefs [evloop/start-worker!
+                      (fn [& _]
                         (throw (ex-info "simulated worker init failure" {})))]
           (try
             (runtime/reload! server config-b {:force? true})
@@ -777,6 +686,148 @@
       (finally
         (runtime/stop! server)))))
 
+(deftest reload-reports-a-snapshot-failure-as-a-validation-failure-test
+  (let [port (util/free-port)
+        server (runtime/start! (response-config port (constantly {:status 200 :body "active"})))
+        cause (ex-info "simulated snapshot failure" {})]
+    (try
+      (with-redefs [config/normalized-snapshot (fn [_] (throw cause))]
+        (let [e (try
+                  (runtime/reload! server {} {:force? true})
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+          (is (= {:reason :reload-failed :stage :validation} (ex-data e)))
+          (is (identical? cause (ex-cause e)))))
+      (is (= :running (:phase (runtime/state server))))
+      (is (= "active" (:out (eventually-curl :http nil port "/" :max-time 5))))
+      (finally
+        (runtime/stop! server)))))
+
+(deftest failed-startup-keeps-its-error-when-a-service-stop-throws-test
+  (let [port (util/free-port)
+        config (util/with-static-tls
+                 (assoc (response-config port (constantly {:status 200}))
+                        :tls {:session-tickets {:persistence :memory}}
+                        :entrypoints {:https {:bind (str "127.0.0.1:" port)
+                                              :http3? false
+                                              :tls {:tls-compatibility-mode :modern}}}))
+        failure (ex-info "simulated generation failure" {})
+        cleanup (ex-info "simulated ticket stop failure" {})
+        stop-key-service! tickets/stop-key-service!]
+    (with-redefs [generation/start! (fn [& _] (throw failure))
+                  tickets/stop-key-service! (fn [service]
+                                              (stop-key-service! service)
+                                              (throw cleanup))]
+      (let [e (try
+                (runtime/start! config)
+                nil
+                (catch clojure.lang.ExceptionInfo e
+                  e))]
+        (is (= "Failed to start generation" (ex-message e)))
+        (is (identical? failure (ex-cause e)))
+        (is (= [cleanup] (vec (.getSuppressed e))))))))
+
+(deftest drained-generation-logs-a-service-stop-that-throws-test
+  (let [port (util/free-port)
+        managed (fn [domain body]
+                  (assoc (managed-http-config port (constantly {:status 200 :body body}))
+                         :tls {:certificates {:manage [domain]}
+                               :issuers [{:directory-url "https://acme.example/directory"}]}))
+        logged_ (atom [])]
+    (with-redefs [clave-adapter/start! (fn [plan] {:runtime-id (gensym "runtime") :managed-plan plan})
+                  clave-adapter/stop! (fn [_] (throw (ex-info "simulated stop failure" {})))
+                  clave-adapter/wrap-handler (fn [handler _] handler)
+                  trove/*log-fn* (fn [_ns _coords _level id _lazy] (swap! logged_ conj id))]
+      (let [server (runtime/start! (managed "a.example" "a"))]
+        (try
+          (is (= :activated (runtime/reload! server (managed "b.example" "b"))))
+          (is (loop [n 100]
+                (cond
+                  (some #{::runtime/service-stop-failed} @logged_) true
+                  (pos? n) (do (Thread/sleep 50) (recur (dec n)))
+                  :else false)))
+          (is (empty? (:draining @(:busker/state server))))
+          (finally
+            (try
+              (runtime/stop! server)
+              (catch clojure.lang.ExceptionInfo _ nil))))))))
+
+(deftest reload-returns-only-after-the-old-generation-stops-accepting-test
+  (let [port (util/free-port)
+        server (runtime/start! (response-config port (constantly {:status 200})))
+        old (active-generation-instance server)
+        old-sockets (set (map :socket (apply concat (::generation/listener-sockets old))))
+        close-socket native/socket-close
+        closing (promise)
+        release (CountDownLatch. 1)]
+    (try
+      (with-redefs [native/socket-close (fn [sock-ptr]
+                                          (when (old-sockets sock-ptr)
+                                            (deliver closing true)
+                                            (.await release))
+                                          (close-socket sock-ptr))]
+        (let [reload (future (runtime/reload! server
+                                              (response-config port (constantly {:status 200}))
+                                              {:force? true}))]
+          (try
+            (is (true? (deref closing 5000 false)) "the old generation closes its listener")
+            (is (= ::waiting (deref reload 100 ::waiting))
+                "the reload waits while the listener close is held")
+            (.countDown release)
+            (is (= :activated (deref reload 10000 ::timeout)))
+            (finally
+              (.countDown release)))))
+      (finally
+        (runtime/stop! server)))))
+
+(deftest interrupted-stop-still-waits-for-the-next-drain-test
+  (let [port (util/free-port)
+        server (runtime/start! (response-config port (constantly {:status 200})))
+        old (active-generation-instance server)
+        new_ (atom nil)
+        lifecycle-thread_ (promise)
+        old-release (promise)
+        new-entered (promise)
+        new-release (promise)
+        begin-stop! generation/begin-stop!
+        stop! generation/stop!]
+    (with-redefs [generation/begin-stop! (fn [instance]
+                                           (when (identical? @new_ instance)
+                                             (deliver lifecycle-thread_ (Thread/currentThread)))
+                                           (begin-stop! instance))
+                  generation/stop! (fn [instance]
+                                     (cond
+                                       (identical? old instance) (deref old-release 10000 nil)
+                                       (identical? @new_ instance) (do (deliver new-entered true)
+                                                                       (deref new-release 10000 nil)))
+                                     (stop! instance 60 TimeUnit/SECONDS))]
+      (try
+        (is (= :activated (runtime/reload! server
+                                           (response-config port (constantly {:status 200}))
+                                           {:force? true})))
+        (reset! new_ (active-generation-instance server))
+        (let [stop-fut (future
+                         (try
+                           (runtime/stop! server)
+                           (catch Throwable t
+                             t)))
+              ^Thread lifecycle-thread (deref lifecycle-thread_ 5000 nil)]
+          (is (deref new-entered 5000 false))
+          (is (loop [n 100]
+                (cond
+                  (= Thread$State/WAITING (.getState lifecycle-thread)) true
+                  (pos? n) (do (Thread/sleep 20) (recur (dec n)))
+                  :else false)))
+          (.interrupt lifecycle-thread)
+          (is (= ::waiting (deref stop-fut 300 ::waiting))
+              "the stop waits for the drain of the active generation")
+          (deliver new-release true)
+          (is (instance? InterruptedException (deref stop-fut 10000 nil))))
+        (finally
+          (deliver new-release true)
+          (deliver old-release true))))))
+
 (deftest reload-reports-listener-acquisition-failure-stage-test
   (let [port (util/free-port)
         server (runtime/start!
@@ -1045,6 +1096,22 @@
       (finally
         (runtime/stop! server)))))
 
+(deftest failed-ticket-manager-registration-leaves-http3-accept-with-the-old-generation-test
+  (let [port (util/free-port)
+        server (runtime/start! (tls-response-config port (constantly {:status 200 :body "old"})))]
+    (try
+      (is (= "old" (:out (util/curl :https :h3 port "/" :max-time 5))))
+      (with-redefs [generation/register-shared-ticket-manager!
+                    (fn [_] (throw (ex-info "simulated registration failure" {})))]
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (runtime/reload! server
+                                      (tls-response-config port (constantly {:status 200 :body "new"}))
+                                      {:force? true}))))
+      (let [results (mapv (fn [_] (util/curl :https :h3 port "/" :max-time 5)) (range 30))]
+        (is (= (repeat 30 "old") (map :out results))))
+      (finally
+        (runtime/stop! server)))))
+
 (deftest failed-startup-stops-the-storage-ticket-rotation-thread-test
   (let [port (util/free-port)
         storage-root (str (Files/createTempDirectory "busker-session-storage"
@@ -1062,12 +1129,14 @@
 
 (deftest failed-startup-reports-a-failed-cleanup-test
   (let [port (util/free-port)
-        stop! generation/stop!
+        destroy native/evloop-destroy
+        thrown_ (atom false)
         failure (ex-info "simulated cleanup failure" {})]
     (with-redefs [native/create-ssl-ctx (fn [& _] mem/null)
-                  generation/stop! (fn [state]
-                                     (stop! state 60 TimeUnit/SECONDS)
-                                     (throw failure))]
+                  native/evloop-destroy (fn [loop]
+                                          (destroy loop)
+                                          (when (compare-and-set! thrown_ false true)
+                                            (throw failure)))]
       (let [error (start-failure (tls-response-config port (constantly {:status 200})))]
         (is (some #(identical? failure %)
                   (mapcat #(.getSuppressed ^Throwable %)
@@ -1075,13 +1144,15 @@
 
 (deftest failed-startup-keeps-its-error-when-cleanup-rethrows-it-test
   (let [port (util/free-port)
-        stop! generation/stop!
+        destroy native/evloop-destroy
+        thrown_ (atom false)
         failure (ex-info "simulated worker startup failure" {})]
-    (with-redefs [generation/init-worker-state (fn [_ _]
-                                                 (throw failure))
-                  generation/stop! (fn [state]
-                                     (stop! state 60 TimeUnit/SECONDS)
-                                     (throw failure))]
+    (with-redefs [evloop/start-worker! (fn [& _]
+                                         (throw failure))
+                  native/evloop-destroy (fn [loop]
+                                          (destroy loop)
+                                          (when (compare-and-set! thrown_ false true)
+                                            (throw failure)))]
       (let [causes (take-while some? (iterate ex-cause
                                               (start-failure
                                                (response-config port (constantly {:status 200})))))]
@@ -1142,7 +1213,7 @@
                       automation/stop (fn [_] nil)]
           (runtime/stop! server))))))
 
-(deftest reload-calls-serialize-through-lifecycle-gate-test
+(deftest reload-calls-run-one-at-a-time-test
   (let [port (util/free-port)
         server (runtime/start!
                 (response-config port

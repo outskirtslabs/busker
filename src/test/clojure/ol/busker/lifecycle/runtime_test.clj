@@ -10,6 +10,8 @@
   [id & {:as more}]
   (merge {:generation-id id
           :config {:version id}
+          :cert-plan [:plan id]
+          :ticket-policy [:policy id]
           :instance (keyword (str "instance-" id))
           :cert-automation (keyword (str "cert-" id))
           :memory-ticket-service (keyword (str "tickets-" id))}
@@ -17,18 +19,23 @@
 
 (defn- services
   [generation]
-  (keep generation [:cert-automation :memory-ticket-service]))
+  (keep #(% generation) [:cert-automation :memory-ticket-service]))
 
 (defn- err
   ([] (err {}))
   ([data] (ex-info "simulated" data)))
 
 (defn- world
-  "A fake shell. `:script` maps an action type to its outcome. `:candidate` is
-  what `[:build id]` gives. `:drain` maps a generation id to the outcome of its
-  `generation/stop!`. `:stop-errors` is a set of services whose stop throws.
-  `:drain-at` maps a generation id to the action count after which its
-  background drain runs."
+  "A fake shell. `:script` maps an action type, or `[:swap f]` for a swap, to
+  its outcome. `:candidate` is the generation that the build starts: its
+  plan, policy, services and instance. `:drain` maps a
+  generation id to the outcome of its `generation/stop!`. `:stop-errors` is a
+  set of services whose stop throws. `:drain-at` maps a generation id to the
+  action count after which its background drain runs. `:background` maps the
+  id of each generation with a drain thread to its entry. `:starts` lists
+  the services that the core started. `:logs` lists the id and the cause of
+  each logged failure. `:active-at-stop-accepting` lists the active
+  generation id at each stop-accepting."
   [state & {:as opts}]
   (merge {:state state
           :script {}
@@ -38,8 +45,11 @@
           :trace []
           :steps 0
           :stops []
+          :starts []
+          :logs []
+          :active-at-stop-accepting []
           :started (set (mapcat services (cons (:active state) (:draining state))))
-          :background (set (keep #(when (:drain %) (:generation-id %)) (:draining state)))
+          :background (into {} (keep #(when (:drain %) [(:generation-id %) %])) (:draining state))
           :drain-results {}
           :seen (set (map :generation-id (remove nil? (cons (:active state) (:draining state)))))
           :drained #{}
@@ -57,8 +67,7 @@
       (not= (count listed) (count (set listed)))
       (conj :listed-twice)
 
-      (and (not= :stopped phase)
-           (seq (remove (set listed) (remove drained seen))))
+      (seq (remove (set listed) (remove drained seen)))
       (conj :in-no-list))))
 
 (defn- set-state
@@ -74,52 +83,70 @@
   [(update w :stops conj service)
    (if ((:stop-errors w) service) {:error (err {:service service})} {:value nil})])
 
+(defn- candidate
+  [w]
+  (or (:candidate w) (generation (get-in w [:state :next-generation-id] 1))))
+
+(defn- start-service
+  "Records the start of `service` and returns `[world outcome]`."
+  [w given service]
+  (if given
+    [w given]
+    [(-> w (update :started conj service) (update :starts conj service)) {:value service}]))
+
+(declare drive)
+
 (defn- finish-drain
-  "Runs the background drain of generation `id` once, as the drain thread does."
+  "Runs the background drain of generation `id` once, as the drain thread
+  does. Its actions are not in the trace of the operation."
   [w id]
   (if (contains? (:drain-results w) id)
     w
-    (let [stopped (get-in w [:drain id] {:value nil})]
-      (if (:error stopped)
-        (assoc-in w [:drain-results id] stopped)
-        (let [{:keys [state stop]} (rt/drained (:state w) id)
-              w (-> w (update :drained conj id) (set-state state))
-              [w errors] (reduce (fn [[w errors] [_ service]]
-                                   (let [[w o] (stop-service w service)]
-                                     [w (cond-> errors (:error o) (conj (:error o)))]))
-                                 [w []]
-                                 stop)]
-          (assoc-in w [:drain-results id]
-                    (if (seq errors) {:error (first errors)} {:value nil})))))))
+    (let [{:keys [trace result]} w
+          w (drive (assoc-in w [:drain-results id] :running)
+                   (rt/begin-drain (get-in w [:background id])))]
+      (assoc w :drain-results (assoc (:drain-results w) id (:result w))
+             :trace trace
+             :result result))))
 
 (defn- perform
   "Does `action` in the fake world. Returns `[world outcome]`."
   [w [type a :as action]]
   (let [given (get-in w [:script type])]
     (case type
-      :swap (let [[_ f & args] action
-                  state (apply f (:state w) args)]
-              [(set-state w state) {:value state}])
-      :build (let [candidate (or (:candidate w) (generation a))]
-               (if given
-                 [w given]
-                 [(update w :started into (services candidate)) {:value candidate}]))
+      :swap (let [[_ f & args] action]
+              (if-let [given (get-in w [:script [:swap f]])]
+                [w given]
+                (let [state (apply f (:state w) args)]
+                  [(set-state w state) {:value state}])))
+      :compile-config [w (or given {:value (assoc (select-keys (candidate w) [:cert-plan :ticket-policy])
+                                                  :snapshot (:config (candidate w))
+                                                  :compiled-config :compiled)})]
+      :start-cert-runtime (start-service w given (:cert-automation (candidate w)))
+      :start-ticket-service (start-service w given (:memory-ticket-service (candidate w)))
+      :start-generation [w (or given {:value (:instance (candidate w))})]
       :activate [w (or given {:value a})]
       :retire (if given
                 [w given]
-                [(update w :background conj (:generation-id a))
+                [(assoc-in w [:background (:generation-id a)] a)
                  {:value [:drain (:generation-id a)]}])
-      :await-drain (if (:drain a)
-                     (let [w (finish-drain w (:generation-id a))]
-                       [w (get-in w [:drain-results (:generation-id a)])])
-                     [w (get-in w [:drain (:generation-id a)] {:value nil})])
+      :await-drain (let [w (finish-drain w (:generation-id a))]
+                     [w (get-in w [:drain-results (:generation-id a)])])
+      :stop-generation (let [o (or given (get-in w [:drain (:generation-id a)]) {:value nil})]
+                         [(cond-> w (not (:error o)) (update :drained conj (:generation-id a))) o])
       (:stop-cert-runtime :stop-ticket-service) (stop-service w a)
+      :stop-accepting [(update w :active-at-stop-accepting conj
+                               (get-in w [:state :active :generation-id]))
+                       (or given {:value nil})]
+      :log-failure (let [[_ id _ cause] action]
+                     [(update w :logs conj [id cause]) (or given {:value nil})])
       [w (or given {:value nil})])))
 
 (defn- run-due-drains
   [w]
   (reduce (fn [w id]
             (if (and (contains? (:background w) id)
+                     (not (contains? (:drain-results w) id))
                      (<= (get-in w [:drain-at id] Long/MAX_VALUE) (:steps w)))
               (finish-drain w id)
               w))
@@ -148,9 +175,9 @@
   [w]
   (drive w (rt/begin-stop (:state w))))
 
-(defn- types
+(defn- start
   [w]
-  (mapv (fn [[type a]] (if (= :swap type) [type a] type)) (:trace w)))
+  (drive w (rt/begin-start)))
 
 (def ^:private one
   (generation 1))
@@ -167,19 +194,13 @@
     (is (= [] (:trace w)))))
 
 (deftest forced-reload-activates-and-retires-the-old-generation-test
-  (let [w (reload (world (running)) :force? true)
-        two (generation 2)]
+  (let [w (reload (world (running)) :force? true)]
     (is (= {:value :activated} (:result w)))
-    (is (= [[:build 2]
-            [:activate two]
-            [:swap rt/publish two]
-            [:stop-accepting one]
-            [:retire one]
-            [:swap rt/attach-drain 1 [:drain 1]]]
-           (:trace w)))
-    (is (= two (get-in w [:state :active])))
+    (is (= (generation 2) (get-in w [:state :active])))
     (is (= [(assoc one :drain [:drain 1])] (get-in w [:state :draining])))
-    (is (= 3 (get-in w [:state :next-generation-id])))))
+    (is (= 3 (get-in w [:state :next-generation-id])))
+    (is (= [:cert-2 :tickets-2] (:starts w)))
+    (is (= [] (:stops w)))))
 
 (deftest changed-configuration-activates-test
   (is (= {:value :activated}
@@ -191,8 +212,8 @@
     (is (= 1 (:generation-id (first (get-in w [:state :draining])))))))
 
 (deftest retry-is-unchanged-only-when-the-active-generation-serves-it-test
-  (let [w (reload (world (running)) :failed-worker? true)
-        retry (reload (assoc w :trace []) :snapshot {:version 2})]
+  (let [w (reload (world (running) :candidate (generation 2 :config {:version 1})) :failed-worker? true)
+        retry (reload (assoc w :trace []))]
     (is (= {:value :unchanged} (:result retry)))
     (is (= [] (:trace retry)))))
 
@@ -204,79 +225,153 @@
       (is (= {:reason :server-stopping} (ex-data e)))
       (is (= [] (:trace w))))))
 
-(deftest build-failure-reports-its-stage-and-changes-nothing-test
-  (doseq [[data expected]
-          [[{:stage :validation} {:reason :reload-failed :stage :validation}]
-           [{:stage :automation-startup} {:reason :reload-failed :stage :automation-startup}]
-           [{} {:reason :reload-failed :stage :activation}]
-           [{:stage :listener-acquisition :listener-key :k}
-            {:reason :reload-failed :stage :listener-acquisition :listener-key :k}]]]
-    (testing (pr-str data)
+(def ^:private build-failures
+  "Each build action, the error that wraps its failure, and the services that
+  the discard stops."
+  [[:compile-config "Failed to compile generation config" :validation []]
+   [:start-cert-runtime "Failed to start certificate automation" :automation-startup []]
+   [:start-ticket-service "Failed to start in-memory session tickets" :activation
+    [:cert-automation]]
+   [:start-generation "Failed to start generation" :activation
+    [:cert-automation :memory-ticket-service]]])
+
+(deftest build-failure-reports-its-stage-and-stops-what-it-started-test
+  (doseq [[action message stage stops] build-failures
+          [data expected] [[{} {:stage stage}]
+                           [{:stage :listener-acquisition :listener-key :k}
+                            {:stage :listener-acquisition :listener-key :k}]]]
+    (testing (pr-str action data)
       (let [cause (err data)
-            w (reload (world (running) :script {:build {:error cause}}) :force? true)
+            w (reload (world (running) :script {action {:error cause}}) :force? true)
             e (:error (:result w))]
         (is (= "Reload failed" (ex-message e)))
-        (is (= expected (ex-data e)))
-        (is (identical? cause (ex-cause e)))
-        (is (= [[:build 2]] (:trace w)))
+        (is (= (assoc expected :reason :reload-failed) (ex-data e)))
+        (is (= message (ex-message (ex-cause e))))
+        (is (= expected (ex-data (ex-cause e))))
+        (is (identical? cause (ex-cause (ex-cause e))))
+        (is (= (map (generation 2) stops) (:starts w) (:stops w))
+            "the build starts nothing after the failed action")
         (is (= (running) (:state w)))))))
 
+(deftest build-reuses-a-service-only-for-the-same-need-test
+  (testing "the same need reuses the service of the old generation"
+    (let [w (reload (world (running)
+                           :candidate (generation 2 :config {:version 1} :cert-plan [:plan 1]
+                                                  :ticket-policy [:policy 1]))
+                    :force? true)]
+      (is (= [] (:starts w)))
+      (is (= [:cert-1 :tickets-1]
+             (map (get-in w [:state :active]) [:cert-automation :memory-ticket-service])))
+      (is (= {:cert-1 1 :tickets-1 1} (frequencies (:stops (stop w)))))))
+  (testing "no need starts no service"
+    (let [w (reload (world (running)
+                           :candidate (generation 2 :config {:version 1} :cert-plan nil
+                                                  :ticket-policy nil))
+                    :force? true)]
+      (is (= [] (:starts w)))
+      (is (= [nil nil]
+             (map (get-in w [:state :active]) [:cert-automation :memory-ticket-service]))))))
+
 (deftest activation-failure-discards-what-the-candidate-started-test
-  (let [two (generation 2 :cert-automation :cert-1)
+  (let [two (generation 2 :config {:version 1} :cert-plan [:plan 1] :cert-automation :cert-1)
         w (reload (world (running)
                          :candidate two
                          :script {:activate {:error (err {:stage :tls-startup})}})
                   :force? true)]
     (is (= {:reason :reload-failed :stage :tls-startup}
            (ex-data (:error (:result w)))))
-    (is (= [[:build 2]
-            [:activate two]
-            [:stop-generation two]
-            [:stop-ticket-service :tickets-2]]
-           (:trace w))
-        "the reused certificate runtime is not stopped")
+    (is (= [:tickets-2] (:stops w)) "the reused certificate runtime is not stopped")
+    (is (contains? (:drained w) 2))
     (is (= (running) (:state w)))))
 
-(deftest discard-errors-do-not-hide-the-activation-error-test
-  (let [w (reload (world (running)
+(deftest discard-errors-are-suppressed-on-the-activation-error-test
+  (let [stop-error (err {:generation-id 2})
+        w (reload (world (running)
                          :stop-errors #{:cert-2 :tickets-2}
                          :script {:activate {:error (err)}
-                                  :stop-generation {:error (err)}})
-                  :force? true)]
-    (is (= :activation (:stage (ex-data (:error (:result w))))))
-    (is (= [:cert-2 :tickets-2] (:stops w)))))
+                                  :stop-generation {:error stop-error}})
+                  :force? true)
+        {:keys [error suppressed]} (:result w)]
+    (is (= :activation (:stage (ex-data error))))
+    (is (= [:cert-2 :tickets-2] (:stops w)))
+    (is (= [stop-error {:service :cert-2} {:service :tickets-2}]
+           (cons (first suppressed) (map ex-data (rest suppressed)))))))
 
 (deftest old-generation-that-does-not-stop-accepting-is-still-retired-test
   (let [cause (err {:generation-id 1})
         w (reload (world (running) :script {:stop-accepting {:error cause}}) :force? true)]
     (is (= {:value :activated} (:result w)))
-    (is (= [:build :activate [:swap rt/publish] :stop-accepting
-            :log-stop-accepting-failed :retire [:swap rt/attach-drain]]
-           (types w)))
-    (is (= [:log-stop-accepting-failed one cause] (nth (:trace w) 4)))
+    (is (= [[:ol.busker.runtime/stop-accepting-failed cause]] (:logs w)))
     (is (= 2 (get-in w [:state :active :generation-id])))
-    (is (= [1] (map :generation-id (get-in w [:state :draining]))))))
+    (is (= [(assoc one :drain [:drain 1])] (get-in w [:state :draining])))))
 
-(deftest old-generation-without-a-drain-thread-stays-listed-test
-  (let [w (reload (world (running) :script {:retire {:error (err)}}) :force? true)]
+(deftest old-generation-without-a-drain-thread-is-logged-and-stays-listed-test
+  (let [cause (err)
+        w (reload (world (running) :script {:retire {:error cause}}) :force? true)]
     (is (= {:value :activated} (:result w)))
+    (is (= [[:ol.busker.runtime/retire-failed cause]] (:logs w)))
     (is (= [one] (get-in w [:state :draining])))))
+
+(deftest publish-failure-discards-the-candidate-and-keeps-the-old-generation-test
+  (let [cause (Error. "simulated")
+        w (reload (world (running) :script {[:swap rt/publish] {:error cause}}) :force? true)]
+    (is (identical? cause (ex-cause (:error (:result w)))))
+    (is (= {:reason :reload-failed :stage :activation} (ex-data (:error (:result w)))))
+    (is (= [:cert-2 :tickets-2] (:stops w)))
+    (is (contains? (:drained w) 2))
+    (is (= (running) (:state w)))))
+
+(deftest attach-failure-still-awaits-the-drain-in-a-stop-test
+  (let [w (stop (world (running) :script {[:swap rt/attach-drain] {:error (Error.)}}))]
+    (is (= {:value nil} (:result w)))
+    (is (= {:value nil} (get-in w [:drain-results 1])) "the stop awaits the drain")
+    (is (= [:cert-1 :tickets-1] (:stops w)))))
+
+(deftest begin-stopping-failure-ends-the-stop-and-changes-nothing-test
+  (let [cause (Error. "simulated")
+        w (stop (world (running) :script {[:swap rt/begin-stopping] {:error cause}}))]
+    (is (= {:error cause} (:result w)))
+    (is (= [] (:stops w)))
+    (is (empty? (:drained w)))
+    (is (= (running) (:state w)))))
+
+(deftest end-stopped-failure-is-added-to-the-stop-failures-test
+  (let [e1 (err)
+        cause (Error. "simulated")
+        w (stop (world (running) :drain {1 {:error e1}}
+                       :script {[:swap rt/end-stopped] {:error cause}}))]
+    (is (= {:error e1 :suppressed [cause]} (:result w)))))
 
 ;; Generation drained
 
 (deftest drained-while-running-stops-services-no-listed-generation-has-test
-  (let [two (generation 2 :memory-ticket-service :tickets-1)
-        state (rt/publish (running) two)]
-    (is (= {:state (assoc state :draining [])
-            :stop [[:stop-cert-runtime :cert-1]]}
-           (rt/drained state 1)))))
+  (let [w (drive (world (rt/publish (running) (generation 2 :memory-ticket-service :tickets-1)))
+                 (rt/begin-drain one))]
+    (is (= {:value nil} (:result w)))
+    (is (= [:cert-1] (:stops w)))))
 
-(deftest drained-while-stopping-stops-nothing-test
-  (is (= [] (get-in (rt/drained (rt/begin-stopping (running)) 1) [:state :draining])))
-  (is (empty? (:stop (rt/drained (rt/begin-stopping (running)) 1)))))
+(deftest drain-stops-the-generation-then-takes-it-off-the-list-test
+  (let [w (drive (world (rt/publish (running) (generation 2))) (rt/begin-drain one))]
+    (is (= {:value nil} (:result w)))
+    (is (= [] (get-in w [:state :draining])))
+    (is (= [:cert-1 :tickets-1] (:stops w)))
+    (is (empty? (:violations w)) "the generation is off the list only after it stopped")))
 
-(deftest drained-of-an-unlisted-generation-changes-nothing-test
-  (is (= {:state (running) :stop nil} (rt/drained (running) 7))))
+(deftest drain-logs-a-service-stop-that-fails-and-goes-on-test
+  (let [w (drive (world (rt/publish (running) (generation 2)) :stop-errors #{:cert-1})
+                 (rt/begin-drain one))]
+    (is (= {:value nil} (:result w)))
+    (is (= [:ol.busker.runtime/service-stop-failed] (map first (:logs w))))
+    (is (= {:service :cert-1} (ex-data (second (first (:logs w))))))
+    (is (= [:cert-1 :tickets-1] (:stops w)))))
+
+(deftest drain-that-cannot-stop-the-generation-keeps-it-listed-test
+  (let [cause (err)
+        w (drive (world (rt/publish (running) (generation 2)) :drain {1 {:error cause}})
+                 (rt/begin-drain one))]
+    (is (= {:error cause} (:result w)))
+    (is (= [] (:stops w)))
+    (is (= [one] (get-in w [:state :draining])))))
 
 ;; Server stop rows
 
@@ -284,19 +379,10 @@
   (let [zero (generation 0 :drain [:drain 0] :cert-automation :cert-1)
         w (stop (world (running zero)))]
     (is (= {:value nil} (:result w)))
-    (is (= [[:swap rt/begin-stopping]
-            [:stop-accepting one]
-            [:retire one]
-            [:swap rt/attach-drain 1 [:drain 1]]
-            [:await-drain zero]
-            [:await-drain (assoc one :drain [:drain 1])]
-            [:stop-cert-runtime :cert-1]
-            [:stop-ticket-service :tickets-0]
-            [:stop-ticket-service :tickets-1]
-            [:swap rt/end-stopped {:value nil}]]
-           (:trace w)))
-    (is (= [:cert-1 :tickets-0 :tickets-1] (:stops w)))
-    (is (= :stopped (get-in w [:state :phase])))))
+    (is (= {:cert-1 1 :tickets-0 1 :tickets-1 1} (frequencies (:stops w))))
+    (is (= #{0 1} (:drained w)))
+    (is (= :stopped (get-in w [:state :phase])))
+    (is (= [] (get-in w [:state :draining])))))
 
 (deftest stop-collects-every-failure-test
   (let [e0 (err {:generation-id 0})
@@ -308,57 +394,70 @@
         {:keys [error suppressed]} (:result w)]
     (is (identical? e0 error))
     (is (= [e1 {:service :cert-0}] [(first suppressed) (ex-data (second suppressed))]))
-    (is (= [:cert-0 :cert-1 :tickets-0 :tickets-1] (:stops w)))
+    (is (= #{:cert-0 :cert-1 :tickets-0 :tickets-1} (set (:stops w))))
     (is (= :stopped (get-in w [:state :phase])))
-    (is (= [] (get-in w [:state :draining])))))
-
-(deftest second-stop-gives-the-same-result-test
-  (let [w (stop (world (running) :drain {1 {:error (err)}}))
-        again (stop (assoc w :trace []))]
-    (is (= (:result w) (:result again)))
-    (is (= [] (:trace again)))))
+    (is (= [0 1] (map :generation-id (get-in w [:state :draining])))
+        "generations that did not drain stay listed")))
 
 ;; Bugs of the old code: each test fails on the old behaviour.
 
-(deftest failed-activation-lists-the-candidate-nowhere-test
-  (let [w (reload (world (running) :script {:activate {:error (err)}}) :force? true)]
-    (is (= one (get-in w [:state :active])))
-    (is (not-any? #{2} (map :generation-id (get-in w [:state :draining]))))))
-
-(deftest old-generation-is-listed-before-it-stops-accepting-test
-  (let [w (reload (world (running)) :force? true)
-        published (rt/publish (running) (generation 2))]
-    (is (= [1] (map :generation-id (:draining published))))
-    (is (< (.indexOf ^java.util.List (types w) [:swap rt/publish])
-           (.indexOf ^java.util.List (types w) :stop-accepting)))
+(deftest old-generation-stops-accepting-only-after-the-new-one-is-active-test
+  (let [w (reload (world (running)) :force? true)]
+    (is (= [2] (:active-at-stop-accepting w)))
     (is (empty? (:violations w)))))
 
-(deftest failed-activation-then-stop-stops-the-new-cert-runtime-once-test
-  (let [w (reload (world (running) :script {:activate {:error (err)}}) :force? true)
-        w (stop (assoc w :script {}))]
-    (is (= 1 (count (filter #{:cert-2} (:stops w)))))
-    (is (= 1 (count (filter #{:cert-1} (:stops w)))))))
+;; Start rows
 
-(deftest stop-continues-after-the-first-drain-failure-test
-  (let [zero (generation 0 :drain [:drain 0])
-        w (stop (world (running zero) :drain {0 {:error (err)}}))]
-    (is (= [:await-drain :await-drain] (filterv #{:await-drain} (types w))))
-    (is (= :stopped (get-in w [:state :phase])))))
+(deftest start-failure-reports-its-stage-and-stops-what-it-started-test
+  (doseq [[action message stage stops] build-failures]
+    (testing (pr-str action)
+      (let [cause (err)
+            w (start (world nil :stop-errors #{:cert-1} :script {action {:error cause}}))
+            {:keys [error suppressed]} (:result w)]
+        (is (= message (ex-message error)))
+        (is (= {:stage stage} (ex-data error)))
+        (is (identical? cause (ex-cause error)))
+        (is (= (map one stops) (:stops w)))
+        (is (= (filter #{:cert-1} (:stops w)) (map (comp :service ex-data) suppressed)))))))
+
+(deftest start-activation-failure-stops-the-generation-and-its-services-test
+  (let [cause (err)
+        w (start (world nil :script {:activate {:error cause}}))]
+    (is (= {:error cause :suppressed []} (:result w)))
+    (is (= #{1} (:drained w)))
+    (is (= [:cert-1 :tickets-1] (:stops w)))))
 
 ;; Exhaustive
+
+(deftest every-start-outcome-stops-each-service-it-started-once-test
+  (doseq [failure [nil :compile-config :start-cert-runtime :start-ticket-service
+                   :start-generation :activate]
+          stop-errors [#{} #{:cert-1} #{:cert-1 :tickets-1}]
+          stop-generation [nil {:error (err)}]]
+    (let [w (start (world nil
+                          :stop-errors stop-errors
+                          :script (cond-> {}
+                                    failure (assoc failure {:error (err)})
+                                    stop-generation (assoc :stop-generation stop-generation))))
+          {:keys [value error]} (:result w)]
+      (is (= (nil? failure) (some? value) (nil? error)))
+      (is (= (if failure (sort (:started w)) [])
+             (sort (:stops w)))
+          (pr-str failure stop-errors stop-generation)))))
 
 (defn- outcome-space
   []
   (for [mode [:unchanged :changed :failed-worker]
-        build [:ok :validation :no-stage]
-        activate [:ok :error]
-        stop-accepting [:ok :error]
-        retire [:ok :error]
+        build [:ok :compile-config :start-cert-runtime :start-ticket-service :start-generation]
+        :let [later (if (= :ok build) [:ok :error] [:ok])]
+        activate later
+        stop-accepting later
+        retire later
         cert-reused? [false true]
         tickets-reused? [false true]
         zero? [false true]
-        drain-at-0 [nil 1 3 5]
-        drain-at-1 [nil 2 5]
+        drain-at-0 [nil 1 6 9]
+        drain-at-1 [nil 9 12]
         drain-fails (if zero? [#{} #{0} #{1} #{0 1}] [#{} #{1}])
         stop-error [nil :cert-1 :tickets-2]]
     {:mode mode :build build :activate activate :stop-accepting stop-accepting
@@ -366,16 +465,15 @@
      :zero? zero? :drain-at {0 drain-at-0 1 drain-at-1} :drain-fails drain-fails
      :stop-error stop-error}))
 
-(defn- start-world
+(defn- outcome-world
   [{:keys [build activate stop-accepting retire cert-reused? tickets-reused?
            zero? drain-at drain-fails stop-error]}]
   (world (if zero? (running (generation 0 :drain [:drain 0])) (running))
          :candidate (cond-> (generation 2)
-                      cert-reused? (assoc :cert-automation :cert-1)
-                      tickets-reused? (assoc :memory-ticket-service :tickets-1))
+                      cert-reused? (assoc :cert-plan [:plan 1])
+                      tickets-reused? (assoc :ticket-policy [:policy 1]))
          :script (cond-> {}
-                   (= :validation build) (assoc :build {:error (err {:stage :validation})})
-                   (= :no-stage build) (assoc :build {:error (err)})
+                   (not= :ok build) (assoc build {:error (err)})
                    (= :error activate) (assoc :activate {:error (err)})
                    (= :error stop-accepting) (assoc :stop-accepting {:error (err)})
                    (= :error retire) (assoc :retire {:error (err)}))
@@ -387,22 +485,15 @@
   (let [runs (outcome-space)
         failures
         (for [{:keys [mode] :as space} runs
-              :let [after-reload (reload (start-world space)
+              :let [after-reload (reload (outcome-world space)
                                          :snapshot {:version (if (= :changed mode) 2 1)}
                                          :failed-worker? (= :failed-worker mode))
                     after-stop (stop after-reload)
-                    again (stop after-stop)
                     stop-counts (frequencies (:stops after-stop))
                     problems
                     (cond-> (:violations after-stop)
                       (not= :stopped (get-in after-stop [:state :phase]))
                       (conj :not-stopped)
-
-                      (not= (:result after-stop) (:result again))
-                      (conj :second-stop-differs)
-
-                      (not= (:trace after-stop) (:trace again))
-                      (conj :second-stop-acts)
 
                       (not-every? #(= 1 (stop-counts %)) (:started after-stop))
                       (conj [:stops stop-counts (:started after-stop)])

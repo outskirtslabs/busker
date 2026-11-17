@@ -739,40 +739,12 @@
     (context-init ctx-ptr loop-ptr config-ptr)
     ctx-ptr))
 
-(defn create-loops
-  "Create n event loops.
-   Returns vector of h2o_evloop_t pointers"
-  [n]
-  (vec (repeatedly n evloop-create)))
-
-(defn create-contexts
-  "Create h2o contexts for the given event loops.
-   Returns vector of h2o_context_t pointers"
-  [arena loops config-ptr]
-  {:pre [(some? arena)
-         (seq loops)
-         (some? config-ptr) (not (ffi/null? config-ptr))]}
-  (vec (for [loop loops]
-         (create-context arena loop config-ptr))))
-
 (defn create-socket-for-loop
   "Create h2o socket wrapper for file descriptor in event loop"
   [loop-ptr fd flags]
   {:pre [(some? loop-ptr) (not (ffi/null? loop-ptr))
          (nat-int? fd) (>= fd 0)]}
   (evloop-socket-create loop-ptr fd flags))
-
-(defn dispose-contexts
-  "Dispose all h2o contexts"
-  [contexts]
-  (doseq [ctx contexts]
-    (context-dispose ctx)))
-
-(defn destroy-loops
-  "Destroy all event loops"
-  [loops]
-  (doseq [loop loops]
-    (evloop-destroy loop)))
 
 (defn create-accept-ctx
   "Create h2o_accept_ctx_t for accepting connections.
