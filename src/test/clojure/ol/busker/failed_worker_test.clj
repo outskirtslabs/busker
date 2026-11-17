@@ -169,7 +169,7 @@
                                         (swap! disposed_ conj ctx)
                                         (context-dispose ctx))]
       (is (nil? (generation/stop! instance 5 TimeUnit/SECONDS))))
-    (is (= :stopped @(::generation/phase instance)))
+    (is (= :stopped (generation/phase instance)))
     (is (= (frequencies (::generation/contexts instance))
            (frequencies @disposed_)))
     (is (port-bindable? port))))
@@ -190,7 +190,7 @@
         (is (= [(:id failed)] (:unfinished-workers (ex-data error))))
         (is (< ms 2000) "the healthy worker does not wait for the failed worker's connection")
         (is (not (.isAlive ^Thread (:thread healthy))))
-        (is (= :retirement-failed @(::generation/phase instance)))
+        (is (= :kept (generation/phase instance)))
         (is (refuses-connections? port))
         (is (port-bindable? port))
         (forget-kept-generation! instance 1)))))
@@ -210,7 +210,7 @@
                     (catch ExceptionInfo e e)))]
       (is (= kept-message (ex-message error)))
       (is (= [(:id failed)] (:unfinished-workers (ex-data error))))
-      (is (= :retirement-failed @(::generation/phase instance)))
+      (is (= :kept (generation/phase instance)))
       (is (port-bindable? port))
       (is (retire! failed-pool))
       (forget-kept-generation! instance 0))))
@@ -232,7 +232,7 @@
                     (catch ExceptionInfo e e)))]
       (is (= kept-message (ex-message error)))
       (is (= [release-error] (vec (.getSuppressed ^Throwable error))))
-      (is (= :retirement-failed @(::generation/phase instance)))
+      (is (= :kept (generation/phase instance)))
       (is (some #(identical? instance %) @@#'generation/failed-retirements_))
       (run! release! (vals (::generation/listener-claims instance)))
       (is (port-bindable? port))
@@ -251,7 +251,7 @@
     (is (= 1 (count (filter #{[:error ::generation/worker-failed]} @logged_))))
     (is (nil? (runtime/stop! server)))
     (is (= :stopped (:phase (runtime/state server))))
-    (is (= :stopped @(::generation/phase instance)))
+    (is (= :stopped (generation/phase instance)))
     (is (port-bindable? port))))
 
 (deftest a-worker-ended-by-a-failed-retirement-logs-no-worker-failure-test
@@ -285,7 +285,7 @@
               "the reload does not wait for the failed worker to stop accepting"))
         (is (= ["new" "new" "new" "new"] (vec (repeatedly 4 #(body port)))))
         (is (eventually #(empty? (:draining @(:busker/state server)))))
-        (is (= :stopped @(::generation/phase old)))
+        (is (= :stopped (generation/phase old)))
         (is (= :unchanged (runtime/reload! server (server-config port "new" :server-name "new")))))
       (finally
         (is (nil? (runtime/stop! server)))))
@@ -303,7 +303,7 @@
         (is (not (identical? old (active-instance server))))
         (is (= :unchanged (runtime/reload! server (server-config port "same"))))
         (is (= "same" (body port)))
-        (is (eventually #(= :stopped @(::generation/phase old)))))
+        (is (eventually #(= :stopped (generation/phase old)))))
       (finally
         (is (nil? (runtime/stop! server)))))))
 
@@ -323,10 +323,10 @@
             (is (= :activated (runtime/reload! server (managed-config port "new")))))
           (let [{:keys [active]} @(:busker/state server)]
             (is (= 2 (:generation-id active)))
-            (is (= :running @(::generation/phase (:instance active)))))
+            (is (= :running (generation/phase (:instance active)))))
           (is (= "new" (body port)))
           (is (eventually #(empty? (:draining @(:busker/state server)))))
-          (is (= :stopped @(::generation/phase old)))
+          (is (= :stopped (generation/phase old)))
           (is (= :unchanged (runtime/reload! server (managed-config port "new"))))
           (finally
             (is (nil? (runtime/stop! server)))))
@@ -431,7 +431,7 @@
       (let [new (active-instance server)]
         (is (= (udp-transport-address old tls-port) (udp-transport-address new tls-port))
             "the new generation uses the UDP transport of the old one")
-        (is (eventually #(= :retirement-failed @(::generation/phase old))))
+        (is (eventually #(= :kept (generation/phase old))))
         (is (= (repeat 12 "new") (repeatedly 12 #(http3-body tls-port))))
         (is (= "new" (body plain-port))))
       (is (= kept-message (stop)))

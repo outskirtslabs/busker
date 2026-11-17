@@ -36,13 +36,13 @@
 (deftest worker-loop-reports-mailbox-work-before-native-iteration
   (let [seen_ (atom nil)
         w (assoc (worker (fn [_ _])) :loop-fn
-                 (fn [w state]
-                   (reset! seen_ state)
+                 (fn [w state mailbox-work?]
+                   (reset! seen_ mailbox-work?)
                    (.set ^AtomicBoolean (:running?_ w) false)
                    state))]
     (p/send-msg w [:response])
     (@#'evloop/run-evloop-on-thread! w)
-    (is (true? (::evloop/mailbox-work? @seen_)))))
+    (is (true? @seen_))))
 
 (deftest unarmed-worker-records-wake-without-native-wake
   (let [w (worker (fn [_ _]))]
@@ -108,8 +108,8 @@
   (let [checking (CountDownLatch. 1) release (CountDownLatch. 1)
         states_ (atom []) original @#'evloop/mailbox-empty?
         w (assoc (worker (fn [_ _])) :loop-fn
-                 (fn [w state]
-                   (swap! states_ conj state)
+                 (fn [w state mailbox-work?]
+                   (swap! states_ conj mailbox-work?)
                    (.set ^AtomicBoolean (:running?_ w) false)
                    state))
         thread (Thread. #(@#'evloop/run-evloop-on-thread! w))]
@@ -125,7 +125,7 @@
         (.countDown release)
         (.join thread 5000)
         (is (false? (.isAlive thread)))
-        (is (true? (::evloop/mailbox-work? (first @states_))))
+        (is (true? (first @states_)))
         (finally (.countDown release) (.interrupt thread) (.join thread 5000))))))
 
 (defn- polling-worker
@@ -142,9 +142,9 @@
                                     (swap! turns_ inc)
                                     (on-zero-wait-turn w)
                                     0)
-                 :loop-fn (fn [w state]
+                 :loop-fn (fn [w state mailbox-work?]
                             (swap! calls_ conj
-                                   {:mailbox-work? (::evloop/mailbox-work? state)
+                                   {:mailbox-work? mailbox-work?
                                     :armed? (.get ^AtomicBoolean (:sleep-armed?_ w))})
                             (.set ^AtomicBoolean (:running?_ w) false)
                             state))]

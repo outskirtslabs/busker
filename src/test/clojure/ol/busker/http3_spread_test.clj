@@ -254,15 +254,13 @@
 (deftest withdraw-skips-freed-contexts-test
   (testing "a worker failure reported after its HTTP/3 contexts were freed
   does not reach them"
-    (let [guard (#'generation/http3-ctxs-guard)
-          withdraw! #'generation/withdraw-http3-worker!
+    (let [withdraw! #'generation/withdraw-http3-worker!
           calls (atom 0)
           ctx (MemorySegment/ofAddress 4096)]
       (with-redefs [h2o/http3-withdraw-worker (fn [_] (swap! calls inc))]
-        (withdraw! guard [ctx])
+        (withdraw! {:stage :serving} [ctx])
         (is (= 1 @calls))
-        (.set ^java.util.concurrent.atomic.AtomicBoolean (:disposed? guard) true)
-        (withdraw! guard [ctx])
+        (withdraw! {:stage :released :nodes {:h3 :released}} [ctx])
         (is (= 1 @calls))))))
 
 (defn- open-moved!

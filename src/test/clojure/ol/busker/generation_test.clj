@@ -25,7 +25,7 @@
    [java.nio.charset StandardCharsets]
    [java.util.concurrent AbstractExecutorService CountDownLatch ExecutorService Executors
     TimeUnit]
-   [java.util.concurrent.atomic AtomicBoolean AtomicReference]
+   [java.util.concurrent.atomic AtomicBoolean AtomicReference AtomicReferenceArray]
    [java.util.concurrent.locks ReentrantReadWriteLock]))
 
 (defrecord RetirementWorker
@@ -118,17 +118,14 @@
                  :native-failure_ (AtomicReference.)
                  :response-slot-monitor (Object.)
                  :callback-dispatch nil})
-        loop-state {::evloop/mailbox-work? true}
         native-state {:loop-ptr :loop
                       :ctx-ptr :context
                       :listener-socks []
                       :accept-callbacks []
-                      :max-connections 0}]
+                      :max-connections 0
+                      :shutting-down? (AtomicBoolean. false)}]
     (with-redefs-fn
-      {#'generation/check-and-initiate-shutdown! (fn [state _] state)
-       #'generation/update-receiver-destruction (fn [state _] state)
-       #'generation/dispose-context-if-ready (fn [state _ _] state)
-       #'callback-dispatch/pending-response-work? (constantly false)
+      {#'callback-dispatch/pending-response-work? (constantly false)
        #'callback-dispatch/drain-responses! (constantly nil)
        #'generation/update-listener-state! (fn [& _])
        #'h2o/evloop-now (constantly 0)
@@ -136,9 +133,9 @@
        #'h2o/evloop-run (fn [_ wait-ms]
                           (reset! wait-ms_ wait-ms)
                           0)}
-      #(let [result (#'generation/worker-loop worker loop-state native-state)]
+      #(let [result (#'generation/worker-loop worker :serving true native-state)]
          (is (= 0 @wait-ms_))
-         (is (not (contains? result ::evloop/mailbox-work?)))))))
+         (is (= :serving result))))))
 
 (deftest response-ring-work-forces-a-nonblocking-native-iteration
   (let [wait-ms_ (atom nil)
@@ -156,12 +153,10 @@
                       :ctx-ptr :context
                       :listener-socks []
                       :accept-callbacks []
-                      :max-connections 0}]
+                      :max-connections 0
+                      :shutting-down? (AtomicBoolean. false)}]
     (with-redefs-fn
-      {#'generation/check-and-initiate-shutdown! (fn [state _] state)
-       #'generation/update-receiver-destruction (fn [state _] state)
-       #'generation/dispose-context-if-ready (fn [state _ _] state)
-       #'callback-dispatch/pending-response-work? (constantly false)
+      {#'callback-dispatch/pending-response-work? (constantly false)
        #'callback-dispatch/drain-responses! (constantly nil)
        #'generation/update-listener-state! (fn [& _])
        #'h2o/mt-response-ring-drain
@@ -173,9 +168,9 @@
        #'h2o/evloop-run (fn [_ wait-ms]
                           (reset! wait-ms_ wait-ms)
                           0)}
-      #(let [result (#'generation/worker-loop worker {} native-state)]
+      #(let [result (#'generation/worker-loop worker :serving false native-state)]
          (is (= 0 @wait-ms_))
-         (is (= {} result))))))
+         (is (= :serving result))))))
 (deftest output-sent-between-turns-forces-a-nonblocking-native-iteration
   (doseq [[sent? expected-wait] [[true 0] [false 1000]]]
     (let [wait-ms_ (atom nil)
@@ -191,12 +186,10 @@
                         :ctx-ptr :context
                         :listener-socks []
                         :accept-callbacks []
-                        :max-connections 0}]
+                        :max-connections 0
+                        :shutting-down? (AtomicBoolean. false)}]
       (with-redefs-fn
-        {#'generation/check-and-initiate-shutdown! (fn [state _] state)
-         #'generation/update-receiver-destruction (fn [state _] state)
-         #'generation/dispose-context-if-ready (fn [state _ _] state)
-         #'callback-dispatch/pending-response-work? (constantly false)
+        {#'callback-dispatch/pending-response-work? (constantly false)
          #'callback-dispatch/drain-responses! (constantly sent?)
          #'generation/update-listener-state! (fn [& _])
          #'h2o/evloop-now (constantly 0)
@@ -204,7 +197,7 @@
          #'h2o/evloop-run (fn [_ wait-ms]
                             (reset! wait-ms_ wait-ms)
                             0)}
-        #(#'generation/worker-loop worker {::evloop/mailbox-work? false} native-state))
+        #(#'generation/worker-loop worker :serving false native-state))
       (is (= expected-wait @wait-ms_) (str "sent? " sent?)))))
 
 (deftest queued-request-tasks-limit-the-native-wait-to-one-millisecond
@@ -227,15 +220,13 @@
                         :ctx-ptr :context
                         :listener-socks []
                         :accept-callbacks []
-                        :max-connections 0}]
+                        :max-connections 0
+                        :shutting-down? (AtomicBoolean. false)}]
       (request-dispatch/dispatch! dispatch 1 (fn []))
       (when queued?
         (request-dispatch/dispatch! dispatch 1 (fn [])))
       (with-redefs-fn
-        {#'generation/check-and-initiate-shutdown! (fn [state _] state)
-         #'generation/update-receiver-destruction (fn [state _] state)
-         #'generation/dispose-context-if-ready (fn [state _ _] state)
-         #'callback-dispatch/pending-response-work? (constantly false)
+        {#'callback-dispatch/pending-response-work? (constantly false)
          #'callback-dispatch/drain-responses! (constantly false)
          #'generation/update-listener-state! (fn [& _])
          #'h2o/evloop-now (constantly 0)
@@ -243,7 +234,7 @@
          #'h2o/evloop-run (fn [_ wait-ms]
                             (reset! wait-ms_ wait-ms)
                             0)}
-        #(#'generation/worker-loop worker {::evloop/mailbox-work? false} native-state))
+        #(#'generation/worker-loop worker :serving false native-state))
       (is (= expected-wait @wait-ms_) (str "queued? " queued?)))))
 
 (defn- recording-executor
@@ -291,7 +282,7 @@
                    (awaitTermination [n unit] (.awaitTermination real n unit)))
         dispatch (request-dispatch/create executor)
         done (CountDownLatch. 5)
-        generation {::generation/phase (atom :running)
+        generation {::generation/progress_ (atom {})
                     ::generation/stop-lock (Object.)
                     ::generation/executor executor
                     ::generation/workers [{:callback-dispatch nil :request-dispatch dispatch}]}]
@@ -316,8 +307,7 @@
 
 (deftest interrupted-stop-shuts-the-executor-down-without-waiting-for-sweeps
   (let [executor (Executors/newVirtualThreadPerTaskExecutor)
-        phase (atom :running)
-        generation {::generation/phase phase
+        generation {::generation/progress_ (atom {})
                     ::generation/stop-lock (Object.)
                     ::generation/executor executor
                     ::generation/workers [{:callback-dispatch nil
@@ -334,7 +324,7 @@
               interrupted? (Thread/interrupted)]
           (is (< ms 300) (str "an interrupted stop took " ms " ms with workers that never sweep"))
           (is (.isShutdown executor))
-          (is (= :stopping @phase))
+          (is (= :stopping (generation/phase generation)))
           (is interrupted? "the interrupt stays set for the caller")))
       (finally
         (Thread/interrupted)
@@ -367,8 +357,7 @@
         response-receiver (mem/segment 2)
         destroyed_ (atom {:wakeup [] :response []})
         events_ (atom [])
-        phase (atom :running)
-        generation-state {::generation/phase phase
+        generation-state {::generation/progress_ (atom {})
                           ::generation/stop-lock (Object.)
                           ::generation/workers []
                           ::generation/wakeup-receivers [wakeup-receiver]
@@ -390,8 +379,8 @@
     (is (= {:wakeup [wakeup-receiver]
             :response [response-receiver]}
            @destroyed_))
-    (is (= [:wakeup :response :context] @events_))
-    (is (= :stopped @phase))))
+    (is (= [:response :wakeup :context] @events_))
+    (is (= :stopped (generation/phase generation-state)))))
 
 (deftest response-ring-claim-is-bounded-and-reusable-from-a-virtual-thread
   (let [port (util/free-port)
@@ -875,13 +864,16 @@
           disposer (Thread.
                     #(try
                        (deliver disposal-result_
-                                {:result (#'generation/dispose-context-if-ready
-                                          {:context-disposed? false
-                                           :shutdown-initiated? true
-                                           :receiver-destroyed? true}
+                                {:result (#'generation/lifecycle-turn!
                                           worker
+                                          :draining
                                           {:ctx-ptr :context
-                                           :http3-ctxs []})})
+                                           :http3-ctxs []
+                                           :shutting-down? (AtomicBoolean. true)
+                                           :statuses (AtomicReferenceArray.
+                                                      ^objects (object-array [{:stage :draining}]))
+                                           :worker-idx 0
+                                           :stopped-accepting_ (promise)})})
                        (catch Throwable error
                          (deliver disposal-result_ {:error error}))))]
       (with-redefs [h2o/mt-response-use-acquire (fn [_] (swap! uses_ inc) 1)
@@ -921,7 +913,7 @@
             (is (= {:context-disposed? false
                     :error             nil}
                    (let [{:keys [result error]} (deref disposal-result_ 5000 ::timeout)]
-                     {:context-disposed? (:context-disposed? result)
+                     {:context-disposed? (= :released result)
                       :error             (some-> error class .getName)})))
             (is (= 2 @pending-checks_))
             (is (= [] @destroyed_))
@@ -1303,7 +1295,7 @@
         (is (= 1 (h2o/mt-response-publish receiver claim-handle)))
         (generation/stop! instance)
         (reset! stopped?_ true)
-        (is (= :stopped @(::generation/phase instance))))
+        (is (= :stopped (generation/phase instance))))
       (finally
         (when-not @stopped?_
           (generation/stop! instance))))))
@@ -1410,14 +1402,10 @@
   (with-open [arena (mem/shared-arena)]
     (let [dispatch (callback-dispatch/create arena)
           worker (retirement-worker dispatch (AtomicReference.) (Thread.) (constantly :accepted))
-          phase (atom :running)
-          generation-state {::generation/phase phase
+          generation-state {::generation/progress_ (atom {})
                             ::generation/stop-lock (Object.)
                             ::generation/workers [worker]
-                            ::generation/worker-states [{:http3-ctxs-guard (#'generation/http3-ctxs-guard)
-                                                         :listener-socks []
-                                                         ::generation/listeners-closed?_ (AtomicBoolean. false)
-                                                         ::generation/http3-sockets-closed?_ (AtomicBoolean. false)}]
+                            ::generation/worker-statuses (AtomicReferenceArray. 1)
                             ::generation/wakeup-receivers [nil]
                             ::generation/listener-runtimes []
                             ::generation/listener-claims {}
@@ -1430,7 +1418,7 @@
         (with-redefs [evloop/broadcast-wake! (constantly nil)]
           (is (thrown-with-msg? clojure.lang.ExceptionInfo #"nothing can finish"
                                 (generation/stop! generation-state))))
-        (is (= :retirement-failed @phase))
+        (is (= :kept (generation/phase generation-state)))
         (is (= 1 (.byteSize (mem/alloc arena 1))))
         (finally
           (bp/release! (:stream-pool worker) block)
@@ -1443,10 +1431,10 @@
   (let [arena (mem/shared-arena)
         dispatch (callback-dispatch/create arena)
         worker (retirement-worker dispatch (AtomicReference.) (Thread.) (constantly :accepted))
-        phase (atom :running)
-        generation-state {::generation/phase phase
+        generation-state {::generation/progress_ (atom {})
                           ::generation/stop-lock (Object.)
                           ::generation/workers [worker]
+                          ::generation/worker-statuses (AtomicReferenceArray. 1)
                           ::generation/wakeup-receivers [nil]
                           ::generation/listener-runtimes []
                           ::generation/listener-claims {}
@@ -1457,12 +1445,12 @@
       (with-redefs [evloop/broadcast-wake! (constantly nil)]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"nothing can finish"
                               (generation/stop! generation-state)))
-        (is (= :retirement-failed @phase))
+        (is (= :kept (generation/phase generation-state)))
         (is (.isAlive (.scope ^Arena arena)))
         (mailbox/release! (:mailbox worker) permit)
         (generation/stop! generation-state))
       (is (false? (.isAlive (.scope ^Arena arena))))
-      (is (= :stopped @phase))
+      (is (= :stopped (generation/phase generation-state)))
       (is (not (some #(identical? generation-state %)
                      @@#'generation/failed-retirements_)))
       (finally
@@ -1474,13 +1462,13 @@
                  (vec (remove #(identical? generation-state %) retirements))))))))
 
 (deftest a-failed-stop-accepting-wait-leaves-the-generation-stopping-test
-  (let [generation-state {::generation/phase (atom :stopping)
+  (let [generation-state {::generation/progress_ (atom {:signalled? true})
                           ::generation/stopped-accepting_ (promise)
                           ::generation/generation-id 3}]
     (with-redefs-fn {#'generation/stop-accepting-wait-ms 20}
       #(is (thrown-with-msg? clojure.lang.ExceptionInfo #"did not stop accepting"
                              (generation/await-stop-accepting! generation-state))))
-    (is (= :stopping @(::generation/phase generation-state)))
+    (is (= :stopping (generation/phase generation-state)))
     (is (not-any? #(identical? generation-state %) @@#'generation/failed-retirements_))))
 
 (deftest retirement-of-a-live-worker-thread-times-out-test
@@ -1490,9 +1478,10 @@
           worker (assoc (retirement-worker (callback-dispatch/create arena) (AtomicReference.)
                                            thread (constantly :accepted))
                         :id 7)
-          generation-state {::generation/phase (atom :running)
+          generation-state {::generation/progress_ (atom {})
                             ::generation/stop-lock (Object.)
                             ::generation/workers [worker]
+                            ::generation/worker-statuses (AtomicReferenceArray. 1)
                             ::generation/wakeup-receivers [nil]
                             ::generation/listener-runtimes []
                             ::generation/listener-claims {}
@@ -1507,7 +1496,7 @@
             (is (= "Generation retirement timed out while worker threads still run. Native resources kept."
                    (ex-message error)))
             (is (= [7] (:alive-workers (ex-data error))))))
-        (is (= :retirement-failed @(::generation/phase generation-state)))
+        (is (= :kept (generation/phase generation-state)))
         (finally
           (.countDown release)
           (.join thread)
@@ -1807,8 +1796,7 @@
                      (if (= 1 (swap! attempts inc))
                        (throw (InterruptedException. "simulated"))
                        true)))
-        phase (atom :running)
-        generation-state {::generation/phase phase
+        generation-state {::generation/progress_ (atom {})
                           ::generation/stop-lock (Object.)
                           ::generation/executor executor
                           ::generation/workers []
@@ -1817,6 +1805,6 @@
                           ::generation/listener-claims {}
                           ::generation/config {}}]
     (is (thrown? InterruptedException (generation/stop! generation-state)))
-    (is (= :stopping @phase))
+    (is (= :stopping (generation/phase generation-state)))
     (generation/stop! generation-state)
-    (is (= :stopped @phase))))
+    (is (= :stopped (generation/phase generation-state)))))

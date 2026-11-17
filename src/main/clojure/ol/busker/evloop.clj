@@ -273,7 +273,7 @@
           ^HashMap requests (.-requests worker)
           hot-poll-ns (.-hot-poll-ns worker)
           loop-fn (:loop-fn worker)]
-      (loop [state {}
+      (loop [state (:loop-state worker)
              wake-seen (long 0)]
         (when (.get running?_)
           (when-let [cause (.get ^AtomicReference (:termination-cause_ worker))]
@@ -283,8 +283,7 @@
             (when (.get running?_)
               (cond
                 (or mailbox-work? (not= wake-requested wake-seen))
-                (recur (loop-fn worker (assoc state ::mailbox-work? true))
-                       wake-requested)
+                (recur (loop-fn worker state true) wake-requested)
 
                 (and (pos? hot-poll-ns)
                      (not (.isEmpty requests))
@@ -306,7 +305,7 @@
                       (.set sleep-armed?_ false)
                       (recur state wake-seen))
                     (let [next-state (try
-                                       (loop-fn worker (assoc state ::mailbox-work? false))
+                                       (loop-fn worker state false)
                                        (finally
                                          (.set sleep-armed?_ false)))]
                       (recur next-state wake-requested))))))))))
@@ -333,11 +332,13 @@
   "Start a worker on a platform thread (daemon).
 
    Parameters:
-   - loop-fn: function called for each loop iteration: (worker, state) -> state
+   - loop-fn: function called for each loop iteration:
+     (worker, state, mailbox-work?) -> state
    - message-handler
    - wakeup-receiver
 
    Options:
+   - :loop-state - the state of the first loop iteration
    - :thread-name-prefix - prefix for thread name (default 'h2o-evloop')
    - :callback-dispatch - worker-local native callback dispatcher
    - :request-dispatch - worker-local handler dispatch with
@@ -356,7 +357,8 @@
 
   [loop-fn message-handler wakeup-receiver
    & {:keys [callback-dispatch request-dispatch response-receiver response-slots
-             response-slot-payload-capacity fixed-body-limit large-head-warnings thread-name-prefix stream-pool
+             response-slot-payload-capacity fixed-body-limit large-head-warnings thread-name-prefix
+             stream-pool loop-state
              on-native-failure! discard-command! zero-wait-turn! hot-poll-ns]
       :or {thread-name-prefix "h2o-evloop"
            hot-poll-ns 0}}]
@@ -393,6 +395,7 @@
                              :termination-cause_ (AtomicReference.)
                              :evloop nil
                              :loop-fn loop-fn
+                             :loop-state loop-state
                              :zero-wait-turn! zero-wait-turn!
                              :hot-poll-ns (long hot-poll-ns)
                              :message-handler message-handler
