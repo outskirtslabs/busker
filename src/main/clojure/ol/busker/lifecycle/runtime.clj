@@ -80,6 +80,12 @@
   [state id]
   (update state :unawaited (fnil conj #{}) id))
 
+(defn await-interrupted?
+  "Tells if `error` is the error of an await of a drain that an interrupt
+  ended. Its cause is the InterruptedException."
+  [error]
+  (= :await-interrupted (:reason (ex-data error))))
+
 (defn- service-stops
   "Returns stop actions for the services of `generations` that no generation in
   `users` has."
@@ -368,8 +374,8 @@
           (next-stop-step progress))))
 
     :await
-    (if (and (instance? InterruptedException error) (:drain (:awaiting progress)))
-      (go (assoc progress :interrupt error)
+    (if (await-interrupted? error)
+      (go (assoc progress :interrupt (ex-cause error))
           :unawaited [:swap unawaited (:generation-id (:awaiting progress))])
       (awaited progress error))
 
@@ -386,8 +392,13 @@
         :else (go (update progress :failures conj interrupt)
                   :reawait [:await-drain awaiting])))
 
+    ;; The drain is past its last swap, so its result comes soon. An
+    ;; interrupt waits again.
     :reawait
-    (awaited progress error)
+    (if (await-interrupted? error)
+      (go (update progress :failures conj (ex-cause error))
+          :reawait [:await-drain (:awaiting progress)])
+      (awaited progress error))
 
     :stop-service
     (next-stop-step (cond-> progress error (update :failures conj error)))

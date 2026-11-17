@@ -36,7 +36,8 @@
   operations, each `[kind observation]`. `:script` maps an action type, `[type
   generation-id]` or `[:swap f]` to its outcome. `:stop-errors` is a set of
   services whose stop throws. Else an action other than a swap takes the next
-  item of `:fails`, and true fails it. `:candidate` is the generation that a
+  item of `:fails`. True fails it, and `:interrupt` fails a stop with an
+  InterruptedException. `:candidate` is the generation that a
   build starts, or else the next item of `:builds` gives its `:cert` and
   `:tickets` needs: `:new`, `:same` as the active generation, or nil.
   `:interrupts` is the number of interrupts that can end an await of a drain.
@@ -74,27 +75,32 @@
             (need :cert-plan cert)
             (need :ticket-policy tickets)))))
 
+(def ^:private stop-actions
+  #{:stop-generation :stop-cert-runtime :stop-ticket-service})
+
 (defn- outcome
   "Returns `[world outcome]`, with a nil outcome when `action` does not fail."
   [{:keys [script stop-errors fails] :as w} [type a]]
   (if-let [given (or (script [type a]) (script [type (:generation-id a)]) (script type))]
     [w given]
-    (let [e (cond (stop-errors a) (err {:service a}) (and (first fails) (not= :swap type)) (err))]
+    (let [e (cond (stop-errors a) (err {:service a})
+                  (= :swap type) nil
+                  (= :interrupt (first fails)) (when (stop-actions type) (InterruptedException.))
+                  (first fails) (err))]
       [(cond-> (update w :fails rest) e (update :raised conj e)) (when e {:error e})])))
 
 (defn- await-drain
   "Gives the drain result as the shell does: its error carries the other
-  errors as suppressed. An interrupt ends the await first."
+  errors as suppressed. An interrupt ends the await first with an error that
+  [[rt/await-interrupted?]] tells."
   [w {id :generation-id}]
   (if (:interrupted? w)
     (let [e (InterruptedException.)]
-      [(-> w (dissoc :interrupted?) (update :raised conj e)) {:error e}])
+      [(-> w (dissoc :interrupted?) (update :raised conj e))
+       {:error (ex-info "interrupted" {:reason :await-interrupted} e)}])
     (let [{:keys [error suppressed] :as result} (get-in w [:drain-results id])]
       (doseq [t suppressed] (.addSuppressed ^Throwable error ^Throwable t))
       [w (if error {:error error} result)])))
-
-(def ^:private stop-actions
-  #{:stop-generation :stop-cert-runtime :stop-ticket-service})
 
 (defn- serves?
   "Tells if `action` stops the active generation, or a service of it, while
@@ -183,11 +189,14 @@
       (end-op (assoc w :ops more :op op) progress (when (= :done kind) result)))))
 
 (defn- step-drain
+  "Steps the drain thread of generation `id`. It gives its result one step
+  after the core is done, as a future does after its body returns."
   [w id]
-  (let [[w progress result] (advance w (get-in w [:drains id]))]
-    (if result
+  (let [drain (get-in w [:drains id])]
+    (if-let [result (::result drain)]
       (-> w (update :drains dissoc id) (assoc-in [:drain-results id] result))
-      (assoc-in w [:drains id] progress))))
+      (let [[w progress result] (advance w drain)]
+        (assoc-in w [:drains id] (if result {::result result} progress))))))
 
 (defn- actors
   "Returns the actors that can do a step: the lifecycle thread unless it awaits
@@ -279,7 +288,9 @@
    :builds (gen/vector (gen/hash-map :cert (gen/elements [:new :same nil])
                                      :tickets (gen/elements [:new :same nil]))
                        4)
-   :fails (gen/vector (gen/frequency [[6 (gen/return false)] [1 (gen/return true)]]) 0 40)
+   :fails (gen/vector (gen/frequency [[6 (gen/return false)] [1 (gen/return true)]
+                                      [1 (gen/return :interrupt)]])
+                      0 40)
    :interrupts (gen/choose 0 2)
    :schedule (gen/vector (gen/choose 0 4) 0 80)))
 

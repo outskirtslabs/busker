@@ -152,7 +152,12 @@
 
    :await-drain
    (fn [_ {:keys [drain]}]
-     (result! @drain))
+     (result! (try
+                @drain
+                (catch InterruptedException e
+                  (throw (ex-info "Await of a drain was interrupted"
+                                  {:reason :await-interrupted}
+                                  e))))))
 
    :stop-generation
    (fn [_ {:keys [instance]}]
@@ -187,7 +192,8 @@
         (recur (rt/step progress outcome)
                (or interrupted?
                    cleared?
-                   (instance? InterruptedException (:error outcome))))))))
+                   (instance? InterruptedException (:error outcome))
+                   (rt/await-interrupted? (:error outcome))))))))
 
 (defn- start-on-lifecycle!
   [user-config lifecycle-executor]
