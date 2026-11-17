@@ -63,6 +63,12 @@
   (update state :draining
           (partial mapv #(cond-> % (= id (:generation-id %)) (assoc :drained? true)))))
 
+(defn drain-failed
+  "Marks draining generation `id` as failed to stop. It stays listed."
+  [state id]
+  (update state :draining
+          (partial mapv #(cond-> % (= id (:generation-id %)) (assoc :drain-failed? true)))))
+
 (defn services-stopped
   "Takes draining generation `id` off the list."
   [state id]
@@ -70,7 +76,7 @@
 
 (defn unawaited
   "Records that the server stop does not await the drain of generation `id`,
-  so the drain logs its failed service stops."
+  so the drain logs its errors."
   [state id]
   (update state :unawaited (fnil conj #{}) id))
 
@@ -192,7 +198,8 @@
 (defn begin-drain
   "Returns the progress of the drain of `generation` after it stopped
   accepting. The drain stops it, marks it with [[drained]], stops the services
-  that [[drained-stops]] gives and takes it off the list."
+  that [[drained-stops]] gives and takes it off the list. A failed stop marks
+  it with [[drain-failed]]."
   [generation]
   (go {:op :drain :generation generation :failures []}
       :drain-stop [:stop-generation generation]))
@@ -366,13 +373,15 @@
           :unawaited [:swap unawaited (:generation-id (:awaiting progress))])
       (awaited progress error))
 
-    ;; A drain that took its generation off the list before this swap gives
-    ;; its failures to this stop. Its result is ready, so the stop reads it.
+    ;; A drain that took its generation off the list or marked it failed
+    ;; before this swap gives its failures to this stop. Its result is ready,
+    ;; so the stop reads it.
     :unawaited
     (let [{:keys [awaiting interrupt]} progress]
       (cond
         error (awaited (update progress :failures conj interrupt) error)
-        (some #(= (:generation-id awaiting) (:generation-id %)) (:draining value))
+        (some #(and (= (:generation-id awaiting) (:generation-id %)) (not (:drain-failed? %)))
+              (:draining value))
         (awaited progress interrupt)
         :else (go (update progress :failures conj interrupt)
                   :reawait [:await-drain awaiting])))
@@ -388,8 +397,22 @@
 
     :drain-stop
     (if error
-      (done progress {:error error})
+      (go (assoc progress :error error)
+          :drain-failed [:swap drain-failed (:generation-id generation)])
       (go progress :drained [:swap drained (:generation-id generation)]))
+
+    ;; The generation stays listed, so a later stop awaits this drain and
+    ;; reads the error. When an interrupt ended the await, it is logged.
+    :drain-failed
+    (cond
+      error (done progress {:error (:error progress) :suppressed [error]})
+      (contains? (:unawaited value) (:generation-id generation))
+      (go progress :log-drain
+          [:log-failure :ol.busker.runtime/generation-stop-failed generation (:error progress)])
+      :else (done progress {:error (:error progress)}))
+
+    :log-drain
+    (done progress {:value nil})
 
     :drained
     (if error

@@ -128,11 +128,11 @@
 
    ;; The lifecycle thread and the drain threads write the state atom with the
    ;; pure functions of the core. Only the lifecycle thread changes :phase,
-   ;; :active and :next-generation-id. `drained` and `attach-drain` change the
-   ;; entry of one id, `services-stopped` removes the entry of one id, and
-   ;; `end-stopped` removes entries. Each swap reads the result of the swaps
-   ;; before it, so a drain that ends during a reload or a stop is not lost or
-   ;; counted twice.
+   ;; :active and :next-generation-id. `drained`, `drain-failed` and
+   ;; `attach-drain` change the entry of one id, `services-stopped` removes the
+   ;; entry of one id, and `end-stopped` removes entries. Each swap reads the
+   ;; result of the swaps before it, so a drain that ends during a reload or a
+   ;; stop is not lost or counted twice.
    :swap
    (fn [{:keys [state]} f & args]
      (apply swap! state f args))

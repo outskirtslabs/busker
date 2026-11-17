@@ -253,17 +253,9 @@
 
 (defn- broken
   "Returns the invariants that the run `w` broke."
-  [{:keys [state started stops generation-stops stop-result results logs raised drain-results]
-    :as w}]
+  [{:keys [state started stops generation-stops stop-result results logs raised] :as w}]
   (let [stopped (frequencies (concat stops generation-stops))
-        ;; When an interrupt ends the await of a drain before the drain stops
-        ;; its generation, no caller reads the drain result and the core does
-        ;; not log its error. This counts that error as reported.
-        unread (->> (:draining state)
-                    (keep #(when (contains? (:unawaited state) (:generation-id %))
-                             (drain-results (:generation-id %))))
-                    (mapcat errors-of))
-        reported (frequencies (concat (mapcat errors-of results) (map second logs) unread))]
+        reported (frequencies (concat (mapcat errors-of results) (map second logs)))]
     (cond-> (:broken w)
       (or (:lifecycle w) (seq (:ops w)))
       (conj :every-operation-returns)
@@ -492,6 +484,17 @@
         [e & more] (errors-of (:result w))]
     (is (identical? cause e))
     (is (= [{:service :cert-1}] (map ex-data more)))
+    (is (= [] (:logs w)))
+    (is (= [1] (map :generation-id (get-in w [:state :draining]))))))
+
+(deftest drain-whose-failure-swap-fails-gives-both-errors-to-the-next-stop-test
+  (let [e1 (err {:generation-id 1})
+        cause (Error. "simulated")
+        failed (simulate (world (reloaded) :script {[:stop-generation 1] {:error e1}
+                                                    [:swap rt/drain-failed] {:error cause}})
+                         [])
+        w (stop (assoc failed :script {}))]
+    (is (= [e1 cause] (errors-of (:result w))))
     (is (= [] (:logs w)))
     (is (= [1] (map :generation-id (get-in w [:state :draining]))))))
 
