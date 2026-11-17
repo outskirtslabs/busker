@@ -8,6 +8,7 @@
    [ol.busker :as busker]
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.generation :as generation]
+   [ol.busker.generation.tls :as tls]
    [ol.busker.native :as native]
    [ol.busker.protocols :as h2o]
    [ol.busker.test-utils :as util]
@@ -1052,7 +1053,7 @@
           lookup-fn (with-redefs [clave-adapter/lookup-certificate (fn [_runtime _hostname]
                                                                      (swap! clave-calls inc)
                                                                      nil)]
-                      (#'generation/build-tls-lookup-fn config {:system {:id ::runtime}}))
+                      (#'tls/build-tls-lookup-fn config {:system {:id ::runtime}}))
           result (lookup-fn "localhost.examp1e.net")]
       (is (= 0 @clave-calls) "Static cert should short-circuit clave lookup")
       (is (string? (:cert-chain-pem result)))
@@ -1075,7 +1076,7 @@
                                     (when (= hostname "hit.example")
                                       {:certificate [cert]
                                        :private-key (.getPrivate keypair)}))]
-                      (#'generation/build-tls-lookup-fn config runtime))]
+                      (#'tls/build-tls-lookup-fn config runtime))]
       (is (nil? (lookup-fn "miss.example")))
       (let [result (lookup-fn "hit.example")]
         (is (string? (:cert-chain-pem result)))
@@ -1090,7 +1091,7 @@
                                         :http3? false
                                         :tls {:tls-compatibility-mode
                                               :modern}}}}
-          lookup-fn (#'generation/build-tls-lookup-fn config nil)
+          lookup-fn (#'tls/build-tls-lookup-fn config nil)
           result (lookup-fn nil)]
       (is (= {:cert-chain-pem (util/fixture-cert-pem)
               :private-key-pem (util/fixture-key-pem)}
@@ -1105,7 +1106,7 @@
                                         :http3? false
                                         :tls {:tls-compatibility-mode
                                               :modern}}}}
-          lookup-fn (#'generation/build-tls-lookup-fn
+          lookup-fn (#'tls/build-tls-lookup-fn
                      config
                      {:subject-names ["fallback.example"]
                       :lookup-fn (fn [hostname]
@@ -1123,7 +1124,7 @@
                                         :http3? false
                                         :tls {:tls-compatibility-mode
                                               :modern}}}}
-          lookup-fn (#'generation/build-tls-lookup-fn
+          lookup-fn (#'tls/build-tls-lookup-fn
                      config
                      {:lookup-fn (fn [hostname]
                                    (swap! calls conj hostname)

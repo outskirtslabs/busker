@@ -11,6 +11,7 @@
    [ol.busker.fixed-final :as fixed-final]
    [ol.busker.worker-context :as worker-context]
    [ol.busker.generation :as generation]
+   [ol.busker.generation.accept :as accept]
    [ol.busker.internal.protocols :as p]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as protocols]
@@ -127,7 +128,7 @@
     (with-redefs-fn
       {#'callback-dispatch/pending-response-work? (constantly false)
        #'callback-dispatch/drain-responses! (constantly nil)
-       #'generation/update-listener-state! (fn [& _])
+       #'accept/update-listener-state! (fn [& _])
        #'h2o/evloop-now (constantly 0)
        #'h2o/cleanup-thread (constantly 1000)
        #'h2o/evloop-run (fn [_ wait-ms]
@@ -158,7 +159,7 @@
     (with-redefs-fn
       {#'callback-dispatch/pending-response-work? (constantly false)
        #'callback-dispatch/drain-responses! (constantly nil)
-       #'generation/update-listener-state! (fn [& _])
+       #'accept/update-listener-state! (fn [& _])
        #'h2o/mt-response-ring-drain
        (fn [actual]
          (is (identical? receiver actual))
@@ -191,7 +192,7 @@
       (with-redefs-fn
         {#'callback-dispatch/pending-response-work? (constantly false)
          #'callback-dispatch/drain-responses! (constantly sent?)
-         #'generation/update-listener-state! (fn [& _])
+         #'accept/update-listener-state! (fn [& _])
          #'h2o/evloop-now (constantly 0)
          #'h2o/cleanup-thread (constantly 1000)
          #'h2o/evloop-run (fn [_ wait-ms]
@@ -228,7 +229,7 @@
       (with-redefs-fn
         {#'callback-dispatch/pending-response-work? (constantly false)
          #'callback-dispatch/drain-responses! (constantly false)
-         #'generation/update-listener-state! (fn [& _])
+         #'accept/update-listener-state! (fn [& _])
          #'h2o/evloop-now (constantly 0)
          #'h2o/cleanup-thread (constantly 1000)
          #'h2o/evloop-run (fn [_ wait-ms]

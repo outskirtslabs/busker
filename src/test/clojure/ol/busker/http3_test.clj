@@ -8,6 +8,7 @@
    [ol.busker :as busker]
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.generation :as generation]
+   [ol.busker.generation.tls :as tls]
    [ol.busker.middleware :as mw]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as proto]
@@ -95,19 +96,19 @@
 (deftest http3-enabled-by-default-test
   (testing "TLS listeners should have HTTP/3 enabled by default"
     (let [listener {:port 8443 :tls {}}]
-      (is (true? (generation/http3-enabled? listener))
+      (is (true? (tls/http3-enabled? listener))
           "http3-enabled? should return true for TLS listener without explicit :http3? flag"))))
 
 (deftest http3-can-be-disabled-test
   (testing "TLS listeners can opt-out of HTTP/3 with :http3? false"
     (let [listener {:port 8443 :tls {:http3? false}}]
-      (is (false? (generation/http3-enabled? listener))
+      (is (false? (tls/http3-enabled? listener))
           "http3-enabled? should return false when :http3? is explicitly false"))))
 
 (deftest non-tls-listener-no-http3-test
   (testing "Non-TLS listeners should not have HTTP/3"
     (let [listener {:port 8080}]
-      (is (false? (generation/http3-enabled? listener))
+      (is (false? (tls/http3-enabled? listener))
           "http3-enabled? should return false for non-TLS listener"))))
 
 (deftest create-ptls-context-test

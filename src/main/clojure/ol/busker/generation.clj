@@ -24,14 +24,14 @@
   - [[ol.busker.runtime]] selects active generations.
   - [[ol.busker.evloop]] runs worker threads."
   (:require
-   [clojure.java.io :as io]
-   [clojure.string :as str]
    [babashka.ffi :as mem]
    [ol.busker.buffer-pool :as bp]
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.config :as config]
    [ol.busker.fixed-final :as fixed-final]
+   [ol.busker.generation.accept :as accept]
+   [ol.busker.generation.tls :as tls]
    [ol.busker.evloop :as evloop]
    [ol.busker.lifecycle.generation :as gen]
    [ol.busker.worker-context :as worker-context]
@@ -45,12 +45,8 @@
    [ol.busker.worker-mailbox :as mailbox]
    [ol.busker.tickets :as tickets]
    [ol.busker.wake-endpoint :as wake-endpoint]
-   [ol.clave.certificate :as clave-certificate]
    [taoensso.trove :as trove])
   (:import
-   [java.io File]
-   [java.security.cert CertificateFactory X509Certificate]
-   [java.util Base64]
    [java.util.concurrent ExecutorService Executors TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicLongArray AtomicReference
     AtomicReferenceArray]
@@ -141,149 +137,6 @@
         (rq/consume-record! st record)
         (rq/discard-record! st record)))
     nil))
-
-;; Connection spread. `counts` holds each worker's TCP and Unix socket
-;; connections; only that worker writes its slot, from its accept and close
-;; callbacks. A worker reads its listeners only while [[at-minimum?]] holds.
-;; It decides in every loop turn before it blocks, and an accept that raises the
-;; minimum wakes the others, so a worker that became eligible decides again.
-;; A worker stopping for the global limit sets `limit-waiting`, which a release
-;; clears with a wake. A failed worker's slot is Long/MAX_VALUE, and during
-;; shutdown no worker starts reading.
-
-(defn- at-minimum?
-  "Returns true when `own` is not above any count in `counts`."
-  [^long own ^AtomicLongArray counts]
-  (let [n (.length counts)]
-    (loop [i 0]
-      (cond
-        (== i n) true
-        (> own (.get counts (int i))) false
-        :else (recur (inc i))))))
-
-(defn- wake-other-workers!
-  "Wakes every started worker in `workers` except the one at `worker-idx`."
-  [^AtomicReferenceArray workers ^long worker-idx]
-  (let [n (.length workers)]
-    (loop [i 0]
-      (when (< i n)
-        (when-not (== i worker-idx)
-          (when-let [worker (.get workers i)]
-            (p/wake worker)))
-        (recur (inc i))))))
-
-(defn- log-callback-failure!
-  "Logs a failure of a native callback. Never throws, since the callback
-  returns to native code."
-  [id ^Throwable t]
-  (try
-    (when (instance? InterruptedException t)
-      (.interrupt (Thread/currentThread)))
-    (trove/log! {:level :error :id id :error t})
-    (catch Throwable _ nil)))
-
-(defn- create-connection-close-callback
-  [active-connection-count_ ^AtomicLongArray counts worker-idx]
-  (let [worker-idx (long worker-idx)
-        cb (fn [_]
-             (try
-               (.decrementAndGet ^AtomicLong active-connection-count_)
-               (.decrementAndGet counts (int worker-idx))
-               (h2o/conn-limit-release)
-               (catch Throwable t
-                 (log-callback-failure! ::connection-close-callback-failed t))))]
-    {::connection-close-cb cb
-     ::connection-close-cb-ptr (mem/callback (mem/auto-arena) cb [:pointer] :void)
-     ::accept-failure-run {:started (AtomicLong. Long/MIN_VALUE)
-                           :failed-worker? (AtomicBoolean.)}}))
-
-(def ^:const accept-failure-run-limit-nanos
-  "How long a run of failed accepts, from its first failure to the next
-  completed accept, may last before the worker is failed."
-  1000000000)
-
-(defn- now-nanos
-  []
-  (System/nanoTime))
-
-(defn- attempt!
-  [f]
-  (try (f) (catch Throwable _ nil)))
-
-(defn- undo-failed-accept!
-  "Gives back what an accept took before it failed at `stage`. From `:closable`
-  on, closing the socket runs its close callback, which releases the slot and
-  the counts; at `:handed` H2O has the socket and nothing is given back."
-  [stage sock-ptr ^AtomicLong active-connection-count_ ^AtomicLongArray counts worker-idx]
-  (when (= :counted stage)
-    (attempt! #(.decrementAndGet active-connection-count_))
-    (attempt! #(.decrementAndGet counts (int worker-idx))))
-  (when (#{:limited :counted} stage)
-    (attempt! h2o/conn-limit-release))
-  (when (#{:accepted :limited :counted :closable} stage)
-    (attempt! #(h2o/socket-close sock-ptr))))
-
-(defn- end-accept-failure-run!
-  [{:keys [^AtomicLong started ^AtomicBoolean failed-worker?]}]
-  (.set started Long/MIN_VALUE)
-  (.set failed-worker? false))
-
-(defn- accept-failed!
-  "Stops `listener-ptr` for this event-loop turn after a failed accept of the
-  worker at `worker-idx`. The first failure of a run starts it and is logged;
-  when the run has lasted [[accept-failure-run-limit-nanos]], the worker is
-  failed once."
-  [^AtomicReferenceArray workers worker-idx
-   {:keys [^AtomicLong started ^AtomicBoolean failed-worker?]} listener-ptr ^Throwable t]
-  (attempt! #(h2o/socket-read-stop listener-ptr))
-  (attempt!
-   #(let [now (now-nanos)]
-      (if (= Long/MIN_VALUE (.get started))
-        (do (.set started now)
-            (log-callback-failure! ::accept-callback-failed t))
-        (when (and (>= (- now (.get started)) accept-failure-run-limit-nanos)
-                   (.compareAndSet failed-worker? false true))
-          (let [worker (.get workers (int worker-idx))]
-            (log-callback-failure! ::accept-failures-failed-worker t)
-            (when-let [fail (:on-native-failure! worker)]
-              (fail worker t))))))))
-
-(defn- create-accept-callback
-  [accept-ctx-ptr {::keys [connection-close-cb-ptr accept-failure-run]}
-   active-connection-count_ ^AtomicLongArray counts workers worker-idx]
-  (let [worker-idx (long worker-idx)
-        accept-cb (fn [listener-ptr _err-ptr]
-                    (let [stage_ (volatile! nil)
-                          sock_ (volatile! nil)]
-                      (try
-                        (if-not (at-minimum? (.get counts (int worker-idx)) counts)
-                          (h2o/socket-read-stop listener-ptr)
-                          (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
-                            (when-not (mem/null? sock-ptr)
-                              (vreset! sock_ sock-ptr)
-                              (vreset! stage_ :accepted)
-                              (if (pos? (h2o/conn-limit-try-acquire))
-                                (do
-                                  (vreset! stage_ :limited)
-                                  (.incrementAndGet ^AtomicLong active-connection-count_)
-                                  (let [own (.incrementAndGet counts (int worker-idx))]
-                                    (vreset! stage_ :counted)
-                                    (h2o/socket-set-on-close sock-ptr connection-close-cb-ptr mem/null)
-                                    (vreset! stage_ :closable)
-                                    (h2o/h2o-accept accept-ctx-ptr sock-ptr)
-                                    (vreset! stage_ :handed)
-                                    (end-accept-failure-run! accept-failure-run)
-                                    (when (at-minimum? own counts)
-                                      (wake-other-workers! workers worker-idx))))
-                                (do
-                                  (vreset! stage_ nil)
-                                  (h2o/socket-close sock-ptr))))))
-                        (catch Throwable t
-                          (undo-failed-accept! @stage_ @sock_ active-connection-count_
-                                               counts worker-idx)
-                          (accept-failed! workers worker-idx accept-failure-run listener-ptr t)))))]
-    {::accept-cb accept-cb
-     ::accept-cb-ptr (mem/callback (mem/auto-arena) accept-cb [:pointer :pointer] :void)}))
 
 (defn- config->flat-globalconf-t
   [config]
@@ -398,32 +251,6 @@
      ::on-request-cleanup-cb on-request-cleanup-cb
      ::handler handler}))
 
-(defn- update-listener-state!
-  "Starts or stops reading this worker's listener sockets by the global
-  connection limit and the connection spread rule."
-  [{:keys [listener-socks accept-callbacks max-connections worker-connection-counts
-           worker-idx accepting-workers limit-waiting]}]
-  (let [^AtomicLongArray counts worker-connection-counts
-        ^AtomicBoolean limit-waiting limit-waiting
-        worker-idx (long worker-idx)
-        limit-allows? (or (zero? max-connections)
-                          (< (h2o/conn-limit-current) max-connections)
-                          (do (.set limit-waiting true)
-                              (< (h2o/conn-limit-current) max-connections)))
-        _ (when (and limit-allows? (.get limit-waiting) (.compareAndSet limit-waiting true false))
-            (wake-other-workers! accepting-workers worker-idx))
-        should-accept? (and limit-allows?
-                            (at-minimum? (.get counts (int worker-idx)) counts))]
-    (doseq [listener-idx (range (count listener-socks))]
-      (let [sock-ptr (nth listener-socks listener-idx)
-            accept-callback (nth accept-callbacks listener-idx)]
-        (when-not (mem/null? sock-ptr)
-          (if should-accept?
-            (when (zero? (h2o/socket-reading? sock-ptr))
-              (h2o/socket-read-start sock-ptr accept-callback))
-            (when-not (zero? (h2o/socket-reading? sock-ptr))
-              (h2o/socket-read-stop sock-ptr))))))))
-
 (defn- has-active-http3-connections?
   [http3-ctx]
   (and http3-ctx
@@ -456,7 +283,7 @@
 (defn- worker-native-failure! [worker cause]
   (when (and (.compareAndSet ^AtomicReference (:native-failure_ worker) nil cause)
              (not (identical? cause (.get ^AtomicReference (:termination-cause_ worker)))))
-    (log-callback-failure! ::worker-failed cause))
+    (accept/log-callback-failure! ::worker-failed cause))
   (.set ^AtomicBoolean (:accepting?_ worker) false)
   (.set ^AtomicBoolean (:running?_ worker) false)
   (mailbox/close! (:mailbox worker))
@@ -653,234 +480,18 @@
                       shutting? 10
                       :else base-wait)]
         (when-not shutting?
-          (update-listener-state! state))
+          (accept/update-listener-state! state))
         (h2o/evloop-run loop-ptr (cond
                                    (pos? (p/count-msgs worker)) 0
                                    tasks-queued? (min 1 wait-ms)
                                    :else wait-ms))))
     stage))
 
-(defn http3-enabled?
-  [listener]
-  (boolean
-   (when-let [tls (:tls listener)]
-     (and (map? tls)
-          (not= false (:http3? tls))))))
-
-(defn- x509-certificate->pem
-  [^X509Certificate cert]
-  (let [line-separator (byte-array [(byte 10)])
-        encoder (Base64/getMimeEncoder 64 line-separator)
-        cert-b64 (.encodeToString encoder (.getEncoded cert))]
-    (str "-----BEGIN CERTIFICATE-----\n"
-         cert-b64
-         "\n-----END CERTIFICATE-----\n")))
-
-(defn- certificate->pem
-  [certificate]
-  (cond
-    (string? certificate)
-    certificate
-
-    (instance? X509Certificate certificate)
-    (x509-certificate->pem certificate)
-
-    :else
-    (throw (ex-info "Unsupported certificate value in TLS lookup bundle."
-                    {:certificate-type (some-> certificate class .getName)}))))
-
-(defn- private-key->pem
-  [private-key]
-  (cond
-    (nil? private-key)
-    nil
-
-    (string? private-key)
-    private-key
-
-    :else
-    (clave-certificate/private-key->pem private-key)))
-
-(defn- clave-bundle->tls-material
-  [bundle]
-  (let [certificates (:certificate bundle)
-        cert-chain (cond
-                     (nil? certificates) nil
-                     (sequential? certificates) certificates
-                     :else [certificates])
-        private-key-pem (private-key->pem (:private-key bundle))]
-    (when (and (seq cert-chain) private-key-pem)
-      {:cert-chain-pem (apply str (map certificate->pem cert-chain))
-       :private-key-pem private-key-pem})))
-
-(defn- read-certificates
-  [cert-file]
-  ;; Parse from in-memory bytes so certificate loading does not depend on
-  ;; FileInputStream close semantics during startup or reload.
-  (with-open [in (java.io.ByteArrayInputStream.
-                  (java.nio.file.Files/readAllBytes
-                   (.toPath (io/file cert-file))))]
-    (vec (.generateCertificates (CertificateFactory/getInstance "X.509") in))))
-
-(defn- certificate-subject-names
-  [^X509Certificate certificate]
-  (let [sans (or (.getSubjectAlternativeNames certificate) [])
-        san-names (->> sans
-                       (keep (fn [entry]
-                               (let [entry-type (.get ^java.util.List entry 0)
-                                     value (.get ^java.util.List entry 1)]
-                                 (when (or (= entry-type 2)
-                                           (= entry-type 7))
-                                   (str value)))))
-                       distinct
-                       vec)]
-    (if (seq san-names)
-      san-names
-      (when-let [[_ cn] (re-find #"CN=([^,]+)"
-                                 (.getName (.getSubjectX500Principal certificate)))]
-        [cn]))))
-
-(defn- wildcard-subject-name?
-  [subject-name]
-  (and (string? subject-name)
-       (str/starts-with? subject-name "*.")))
-
-(defn- subject-name-matches-hostname?
-  [subject-name hostname]
-  (cond
-    (or (nil? subject-name) (nil? hostname))
-    false
-
-    (= subject-name hostname)
-    true
-
-    (wildcard-subject-name? subject-name)
-    (let [suffix (subs subject-name 1)
-          hostname-parts (str/split hostname #"\.")
-          suffix-parts (str/split (subs subject-name 2) #"\.")]
-      (and (str/ends-with? hostname suffix)
-           (= (count hostname-parts)
-              (inc (count suffix-parts)))))
-
-    :else
-    false))
-
-(defn- tls-material-from-files
-  [cert-file key-file]
-  (let [certificates (read-certificates cert-file)]
-    {:names (or (some-> certificates first certificate-subject-names)
-                [])
-     :material {:cert-chain-pem (slurp cert-file)
-                :private-key-pem (slurp key-file)}}))
-
-(defn- directory-pem-pair
-  [^File dir]
-  (let [cert-pem (io/file dir "cert.pem")
-        key-pem (io/file dir "key.pem")
-        fullchain-pem (io/file dir "fullchain.pem")
-        privkey-pem (io/file dir "privkey.pem")]
-    (cond
-      (and (.isFile cert-pem) (.isFile key-pem))
-      {:cert-file (.getPath cert-pem)
-       :key-file (.getPath key-pem)}
-
-      (and (.isFile fullchain-pem) (.isFile privkey-pem))
-      {:cert-file (.getPath fullchain-pem)
-       :key-file (.getPath privkey-pem)}
-
-      :else
-      nil)))
-
-(defn- load-folder-tls-materials
-  [path]
-  (->> (file-seq (io/file path))
-       (filter #(.isDirectory ^File %))
-       (keep directory-pem-pair)
-       (mapv (fn [{:keys [cert-file key-file]}]
-               (tls-material-from-files cert-file key-file)))))
-
-(defn- load-static-tls-materials
-  [config]
-  (->> (get-in config [:tls :certificates :load])
-       (mapcat (fn [{:keys [type path cert-file key-file]}]
-                 (case type
-                   :folder (load-folder-tls-materials path)
-                   :pem [(tls-material-from-files cert-file key-file)]
-                   [])))
-       vec))
-
-(defn- first-static-tls-identity
-  [config]
-  (some (fn [{:keys [type path cert-file key-file]}]
-          (case type
-            :pem
-            (when (and cert-file key-file)
-              {:cert-file cert-file
-               :key-file key-file})
-
-            :folder
-            (some->> (file-seq (io/file path))
-                     (filter #(.isDirectory ^File %))
-                     (keep directory-pem-pair)
-                     first)
-
-            nil))
-        (get-in config [:tls :certificates :load])))
-
-(defn- tls-callback-required?
-  [config]
-  (boolean
-   (some (fn [[_ entrypoint]]
-           (map? (:tls entrypoint)))
-         (:entrypoints config))))
-
-(defn- build-tls-lookup-fn
-  [config cert-runtime]
-  (let [static-materials (load-static-tls-materials config)
-        fallback-material (some-> static-materials first :material)
-        fallback-subject-name (first (:subject-names cert-runtime))
-        cert-lookup-fn
-        (or (:lookup-fn cert-runtime)
-            (let [lookup-certificate clave-adapter/lookup-certificate]
-              (fn [hostname]
-                (lookup-certificate cert-runtime hostname))))]
-    (fn [hostname]
-      (let [sni-hostname (when (and (string? hostname)
-                                    (not (.isEmpty ^String hostname)))
-                           hostname)
-            static-match (when sni-hostname
-                           (some (fn [{:keys [names material]}]
-                                   (when (some #(subject-name-matches-hostname? % sni-hostname)
-                                               names)
-                                     material))
-                                 static-materials))]
-        (cond
-          static-match
-          static-match
-
-          sni-hostname
-          (some-> (cert-lookup-fn sni-hostname)
-                  clave-bundle->tls-material)
-
-          fallback-material
-          fallback-material
-
-          fallback-subject-name
-          (some-> (cert-lookup-fn fallback-subject-name)
-                  clave-bundle->tls-material)
-
-          :else
-          (do
-            (trove/log! {:level :trace
-                         :id ::tls-lookup-no-sni-miss
-                         :data {}})
-            nil))))))
-
 (defn- init-tls-lookup-state
   [{::keys [config cert-runtime] :as state}]
   (try
-    (if (tls-callback-required? config)
-      (let [lookup-fn (build-tls-lookup-fn config cert-runtime)
+    (if (tls/tls-callback-required? config)
+      (let [lookup-fn (tls/build-tls-lookup-fn config cert-runtime)
             callback-refs (h2o/build-tls-lookup-callback lookup-fn)]
         (assoc state
                ::tls-lookup-fn lookup-fn
@@ -915,12 +526,12 @@
 (defn- create-http3-contexts
   [listeners config config-ptr ticket-mgr-ptr ticket-lifetime-seconds tls-lookup-callback-ptr
    cleanup-state_]
-  (let [{:keys [cert-file key-file]} (first-static-tls-identity config)]
+  (let [{:keys [cert-file key-file]} (tls/first-static-tls-identity config)]
     (try
       (into {}
             (keep-indexed
              (fn [idx listener]
-               (when (http3-enabled? listener)
+               (when (tls/http3-enabled? listener)
                  (let [ptls-ctx (h2o/http3-create-ptls-ctx cert-file
                                                            key-file
                                                            (or tls-lookup-callback-ptr mem/null)
@@ -969,7 +580,7 @@
      (vec
       (for [listener-idx (range (count listeners))]
         (let [listener (nth listeners listener-idx)]
-          (when (http3-enabled? listener)
+          (when (tls/http3-enabled? listener)
             (let [{:keys [quicly-ctx]} (get http3-contexts listener-idx)
                   listener-claim (or (get listener-claims
                                           (listen/listener-key
@@ -1008,7 +619,7 @@
   (->> listeners
        (mapcat (fn [listener]
                  (cond-> [(listen/listener-key listener)]
-                   (http3-enabled? listener)
+                   (tls/http3-enabled? listener)
                    (conj (listen/listener-key
                           (assoc listener :transport :udp))))))
        distinct
@@ -1144,7 +755,7 @@
                          arena))
                       (range slot-count)))
               response-receivers)
-        on-close-callbacks (mapv #(create-connection-close-callback
+        on-close-callbacks (mapv #(accept/create-connection-close-callback
                                    active-connection-count_ worker-connection-counts %)
                                  (range n-workers))]
     (assoc state
@@ -1254,14 +865,14 @@
                                                    (get entrypoint-hosts
                                                         (:entrypoint listener))
                                                    ssl-ctx-ptr)
-                 accept-callback (create-accept-callback
+                 accept-callback (accept/create-accept-callback
                                   accept-ctx
                                   (nth on-close-callbacks thread-idx)
                                   active-connection-count_
                                   worker-connection-counts
                                   accepting-workers
                                   thread-idx)
-                 accept-callback-ptr (::accept-cb-ptr accept-callback)
+                 accept-callback-ptr (::accept/accept-cb-ptr accept-callback)
                  sock-ptr (h2o/create-socket-for-loop
                            (nth loops thread-idx)
                            (nth dup-fds thread-idx)
@@ -1361,7 +972,7 @@
                                      (int thread-idx) Long/MAX_VALUE)
                                (let [status (.get ^AtomicReferenceArray worker-statuses (int thread-idx))]
                                  (withdraw-http3-worker! status (:http3-ctxs worker-state))
-                                 (wake-other-workers! accepting-workers thread-idx)
+                                 (accept/wake-other-workers! accepting-workers thread-idx)
                                  (publish-status! worker-state (assoc status :failure cause))))))
                          :discard-command! (fn [[op _ _ st record]]
                                              (when (= :h2o/output op)

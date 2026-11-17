@@ -14,6 +14,7 @@
    [ol.busker.config :as config]
    [ol.busker.fixed-final :as fixed-final]
    [ol.busker.generation :as generation]
+   [ol.busker.generation.accept :as accept]
    [ol.busker.native :as h2o]
    [ol.busker.request :as request]
    [ol.busker.response :as response]
@@ -170,13 +171,13 @@
         calls (atom [])
         record (fn [k] (fn [& _] (swap! calls conj k) nil))
         close-installed? (atom false)
-        per-worker (#'generation/create-connection-close-callback active counts 0)
+        per-worker (#'accept/create-connection-close-callback active counts 0)
         sock (ffi/alloc (ffi/auto-arena) 8)
         outcome_ (atom nil)
         clock_ (atom 0)
-        {::generation/keys [accept-cb]}
-        (#'generation/create-accept-callback ::accept-ctx per-worker active counts workers 0)
-        defaults {#'generation/now-nanos (fn [] (* 1000000 @clock_))
+        {::accept/keys [accept-cb]}
+        (#'accept/create-accept-callback ::accept-ctx per-worker active counts workers 0)
+        defaults {#'accept/now-nanos (fn [] (* 1000000 @clock_))
                   #'h2o/socket-read-stop (record :read-stop)
                   #'h2o/evloop-socket-accept (fn [_] sock)
                   #'h2o/conn-limit-try-acquire (fn []
@@ -191,7 +192,7 @@
                                        (swap! calls conj :socket-close)
                                        (when @close-installed?
                                          (reset! close-installed? false)
-                                         ((::generation/connection-close-cb per-worker) sock)))}
+                                         ((::accept/connection-close-cb per-worker) sock)))}
         [_ events]
         (with-redefs-fn (merge defaults natives)
           #(capture-logs (fn []
@@ -202,7 +203,7 @@
     {:events (mapv :id events)
      :worker-failures @worker-failures
      :in-run? (not= Long/MIN_VALUE
-                    (.get ^AtomicLong (:started (::generation/accept-failure-run per-worker))))
+                    (.get ^AtomicLong (:started (::accept/accept-failure-run per-worker))))
      :calls (frequencies @calls)
      :active (.get active)
      :count (.get counts 0)}))
@@ -218,7 +219,7 @@
     (is (= 0 count))
     (is (= {:acquire 2 :release 2 :socket-close 2 :read-stop 2} calls))
     (is (= 0 worker-failures))
-    (is (= [::generation/accept-callback-failed] events)
+    (is (= [::accept/accept-callback-failed] events)
         "Only the first failure of a run is logged.")))
 
 (deftest failed-h2o-accept-closes-the-socket-and-its-close-callback-gives-back
@@ -235,7 +236,7 @@
                       (fn [_] (throw (IllegalStateException. "accept failed")))})]
     (is (= {:read-stop 1} calls))
     (is (= [0 0] [active count]))
-    (is (= [::generation/accept-callback-failed] events))))
+    (is (= [::accept/accept-callback-failed] events))))
 
 (deftest failed-accepts-that-clear-leave-the-worker-serving
   (let [{:keys [events worker-failures in-run? calls active count]}
@@ -244,14 +245,14 @@
     (is (false? in-run?) "The completed accept ends the run.")
     (is (= [1 1] [active count]) "Only the completed connection is counted.")
     (is (= 1 (- (:acquire calls) (:release calls))) "Only its slot is taken.")
-    (is (= [::generation/accept-callback-failed] events) "One log line for the run.")))
+    (is (= [::accept/accept-callback-failed] events) "One log line for the run.")))
 
 (deftest failed-accepts-that-last-a-second-fail-the-worker-once
   (let [{:keys [events worker-failures active count]}
         (run-accepts (map (fn [ms] [accept-failure ms]) [0 400 999 1000 1500 2000]) {})]
     (is (= 1 worker-failures))
     (is (= [0 0] [active count]))
-    (is (= [::generation/accept-callback-failed ::generation/accept-failures-failed-worker]
+    (is (= [::accept/accept-callback-failed ::accept/accept-failures-failed-worker]
            events)
         "The run is logged once, and failing the worker once more.")))
 
@@ -263,14 +264,14 @@
 
 (deftest connection-close-callback-contains-and-logs-errors
   (let [failure (IllegalStateException. "release failed")
-        {::generation/keys [connection-close-cb]}
-        (#'generation/create-connection-close-callback (AtomicLong. 1)
-                                                       (AtomicLongArray. 1) 0)
+        {::accept/keys [connection-close-cb]}
+        (#'accept/create-connection-close-callback (AtomicLong. 1)
+                                                   (AtomicLongArray. 1) 0)
         [result events]
         (with-redefs [h2o/conn-limit-release (fn [] (throw failure))]
           (capture-logs #(connection-close-cb ffi/null)))]
     (is (nil? result))
-    (is (= [{:id ::generation/connection-close-callback-failed :error failure}]
+    (is (= [{:id ::accept/connection-close-callback-failed :error failure}]
            events))))
 
 ;; Body, proceed and stop callbacks

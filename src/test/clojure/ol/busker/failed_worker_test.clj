@@ -7,6 +7,7 @@
    [ol.busker.buffer-pool :as bp]
    [ol.busker.config :as config]
    [ol.busker.generation :as generation]
+   [ol.busker.generation.accept :as accept]
    [ol.busker.internal.protocols :as p]
    [ol.busker.listen :as listen]
    [ol.busker.native :as h2o]
@@ -72,8 +73,8 @@
   for the thread to end."
   [instance idx]
   (let [worker (nth (::generation/workers instance) idx)
-        update-listener-state! @#'generation/update-listener-state!]
-    (with-redefs-fn {#'generation/update-listener-state!
+        update-listener-state! @#'accept/update-listener-state!]
+    (with-redefs-fn {#'accept/update-listener-state!
                      (fn [state]
                        (when (= idx (:worker-idx state))
                          (throw (ex-info "simulated worker failure" {})))

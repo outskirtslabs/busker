@@ -4,6 +4,7 @@
    [clojure.test :refer [deftest is testing]]
    [ol.busker :as busker]
    [ol.busker.generation :as generation]
+   [ol.busker.generation.accept :as accept]
    [ol.busker.test-utils :as util])
   (:import
    [java.io ByteArrayOutputStream]
@@ -12,7 +13,7 @@
    [java.util.concurrent.atomic AtomicLongArray]))
 
 (deftest at-minimum-rule
-  (let [at-minimum? #'generation/at-minimum?
+  (let [at-minimum? #'accept/at-minimum?
         counts (fn [& xs] (AtomicLongArray. (long-array xs)))]
     (testing "equal counts"
       (is (at-minimum? 0 (counts 0 0 0 0)))
