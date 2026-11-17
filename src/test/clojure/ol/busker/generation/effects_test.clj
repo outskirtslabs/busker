@@ -40,6 +40,41 @@
     (is (not-any? #{ptls-1} @freed_) "the PTLS context that the QUIC context needs stays")
     (is (every? (set @freed_) [quicly-0 ptls-0]))))
 
+(deftest an-encrypt-ticket-is-freed-once-test
+  (let [[ptls quicly ticket mgr] (map #(MemorySegment/ofAddress %) [1 2 3 4])
+        g {::generation/config {:listeners [{:port 1 :tls {}}]}
+           ::generation/native-ticket-mgr mgr}
+        run (fn [set-tickets-rc quicly]
+              (let [freed_ (atom [])
+                    error (with-redefs [h2o/http3-create-ptls-ctx (constantly ptls)
+                                        h2o/ticket-manager-create-encrypt-ticket (constantly ticket)
+                                        h2o/ptls-ctx-set-tickets (constantly set-tickets-rc)
+                                        h2o/http3-create-quicly-ctx (constantly quicly)
+                                        h2o/ticket-manager-set-quic-tag (constantly nil)
+                                        h2o/http3-free-quicly-ctx #(swap! freed_ conj [:quicly %])
+                                        h2o/http3-free-ptls-ctx #(swap! freed_ conj [:ptls %])
+                                        h2o/free-encrypt-ticket #(swap! freed_ conj [:ticket %])]
+                            (try
+                              (let [{:keys [acquire release]} (:h3-contexts effects/table)]
+                                (release (acquire g nil) 0))
+                              nil
+                              (catch Throwable t t)))]
+                {:error error :freed @freed_}))]
+    (testing "a refused encrypt-ticket is freed once"
+      (let [{:keys [error freed]} (run -1 quicly)]
+        (is (some? error))
+        (is (= 1 (count (filter #{[:ticket ticket]} freed))))
+        (is (= [[:ptls ptls]] (remove #{[:ticket ticket]} freed)))))
+    (testing "an accepted encrypt-ticket is freed only with the ptls context"
+      (let [{:keys [error freed]} (run 0 quicly)]
+        (is (nil? error))
+        (is (= #{[:quicly quicly] [:ptls ptls]} (set freed)))
+        (is (= 2 (count freed)))))
+    (testing "an accepted encrypt-ticket is freed with the ptls context when a later step fails"
+      (let [{:keys [error freed]} (run 0 nil)]
+        (is (some? error))
+        (is (= [[:ptls ptls]] freed))))))
+
 (deftest a-release-of-several-items-tries-every-item-test
   (let [[a b c] (map #(MemorySegment/ofAddress %) [1 2 3])
         tcp (fn [port] {:transport :tcp :port port})]

@@ -389,6 +389,7 @@
             _ (when (and encrypt-ticket
                          (not (zero? (h2o/ptls-ctx-set-tickets ptls-ctx encrypt-ticket
                                                                ticket-lifetime-seconds 8192))))
+                (h2o/free-encrypt-ticket encrypt-ticket)
                 (throw (ex-info "Failed to set session tickets for HTTP/3" {:listener-index idx})))
             quicly-ctx (h2o/http3-create-quicly-ctx ptls-ctx config-ptr)]
         (when (or (nil? quicly-ctx) (mem/null? quicly-ctx))

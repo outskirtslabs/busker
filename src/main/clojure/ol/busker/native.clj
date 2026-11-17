@@ -1370,6 +1370,11 @@
   "clj_ticket_manager_create_encrypt_ticket"
   [:pointer :int] :pointer)
 
+(defcfn free-encrypt-ticket
+  "Free an encrypt-ticket callback that [[ptls-ctx-set-tickets]] refused."
+  "clj_free_encrypt_ticket"
+  [:pointer] :void)
+
 (defcfn ptls-ctx-set-tickets
   "Configure ptls context for session tickets.
    Sets encrypt_ticket callback, ticket lifetime, and max early data size.

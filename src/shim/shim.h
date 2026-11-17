@@ -619,6 +619,10 @@ clj_encrypt_ticket_t *clj_ticket_manager_create_encrypt_ticket(
     clj_ticket_manager_t *mgr,
     int is_quic);
 
+/* Free an encrypt_ticket that clj_ptls_ctx_set_tickets refused. NULL is a
+   no-op. */
+void clj_free_encrypt_ticket(clj_encrypt_ticket_t *encrypt_ticket);
+
 /* Configure ptls context for session tickets.
    Sets encrypt_ticket callback, ticket lifetime, and max early data size.
    ctx must come from clj_h2o_create_ptls_ctx. Call it once per context,

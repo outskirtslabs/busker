@@ -88,7 +88,7 @@ static void ptls_with_session_tickets_set_twice(void) {
   CHECK(clj_ptls_ctx_set_tickets(ptls, second, 60, 0) == -1);
   CHECK(ptls->encrypt_ticket == &first->super);
   CHECK(ptls->ticket_lifetime == 3600);
-  free(second);
+  clj_free_encrypt_ticket(second);
   clj_h2o_free_ptls_ctx(ptls);
 }
 

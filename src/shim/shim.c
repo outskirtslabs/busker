@@ -4660,6 +4660,10 @@ clj_encrypt_ticket_t *clj_ticket_manager_create_encrypt_ticket(
     return enc;
 }
 
+void clj_free_encrypt_ticket(clj_encrypt_ticket_t *encrypt_ticket) {
+    free(encrypt_ticket);
+}
+
 int clj_ptls_ctx_set_tickets(
     ptls_context_t *ctx,
     clj_encrypt_ticket_t *encrypt_ticket,
