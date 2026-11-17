@@ -388,7 +388,8 @@
         load-result (load-keys-result store)]
     (cond
       (= :storage-error (:status load-result))
-      current-snapshot
+      (do (trove/log! {:level :warn :id ::store-load-failed :error (:exception load-result)})
+          current-snapshot)
 
       (and (= :ok (:status load-result))
            (not (snapshot-needs-rotation? (:snapshot load-result)
@@ -401,12 +402,13 @@
         (with-store-lock
           store
           (fn []
-            (let [{:keys [status snapshot]} (load-keys-result store)
+            (let [{:keys [status snapshot exception]} (load-keys-result store)
                   base-snapshot (case status
                                   :ok snapshot
                                   :missing current-snapshot
                                   :corrupt current-snapshot
-                                  :storage-error current-snapshot)
+                                  :storage-error (do (trove/log! {:level :warn :id ::store-load-failed :error exception})
+                                                     current-snapshot))
                   winner (if (snapshot-needs-rotation? base-snapshot
                                                        now-ms
                                                        lifetime-ms)
@@ -423,7 +425,8 @@
                         (not (same-snapshot? base-snapshot winner)))
                 (store-snapshot! store winner))
               winner)))
-        (catch Exception _
+        (catch Exception e
+          (trove/log! {:level :warn :id ::store-rotation-failed :error e})
           current-snapshot)))))
 
 (defn- rotation-check-jitter-ms

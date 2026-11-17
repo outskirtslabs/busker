@@ -29,7 +29,6 @@
    [ol.busker.response-serialization :as serialization]
    [taoensso.trove :as trove])
   (:import
-   [java.lang System$Logger$Level]
    [java.lang.foreign Arena MemorySegment ValueLayout]
    [java.lang.invoke VarHandle]
    [java.nio ByteBuffer]
@@ -204,10 +203,8 @@
   (try
     (pi/wake worker)
     (catch Throwable error
-      (try
-        (.log (System/getLogger "ol.busker.fixed-final") System$Logger$Level/ERROR
-              "Fixed response wake failed" error)
-        (catch Throwable _ nil)))))
+      (try (trove/log! {:level :error :id ::wake-failed :error error})
+           (catch Throwable _ nil)))))
 
 (defn- claim-once!
   [worker]

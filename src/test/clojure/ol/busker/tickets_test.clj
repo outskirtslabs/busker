@@ -5,7 +5,8 @@
    [clojure.test :refer [deftest is testing]]
    [ol.busker.tickets :as tickets]
    [ol.clave.storage :as storage]
-   [ol.clave.storage.file :as file-storage])
+   [ol.clave.storage.file :as file-storage]
+   [taoensso.trove :as trove])
   (:import
    java.nio.file.Files))
 
@@ -302,3 +303,63 @@
                     (key-set->edn (tickets/current-keys manager-b))))
           (finally
             (tickets/stop-key-manager! manager-b)))))))
+
+(defn- failing-once-store
+  "Returns `[store fail-next! loads_]`. Each load returns `snapshot`.
+  `(fail-next! op e)` makes the next `:load` or `:store` throw `e` once.
+  `loads_` counts the loads."
+  [snapshot]
+  (let [loads_ (atom 0)
+        failure_ (atom nil)
+        fail! (fn [op]
+                (let [[failing-op e :as failure] @failure_]
+                  (when (and (= op failing-op) (compare-and-set! failure_ failure nil))
+                    (throw e))))]
+    [(reify tickets/TicketKeyStore
+       (load-snapshot [_] (swap! loads_ inc) (fail! :load) snapshot)
+       (store-snapshot! [_ _] (fail! :store) nil)
+       (with-store-lock [_ f] (f)))
+     (fn [op e] (reset! failure_ [op e]))
+     loads_]))
+
+(defn- rotation-log-events
+  "Creates a key manager on a store that holds `snapshot`, makes the next `op`
+  of the store throw `failure`, and runs the rotation loop for some checks.
+  Returns `[level id error]` of each ticket log event."
+  [snapshot op failure]
+  (let [events (atom [])
+        [store fail-next! loads_] (failing-once-store snapshot)]
+    (with-redefs [tickets/sync-keys-to-native! (fn [_ _] nil)
+                  tickets/rotation-check-jitter-ms (constantly (- 1 tickets/rotation-check-interval-ms))
+                  trove/*log-fn* (fn [_ns _coords level id lazy_]
+                                   (when (= "ol.busker.tickets" (namespace id))
+                                     (swap! events conj [level id (:error (force lazy_))])))]
+      (let [manager (tickets/create-key-manager store ::native {:lifetime-seconds 86400})
+            _ (fail-next! op failure)
+            enough-loads (+ @loads_ 6)
+            deadline (+ (System/currentTimeMillis) 5000)]
+        (tickets/start-key-manager! manager)
+        (try
+          (while (and (< @loads_ enough-loads) (< (System/currentTimeMillis) deadline))
+            (Thread/sleep 1))
+          (finally
+            (tickets/stop-key-manager! manager)))))
+    @events))
+
+(deftest rotation-check-logs-a-store-load-failure-once-test
+  (let [failure (Exception. "store unavailable")
+        now-ms (System/currentTimeMillis)
+        current {:keys [(tickets/generate-key now-ms (* 86400 1000))]
+                 :last-rotation-ms now-ms
+                 :next-rotation-ms (+ now-ms 3600000)}]
+    (is (= [[:warn ::tickets/store-load-failed failure]]
+           (rotation-log-events current :load failure)))))
+
+(deftest rotation-check-logs-a-store-write-failure-once-test
+  (let [failure (Exception. "store unavailable")
+        now-ms (System/currentTimeMillis)
+        due {:keys [(tickets/generate-key (- now-ms (* 7 3600000)) (* 86400 1000))]
+             :last-rotation-ms (- now-ms 1000)
+             :next-rotation-ms (- now-ms 1)}]
+    (is (= [[:warn ::tickets/store-rotation-failed failure]]
+           (rotation-log-events due :store failure)))))

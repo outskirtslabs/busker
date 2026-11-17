@@ -12,7 +12,8 @@
    [ol.busker.protocols :as protocols]
    [ol.busker.response :as response]
    [ol.busker.response-queue :as response-queue]
-   [ol.busker.test-utils :as util])
+   [ol.busker.test-utils :as util]
+   [taoensso.trove :as trove])
   (:import
    [java.lang.foreign MemorySegment ValueLayout]
    [java.security MessageDigest]
@@ -620,20 +621,26 @@
                           [:body-len :content-length]))))))
 
 (deftest accepted-fixed-publication-survives-wake-failure
-  (let [worker {:response-slot-monitor (Object.)
-                :response-receiver-open?_ (AtomicBoolean. true)
-                :response-slots [:slot]
-                :response-slot-payload-capacity 64}
-        released?_ (atom false)]
-    (with-redefs [h2o/mt-response-publish (receiver-handle->long-fn (constantly 1))
-                  h2o/mt-response-abort (fn [& _] (throw (AssertionError. "published slot aborted")))
-                  h2o/mt-response-use-release (fn [_] (reset! released?_ true))
-                  pi/wake (fn [_] (throw (Exception. "wake failed")))]
-      (is (= :accepted
-             (#'fixed-final/prepare-and-publish!
-              worker [:receiver 65537] (constantly false) (fn [& _])
-              (fn [publish!] (publish!))))))
-    (is (true? @released?_))))
+  (with-open [arena (mem/confined-arena)]
+    (let [receiver (mem/alloc arena 1)
+          slot (mem/alloc arena (inc (mem/sizeof h2o/ffi-clj-fixed-response-slot-data-t)))
+          worker (direct-response-worker receiver [slot] 0)
+          failure (Exception. "wake failed")
+          released?_ (atom false)
+          logged_ (atom [])]
+      (with-redefs [h2o/mt-response-use-acquire (constantly 1)
+                    h2o/mt-response-try-claim (unary-long-fn (constantly 65537))
+                    h2o/mt-response-publish (receiver-handle->long-fn (constantly 1))
+                    h2o/mt-response-abort (fn [& _] (throw (AssertionError. "published slot aborted")))
+                    h2o/mt-response-use-release (fn [_] (reset! released?_ true))
+                    pi/wake (fn [_] (throw failure))
+                    trove/*log-fn* (fn [_ns _coords level id lazy_]
+                                     (swap! logged_ conj [level id (:error (force lazy_))]))]
+        (is (= :accepted
+               (fixed-final/publish-direct-response!
+                worker (direct-plan 1 1 200 [] 0 0 (byte-array 0) 0)))))
+      (is (true? @released?_))
+      (is (= [[:error ::fixed-final/wake-failed failure]] @logged_)))))
 
 (deftest fixed-producer-rejection-skips-callback
   (doseq [rejection [:closed :overloaded]]
