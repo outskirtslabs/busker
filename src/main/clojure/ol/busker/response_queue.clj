@@ -439,7 +439,10 @@
                     (prepare-record! st nil 0 nil (assoc opts :wait? true :body? true)
                                      receipt false true))
                   (catch Throwable t
-                    (fail! st t {:if-open? true}))
+                    ;; After a close, the fill path throws "Response closed". That is not an application error.
+                    (try (when (open? st)
+                           (trove/log! {:level :error :id :response/body-write-failed :error t}))
+                         (finally (fail! st t {:if-open? true}))))
                   (finally
                     (when-let [block @initial]
                       (bp/release! (:buffer-pool st) block)

@@ -12,7 +12,8 @@
    [ol.busker.request-dispatch :as request-dispatch]
    [ol.busker.response-queue :as queue]
    [ol.busker.test-utils :as util]
-   [ol.busker.worker-context :as worker-context])
+   [ol.busker.worker-context :as worker-context]
+   [taoensso.trove :as trove])
   (:import
    [java.net Socket]
    [java.nio.charset StandardCharsets]
@@ -97,6 +98,7 @@
   (doseq [index [h2o/CLJ_ENTRYPOINT_UNKNOWN 2 nil]]
     (let [executed_ (atom 0)
           installed_ (atom 0)
+          logged_ (atom [])
           executor (proxy [AbstractExecutorService] []
                      (execute [_] (swap! executed_ inc)))]
       (with-redefs [pi/running? (constantly true)
@@ -104,11 +106,13 @@
                     h2o/copy-request-context (constantly {:has-body 0 :entrypoint index})
                     h2o/install-request-dispatch (fn [& _] (swap! installed_ inc) 1)]
         (is (= h2o/CLJ_HANDLER_ERROR
-               (binding [*err* (java.io.StringWriter.)]
+               (binding [trove/*log-fn* (fn [_ns _coords level id lazy_]
+                                          (swap! logged_ conj [level id (:data (force lazy_))]))]
                  (request/on-request executor identity
                                      {:entrypoints {:http {} :admin {}}}
                                      identity ffi/null)))
             (str "index " index))
+        (is (= [[:error ::request/unknown-entrypoint {:index index}]] @logged_))
         (is (= [0 0] [@executed_ @installed_]))))))
 
 (deftest closed-required-proceed-fails-request-body-read

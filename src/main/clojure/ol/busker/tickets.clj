@@ -4,7 +4,8 @@
    [clojure.edn :as edn]
    [babashka.ffi :as mem]
    [ol.busker.native :as h2o]
-   [ol.clave.storage :as storage])
+   [ol.clave.storage :as storage]
+   [taoensso.trove :as trove])
   (:import
    java.nio.file.NoSuchFileException
    [java.security SecureRandom]))
@@ -447,8 +448,8 @@
             (replace-current-snapshot! service next-snapshot))))
       (catch InterruptedException _
         nil)
-      (catch Exception _
-        nil))))
+      (catch Exception e
+        (trove/log! {:level :warn :id ::rotation-failed :error e})))))
 
 (defn create-key-service
   "Create a key service map with store, rotation, and native sync."

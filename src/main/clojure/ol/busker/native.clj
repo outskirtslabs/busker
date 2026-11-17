@@ -394,13 +394,6 @@
   "clj_h2o_cancel_request"
   [:pointer] :int)
 
-(defn report-almost-fatal-error [msg e]
-  (binding [*out* *err*]
-    (tap> [msg e])
-    (println msg)
-    (when e
-      (.printStackTrace ^Throwable e ^java.io.PrintWriter *err*))))
-
 (defcfn create-handler*
   "Construct an H2O handler with its request and cleanup callbacks."
   "clj_h2o_create_handler"

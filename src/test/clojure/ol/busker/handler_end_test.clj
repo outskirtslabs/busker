@@ -6,9 +6,11 @@
    [clojure.test :refer [deftest is]]
    [ol.busker :as busker]
    [ol.busker.protocols :as p]
-   [ol.busker.test-utils :as util])
+   [ol.busker.request :as request]
+   [ol.busker.test-utils :as util]
+   [taoensso.trove :as trove])
   (:import
-   [java.io ByteArrayOutputStream InputStream]
+   [java.io ByteArrayOutputStream InputStream IOException]
    [java.net InetSocketAddress Socket SocketTimeoutException]
    [java.nio.charset StandardCharsets]))
 
@@ -17,6 +19,21 @@
 
 (defn- head! [emitter]
   (p/emit! emitter {:status 200 :headers {"content-type" "text/plain; charset=utf-8"}}))
+
+(defn- failing-stream
+  "Returns an InputStream that gives `partial` once, then throws."
+  []
+  (let [read? (volatile! false)]
+    (proxy [InputStream] []
+      (read
+        ([] (throw (UnsupportedOperationException.)))
+        ([^bytes b] (.read ^InputStream this b 0 (alength b)))
+        ([^bytes b off _len]
+         (when @read? (throw (IOException. "source failed")))
+         (vreset! read? true)
+         (let [data (.getBytes "partial" StandardCharsets/US_ASCII)]
+           (System/arraycopy data 0 b (int off) (alength data))
+           (alength data)))))))
 
 (defn- handler [{:keys [uri] emitter :ol.busker.request/emitter}]
   (case uri
@@ -34,6 +51,7 @@
                                               {:flush? true})
                                      (throw (ex-info "handler failed" {})))
     "/error" (throw (AssertionError. "handler failed"))
+    "/body-source-throws" {:status 200 :body (failing-stream)}
     "/handoff" (do (head! emitter)
                    (Thread/startVirtualThread
                     #(do (Thread/sleep 200)
@@ -135,3 +153,27 @@
       (doseq [[scheme proto port] [[:http :h1 port] [:https :h2 tls-port] [:https :h3 tls-port]]]
         (is (= {:exit 0 :status 200 :body "later"} (curl-exchange scheme proto port "/handoff"))
             (pr-str proto))))))
+
+(defn- logging-events
+  "Calls `f` with a trove backend that records `[level id error-message]` of
+  each event, and returns the events."
+  [f]
+  (let [events (atom [])]
+    (with-redefs [trove/*log-fn* (fn [_ns _coords level id lazy_]
+                                   (swap! events conj [level id (ex-message (:error (force lazy_)))]))]
+      (f))
+    @events))
+
+(deftest handler-error-is-logged-test
+  (with-server
+    (fn [port _]
+      (is (= [[:error ::request/handler-failed "handler failed"]]
+             (logging-events
+              #(is (= 500 (:status (curl-exchange :http :h1 port "/error"))))))))))
+
+(deftest body-source-error-after-the-head-is-logged-once-test
+  (with-server
+    (fn [port _]
+      (is (= [[:error :response/body-write-failed "source failed"]]
+             (logging-events
+              #(is (= [200 :closed] (http1-status-and-end port "/body-source-throws")))))))))

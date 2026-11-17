@@ -26,7 +26,8 @@
    [babashka.ffi :as mem]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
-   [ol.busker.response-serialization :as serialization])
+   [ol.busker.response-serialization :as serialization]
+   [taoensso.trove :as trove])
   (:import
    [java.lang System$Logger$Level]
    [java.lang.foreign Arena MemorySegment ValueLayout]
@@ -287,7 +288,10 @@
                 result))))
         (catch Throwable error
           (if @published?_
-            (do (wake-published! worker) :accepted)
+            (do (wake-published! worker)
+                (try (trove/log! {:level :error :id ::after-publication-failed :error error})
+                     (catch Throwable _ nil))
+                :accepted)
             (throw error)))
         (finally
           (try

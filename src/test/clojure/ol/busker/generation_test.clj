@@ -23,7 +23,8 @@
    [ol.busker.request-dispatch :as request-dispatch]
    [ol.busker.response-queue :as response-queue]
    [ol.busker.wake-endpoint :as wake-endpoint]
-   [ol.busker.test-utils :as util])
+   [ol.busker.test-utils :as util]
+   [taoensso.trove :as trove])
   (:import
    [java.lang.foreign Arena]
    [java.net InetSocketAddress Socket]
@@ -1831,6 +1832,43 @@
           (swap! @#'generation/failed-retirements_
                  (fn [retirements]
                    (vec (remove #(identical? generation-state %) retirements)))))))))
+
+(defn- await-ignoring-interrupts
+  "Waits up to 10 s for `latch` and ignores interrupts."
+  [^CountDownLatch latch]
+  (let [deadline (+ (System/nanoTime) 10000000000)]
+    (loop []
+      (when (and (pos? (.getCount latch)) (< (System/nanoTime) deadline))
+        (try (.await latch 100 TimeUnit/MILLISECONDS) (catch InterruptedException _ nil))
+        (recur)))))
+
+(deftest stop-logs-a-handler-that-ignores-the-interrupt-test
+  (let [port (util/free-port)
+        entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        instance (generation/start!
+                  (config/load!
+                   {:entrypoints {:http {:bind (str "127.0.0.1:" port) :tls false}}
+                    :dispatch [{:handler (fn [_]
+                                           (.countDown entered)
+                                           (await-ignoring-interrupts release)
+                                           {:status 200})}]})
+                  nil)
+        logged_ (atom [])]
+    (try
+      (future (util/curl :http nil port "/" :max-time 5))
+      (is (.await entered 5 TimeUnit/SECONDS))
+      (binding [trove/*log-fn* (fn [_ns _coords level id lazy_]
+                                 (when (= ::effects/executor-shutdown-timed-out id)
+                                   (swap! logged_ conj [level (:data (force lazy_))])
+                                   (.countDown release)))]
+        (try
+          (generation/stop! instance 200 TimeUnit/MILLISECONDS)
+          (catch clojure.lang.ExceptionInfo _ nil)))
+      (is (= [[:warn {:executor :request}]] @logged_))
+      (finally
+        (.countDown release)
+        (generation/stop! instance)))))
 
 (deftest native-callbacks-deliver-and-retire-request-state-test
   (let [port 18585

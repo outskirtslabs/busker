@@ -29,7 +29,8 @@
    [ol.busker.request :as request]
    [ol.busker.request-dispatch :as request-dispatch]
    [ol.busker.tickets :as tickets]
-   [ol.busker.wake-endpoint :as wake-endpoint])
+   [ol.busker.wake-endpoint :as wake-endpoint]
+   [taoensso.trove :as trove])
   (:import
    [java.lang AutoCloseable]
    [java.util.concurrent ExecutorService Executors RejectedExecutionException TimeUnit]
@@ -151,13 +152,19 @@
 
 ;;; Executor, arena, server configuration, loops
 
+(defn- warn-executor-timeout!
+  [executor-name]
+  (trove/log! {:level :warn :id ::executor-shutdown-timed-out
+               :msg "Executor tasks still run after shutdownNow"
+               :data {:executor executor-name}}))
+
 (defn- shutdown-executor!
-  [^ExecutorService executor ^long timeout-ns message]
+  [^ExecutorService executor ^long timeout-ns executor-name]
   (.shutdown executor)
   (when-not (.awaitTermination executor timeout-ns TimeUnit/NANOSECONDS)
     (.shutdownNow executor)
     (when-not (.awaitTermination executor timeout-ns TimeUnit/NANOSECONDS)
-      (println message))))
+      (warn-executor-timeout! executor-name))))
 
 (defn- close-callback-dispatcher
   [^ExecutorService executor]
@@ -623,7 +630,7 @@
     (some-> (:request-dispatch worker) request-dispatch/interrupt-remaining!))
   (.shutdownNow executor)
   (when-not (.awaitTermination executor timeout-ns TimeUnit/NANOSECONDS)
-    (println "Virtual thread request executor pool did not shutdown cleanly")))
+    (warn-executor-timeout! :request)))
 
 (defn join-workers!
   "Wakes the worker threads and waits up to `timeout-ns` for them to end."
@@ -657,7 +664,7 @@
                                       (Executors/newVirtualThreadPerTaskExecutor)))
                     :release (fn [g timeout-ns]
                                (shutdown-executor! (::g/close-callback-executor g) timeout-ns
-                                                   "Virtual thread close callback executor did not shutdown cleanly"))}
+                                                   :close-callback))}
    :arena {:acquire (fn [g _] (assoc g ::g/arena (mem/shared-arena)))
            :release (fn [g _] (.close ^AutoCloseable (::g/arena g)))}
    :config {:acquire acquire-config

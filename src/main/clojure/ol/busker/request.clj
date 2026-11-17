@@ -12,7 +12,8 @@
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.request-dispatch :as request-dispatch]
-   [ol.busker.response :as response])
+   [ol.busker.response :as response]
+   [taoensso.trove :as trove])
   (:import
    [java.io IOException]
    [java.nio ByteBuffer]
@@ -125,8 +126,7 @@
            :headers {"content-type" "text/plain; charset=utf-8"}
            :body "Server shutting down"})
         (catch Throwable e
-          (println "Handler error:" (.getMessage e))
-          (.printStackTrace e)
+          (trove/log! {:level :error :id ::handler-failed :error e})
           {:status 500
            :headers {"content-type" "text/plain; charset=utf-8"}
            :body "Internal Server Error"}))
@@ -163,10 +163,9 @@
 
         (nil? entrypoint)
         (do
-          (h2o/report-almost-fatal-error
-           (str "Rejected a request whose listener has no known entrypoint"
-                " [:ol.busker/unknown-entrypoint index=" (:entrypoint req-ctx) "]")
-           nil)
+          (trove/log! {:level :error :id ::unknown-entrypoint
+                       :msg "Rejected a request whose listener has no known entrypoint"
+                       :data {:index (:entrypoint req-ctx)}})
           h2o/CLJ_HANDLER_ERROR)
 
         :else
