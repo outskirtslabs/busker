@@ -68,6 +68,12 @@
   [state id]
   (update state :draining (partial filterv #(not= id (:generation-id %)))))
 
+(defn unawaited
+  "Records that the server stop does not await the drain of generation `id`,
+  so the drain logs its failed service stops."
+  [state id]
+  (update state :unawaited (fnil conj #{}) id))
+
 (defn- service-stops
   "Returns stop actions for the services of `generations` that no generation in
   `users` has."
@@ -220,7 +226,8 @@
 (defn- next-stop-step
   "Awaits each generation, then stops each service, then ends the stop with the
   first failure and the others as `:suppressed`. A generation without a drain
-  thread is stopped in place of the await."
+  thread is stopped in place of the await. An interrupt ends the await of a
+  drain, and [[unawaited]] records it."
   [{:keys [to-await to-stop kept] :as progress}]
   (cond
     (seq to-await)
@@ -236,6 +243,14 @@
 
     :else
     (go progress :end-stopped [:swap end-stopped kept])))
+
+(defn- awaited
+  "Continues the stop after the await of a generation. An error keeps the
+  generation listed."
+  [{:keys [awaiting] :as progress} error]
+  (next-stop-step (cond-> progress
+                    error (-> (update :failures conj error)
+                              (update :kept conj (:generation-id awaiting))))))
 
 (defn- next-drain-stop
   "Stops each service, then takes the generation off the list."
@@ -346,9 +361,24 @@
           (next-stop-step progress))))
 
     :await
-    (next-stop-step (cond-> progress
-                      error (-> (update :failures conj error)
-                                (update :kept conj (:generation-id (:awaiting progress))))))
+    (if (and (instance? InterruptedException error) (:drain (:awaiting progress)))
+      (go (assoc progress :interrupt error)
+          :unawaited [:swap unawaited (:generation-id (:awaiting progress))])
+      (awaited progress error))
+
+    ;; A drain that took its generation off the list before this swap gives
+    ;; its failures to this stop. Its result is ready, so the stop reads it.
+    :unawaited
+    (let [{:keys [awaiting interrupt]} progress]
+      (cond
+        error (awaited (update progress :failures conj interrupt) error)
+        (some #(= (:generation-id awaiting) (:generation-id %)) (:draining value))
+        (awaited progress interrupt)
+        :else (go (update progress :failures conj interrupt)
+                  :reawait [:await-drain awaiting])))
+
+    :reawait
+    (awaited progress error)
 
     :stop-service
     (next-stop-step (cond-> progress error (update :failures conj error)))
@@ -370,11 +400,14 @@
     (next-drain-stop (cond-> progress error (update :failures conj error)))
 
     ;; A server stop that began before this swap awaits this drain, so the
-    ;; failures go to it. With no stop running, they are logged.
+    ;; failures go to it. With no stop running, or when an interrupt ended the
+    ;; await, they are logged.
     :services-stopped
     (cond
       error (done progress {:error error :suppressed (:failures progress)})
-      (= :stopping (:phase value)) (done progress (failures-result (:failures progress)))
+      (and (= :stopping (:phase value))
+           (not (contains? (:unawaited value) (:generation-id generation))))
+      (done progress (failures-result (:failures progress)))
       :else (next-drain-log progress))
 
     :log-service
