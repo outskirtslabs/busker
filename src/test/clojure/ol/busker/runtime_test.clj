@@ -4,7 +4,10 @@
    [ol.busker.clave-adapter :as clave-adapter]
    [ol.busker.generation :as generation]
    [ol.busker.runtime :as runtime]
-   [ol.busker.test-utils :as util]))
+   [ol.busker.test-utils :as util])
+  (:import
+   [java.net InetSocketAddress ServerSocket]
+   [java.util.concurrent CountDownLatch TimeUnit]))
 
 (defn- invoke-on-virtual-thread
   [f]
@@ -160,6 +163,107 @@
   (let [e (try (runtime/start! "not-a-map") nil (catch Throwable t t))]
     (is (= "Failed to compile generation config" (ex-message e)))
     (is (= :validation (:stage (ex-data e))))))
+
+(defn- await-like-a-native-call
+  "Waits for `latch` and ignores interrupts, as a native call does. Keeps the
+  interrupt flag set when an interrupt came."
+  [^CountDownLatch latch]
+  (loop [interrupted? false]
+    (if (try
+          (.await latch)
+          true
+          (catch InterruptedException _
+            false))
+      (when interrupted?
+        (.interrupt (Thread/currentThread)))
+      (recur true))))
+
+(defn- spin-until
+  [pred]
+  (let [deadline (+ (System/nanoTime) 10000000000)]
+    (while (and (not (pred)) (< (System/nanoTime) deadline))
+      (Thread/onSpinWait))))
+
+(deftest an-interrupt-of-the-caller-during-start-still-gives-the-handle-test
+  (let [port (util/free-port)
+        start-generation generation/start!
+        activate generation/activate-http3-transports!
+        instance_ (promise)
+        activated_ (promise)
+        release (CountDownLatch. 1)
+        result_ (promise)
+        caller (Thread.
+                #(deliver result_
+                          (try
+                            (let [server (runtime/start!
+                                          {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                                                :tls false}}
+                                           :dispatch [{:handler (constantly {:status 200})}]})]
+                              {:server server
+                               :interrupted? (.isInterrupted (Thread/currentThread))})
+                            (catch Throwable t
+                              {:error t}))))]
+    (with-redefs [generation/start! (fn [& args]
+                                      (let [instance (apply start-generation args)]
+                                        (deliver instance_ instance)
+                                        (await-like-a-native-call release)
+                                        instance))
+                  generation/activate-http3-transports! (fn [instance]
+                                                          (try
+                                                            (activate instance)
+                                                            (finally
+                                                              (deliver activated_ true))))]
+      (.start caller)
+      (is (some? (deref instance_ 10000 nil)) "The start should bind the listeners")
+      (.interrupt caller)
+      (spin-until #(or (realized? result_)
+                       (and (not (.isInterrupted caller))
+                            (= Thread$State/WAITING (.getState caller)))))
+      (.countDown release)
+      (let [{:keys [server interrupted? error]} (deref result_ 10000 {:error ::timeout})]
+        (try
+          (is (nil? error))
+          (is (= :running (some-> server runtime/state :phase)))
+          (is (true? interrupted?) "start! should set the interrupt flag of the caller again")
+          (finally
+            (if server
+              (runtime/stop! server)
+              (when (deref activated_ 10000 false)
+                (generation/stop! @instance_)))))))))
+
+(deftest an-interrupt-of-the-caller-ends-a-start-that-waits-in-application-code-test
+  (let [port (util/free-port)
+        entered (CountDownLatch. 1)
+        never (CountDownLatch. 1)
+        result_ (promise)
+        caller (Thread.
+                #(deliver result_
+                          (try
+                            {:server (runtime/start!
+                                      {:entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                                            :tls false}}
+                                       :dispatch [{:handler (constantly {:status 200})
+                                                   :middleware [(fn [handler]
+                                                                  (.countDown entered)
+                                                                  (.await never)
+                                                                  handler)]}]})}
+                            (catch Throwable t
+                              {:error t
+                               :interrupted? (.isInterrupted (Thread/currentThread))}))))]
+    (.start caller)
+    (try
+      (is (.await entered 10 TimeUnit/SECONDS))
+      (.interrupt caller)
+      (let [{:keys [server error interrupted?]} (deref result_ 10000 {:timeout true})]
+        (when server
+          (runtime/stop! server))
+        (is (some? error) "start! should throw")
+        (is (true? interrupted?) "start! should set the interrupt flag of the caller again")
+        (is (with-open [socket (ServerSocket.)]
+              (.bind socket (InetSocketAddress. "127.0.0.1" (int port)))
+              true)))
+      (finally
+        (.countDown never)))))
 
 (deftest a-start-error-that-its-cleanup-throws-again-is-not-suppressed-in-itself-test
   (let [e (ex-info "simulated" {})

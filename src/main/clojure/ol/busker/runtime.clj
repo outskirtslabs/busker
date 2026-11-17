@@ -45,14 +45,39 @@
     (catch ExecutionException e
       (throw (.getCause e)))))
 
+(defn- await-to-end
+  "Waits until `result` is done, also when the thread is interrupted. Calls
+  `on-interrupt` for each interrupt of the wait. Sets the interrupt flag again
+  after the wait if an interrupt came."
+  [^Future result on-interrupt]
+  (loop [interrupted? false]
+    (let [outcome (try
+                    {:value (.get result)}
+                    (catch InterruptedException _
+                      (on-interrupt)
+                      nil)
+                    (catch ExecutionException e
+                      {:error (.getCause e)}))]
+      (if outcome
+        (do
+          (when interrupted?
+            (.interrupt (Thread/currentThread)))
+          (if-let [error (:error outcome)]
+            (throw error)
+            (:value outcome)))
+        (recur true)))))
+
+(defn- submit-lifecycle
+  ^Future [^ExecutorService executor f]
+  (.submit executor
+           ^Callable
+           (reify Callable
+             (call [_]
+               (f)))))
+
 (defn- call-on-lifecycle
-  [^ExecutorService executor f]
-  (await-lifecycle
-   (.submit executor
-            ^Callable
-            (reify Callable
-              (call [_]
-                (f))))))
+  [executor f]
+  (await-lifecycle (submit-lifecycle executor f)))
 
 (defn- memory-ticket-policy
   "Returns the policy of the in-memory ticket service that `compiled-config`
@@ -205,11 +230,26 @@
      :busker/state (atom (rt/initial-state generation listener-pool))}))
 
 (defn start!
-  "Start a new Busker server from `user-config`."
+  "Start a new Busker server from `user-config`.
+
+  An interrupt goes to the step of the start that runs. The start then fails
+  and cleans up, or runs to the end. The interrupt flag is set again when the
+  start is done."
   [user-config]
-  (let [executor (new-lifecycle-executor)]
+  (let [executor (new-lifecycle-executor)
+        runner (AtomicReference.)
+        result (submit-lifecycle executor
+                                 (fn []
+                                   (.set runner (Thread/currentThread))
+                                   (start-on-lifecycle! user-config executor)))]
     (try
-      (call-on-lifecycle executor #(start-on-lifecycle! user-config executor))
+      ;; An interrupt sent just after the start is done is cleared by the
+      ;; executor before its next task. No next task can come before start!
+      ;; returns the handle.
+      (await-to-end result
+                    #(when-let [^Thread thread (.get runner)]
+                       (when-not (.isDone result)
+                         (.interrupt thread))))
       (catch Throwable t
         (.shutdownNow ^ExecutorService executor)
         (throw t)))))
