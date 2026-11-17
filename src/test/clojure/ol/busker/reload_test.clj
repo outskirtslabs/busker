@@ -753,6 +753,40 @@
               (runtime/stop! server)
               (catch clojure.lang.ExceptionInfo _ nil))))))))
 
+(deftest stop-during-a-drain-service-stop-waits-for-it-and-throws-its-error-test
+  (let [port (util/free-port)
+        managed (fn [domain]
+                  (assoc (managed-http-config port (constantly {:status 200}))
+                         :tls {:certificates {:manage [domain]}
+                               :issuers [{:directory-url "https://acme.example/directory"}]}))
+        failure (ex-info "simulated stop failure" {})
+        old-runtime_ (promise)
+        entered (CountDownLatch. 1)
+        stopping (CountDownLatch. 1)
+        logged_ (atom [])]
+    (with-redefs [clave-adapter/start! (fn [plan] {:runtime-id (gensym "runtime") :managed-plan plan})
+                  clave-adapter/stop! (fn [runtime]
+                                        (when (identical? @old-runtime_ runtime)
+                                          (.countDown entered)
+                                          (.await stopping 10 TimeUnit/SECONDS)
+                                          (throw failure)))
+                  clave-adapter/wrap-handler (fn [handler _] handler)
+                  trove/*log-fn* (fn [_ns _coords _level id _lazy] (swap! logged_ conj id))]
+      (let [server (runtime/start! (managed "a.example"))
+            state (:busker/state server)]
+        (deliver old-runtime_ (:cert-automation (:active @state)))
+        (add-watch state ::stopping (fn [_ _ _ new-state]
+                                      (when (= :stopping (:phase new-state))
+                                        (.countDown stopping))))
+        (try
+          (is (= :activated (runtime/reload! server (managed "b.example"))))
+          (is (.await entered 10 TimeUnit/SECONDS) "the drain stops the old runtime")
+          (is (identical? failure (try (runtime/stop! server) nil (catch Throwable t t))))
+          (is (not-any? #{::runtime/service-stop-failed} @logged_))
+          (finally
+            (.countDown stopping)
+            (try (runtime/stop! server) (catch Throwable _ nil))))))))
+
 (deftest reload-returns-only-after-the-old-generation-stops-accepting-test
   (let [port (util/free-port)
         server (runtime/start! (response-config port (constantly {:status 200})))

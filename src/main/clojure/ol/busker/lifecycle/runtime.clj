@@ -57,6 +57,13 @@
           (partial mapv #(cond-> % (= id (:generation-id %)) (assoc :drain handle)))))
 
 (defn drained
+  "Marks draining generation `id` as stopped. It stays listed until its drain
+  thread has stopped the services that [[drained-stops]] gives."
+  [state id]
+  (update state :draining
+          (partial mapv #(cond-> % (= id (:generation-id %)) (assoc :drained? true)))))
+
+(defn services-stopped
   "Takes draining generation `id` off the list."
   [state id]
   (update state :draining (partial filterv #(not= id (:generation-id %)))))
@@ -76,12 +83,13 @@
 (defn drained-stops
   "Returns the stop actions that follow the drain of `generation`, from
   `state`, the result of [[drained]]. While the phase is `:running`, that is a
-  stop action for each service of `generation` that no listed generation has.
-  During a server stop it is empty, because the stop stops the services of
-  every generation it drains."
+  stop action for each service of `generation` that no listed generation has,
+  except generations that [[drained]] marked. During a server stop it is
+  empty, because the stop stops the services of each generation that was not
+  marked when it began."
   [state generation]
   (when (= :running (:phase state))
-    (service-stops [generation] (cons (:active state) (:draining state)))))
+    (service-stops [generation] (cons (:active state) (remove :drained? (:draining state))))))
 
 (defn- go
   [progress stage action]
@@ -177,10 +185,10 @@
 
 (defn begin-drain
   "Returns the progress of the drain of `generation` after it stopped
-  accepting. The drain stops it, takes it off the list and stops the services
-  that [[drained-stops]] gives."
+  accepting. The drain stops it, marks it with [[drained]], stops the services
+  that [[drained-stops]] gives and takes it off the list."
   [generation]
-  (go {:op :drain :generation generation}
+  (go {:op :drain :generation generation :failures []}
       :drain-stop [:stop-generation generation]))
 
 (defn- next-discard
@@ -230,12 +238,18 @@
     (go progress :end-stopped [:swap end-stopped kept])))
 
 (defn- next-drain-stop
-  "Stops each service, then ends the drain. A failed service stop is logged and
-  is not in the result, because no stop waits for a generation that is off
-  the list while the phase is `:running`."
-  [{:keys [to-stop] :as progress}]
+  "Stops each service, then takes the generation off the list."
+  [{:keys [to-stop generation] :as progress}]
   (if (seq to-stop)
     (go (update progress :to-stop rest) :drain-service (first to-stop))
+    (go progress :services-stopped [:swap services-stopped (:generation-id generation)])))
+
+(defn- next-drain-log
+  "Logs each failed service stop, then ends the drain."
+  [{:keys [failures generation] :as progress}]
+  (if-let [failure (first failures)]
+    (go (update progress :failures rest) :log-service
+        [:log-failure :ol.busker.runtime/service-stop-failed generation failure])
     (done progress {:value nil})))
 
 (defn- drain-begun
@@ -326,7 +340,7 @@
             progress (assoc progress
                             :to-await (filterv #(not= (:generation-id old) (:generation-id %))
                                                generations)
-                            :to-stop (service-stops generations []))]
+                            :to-stop (service-stops (remove :drained? generations) []))]
         (if old
           (go progress :stop-accepting [:stop-accepting old])
           (next-stop-step progress))))
@@ -353,10 +367,15 @@
       (next-drain-stop (assoc progress :to-stop (drained-stops value generation))))
 
     :drain-service
-    (if error
-      (go progress :log-service
-          [:log-failure :ol.busker.runtime/service-stop-failed generation error])
-      (next-drain-stop progress))
+    (next-drain-stop (cond-> progress error (update :failures conj error)))
+
+    ;; A server stop that began before this swap awaits this drain, so the
+    ;; failures go to it. With no stop running, they are logged.
+    :services-stopped
+    (cond
+      error (done progress {:error error :suppressed (:failures progress)})
+      (= :stopping (:phase value)) (done progress (failures-result (:failures progress)))
+      :else (next-drain-log progress))
 
     :log-service
-    (next-drain-stop progress)))
+    (next-drain-log progress)))
