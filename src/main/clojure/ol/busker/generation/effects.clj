@@ -571,7 +571,7 @@
 (defn- open-listener-socket
   "Opens the socket of worker `i` for `listener` and starts its accepts."
   [{::g/keys [listener-claims loops contexts arena entrypoint-hosts active-connection-count_
-              worker-connection-counts accepting-workers]}
+              worker-connection-counts accepting-workers max-connections shutting-down?]}
    i listener ssl-ctx close-callback]
   (let [claim (or (get listener-claims (listen/listener-key listener))
                   (throw (ex-info "Missing TCP listener claim" {:listener listener})))
@@ -584,7 +584,8 @@
       (let [accept-ctx (h2o/create-accept-ctx arena (nth contexts i)
                                               (get entrypoint-hosts (:entrypoint listener)) ssl-ctx)
             callback (accept/create-accept-callback accept-ctx close-callback active-connection-count_
-                                                    worker-connection-counts accepting-workers i)
+                                                    worker-connection-counts accepting-workers i
+                                                    max-connections shutting-down?)
             callback-ptr (::accept/accept-cb-ptr callback)]
         (h2o/socket-read-start sock-ptr callback-ptr)
         {:socket sock-ptr :accept-callback callback :accept-callback-ptr callback-ptr})

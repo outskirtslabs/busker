@@ -25,7 +25,7 @@
    [java.net InetSocketAddress Socket]
    [java.nio.charset StandardCharsets]
    [java.util.concurrent TimeUnit]
-   [java.util.concurrent.atomic AtomicLong AtomicLongArray AtomicReferenceArray]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicLongArray AtomicReferenceArray]))
 
 (defn- capture-logs
   "Calls `f` with trove bound to a backend that records each event as
@@ -148,12 +148,14 @@
 
 (defn- run-accepts
   "Runs one accept on worker 0 of one for each `[outcome millis]` of `steps`,
-  with the clock at `millis`. An outcome is `:ok`, `:limit` for an accept at the
-  connection limit, or a Throwable for `h2o-accept` to throw; `natives` replaces
-  further H2O calls. Closing a socket whose close callback is installed runs
-  that callback, as H2O does. Returns what the accepts took, gave back and
-  reported."
-  [steps natives]
+  with the clock at `millis` and `queued` sockets queued, 1 by default. An
+  outcome is `:ok`, `:limit` for an accept at the connection limit, or a
+  Throwable for `h2o-accept` to throw. `natives` replaces further H2O calls.
+  `shutting-down?` is the generation's stop flag. Closing a socket whose
+  close callback is installed runs that callback, as H2O does. Returns what
+  the accepts took, gave back and reported, and how many sockets stay queued."
+  [steps natives & {:keys [queued shutting-down?]
+                    :or {queued 1 shutting-down? (AtomicBoolean.)}}]
   (let [active (AtomicLong.)
         counts (AtomicLongArray. 1)
         worker-failures (atom 0)
@@ -164,13 +166,18 @@
         close-installed? (atom false)
         per-worker (#'accept/create-connection-close-callback active counts 0)
         sock (ffi/alloc (ffi/auto-arena) 8)
+        queued_ (atom 0)
         outcome_ (atom nil)
         clock_ (atom 0)
         {::accept/keys [accept-cb]}
-        (#'accept/create-accept-callback ::accept-ctx per-worker active counts workers 0)
+        (#'accept/create-accept-callback ::accept-ctx per-worker active counts workers 0 0
+                                         shutting-down?)
         defaults {#'accept/now-nanos (fn [] (* 1000000 @clock_))
                   #'h2o/socket-read-stop (record :read-stop)
-                  #'h2o/evloop-socket-accept (fn [_] sock)
+                  #'h2o/evloop-socket-accept (fn [_]
+                                               (if (pos? @queued_)
+                                                 (do (swap! queued_ dec) sock)
+                                                 ffi/null))
                   #'h2o/conn-limit-try-acquire (fn []
                                                  (swap! calls conj :acquire)
                                                  (if (= :limit @outcome_) 0 1))
@@ -188,6 +195,7 @@
         (with-redefs-fn (merge defaults natives)
           #(capture-logs (fn []
                            (doseq [[outcome millis] steps]
+                             (reset! queued_ queued)
                              (reset! outcome_ outcome)
                              (reset! clock_ millis)
                              (accept-cb ::listener ffi/null)))))]
@@ -197,7 +205,8 @@
                     (.get ^AtomicLong (:started (::accept/accept-failure-run per-worker))))
      :calls (frequencies @calls)
      :active (.get active)
-     :count (.get counts 0)}))
+     :count (.get counts 0)
+     :queued @queued_}))
 
 (def ^:private accept-failure (OutOfMemoryError. "accept failed"))
 
@@ -252,6 +261,15 @@
         (run-accepts [[accept-failure 0] [:limit 500] [accept-failure 1000]] {})]
     (is (true? in-run?))
     (is (= 1 worker-failures))))
+
+(deftest a-stop-during-an-accept-callback-leaves-later-sockets-queued
+  (let [stopping (AtomicBoolean.)
+        {:keys [queued active count]}
+        (run-accepts [[:ok 0]]
+                     {#'h2o/h2o-accept (fn [& _] (.set stopping true))}
+                     :queued 2 :shutting-down? stopping)]
+    (is (= [1 1] [active count]) "The socket accepted before the stop is served.")
+    (is (= 1 queued) "The next generation accepts the second socket.")))
 
 (deftest connection-close-callback-contains-and-logs-errors
   (let [failure (IllegalStateException. "release failed")

@@ -140,22 +140,40 @@
             (when-let [fail (:on-native-failure! worker)]
               (fail worker t))))))))
 
+(def ^:const accept-batch-size
+  "How many queued sockets one accept callback takes at most. One callback must
+  take enough sockets that a burst of new TLS connections gets in within a few
+  event-loop turns, which are long under load. One callback can take this many
+  connections while the other workers take none."
+  32)
+
+(defn- below-limit?
+  [^long max-connections]
+  (or (zero? max-connections)
+      (< (h2o/conn-limit-current) max-connections)))
+
 (defn create-accept-callback
   [accept-ctx-ptr {::keys [connection-close-cb-ptr accept-failure-run]}
-   active-connection-count_ ^AtomicLongArray counts workers worker-idx]
+   active-connection-count_ ^AtomicLongArray counts workers worker-idx max-connections
+   ^AtomicBoolean shutting-down?]
   (let [accept-cb (fn [listener-ptr _err-ptr]
                     (try
                       (if-not (at-minimum? (.get counts (int worker-idx)) counts)
                         (h2o/socket-read-stop listener-ptr)
-                        (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
-                          (when-not (mem/null? sock-ptr)
-                            (if (admit-connection! accept-ctx-ptr sock-ptr connection-close-cb-ptr
-                                                   active-connection-count_ counts worker-idx)
-                              (do
-                                (end-accept-failure-run! accept-failure-run)
-                                (when (at-minimum? (.get counts (int worker-idx)) counts)
-                                  (wake-other-workers! workers worker-idx)))
-                              (h2o/socket-close sock-ptr)))))
+                        (loop [n 0]
+                          (when (and (< n accept-batch-size)
+                                     (not (.get shutting-down?))
+                                     (below-limit? max-connections))
+                            (let [sock-ptr (h2o/evloop-socket-accept listener-ptr)]
+                              (when-not (mem/null? sock-ptr)
+                                (if (admit-connection! accept-ctx-ptr sock-ptr connection-close-cb-ptr
+                                                       active-connection-count_ counts worker-idx)
+                                  (do
+                                    (end-accept-failure-run! accept-failure-run)
+                                    (when (at-minimum? (.get counts (int worker-idx)) counts)
+                                      (wake-other-workers! workers worker-idx))
+                                    (recur (inc n)))
+                                  (h2o/socket-close sock-ptr)))))))
                       (catch Throwable t
                         (accept-failed! workers worker-idx accept-failure-run listener-ptr t))))]
     {::accept-cb accept-cb
@@ -169,10 +187,9 @@
   (let [^AtomicLongArray counts worker-connection-counts
         ^AtomicBoolean limit-waiting limit-waiting
         worker-idx (long worker-idx)
-        limit-allows? (or (zero? max-connections)
-                          (< (h2o/conn-limit-current) max-connections)
+        limit-allows? (or (below-limit? max-connections)
                           (do (.set limit-waiting true)
-                              (< (h2o/conn-limit-current) max-connections)))
+                              (below-limit? max-connections)))
         _ (when (and limit-allows? (.get limit-waiting) (.compareAndSet limit-waiting true false))
             (wake-other-workers! accepting-workers worker-idx))
         should-accept? (and limit-allows?
