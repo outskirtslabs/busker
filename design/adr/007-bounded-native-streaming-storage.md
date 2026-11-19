@@ -24,7 +24,7 @@ Failure while sending an ordinary Ring response, other than an invalid response 
 
 Private blocks remain valid until the producer exits. Disconnect, interruption and retirement deadlines do not permit reuse while it is writing. The pool records free and checked-out blocks and rejects stale or duplicate releases. Retirement closes admission and frees the shared arena only when no blocks remain checked out; otherwise the caller retains the pool and retries.
 
-Capacity pressure flushes accepted output. Global pool pressure visits only responses with published unflushed blocks; it cannot reclaim private callbacks or native sends. Blocking calls park through Java synchronization, while nonblocking calls return full without invoking their producer.
+Capacity pressure flushes accepted output. Global pool pressure visits only responses with published unflushed blocks; it cannot reclaim private callbacks or native sends. A blocking call that waits for a block parks on a lock-free queue, and each released block wakes one waiter. Closing a response wakes the call that waits for that response. Pool retirement and worker failure wake every waiting call. Nonblocking calls return full without invoking their producer.
 
 Native sends can begin between event-loop calls as well as from proceed callbacks. The [H2O patch that h2o-zig applies](../architecture.md#native-write-completion) records interest reconciliation before write completion callbacks. It does not change send ordering, byte credit, receipt settlement or block-release events.
 
