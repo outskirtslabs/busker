@@ -8,7 +8,7 @@
    [ol.busker.test-utils :as util])
   (:import
    [java.io ByteArrayOutputStream]
-   [java.net InetSocketAddress Socket]
+   [java.net InetSocketAddress Socket SocketException SocketTimeoutException]
    [java.nio.charset StandardCharsets]
    [java.util.concurrent.atomic AtomicLongArray]))
 
@@ -28,15 +28,16 @@
       (is (at-minimum? 0 (counts 0)))
       (is (at-minimum? 7 (counts 7))))))
 
-(defn- start-server [n-workers]
+(defn- start-server [n-workers & {:as config}]
   (let [port (util/free-port)
         server (busker/start!
                 (util/with-handler
                   (fn [_] {:status 200 :body "ok"})
-                  {:n-workers n-workers
-                   :entrypoints {:http {:bind (str "127.0.0.1:" port)
-                                        :http3? false
-                                        :tls false}}}))]
+                  (merge {:n-workers n-workers
+                          :entrypoints {:http {:bind (str "127.0.0.1:" port)
+                                               :http3? false
+                                               :tls false}}}
+                         config)))]
     (is (zero? (:exit (util/wait-for-curl-ready! :http :h1 port "/" :max-time 2))))
     [server port]))
 
@@ -54,25 +55,40 @@
           (> (System/currentTimeMillis) deadline) current
           :else (do (Thread/sleep 5) (recur)))))))
 
-(defn- open-answered!
-  "Opens a keep-alive connection, sends one request and reads its response."
+(defn- send-request!
   ^Socket [port timeout-ms]
   (let [socket (Socket.)]
     (.connect socket (InetSocketAddress. "127.0.0.1" (int port)) (int timeout-ms))
-    (.setSoTimeout socket (int timeout-ms))
-    (let [out (.getOutputStream socket)
-          in (.getInputStream socket)
-          seen (ByteArrayOutputStream.)]
-      (.write out (.getBytes "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" StandardCharsets/US_ASCII))
-      (.flush out)
+    (doto (.getOutputStream socket)
+      (.write (.getBytes "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" StandardCharsets/US_ASCII))
+      (.flush))
+    socket))
+
+(defn- response
+  [^Socket socket timeout-ms]
+  (.setSoTimeout socket (int timeout-ms))
+  (let [in (.getInputStream socket)
+        seen (ByteArrayOutputStream.)]
+    (try
       (loop []
         (let [b (.read in)]
-          (when (neg? b)
-            (throw (ex-info "Connection closed before the response" {:seen (str seen)})))
-          (.write seen b)
-          (when-not (str/ends-with? (.toString seen "US-ASCII") "\r\n\r\nok")
-            (recur))))
-      socket)))
+          (if (neg? b)
+            :closed
+            (do (.write seen b)
+                (if (str/ends-with? (.toString seen "US-ASCII") "\r\n\r\nok")
+                  :answered
+                  (recur))))))
+      (catch SocketTimeoutException _ :silent)
+      (catch SocketException _ :closed))))
+
+(defn- open-answered!
+  "Opens a keep-alive connection, sends one request and reads its response."
+  ^Socket [port timeout-ms]
+  (let [socket (send-request! port timeout-ms)
+        result (response socket timeout-ms)]
+    (when-not (= :answered result)
+      (throw (ex-info "No response" {:result result})))
+    socket))
 
 (defn- close-all! [sockets]
   (doseq [^Socket socket sockets] (.close socket)))
@@ -115,4 +131,22 @@
           (is (= [25 25] (counts server)))
           (close-all! sockets)
           (is (= [0 0] (await-counts! server #(every? zero? %))))))
+      (finally (busker/stop! server)))))
+
+(deftest connections-above-the-limit-wait-for-a-free-slot
+  (let [[server port] (start-server 1 :max-connections 4)]
+    (try
+      (let [served (vec (repeatedly 4 #(open-answered! port 2000)))
+            waiting (vec (repeatedly 8 #(send-request! port 2000)))]
+        (is (= :silent (response (first waiting) 200))
+            "A fifth connection gets no response while four are open.")
+        (is (= (conj (vec (repeat 7 [:answered :silent])) [:answered nil])
+               (mapv (fn [^Socket old i]
+                       (.close old)
+                       [(response (nth waiting i) 2000)
+                        (some-> (get waiting (inc i)) (response 200))])
+                     (into served waiting)
+                     (range 8)))
+            "Each close lets only the next waiting connection in, and none is closed.")
+        (close-all! (into served waiting)))
       (finally (busker/stop! server)))))
