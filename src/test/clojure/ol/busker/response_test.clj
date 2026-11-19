@@ -773,17 +773,20 @@
                            (protocols/close! emitter)
                            {:body emitter})))
         worker (first (::generation/workers (:instance (:active @(:busker/state server)))))
-        give-back! (let [taken (take! worker)
-                         returned (delay (taken))]
-                     #(force returned))]
+        returned (volatile! nil)
+        give-back! #(some-> @returned force)]
     (try
+      (let [taken (take! worker)]
+        (vreset! returned (delay (taken))))
       (let [clients (vec (repeatedly n #(on-virtual-thread (fn [] (util/curl :http :h1 port "/" :max-time 10)))))
             waiting (vec (repeatedly n #(.poll entries 5 TimeUnit/SECONDS)))]
         (run! #(await-waiting! (:thread %)) waiting)
         (f {:worker worker :clients clients :give-back! give-back! :entries waiting}))
       (finally
-        (give-back!)
-        (busker/stop! server)))))
+        (try
+          (give-back!)
+          (finally
+            (busker/stop! server)))))))
 
 (defn- close-while-capacity-is-used-up
   [take! emit!]
@@ -800,10 +803,31 @@
 
 (defn- take-fixed-slots! [worker]
   (let [receiver (.get ^AtomicReference (:response-receiver_ worker))
-        handles (vec (take-while pos? (repeatedly #(h2o/mt-response-try-claim receiver))))]
-    (fn []
-      (doseq [handle handles] (h2o/mt-response-abort receiver handle))
-      (fixed-final/notify-capacity! worker (count handles)))))
+        capacity (h2o/mt-response-ring-capacity receiver)
+        deadline (+ (System/currentTimeMillis) 5000)
+        handles (volatile! [])
+        give-back (fn []
+                    (let [error (reduce (fn [error handle]
+                                          (try
+                                            (h2o/mt-response-abort receiver handle)
+                                            error
+                                            (catch Throwable t (or error t))))
+                                        nil
+                                        @handles)]
+                      (fixed-final/notify-capacity! worker (count @handles))
+                      (when error (throw error))))]
+    (try
+      (while (< (count @handles) capacity)
+        (let [handle (h2o/mt-response-try-claim receiver)]
+          (cond
+            (pos? handle) (vswap! handles conj handle)
+            (> (System/currentTimeMillis) deadline)
+            (throw (ex-info "Fixed slots did not come back" {:claimed (count @handles)}))
+            :else (Thread/sleep 1))))
+      give-back
+      (catch Throwable t
+        (give-back)
+        (throw t)))))
 
 (defn- take-stream-blocks! [worker]
   (let [pool (:stream-pool worker)
@@ -823,8 +847,9 @@
                          (.put threads (Thread/currentThread))
                          {:status 200 :body "ok"}))
         worker (first (::generation/workers (:instance (:active @(:busker/state server)))))
-        give-back! (take-fixed-slots! worker)]
+        give-back! (volatile! (constantly nil))]
     (try
+      (vreset! give-back! (take-fixed-slots! worker))
       (let [client (on-virtual-thread
                     #(util/curl :http nil port "/" :max-time 1 :args ["--http2-prior-knowledge"]))
             ^Thread thread (doto (.poll threads 5 TimeUnit/SECONDS) await-waiting!)]
@@ -832,8 +857,37 @@
         (is (.join thread (Duration/ofSeconds 5))
             "The handler thread ends while every fixed slot is still taken."))
       (finally
+        (try
+          (@give-back!)
+          (finally
+            (busker/stop! server)))))))
+
+(deftest http1-ring-response-of-a-closed-client-ends-when-slots-return
+  (let [threads (LinkedBlockingQueue.)
+        [server port] (start-server
+                       (fn [_]
+                         (.put threads (Thread/currentThread))
+                         {:status 200 :body "ok"}))
+        worker (first (::generation/workers (:instance (:active @(:busker/state server)))))
+        returned (volatile! nil)
+        give-back! #(some-> @returned force)]
+    (try
+      (let [taken (take-fixed-slots! worker)]
+        (vreset! returned (delay (taken))))
+      (let [^Thread thread (with-open [^Socket socket (connect port)]
+                             (doto (.getOutputStream socket)
+                               (.write (.getBytes "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+                                                  StandardCharsets/US_ASCII))
+                               (.flush))
+                             (doto (.poll threads 5 TimeUnit/SECONDS) await-waiting!))]
         (give-back!)
-        (busker/stop! server)))))
+        (is (.join thread (Duration/ofSeconds 10))
+            "The handler thread of a client that closed its connection ends once the fixed slots are given back."))
+      (finally
+        (try
+          (give-back!)
+          (finally
+            (busker/stop! server)))))))
 
 (deftest closing-receiver-admission-ends-every-emit-that-waits-for-a-slot
   (with-waiting-emits
