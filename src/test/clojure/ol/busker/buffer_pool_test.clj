@@ -194,5 +194,29 @@
           (doseq [block blocks] (pool/release! p block))
           (pool/retire! p))))))
 
+(deftest parked-borrower-gets-a-block-that-a-later-tracked-response-frees
+  (let [p (pool/create-stream-pool 16)
+        blocks (mapv (fn [_] (pool/try-borrow! p)) (range 256))
+        attempts (AtomicInteger. 0)
+        borrower (promise)
+        thread (Thread/startVirtualThread
+                #(deliver borrower (pool/await-block!
+                                    p (fn []
+                                        (.incrementAndGet attempts)
+                                        (let [claim (pool/try-borrow! p)]
+                                          (if (= :full claim)
+                                            (do (pool/relieve-pressure! p) nil)
+                                            claim))))))]
+    (try
+      (is (parked? thread attempts))
+      (pool/track-pressure! p :late #(pool/release! p (first blocks)))
+      (is (map? (deref borrower 10000 :timeout)))
+      (finally
+        (pool/retire! p)
+        (let [result (deref borrower 10000 :timeout)]
+          (doseq [block (if (map? result) (cons result (rest blocks)) blocks)]
+            (pool/release! p block)))
+        (pool/retire! p)))))
+
 (deftest rejects-zero-buffer-configuration
   (is (thrown? IllegalArgumentException (pool/create-stream-pool 0))))
