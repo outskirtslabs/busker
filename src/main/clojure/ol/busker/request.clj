@@ -226,8 +226,8 @@
 
 (defn on-request-cleanup
   "Retires the state of the `n` requests whose sequences native cleanup passes
-  in `request-seqs`, then wakes fixed-slot waiters once. A failed retirement
-  does not stop the others."
+  in `request-seqs`, then wakes a fixed-slot waiter for each slot that cleanup
+  freed. A failed retirement does not stop the others."
   [module-id request-seqs n]
   (try
     (when-let [worker (worker-context/get-current-worker)]
@@ -235,6 +235,6 @@
         (try
           (dotimes [i n]
             (retire-request! dispatch module-id (h2o/request-seq-at request-seqs i)))
-          (finally (fixed-final/notify-capacity! worker)))))
+          (finally (fixed-final/notify-freed! worker)))))
     (catch Throwable t
       (request-callback-failed! ::cleanup-callback-failed t))))

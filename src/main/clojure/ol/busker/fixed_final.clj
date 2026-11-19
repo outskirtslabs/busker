@@ -3,7 +3,7 @@
 
   Direct plans write header descriptors and payload bytes into a claimed native
   slot. H2O retains that slot until request cleanup. [[publish-direct-response!]]
-  parks for capacity; [[publish-direct-producer!]] parks or returns `:overloaded`.
+  and [[publish-direct-producer!]] park for capacity or return `:overloaded`.
 
   Each worker has `:fixed-response-slots` independently claimable slots.
   Eligibility allows at most 64 header pairs, 16384 bytes of header staging and
@@ -24,15 +24,15 @@
   - [[ol.busker.response-head]] sends streaming response heads."
   (:require
    [babashka.ffi :as mem]
+   [ol.busker.capacity-waiters :as waiters]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.response-serialization :as serialization]
    [taoensso.trove :as trove])
   (:import
    [java.lang.foreign Arena MemorySegment ValueLayout]
-   [java.lang.invoke VarHandle]
    [java.nio ByteBuffer]
-   [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicReference]
+   [java.util.concurrent.atomic AtomicBoolean AtomicReference]
    [java.util.concurrent.locks Lock ReentrantReadWriteLock]))
 
 (set! *warn-on-reflection* true)
@@ -171,32 +171,28 @@
       (put-slot-int! data slot-compress-hint-offset compress-hint)
       data)))
 
-;; Fixed-slot waiters. A thread waits on `:response-slot-monitor` only in
-;; wait-for-claim!. Under the monitor it increments `:response-slot-waiters`
-;; before its first check and rechecks before each wait. A notifier makes its
-;; change, issues a full fence, reads the count and takes the monitor for
-;; notifyAll only when the count is above zero. Either the notifier sees the
-;; count or the waiter's recheck sees the change; the monitor orders the first.
-;; Closing receiver admission also wakes waiters, through notify-all-capacity!,
-;; which does not read the count.
-
 (defn notify-all-capacity!
-  "Wakes every fixed-slot waiter of `worker` without reading the waiter count."
+  "Wakes every fixed-slot waiter of `worker`. Call it after closing receiver
+  admission."
   [worker]
-  (when-let [monitor (:response-slot-monitor worker)]
-    (locking monitor
-      (.notifyAll ^Object monitor))))
+  (when-let [queue (:response-slot-waiters worker)]
+    (waiters/signal-all! queue)))
 
 (defn notify-capacity!
-  "Wakes fixed-slot waiters of `worker` after a slot is released or a response
-  that may wait for a slot is closed. Call it after that change; it takes the
-  monitor only when a thread is waiting or about to wait."
+  "Wakes up to `n` fixed-slot waiters of `worker`. Call it after `n` slots
+  become free."
+  [worker n]
+  (when-let [queue (:response-slot-waiters worker)]
+    (waiters/signal! queue n)))
+
+(defn notify-freed!
+  "Wakes one fixed-slot waiter of `worker` for each slot that its event loop
+  freed since the last call. Call it on the event-loop thread."
   [worker]
-  (let [^AtomicInteger waiters (:response-slot-waiters worker)]
-    (when (or (nil? waiters)
-              (do (VarHandle/fullFence)
-                  (pos? (.get waiters))))
-      (notify-all-capacity! worker))))
+  (when-let [^AtomicReference receiver_ (:response-receiver_ worker)]
+    (let [receiver (.get receiver_)]
+      (when (and receiver (not (mem/null? receiver)))
+        (notify-capacity! worker (h2o/mt-response-take-freed receiver))))))
 
 (defn- wake-published!
   [worker]
@@ -231,33 +227,15 @@
                   [receiver claim])))))
         (finally (.unlock read-lock))))))
 
-(defn- wait-for-claim!
-  [worker cancelled?]
-  (let [monitor (:response-slot-monitor worker)
-        ^AtomicInteger waiters (:response-slot-waiters worker)]
-    (locking monitor
-      (when waiters (.incrementAndGet waiters))
-      (try
-        (loop []
-          (if (cancelled?)
-            :closed
-            (let [claim (claim-once! worker)]
-              (if (= :overloaded claim)
-                (do (.wait ^Object monitor) (recur))
-                claim))))
-        (finally
-          (when waiters (.decrementAndGet waiters)))))))
-
 (defn- claim-response!
-  "Claims a slot without the slot monitor, and waits on it only when `wait?`
-  and no slot is free."
   [worker wait? cancelled?]
-  (if (cancelled?)
-    :closed
-    (let [claim (claim-once! worker)]
-      (if (and wait? (= :overloaded claim))
-        (wait-for-claim! worker cancelled?)
-        claim))))
+  (let [attempt! #(if (cancelled?)
+                    :closed
+                    (let [claim (claim-once! worker)]
+                      (when-not (= :overloaded claim) claim)))]
+    (if wait?
+      (waiters/await! (:response-slot-waiters worker) attempt!)
+      (or (attempt!) :overloaded))))
 
 (defn- prepare-and-publish!
   [worker claim cancelled? prepare! accept!]
@@ -297,18 +275,18 @@
             (finally
               (h2o/mt-response-use-release receiver)
               (when-not @published?_
-                (notify-capacity! worker))
+                (notify-capacity! worker 1))
               (when-not (.get ^AtomicBoolean (:response-receiver-open?_ worker))
                 (wake-published! worker)))))))))
 
 (defn publish-direct-response!
-  "Parks for a fixed slot, then publishes `plan`. Returns `:accepted` or `:closed`."
+  "Claims a fixed slot, parking for one when `wait?`, then publishes `plan`.
+  `cancelled?` and `accept!` are as in [[publish-direct-producer!]]. Returns
+  `:accepted`, `:closed`, or `:overloaded` when `wait?` is false."
   ([worker plan]
-   (publish-direct-response! worker plan (constantly false)))
-  ([worker plan cancelled?]
-   (publish-direct-response! worker plan cancelled? (fn [publish!] (publish!))))
-  ([worker ^DirectResponsePlan plan cancelled? accept!]
-   (prepare-and-publish! worker (claim-response! worker true cancelled?)
+   (publish-direct-response! worker plan true (constantly false) (fn [publish!] (publish!))))
+  ([worker ^DirectResponsePlan plan wait? cancelled? accept!]
+   (prepare-and-publish! worker (claim-response! worker wait? cancelled?)
                          cancelled?
                          #(write-direct-response-slot! %1 %2 plan)
                          accept!)))
@@ -337,7 +315,7 @@
 
   `plan` has an empty body; content length `-1` selects the produced length.
   Another content length must equal the produced length, or this throws.
-  `cancelled?` checks response closure. Closure must call [[notify-capacity!]].
+  `cancelled?` checks response closure. Closure must unpark a waiting call.
   `accept!` atomically checks closure and registers the response before calling
   its publication function exactly once, or returns `:closed` without calling it.
   Returns `:accepted`, `:closed`, or `:overloaded` when `wait?` is false."

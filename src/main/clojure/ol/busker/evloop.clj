@@ -17,6 +17,7 @@
   - [[ol.busker.wake-endpoint]] sends native event-loop wakes."
   (:require
    [ol.busker.callback-dispatch :as callback-dispatch]
+   [ol.busker.capacity-waiters :as capacity-waiters]
    [ol.busker.internal.protocols :as p]
    [ol.busker.wake-endpoint :as wake-endpoint]
    [ol.busker.worker-context :as worker-context]
@@ -25,7 +26,7 @@
   (:import
    [java.util HashMap]
    [java.util.concurrent.locks ReentrantReadWriteLock]
-   [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicLong AtomicReference]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference]))
 
 (set! *warn-on-reflection* true)
 
@@ -149,10 +150,7 @@
             wake-command-waiters!
             on-native-failure!
             discard-command!
-            response-slot-monitor
-            ;; The number of threads waiting or about to wait on
-            ;; response-slot-monitor; see ol.busker.fixed-final.
-            ^AtomicInteger response-slot-waiters
+            response-slot-waiters
             ^AtomicReference native-failure_
             ^AtomicReference termination-cause_]
   p/WorkerThread
@@ -389,8 +387,7 @@
                              :wake-command-waiters! wake-command-waiters!
                              :on-native-failure! on-native-failure!
                              :discard-command! discard-command!
-                             :response-slot-monitor (Object.)
-                             :response-slot-waiters (AtomicInteger.)
+                             :response-slot-waiters (capacity-waiters/create)
                              :native-failure_ (AtomicReference.)
                              :termination-cause_ (AtomicReference.)
                              :evloop nil

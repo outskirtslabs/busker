@@ -12,7 +12,6 @@
    [ol.busker.buffer-pool :as bp]
    [ol.busker.callback-dispatch :as callback-dispatch]
    [ol.busker.config :as config]
-   [ol.busker.fixed-final :as fixed-final]
    [ol.busker.generation :as generation]
    [ol.busker.generation.accept :as accept]
    [ol.busker.native :as h2o]
@@ -108,14 +107,11 @@
   (with-open [arena (ffi/shared-arena)]
     (let [dispatch (bound-dispatch arena)
           failure (AssertionError. "retire failed")
-          capacity-notified (atom 0)
           [result events]
-          (with-redefs [callback-dispatch/retire! (fn [_ _ _] (throw failure))
-                        fixed-final/notify-capacity! (fn [_] (swap! capacity-notified inc))]
+          (with-redefs [callback-dispatch/retire! (fn [_ _ _] (throw failure))]
             (with-worker-context {:callback-dispatch dispatch}
               #(capture-logs (fn [] (request/on-request-cleanup 1 (request-seqs arena [1]) 1)))))]
       (is (nil? result))
-      (is (= 1 @capacity-notified))
       (is (= [{:id ::request/cleanup-callback-failed :error failure}] events))
       (is (= 1 (faults dispatch))))))
 
@@ -123,30 +119,25 @@
   (with-open [arena (ffi/shared-arena)]
     (let [failure (AssertionError. "retire failed")
           retired (atom [])
-          capacity-notified (atom 0)
           [_ events]
           (with-redefs [callback-dispatch/retire! (fn [_ _ request-seq]
                                                     (swap! retired conj request-seq)
-                                                    (when (= 2 request-seq) (throw failure)))
-                        fixed-final/notify-capacity! (fn [_] (swap! capacity-notified inc))]
+                                                    (when (= 2 request-seq) (throw failure)))]
             (with-worker-context {:callback-dispatch nil}
               #(capture-logs (fn [] (request/on-request-cleanup 1 (request-seqs arena [1 2 3]) 3)))))]
       (is (= [1 2 3] @retired))
-      (is (= 1 @capacity-notified))
       (is (= [{:id ::request/cleanup-callback-failed :error failure}] events)))))
 
 (deftest request-cleanup-callback-contains-a-failing-report
   (with-open [arena (ffi/shared-arena)]
-    (with-redefs [callback-dispatch/retire! (fn [_ _ _] (throw (AssertionError. "retire failed")))
-                  fixed-final/notify-capacity! (fn [_] nil)]
+    (with-redefs [callback-dispatch/retire! (fn [_ _ _] (throw (AssertionError. "retire failed")))]
       (with-worker-context {:callback-dispatch nil}
         #(is (nil? (failing-log-backend
                     (fn [] (request/on-request-cleanup 1 (request-seqs arena [1]) 1)))))))))
 
 (deftest cleanup-callback-keeps-the-interrupt-status
   (with-open [arena (ffi/shared-arena)]
-    (with-redefs [callback-dispatch/retire! (fn [_ _ _] (throw (InterruptedException.)))
-                  fixed-final/notify-capacity! (fn [_] nil)]
+    (with-redefs [callback-dispatch/retire! (fn [_ _ _] (throw (InterruptedException.)))]
       (try
         (with-worker-context {:callback-dispatch nil}
           #(request/on-request-cleanup 1 (request-seqs arena [1]) 1))

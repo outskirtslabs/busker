@@ -139,7 +139,6 @@
                  :response-slot-payload-capacity 0
                  :hot-poll-ns 0
                  :native-failure_ (AtomicReference.)
-                 :response-slot-monitor (Object.)
                  :callback-dispatch nil})
         native-state {:loop-ptr :loop
                       :ctx-ptr :context
@@ -170,8 +169,7 @@
                  :response-slot-payload-capacity 0
                  :hot-poll-ns 0
                  :response-receiver_ (AtomicReference. receiver)
-                 :native-failure_ (AtomicReference.)
-                 :response-slot-monitor (Object.)})
+                 :native-failure_ (AtomicReference.)})
         native-state {:loop-ptr :loop
                       :ctx-ptr :context
                       :listener-socks []
@@ -186,6 +184,7 @@
        (fn [actual]
          (is (identical? receiver actual))
          1)
+       #'h2o/mt-response-take-freed (constantly 0)
        #'h2o/evloop-now (constantly 0)
        #'h2o/cleanup-thread (constantly 1000)
        #'h2o/evloop-run (fn [_ wait-ms]
@@ -203,8 +202,7 @@
                    :response-slots []
                    :response-slot-payload-capacity 0
                    :hot-poll-ns 0
-                   :native-failure_ (AtomicReference.)
-                   :response-slot-monitor (Object.)})
+                   :native-failure_ (AtomicReference.)})
           native-state {:loop-ptr :loop
                         :ctx-ptr :context
                         :listener-socks []
@@ -237,7 +235,6 @@
                    :response-slot-payload-capacity 0
                    :hot-poll-ns 0
                    :native-failure_ (AtomicReference.)
-                   :response-slot-monitor (Object.)
                    :request-dispatch dispatch})
           native-state {:loop-ptr :loop
                         :ctx-ptr :context
@@ -430,7 +427,6 @@
   {:response-receiver_             (AtomicReference. receiver)
    :response-receiver-open?_       (AtomicBoolean. true)
    :response-receiver-lock         (ReentrantReadWriteLock.)
-   :response-slot-monitor          (Object.)
    :response-slots                 [slot]
    :response-slot-payload-capacity 1
    :fixed-body-limit               1})
@@ -1678,7 +1674,6 @@
         receiver (.get ^AtomicReference (:response-receiver_ worker))
         handles (mapv (fn [_] (h2o/mt-response-try-claim receiver))
                       (range (h2o/mt-response-ring-capacity receiver)))
-        monitor (:response-slot-monitor worker)
         full_ (promise)
         result_ (promise)
         try-claim h2o/mt-response-try-claim]
@@ -1694,19 +1689,17 @@
                       #(deliver result_ (util/curl :http nil port "/" :max-time 5)))]
           (try
             (is (true? (deref full_ 5000 false)))
-            ;; Taking this monitor proves admission has released it to park.
-            (locking monitor
-              (is (not (realized? result_)))
-              (is (= 256 (h2o/mt-response-claimed receiver)))
-              (is (= 1 (h2o/mt-response-abort receiver (first handles))))
-              (fixed-final/notify-capacity! worker))
+            (is (not (realized? result_)))
+            (is (= 256 (h2o/mt-response-claimed receiver)))
+            (is (= 1 (h2o/mt-response-abort receiver (first handles))))
+            (fixed-final/notify-capacity! worker 1)
             (is (= {:exit 0 :out "ring-wakeup"}
                    (select-keys (deref result_ 6000 {}) [:exit :out])))
             (finally (.join client 6000)))))
       (finally
         (doseq [claim-handle handles]
           (h2o/mt-response-abort receiver claim-handle))
-        (fixed-final/notify-capacity! worker)
+        (fixed-final/notify-capacity! worker (count handles))
         (generation/stop! instance)))))
 
 (deftest failed-worker-with-a-block-checked-out-keeps-the-callback-arena-test

@@ -33,6 +33,7 @@
    [java.nio.charset Charset CharsetEncoder CodingErrorAction StandardCharsets]
    [java.util Arrays Iterator Map]
    [java.util.concurrent.atomic AtomicLongArray]
+   [java.util.concurrent.locks LockSupport]
    [clojure.lang MapEntry RT]
    [ol.busker.internal.protocols Request]
    [ol.busker.response_queue BlockOutput]))
@@ -431,6 +432,8 @@
           (when-let [receipt (:last-receipt state)]
             (deliver receipt {:status :closed}))
           (.notifyAll ^Object lock)
+          (when-let [producer (:producer state)]
+            (LockSupport/unpark producer))
           task)))))
 
 (defn- terminal! [lock state_ tail_ dispatch]
@@ -452,9 +455,6 @@
   (locking lock
     (swap! state_ assoc :producer nil)
     (.notifyAll ^Object lock)))
-
-(defn- wake-slot-waiters! [req]
-  (fixed-final/notify-capacity! (:worker req)))
 
 (declare emit-value! close-emitter!)
 
@@ -495,23 +495,18 @@
                   writer (response-queue/create-response-writer
                           (assoc req
                                  :apply-head! #(apply-head! req %1 %2)
-                                 :on-terminal! #(do
-                                                  (terminal! (.lifecycle-lock emitter) (.lifecycle_ emitter)
-                                                             (.callback-tail_ emitter) (.callback-dispatch emitter))
-                                                  (wake-slot-waiters! req))))]
+                                 :on-terminal! #(terminal! (.lifecycle-lock emitter) (.lifecycle_ emitter)
+                                                           (.callback-tail_ emitter) (.callback-dispatch emitter))))]
               (reset! (.writer_ emitter) writer)))))))
 
 (defn close-emitter! [^H2OResponseEmitter emitter]
-  (let [lock (.lifecycle-lock emitter)
-        changed?
-        (locking lock
-          (if (= :closed (:phase @(.lifecycle_ emitter)))
-            false
-            (if-let [writer (ensure-writer! emitter)]
-              (response-queue/close! writer)
-              false)))]
-    (wake-slot-waiters! (.req emitter))
-    changed?))
+  (let [lock (.lifecycle-lock emitter)]
+    (locking lock
+      (if (= :closed (:phase @(.lifecycle_ emitter)))
+        false
+        (if-let [writer (ensure-writer! emitter)]
+          (response-queue/close! writer)
+          false)))))
 
 (def ^:private completed-callback-tail
   "The callback tail of an emitter that has queued no close callbacks. Tails are
@@ -535,18 +530,14 @@
       (when-let [writer @(.writer_ emitter)]
         (response-queue/on-stop writer nil))
       (terminal! (.lifecycle-lock emitter) (.lifecycle_ emitter)
-                 (.callback-tail_ emitter) (.callback-dispatch emitter))))
-  (wake-slot-waiters! (.req emitter)))
+                 (.callback-tail_ emitter) (.callback-dispatch emitter)))))
 
 (defn stop-emitter
   "Stops admission and settles receipts without releasing native in-flight storage."
   [^H2OResponseEmitter emitter]
   ;; A closed emitter without a writer is left unchanged by the locked path:
   ;; :closed is terminal, a writer is only created while the lifecycle is open,
-  ;; and closing a closed lifecycle does nothing. Its slot waiters were woken
-  ;; when it closed: stop-emitter and close-emitter! wake them, and a fixed
-  ;; publication closes it from the only thread that claims for it, which has
-  ;; already claimed.
+  ;; and closing a closed lifecycle does nothing.
   ;; So an unlocked read that sees both is final, and nothing is left to do.
   (when-not (and (= :closed (:phase @(.lifecycle_ emitter)))
                  (nil? @(.writer_ emitter)))
@@ -790,12 +781,13 @@
   "Publishes `plan` as the whole response of an untouched `emitter` and closes
   the emitter with one state change. Returns `::touched`, and sends nothing,
   when the emitter was used before the publication. Otherwise returns the
-  result of [[fixed-final/publish-direct-response!]]."
+  result of [[fixed-final/publish-direct-response!]], which does not wait for a
+  slot."
   [^H2OResponseEmitter emitter plan]
   (if-not (untouched? emitter)
     ::touched
     (fixed-final/publish-direct-response!
-     (:worker (.req emitter)) plan #(not (p/open? emitter))
+     (:worker (.req emitter)) plan false #(not (p/open? emitter))
      (fn [publish!]
        (let [lock (.lifecycle-lock emitter)]
          (locking lock
@@ -824,12 +816,12 @@
         (when (:status response) (p/emit! emitter (dissoc response :body)))
         (if-let [plan (when (and (p/open? emitter) (nil? @(.writer_ emitter)))
                         (ordinary-fixed-plan (.req emitter) response))]
-          (when (and (= ::touched (publish-untouched! emitter plan))
+          (when (and (#{::touched :overloaded} (publish-untouched! emitter plan))
                      (= :accepted (acquire-producer! (.lifecycle-lock emitter) (.lifecycle_ emitter) true)))
             (try
               (if (and (p/open? emitter) (nil? @(.writer_ emitter)))
                 (fixed-final/publish-direct-response!
-                 (:worker (.req emitter)) plan #(not (p/open? emitter))
+                 (:worker (.req emitter)) plan true #(not (p/open? emitter))
                  (fn [publish!]
                    (locking lock
                      (if (p/open? emitter)

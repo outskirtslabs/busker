@@ -26,7 +26,7 @@
 
 (deftest hot-worker-keys-are-record-fields-test
   (is (every? (set (map keyword (Worker/getBasis)))
-              [:callback-dispatch :response-slot-monitor :response-slot-waiters :stream-pool
+              [:callback-dispatch :response-slot-waiters :stream-pool
                :native-failure_ :termination-cause_ :on-native-failure! :discard-command!
                :reserve-command! :publish-command! :release-command! :wake-command-waiters!])))
 

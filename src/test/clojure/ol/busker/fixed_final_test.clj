@@ -4,9 +4,9 @@
    [clojure.string :as str]
    [babashka.ffi :as mem]
    [ol.busker :as busker]
+   [ol.busker.capacity-waiters :as waiters]
    [ol.busker.fixed-final :as fixed-final]
    [ol.busker.generation :as generation]
-   [ol.busker.generation.effects :as effects]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as protocols]
@@ -20,7 +20,6 @@
    [java.net InetSocketAddress Socket]
    [java.nio ByteBuffer]
    [java.nio.charset StandardCharsets]
-   [java.util.concurrent CountDownLatch TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicReference]
    [java.util.concurrent.locks ReentrantReadWriteLock]))
 
@@ -37,7 +36,7 @@
   {:response-receiver_             (AtomicReference. receiver)
    :response-receiver-open?_       (AtomicBoolean. true)
    :response-receiver-lock         (ReentrantReadWriteLock.)
-   :response-slot-monitor          (Object.)
+   :response-slot-waiters          (waiters/create)
    :response-slots                 response-slots
    :response-slot-payload-capacity response-slot-payload-capacity
    :fixed-body-limit               32768})
@@ -654,151 +653,6 @@
                false (constantly false)
                (fn [_] (throw (AssertionError. "rejected response accepted")))))))))
 
-(deftest fixed-capacity-wait-rechecks-release-and-cancellation
-  (doseq [cancel? [false true]]
-    (let [worker {:response-slot-monitor (Object.)}
-          checked (CountDownLatch. 1)
-          available?_ (atom false)
-          cancelled?_ (atom false)
-          result (promise)]
-      (with-redefs-fn
-        {#'fixed-final/claim-once!
-         (fn [_]
-           (if @available?_
-             [:receiver 65537]
-             (do (.countDown checked) :overloaded)))}
-        (fn []
-          (let [thread (Thread/startVirtualThread
-                        #(deliver result
-                                  (#'fixed-final/claim-response!
-                                   worker true (fn [] @cancelled?_))))]
-            (try
-              (is (.await checked 2 TimeUnit/SECONDS))
-              (if cancel? (reset! cancelled?_ true) (reset! available?_ true))
-              (fixed-final/notify-capacity! worker)
-              (is (= (if cancel? :closed [:receiver 65537])
-                     (deref result 2000 :timeout)))
-              (finally
-                (.interrupt thread)
-                (.join thread 2000)))))))))
-
-(defn- counted-slot-worker []
-  {:response-slot-monitor (Object.)
-   :response-slot-waiters (AtomicInteger.)
-   :response-receiver-open?_ (AtomicBoolean. true)})
-
-(defn- await-count
-  [^AtomicInteger counter ^long expected]
-  (let [deadline (+ (System/nanoTime) (* 2000 1000000))]
-    (loop []
-      (cond
-        (>= (.get counter) expected) true
-        (> (System/nanoTime) deadline) false
-        :else (do (Thread/onSpinWait) (recur))))))
-
-(deftest freed-slots-reach-every-counted-waiter-test
-  (dotimes [round 300]
-    (let [worker (counted-slot-worker)
-          free (AtomicInteger. 0)
-          done (AtomicInteger. 0)
-          n-waiters 4]
-      (with-redefs-fn
-        {#'fixed-final/claim-once!
-         (fn [_]
-           (loop []
-             (let [available (.get free)]
-               (cond
-                 (zero? available) :overloaded
-                 (.compareAndSet free available (dec available)) [:receiver 65537]
-                 :else (recur)))))}
-        (fn []
-          (let [threads (vec (repeatedly n-waiters
-                                         #(Thread/startVirtualThread
-                                           (fn []
-                                             (#'fixed-final/claim-response!
-                                              worker true (constantly false))
-                                             (.incrementAndGet done)))))]
-            (try
-              (when (odd? round) (Thread/sleep 1))
-              (doseq [freed (range 1 (inc n-waiters))]
-                (.incrementAndGet free)
-                (fixed-final/notify-capacity! worker)
-                (is (await-count done freed)
-                    (str "round " round ": " (.get done) " of " freed " waiters proceeded")))
-              (is (zero? (.get ^AtomicInteger (:response-slot-waiters worker))))
-              (finally
-                (doseq [^Thread thread threads]
-                  (.interrupt thread)
-                  (.join thread 2000))))))))))
-
-(deftest closing-admission-wakes-counted-waiters-test
-  (let [worker (counted-slot-worker)
-        open?_ ^AtomicBoolean (:response-receiver-open?_ worker)
-        results (vec (repeatedly 4 promise))]
-    (with-redefs-fn
-      {#'fixed-final/claim-once! (fn [_] (if (.get open?_) :overloaded :closed))}
-      (fn []
-        (let [threads (mapv (fn [result]
-                              (Thread/startVirtualThread
-                               #(deliver result (#'fixed-final/claim-response!
-                                                 worker true (constantly false)))))
-                            results)]
-          (try
-            (is (await-count (:response-slot-waiters worker) 4))
-            (#'effects/close-response-receiver-admission! worker)
-            (is (= [:closed :closed :closed :closed]
-                   (mapv #(deref % 2000 :timeout) results)))
-            (is (zero? (.get ^AtomicInteger (:response-slot-waiters worker))))
-            (finally
-              (doseq [^Thread thread threads]
-                (.interrupt thread)
-                (.join thread 2000)))))))))
-
-(deftest claim-with-a-free-slot-skips-the-monitor-test
-  (let [worker (counted-slot-worker)
-        monitor (:response-slot-monitor worker)
-        held (CountDownLatch. 1)
-        release (CountDownLatch. 1)
-        holder (Thread/startVirtualThread
-                #(locking monitor
-                   (.countDown held)
-                   (.await release)))]
-    (with-redefs-fn
-      {#'fixed-final/claim-once! (fn [_] [:receiver 65537])}
-      (fn []
-        (try
-          (is (.await held 2 TimeUnit/SECONDS))
-          (doseq [wait? [true false]]
-            (is (= [:receiver 65537]
-                   (deref (future (#'fixed-final/claim-response! worker wait? (constantly false)))
-                          1000 :blocked))))
-          (is (zero? (.get ^AtomicInteger (:response-slot-waiters worker))))
-          (finally
-            (.countDown release)
-            (.join holder 2000)))))))
-
-(deftest capacity-notice-without-waiters-skips-the-monitor-test
-  (let [worker (counted-slot-worker)
-        monitor (:response-slot-monitor worker)
-        held (CountDownLatch. 1)
-        release (CountDownLatch. 1)
-        holder (Thread/startVirtualThread
-                #(locking monitor
-                   (.countDown held)
-                   (.await release)))]
-    (try
-      (is (.await held 2 TimeUnit/SECONDS))
-      (is (= :returned (deref (future (fixed-final/notify-capacity! worker) :returned)
-                              1000 :blocked)))
-      (.incrementAndGet ^AtomicInteger (:response-slot-waiters worker))
-      (let [notice (future (fixed-final/notify-capacity! worker) :returned)]
-        (is (= :blocked (deref notice 200 :blocked)))
-        (.countDown release)
-        (is (= :returned (deref notice 2000 :blocked))))
-      (finally
-        (.countDown release)
-        (.join holder 2000)))))
-
 (defn- fixed-final-server
   []
   (let [port (util/free-port)
@@ -1083,8 +937,7 @@
   (with-open [arena (mem/confined-arena)]
     (let [capacity 64
           slot (mem/alloc arena (+ pinned-data-size capacity 1))
-          worker (assoc (direct-response-worker (mem/alloc arena 1) [slot] capacity)
-                        :response-slot-waiters (AtomicInteger.))
+          worker (direct-response-worker (mem/alloc arena 1) [slot] capacity)
           calls_ (atom [])]
       (with-redefs [h2o/mt-response-use-acquire (constantly 1)
                     h2o/mt-response-use-release (fn [_])
@@ -1230,11 +1083,11 @@
                     (Thread/sleep 300)
                     (is (not (realized? request)) "a response waits while every slot is claimed")
                     (h2o/mt-response-abort receiver (first handles))
-                    (fixed-final/notify-capacity! worker)
+                    (fixed-final/notify-capacity! worker 1)
                     (deref request 5000 nil)))]
             (is (= 0 (:exit result)))
             (is (= [1 0] [fixed streaming])))
           (finally
             (doseq [handle (rest handles)]
               (h2o/mt-response-abort receiver handle))
-            (fixed-final/notify-capacity! worker)))))))
+            (fixed-final/notify-capacity! worker (count (rest handles)))))))))

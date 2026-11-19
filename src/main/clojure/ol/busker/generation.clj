@@ -253,7 +253,7 @@
                         (not (mem/null? receiver))
                         (pos? (h2o/mt-response-ring-drain receiver)))
         sent? (when-not disposed?
-                (when ring-work? (fixed-final/notify-capacity! worker))
+                (fixed-final/notify-freed! worker)
                 (callback-dispatch/drain-responses! (:callback-dispatch worker)))
         shutting? (not (identical? :serving stage))
         tasks-queued? (when-let [reuse (:request-dispatch worker)]
