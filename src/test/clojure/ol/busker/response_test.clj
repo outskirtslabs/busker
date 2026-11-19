@@ -22,6 +22,7 @@
    [java.nio.charset StandardCharsets]
    [java.security KeyStore]
    [java.security.cert CertificateFactory]
+   [java.time Duration]
    [java.util HashMap LinkedHashMap]
    [java.util.concurrent CountDownLatch LinkedBlockingQueue TimeUnit]
    [java.util.concurrent.atomic AtomicReference]
@@ -814,6 +815,25 @@
 
 (deftest close-ends-an-emit-that-waits-for-a-fixed-slot
   (close-while-capacity-is-used-up take-fixed-slots! emit-fixed!))
+
+(deftest client-disconnect-ends-a-ring-response-that-waits-for-a-fixed-slot
+  (let [threads (LinkedBlockingQueue.)
+        [server port] (start-server
+                       (fn [_]
+                         (.put threads (Thread/currentThread))
+                         {:status 200 :body "ok"}))
+        worker (first (::generation/workers (:instance (:active @(:busker/state server)))))
+        give-back! (take-fixed-slots! worker)]
+    (try
+      (let [client (on-virtual-thread
+                    #(util/curl :http nil port "/" :max-time 1 :args ["--http2-prior-knowledge"]))
+            ^Thread thread (doto (.poll threads 5 TimeUnit/SECONDS) await-waiting!)]
+        (is (= 28 (:exit (await-result client))) "curl gives up and closes its connection.")
+        (is (.join thread (Duration/ofSeconds 5))
+            "The handler thread ends while every fixed slot is still taken."))
+      (finally
+        (give-back!)
+        (busker/stop! server)))))
 
 (deftest closing-receiver-admission-ends-every-emit-that-waits-for-a-slot
   (with-waiting-emits
