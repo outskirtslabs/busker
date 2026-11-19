@@ -135,6 +135,7 @@ static void test_independent_release(h2o_context_t *context) {
   for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); ++i) {
     size_t index = order[i];
     release_fixed_slot(&contexts[index]);
+    CHECK(clj_h2o_response_take_freed(receiver) == 1);
     uint64_t replacement = clj_h2o_response_try_claim(receiver);
     CHECK((replacement & CLJ_RESPONSE_HANDLE_INDEX_MASK) == index + 1);
     CHECK(clj_h2o_response_abort(receiver, claims[index]) == 0);
@@ -164,6 +165,8 @@ static void test_discovery(h2o_context_t *context, size_t capacity) {
   CHECK(atomic_load(&receiver->ready_words[(capacity - 1) / 64]) ==
         (UINT64_C(1) << ((capacity - 1) % 64)));
   CHECK(clj_h2o_response_ring_drain(receiver) == 1);
+  CHECK(clj_h2o_response_take_freed(receiver) == 1);
+  CHECK(clj_h2o_response_take_freed(receiver) == 0);
   CHECK(clj_h2o_response_abort(receiver, last) == 0);
   CHECK(clj_h2o_response_ring_ready(receiver) == 0);
   CHECK(clj_h2o_mt_response_pending(receiver) == 1);
@@ -186,7 +189,27 @@ static void test_discovery(h2o_context_t *context, size_t capacity) {
   CHECK(clj_h2o_response_use_acquire(receiver) == 0);
   CHECK(clj_h2o_response_ring_drain(receiver) == 1);
   CHECK(clj_h2o_response_ring_drain(receiver) == 0);
+  CHECK(clj_h2o_response_take_freed(receiver) == 1);
   CHECK(clj_h2o_mt_response_pending(receiver) == 1);
+  clj_h2o_response_use_release(receiver);
+  CHECK(clj_h2o_mt_response_pending(receiver) == 0);
+  clj_h2o_mt_destroy_response_receiver(receiver);
+}
+
+static void test_wake_drain_reports_freed(h2o_context_t *context) {
+  clj_mt_receiver_t *receiver = clj_h2o_mt_create_response_receiver(context, 4, 3);
+  CHECK(receiver != NULL);
+  CHECK(clj_h2o_response_use_acquire(receiver) == 1);
+  const uint64_t no_request_sequence = 98;
+  const uint64_t other_no_request_sequence = 99;
+  publish(receiver, no_request_sequence, 200);
+  publish(receiver, other_no_request_sequence, 200);
+  h2o_linklist_t messages;
+  h2o_linklist_init_anchor(&messages);
+  clj_mt_response_on_recv(&receiver->receiver, &messages);
+  CHECK(clj_h2o_response_ring_ready(receiver) == 0);
+  CHECK(clj_h2o_response_take_freed(receiver) == 2);
+  CHECK(clj_h2o_response_take_freed(receiver) == 0);
   clj_h2o_response_use_release(receiver);
   CHECK(clj_h2o_mt_response_pending(receiver) == 0);
   clj_h2o_mt_destroy_response_receiver(receiver);
@@ -498,6 +521,7 @@ int main(void) {
   test_independent_release(&context);
   test_discovery(&context, 65);
   test_discovery(&context, UINT16_MAX);
+  test_wake_drain_reports_freed(&context);
   test_cancel_full(&context);
   test_cleanup_batch(loop, &context);
   h2o_mem_release_shared(context._timestamp_cache.value);

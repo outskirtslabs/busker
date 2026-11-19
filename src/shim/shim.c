@@ -95,6 +95,7 @@ struct clj_mt_receiver_t {
   size_t ring_capacity;
   size_t ring_stride;
   size_t slot_payload_capacity;
+  size_t loop_freed_slots;
   _Atomic bool accepts_responses;
 };
 
@@ -879,6 +880,7 @@ static void release_fixed_slot(clj_req_ctx_t *ctx) {
   atomic_fetch_sub_explicit(&receiver->ring_retained, 1, memory_order_release);
   atomic_store_explicit(&slot->state, CLJ_RESPONSE_SLOT_FREE,
                         memory_order_release);
+  ++receiver->loop_freed_slots;
 }
 
 static void cleanup_request(void *ptr) {
@@ -1447,12 +1449,21 @@ size_t clj_h2o_response_ring_drain(clj_mt_receiver_t *receiver) {
                                   memory_order_release);
         atomic_store_explicit(&slot->state, CLJ_RESPONSE_SLOT_FREE,
                               memory_order_release);
+        ++receiver->loop_freed_slots;
         ++drained;
       }
     }
   }
   end_cleanup_batch(started);
   return drained;
+}
+
+size_t clj_h2o_response_take_freed(clj_mt_receiver_t *receiver) {
+  if (receiver == NULL)
+    return 0;
+  size_t freed = receiver->loop_freed_slots;
+  receiver->loop_freed_slots = 0;
+  return freed;
 }
 
 static void clj_mt_response_on_recv(h2o_multithread_receiver_t *h2o_receiver,

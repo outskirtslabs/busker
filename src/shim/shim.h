@@ -356,6 +356,8 @@ int clj_h2o_response_publish(clj_mt_receiver_t *receiver,
 int clj_h2o_response_abort(clj_mt_receiver_t *receiver,
                            uint64_t claim_handle);
 size_t clj_h2o_response_ring_drain(clj_mt_receiver_t *receiver);
+/* Call only on the event-loop thread of `receiver`. The count is not atomic. */
+size_t clj_h2o_response_take_freed(clj_mt_receiver_t *receiver);
 
 /* The socket helpers below return the negative errno on failure.
    FFM callers cannot read errno reliably after the call returns. */

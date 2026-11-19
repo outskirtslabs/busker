@@ -588,6 +588,17 @@
   [receiver]
   (long (mt-response-ring-drain* receiver)))
 
+(defcfn mt-response-take-freed*
+  "clj_h2o_response_take_freed"
+  [:pointer] :long)
+
+(defn mt-response-take-freed
+  "Returns the number of slots that request cleanup and ring drains without a
+  send freed since the last call, and resets it. Call it on the event-loop
+  thread."
+  [receiver]
+  (long (mt-response-take-freed* receiver)))
+
 (defcfn mt-destroy-wakeup-receiver
   "Unregister and free the wakeup receiver"
   "clj_h2o_mt_destroy_wakeup_receiver"
