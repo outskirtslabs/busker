@@ -146,5 +146,53 @@
 (deftest every-waiter-gets-a-block-when-releases-race-new-waiters
   (is (nil? (unserved-round 300 8 100000))))
 
+(defn- wait-until
+  "Calls `done?` every 1 ms for up to 10 s. Returns its last result."
+  [done?]
+  (let [deadline (+ (System/nanoTime) 10000000000)]
+    (loop []
+      (or (done?)
+          (when (< (System/nanoTime) deadline)
+            (Thread/sleep 1)
+            (recur))))))
+
+(defn- parked?
+  "Returns true once `thread` parks after at least two `attempts`, within 10 s."
+  [^Thread thread ^AtomicInteger attempts]
+  (wait-until #(and (<= 2 (.get attempts))
+                    (= Thread$State/WAITING (.getState thread)))))
+
+(deftest relief-after-a-failed-flush-flushes-each-response-once
+  (let [p (pool/create-stream-pool 16)
+        blocks (mapv (fn [_] (pool/try-borrow! p)) (range 256))
+        attempts (AtomicInteger. 0)
+        borrower (promise)
+        flushes (atom {})
+        calls (AtomicInteger. 0)
+        flush-fn (fn [token]
+                   #(if (= 2 (.incrementAndGet calls))
+                      (throw (IllegalStateException. "flush"))
+                      (swap! flushes update token (fnil inc 0))))]
+    (doseq [token [:a :b :c :d]] (pool/track-pressure! p token (flush-fn token)))
+    (let [thread (Thread/startVirtualThread
+                  #(deliver borrower (pool/await-block!
+                                      p (fn []
+                                          (.incrementAndGet attempts)
+                                          (let [claim (pool/try-borrow! p)]
+                                            (when-not (= :full claim) claim))))))]
+      (try
+        (is (parked? thread attempts))
+        (is (thrown? IllegalStateException (pool/relieve-pressure! p)))
+        (is (= [1 1 1] (vals @flushes)))
+        (is (wait-until #(<= 3 (.get attempts))))
+        (pool/relieve-pressure! p)
+        (pool/relieve-pressure! p)
+        (is (= {:a 1 :b 1 :c 1 :d 1} @flushes))
+        (finally
+          (pool/retire! p)
+          (is (= :closed (deref borrower 10000 :timeout)))
+          (doseq [block blocks] (pool/release! p block))
+          (pool/retire! p))))))
+
 (deftest rejects-zero-buffer-configuration
   (is (thrown? IllegalArgumentException (pool/create-stream-pool 0))))

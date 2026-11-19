@@ -65,18 +65,36 @@
   (waiters/signal-all! (:waiters pool)))
 
 (defn track-pressure!
-  "Registers only responses with published, unflushed storage."
+  "Registers only responses with published, unflushed storage.
+  Wakes one block waiter, which then tries again."
   [^StreamPool pool token flush-fn]
-  (locking (:lock pool) (.put ^HashMap (:pressure pool) token flush-fn)))
+  (locking (:lock pool) (.put ^HashMap (:pressure pool) token flush-fn))
+  (waiters/signal! (:waiters pool) 1))
 
 (defn untrack-pressure! [^StreamPool pool token]
   (locking (:lock pool) (.remove ^HashMap (:pressure pool) token)))
 
 (defn relieve-pressure!
-  "Flushes the tracked subset without holding the pool monitor."
+  "Removes all tracked responses, then calls each flush function once without
+  holding the pool monitor. A response needs [[track-pressure!]] again to be
+  flushed by a later call. A flush function that throws does not stop the
+  others. Its response is tracked again. After the calls, if any flush function
+  threw, every block waiter wakes and the first exception propagates."
   [^StreamPool pool]
-  (let [callbacks (locking (:lock pool) (vec (.values ^HashMap (:pressure pool))))]
-    (doseq [f callbacks] (f))))
+  (let [^HashMap pressure (:pressure pool)
+        entries (locking (:lock pool)
+                  (let [taken (mapv (juxt key val) pressure)]
+                    (.clear pressure)
+                    taken))
+        failed (into [] (keep (fn [[_ f :as entry]]
+                                (try (f) nil
+                                     (catch Throwable t (conj entry t)))))
+                     entries)]
+    (when-let [[[_ _ t]] (seq failed)]
+      (locking (:lock pool)
+        (doseq [[token f] failed] (.putIfAbsent pressure token f)))
+      (wake-all! pool)
+      (throw t))))
 
 (defn try-borrow!
   "Returns a block claim, `:full` if exhausted, or `:closed` after retirement starts.
