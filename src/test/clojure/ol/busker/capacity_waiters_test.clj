@@ -113,6 +113,35 @@
       (is (true? (deref waiting 2000 :timeout)))
       (finally (stop-all! [first-waiter second-waiter])))))
 
+(deftest many-waiters-that-stop-together-all-leave-quickly
+  (let [queue (waiters/create)
+        free (AtomicInteger. 0)
+        closed?_ (AtomicBoolean.)
+        n-waiters 200000
+        finished (CountDownLatch. n-waiters)
+        threads (vec (repeatedly n-waiters
+                                 #(Thread/startVirtualThread
+                                   (fn []
+                                     (waiters/await! queue (take-unit! free closed?_))
+                                     (.countDown finished)))))]
+    (try
+      (is (every? parked? threads))
+      (.set closed?_ true)
+      (doseq [^Thread thread threads]
+        (LockSupport/unpark thread))
+      (is (.await finished 5 TimeUnit/SECONDS))
+      (let [result (promise)
+            late-waiter (start-waiter queue (take-unit! free (AtomicBoolean.)) result)]
+        (try
+          (is (parked? late-waiter))
+          (.set free 1)
+          (waiters/signal! queue 1)
+          (is (true? (deref result 2000 :timeout)))
+          (finally (stop-all! [late-waiter]))))
+      (finally
+        (doseq [^Thread thread threads]
+          (.interrupt thread))))))
+
 (deftest a-woken-waiter-whose-attempt-throws-passes-its-wake-on
   (let [queue (waiters/create)
         free (AtomicInteger. 0)
