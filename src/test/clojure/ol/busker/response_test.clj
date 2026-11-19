@@ -5,7 +5,9 @@
    [babashka.ffi :as mem]
    [clojure.test :refer [deftest is testing]]
    [ol.busker :as busker]
+   [ol.busker.buffer-pool :as bp]
    [ol.busker.fixed-final :as fixed-final]
+   [ol.busker.generation :as generation]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as protocols]
    [ol.busker.response :as response]
@@ -20,7 +22,8 @@
    [java.security KeyStore]
    [java.security.cert CertificateFactory]
    [java.util HashMap LinkedHashMap]
-   [java.util.concurrent CountDownLatch TimeUnit]
+   [java.util.concurrent CountDownLatch LinkedBlockingQueue TimeUnit]
+   [java.util.concurrent.atomic AtomicReference]
    [javax.net.ssl SNIHostName SSLContext SSLSocket SSLSocketFactory TrustManagerFactory]))
 
 (defn- start-server
@@ -751,6 +754,60 @@
           (is (= {:exit 0 :out "AB"} (select-keys (await-result client) [:exit :out])))
           (is (= 1 @closed))
           (finally (deliver release true)))))))
+
+(defn- close-while-capacity-is-used-up
+  "Uses up a capacity of a server's worker with `take!`, starts two requests
+  whose handlers call `emit!` and wait for that capacity, then closes the
+  second response. `take!` returns a function that gives the capacity back."
+  [take! emit!]
+  (let [entries (LinkedBlockingQueue.)
+        [server port] (start-server
+                       (fn [{emitter :ol.busker.request/emitter}]
+                         (let [result (promise)]
+                           (.put entries {:thread (Thread/currentThread) :emitter emitter :result result})
+                           (deliver result (emit! emitter))
+                           {:body emitter})))
+        worker (first (::generation/workers (:instance (:active @(:busker/state server)))))
+        give-back! (let [taken (take! worker)
+                         returned (delay (taken))]
+                     #(force returned))]
+    (try
+      (let [clients (vec (repeatedly 2 #(on-virtual-thread (fn [] (util/curl :http :h1 port "/" :max-time 10)))))
+            [waiting closing] (repeatedly 2 #(.poll entries 5 TimeUnit/SECONDS))]
+        (await-waiting! (:thread waiting))
+        (await-waiting! (:thread closing))
+        (is (true? (protocols/close! (:emitter closing))))
+        (is (= {:status :closed} (deref (:result closing) 2000 ::timeout))
+            "close! ends the blocked emit! of its response")
+        (is (not (realized? (:result waiting))) "the other response still waits")
+        (give-back!)
+        (is (= :accepted (:status (deref (:result waiting) 5000 ::timeout))))
+        (is (= [0 0] (mapv #(:exit (await-result %)) clients))))
+      (finally
+        (give-back!)
+        (busker/stop! server)))))
+
+(defn- take-fixed-slots! [worker]
+  (let [receiver (.get ^AtomicReference (:response-receiver_ worker))
+        handles (vec (take-while pos? (repeatedly #(h2o/mt-response-try-claim receiver))))]
+    (fn []
+      (doseq [handle handles] (h2o/mt-response-abort receiver handle))
+      (fixed-final/notify-capacity! worker (count handles)))))
+
+(defn- take-stream-blocks! [worker]
+  (let [pool (:stream-pool worker)
+        blocks (vec (take-while map? (repeatedly #(bp/try-borrow! pool))))]
+    (fn [] (doseq [block blocks] (bp/release! pool block)))))
+
+(deftest close-ends-an-emit-that-waits-for-a-fixed-slot
+  (close-while-capacity-is-used-up
+   take-fixed-slots!
+   #(protocols/emit! % (fn [^ByteBuffer b] (.put b (byte 65))) {:capacity 1 :end? true})))
+
+(deftest close-ends-an-emit-that-waits-for-a-stream-block
+  (close-while-capacity-is-used-up
+   take-stream-blocks!
+   #(protocols/emit! % "A" {:end? true})))
 
 (deftest close-during-fixed-producer-publishes-nothing-test
   (with-emitter
