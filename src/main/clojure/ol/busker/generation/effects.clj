@@ -605,12 +605,13 @@
 ;;; Stop
 
 (defn signal-stop!
-  "Stops new work: marks the handler and the workers as stopping, stops the
-  key manager and shuts down the request executor."
+  "Stops new work: marks the workers and then the handler as stopping, stops
+  the key manager and shuts down the request executor. Each worker can still
+  finish at most one accept that it started before the stop."
   [{::g/keys [handler ^AtomicBoolean shutting-down? key-manager workers ^ExecutorService executor]}]
+  (.set shutting-down? true)
   (when-let [handler-ptr (::h2o/handler-ptr handler)]
     (h2o/handler-set-shutting-down handler-ptr 1))
-  (.set shutting-down? true)
   (some-> key-manager tickets/stop-key-manager!)
   (when-let [workers (seq (remove nil? workers))]
     (doseq [worker workers]

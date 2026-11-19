@@ -268,8 +268,8 @@
         (run-accepts [[:ok 0]]
                      {#'h2o/h2o-accept (fn [& _] (.set stopping true))}
                      :queued 2 :shutting-down? stopping)]
-    (is (= [1 1] [active count]) "The socket accepted before the stop is served.")
-    (is (= 1 queued) "The next generation accepts the second socket.")))
+    (is (= [1 1] [active count]) "One socket is taken before the stop.")
+    (is (= 1 queued) "The second socket stays in the listener queue.")))
 
 (deftest connection-close-callback-contains-and-logs-errors
   (let [failure (IllegalStateException. "release failed")
