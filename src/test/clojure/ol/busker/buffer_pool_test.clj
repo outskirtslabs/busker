@@ -4,7 +4,8 @@
    [ol.busker.buffer-pool :as pool])
   (:import
    [java.lang.foreign MemorySegment ValueLayout]
-   [java.nio ByteBuffer]))
+   [java.nio ByteBuffer]
+   [java.util.concurrent.atomic AtomicBoolean AtomicInteger]))
 
 (deftest bounded-storage-retains-checked-out-blocks
   (let [p (pool/create-stream-pool 16)
@@ -97,6 +98,53 @@
       (finally
         (doseq [block blocks] (pool/release! p block))
         (is (true? (pool/retire! p)))))))
+
+(defn- unserved-round
+  "Runs `rounds` rounds on a full pool. In each round `n` virtual threads wait
+  for a block while `n` platform threads release one block each, after a random
+  spin of up to `jitter` steps. A waiter sleeps 1 ms after it claims a block,
+  as a producer thread that is descheduled. Returns the first round where a
+  waiter has no block 2 s later, or nil."
+  [rounds n jitter]
+  (loop [round 0]
+    (when (< round rounds)
+      (let [p (pool/create-stream-pool 16)
+            blocks (mapv (fn [_] (pool/try-borrow! p)) (range 256))
+            ready (AtomicInteger. 0)
+            go?_ (AtomicBoolean.)
+            in-step! (fn [] (.incrementAndGet ready) (while (not (.get go?_)) (Thread/yield)))
+            results (vec (repeatedly n promise))
+            borrow! (fn [] (let [claim (pool/try-borrow! p)]
+                             (when-not (= :full claim)
+                               (Thread/sleep 1)
+                               claim)))
+            releasers (mapv (fn [block]
+                              (let [delay (rand-int jitter)]
+                                (doto (Thread. (fn []
+                                                 (in-step!)
+                                                 (dotimes [_ delay] (Thread/onSpinWait))
+                                                 (pool/release! p block)))
+                                  (.start))))
+                            (take n blocks))]
+        (doseq [result results]
+          (Thread/startVirtualThread
+           (fn []
+             (in-step!)
+             (deliver result (pool/await-block! p borrow!)))))
+        (while (< (.get ready) (* 2 n)) (Thread/yield))
+        (.set go?_ true)
+        (let [deadline (+ (System/nanoTime) (* 2000 1000000))
+              served? (every? #(map? (deref % (max 0 (quot (- deadline (System/nanoTime)) 1000000)) nil))
+                              results)]
+          (doseq [^Thread thread releasers] (.join thread 2000))
+          (pool/retire! p)
+          (doseq [block (concat (drop n blocks) (filter map? (map #(deref % 2000 nil) results)))]
+            (pool/release! p block))
+          (pool/retire! p)
+          (if served? (recur (inc round)) round))))))
+
+(deftest every-waiter-gets-a-block-when-releases-race-new-waiters
+  (is (nil? (unserved-round 300 8 100000))))
 
 (deftest rejects-zero-buffer-configuration
   (is (thrown? IllegalArgumentException (pool/create-stream-pool 0))))
