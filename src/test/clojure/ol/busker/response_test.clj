@@ -8,6 +8,7 @@
    [ol.busker.buffer-pool :as bp]
    [ol.busker.fixed-final :as fixed-final]
    [ol.busker.generation :as generation]
+   [ol.busker.generation.effects :as effects]
    [ol.busker.native :as h2o]
    [ol.busker.protocols :as protocols]
    [ol.busker.response :as response]
@@ -755,37 +756,46 @@
           (is (= 1 @closed))
           (finally (deliver release true)))))))
 
-(defn- close-while-capacity-is-used-up
-  "Uses up a capacity of a server's worker with `take!`, starts two requests
-  whose handlers call `emit!` and wait for that capacity, then closes the
-  second response. `take!` returns a function that gives the capacity back."
-  [take! emit!]
+(defn- with-waiting-emits
+  "Starts a server, uses up a capacity of its worker with `take!`, and starts
+  `n` requests whose handlers call `emit!` and wait for that capacity. Calls `f`
+  with a map of the worker, the clients, a `:give-back!` function and the
+  `{:emitter :result}` of each request, once every request waits. `take!`
+  returns a function that gives the capacity back."
+  [take! emit! n f]
   (let [entries (LinkedBlockingQueue.)
         [server port] (start-server
                        (fn [{emitter :ol.busker.request/emitter}]
                          (let [result (promise)]
                            (.put entries {:thread (Thread/currentThread) :emitter emitter :result result})
                            (deliver result (emit! emitter))
+                           (protocols/close! emitter)
                            {:body emitter})))
         worker (first (::generation/workers (:instance (:active @(:busker/state server)))))
         give-back! (let [taken (take! worker)
                          returned (delay (taken))]
                      #(force returned))]
     (try
-      (let [clients (vec (repeatedly 2 #(on-virtual-thread (fn [] (util/curl :http :h1 port "/" :max-time 10)))))
-            [waiting closing] (repeatedly 2 #(.poll entries 5 TimeUnit/SECONDS))]
-        (await-waiting! (:thread waiting))
-        (await-waiting! (:thread closing))
-        (is (true? (protocols/close! (:emitter closing))))
-        (is (= {:status :closed} (deref (:result closing) 2000 ::timeout))
-            "close! ends the blocked emit! of its response")
-        (is (not (realized? (:result waiting))) "the other response still waits")
-        (give-back!)
-        (is (= :accepted (:status (deref (:result waiting) 5000 ::timeout))))
-        (is (= [0 0] (mapv #(:exit (await-result %)) clients))))
+      (let [clients (vec (repeatedly n #(on-virtual-thread (fn [] (util/curl :http :h1 port "/" :max-time 10)))))
+            waiting (vec (repeatedly n #(.poll entries 5 TimeUnit/SECONDS)))]
+        (run! #(await-waiting! (:thread %)) waiting)
+        (f {:worker worker :clients clients :give-back! give-back! :entries waiting}))
       (finally
         (give-back!)
         (busker/stop! server)))))
+
+(defn- close-while-capacity-is-used-up
+  [take! emit!]
+  (with-waiting-emits
+    take! emit! 2
+    (fn [{:keys [clients give-back!] [waiting closing] :entries}]
+      (is (true? (protocols/close! (:emitter closing))))
+      (is (= {:status :closed} (deref (:result closing) 2000 ::timeout))
+          "close! ends the blocked emit! of its response")
+      (is (not (realized? (:result waiting))) "the other response still waits")
+      (give-back!)
+      (is (= :accepted (:status (deref (:result waiting) 5000 ::timeout))))
+      (is (= [0 0] (mapv #(:exit (await-result %)) clients))))))
 
 (defn- take-fixed-slots! [worker]
   (let [receiver (.get ^AtomicReference (:response-receiver_ worker))
@@ -799,10 +809,19 @@
         blocks (vec (take-while map? (repeatedly #(bp/try-borrow! pool))))]
     (fn [] (doseq [block blocks] (bp/release! pool block)))))
 
+(defn- emit-fixed! [emitter]
+  (protocols/emit! emitter (fn [^ByteBuffer b] (.put b (byte 65))) {:capacity 1 :end? true}))
+
 (deftest close-ends-an-emit-that-waits-for-a-fixed-slot
-  (close-while-capacity-is-used-up
-   take-fixed-slots!
-   #(protocols/emit! % (fn [^ByteBuffer b] (.put b (byte 65))) {:capacity 1 :end? true})))
+  (close-while-capacity-is-used-up take-fixed-slots! emit-fixed!))
+
+(deftest closing-receiver-admission-ends-every-emit-that-waits-for-a-slot
+  (with-waiting-emits
+    take-fixed-slots! emit-fixed! 3
+    (fn [{:keys [worker entries]}]
+      (effects/close-response-receiver-admission! worker)
+      (is (= (repeat 3 {:status :closed})
+             (mapv #(deref (:result %) 2000 ::timeout) entries))))))
 
 (deftest close-ends-an-emit-that-waits-for-a-stream-block
   (close-while-capacity-is-used-up
