@@ -15,8 +15,12 @@
   Application virtual threads fill blocks through [[fill-native-range!]]. Its
   confined view expires before publication; the worker reads the separately
   retained shared segment. Pool accounting is synchronized, but callers must
-  coordinate segment access and release. This is internal response storage, not
-  an application buffer API; applications use [[ol.busker.protocols/emit!]]."
+  coordinate segment access and release. Threads that wait for a block park on
+  a lock-free queue: a release wakes one of them, and retirement wakes all.
+  This is internal response storage, not an application buffer API;
+  applications use [[ol.busker.protocols/emit!]]."
+  (:require
+   [ol.busker.capacity-waiters :as waiters])
   (:import
    [java.lang.foreign Arena MemorySegment]
    [java.util ArrayDeque HashMap]))
@@ -24,7 +28,8 @@
 (set! *warn-on-reflection* true)
 
 (defrecord StreamPool [^Arena arena ^long block-size ^Object lock
-                       ^ArrayDeque free ^HashMap checked ^HashMap pressure state_])
+                       ^ArrayDeque free ^HashMap checked ^HashMap pressure state_
+                       waiters])
 
 (defn create-stream-pool
   "Returns a pool of 256 native blocks, each `size` bytes, in a shared FFM arena.
@@ -43,31 +48,21 @@
         (dotimes [i 256]
           (.add free {:index i :segment (.asSlice storage (long (* (long i) size)) (long size))}))
         (->StreamPool arena size (Object.) free (HashMap.) (HashMap.)
-                      (atom {:retiring? false :closed? false :epoch 0})))
+                      (atom {:retiring? false :closed? false}) (waiters/create)))
       (catch Throwable t
         (.close arena)
         (throw t)))))
 
-(defn signal!
-  "Wakes capacity waiters after a release or response closure."
+(defn await-block!
+  "Calls [[ol.busker.capacity-waiters/await!]] with `attempt!` on the block
+  waiters of `pool`. `attempt!` must return `:closed` once `pool` retires."
+  [^StreamPool pool attempt!]
+  (waiters/await! (:waiters pool) attempt!))
+
+(defn wake-all!
+  "Wakes every block waiter of `pool`, so that each rechecks its response."
   [^StreamPool pool]
-  (locking (:lock pool)
-    (swap! (:state_ pool) update :epoch inc)
-    (.notifyAll ^Object (:lock pool))))
-
-(defn epoch [^StreamPool pool]
-  (locking (:lock pool) (:epoch @(:state_ pool))))
-
-(defn await-change!
-  "Waits once if `observed` still matches [[epoch]] and admission remains open.
-  Callers must recheck capacity after waking and call [[signal!]] on cancellation.
-  The Java monitor wait is interruptible and can park a virtual thread."
-  [^StreamPool pool observed cancelled?]
-  (locking (:lock pool)
-    (when (and (= observed (:epoch @(:state_ pool)))
-               (not (:retiring? @(:state_ pool)))
-               (not (cancelled?)))
-      (.wait ^Object (:lock pool)))))
+  (waiters/signal-all! (:waiters pool)))
 
 (defn track-pressure!
   "Registers only responses with published, unflushed storage."
@@ -98,7 +93,7 @@
         :full))))
 
 (defn release!
-  "Returns a checked-out block and wakes capacity waiters; nil is ignored.
+  "Returns a checked-out block and wakes one block waiter. Ignores nil.
   Stale or duplicate claims throw. The caller must end all producer and native
   access first. This does not close the arena or finish a pending retirement."
   [^StreamPool pool block]
@@ -107,8 +102,8 @@
       (when-not (identical? (:claim block) (.get ^HashMap (:checked pool) (:index block)))
         (throw (IllegalStateException. "Stale native stream block release")))
       (.remove ^HashMap (:checked pool) (:index block))
-      (.add ^ArrayDeque (:free pool) (dissoc block :claim))
-      (signal! pool))))
+      (.add ^ArrayDeque (:free pool) (dissoc block :claim)))
+    (waiters/signal! (:waiters pool) 1)))
 
 (defn checked-out [^StreamPool pool]
   (locking (:lock pool) (.size ^HashMap (:checked pool))))
@@ -123,7 +118,7 @@
     (throw (IllegalStateException. "Stream storage retirement requires a platform thread")))
   (locking (:lock pool)
     (swap! (:state_ pool) assoc :retiring? true)
-    (signal! pool)
+    (wake-all! pool)
     (if (.isEmpty ^HashMap (:checked pool))
       (do
         (when-not (:closed? @(:state_ pool))

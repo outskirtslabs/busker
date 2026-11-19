@@ -50,7 +50,6 @@
 
 (defn- notify-capacity! [st]
   (locking (:lock st) (.notifyAll ^Object (:lock st)))
-  (bp/signal! (:buffer-pool st))
   (let [worker (-> st :req :worker)]
     (when-let [f (:wake-command-waiters! worker)]
       (try (f worker) (catch Throwable _ nil)))))
@@ -183,18 +182,16 @@
     (when receipt? (swap! (:state_ st) update :reserved-receipts dec)))
   (notify-capacity! st))
 
-(defn- borrow-block! [st wait?]
-  (let [pool (:buffer-pool st)]
-    (loop []
-      (let [observed (bp/epoch pool)
-            result (if (open? st) (bp/try-borrow! pool) :closed)]
-        (if (not= result :full)
-          result
-          (do
-            (pressure! st)
-            (if-not wait?
-              :full
-              (do (bp/await-change! pool observed #(not (open? st))) (recur)))))))))
+(defn- borrow-block!
+  [st wait?]
+  (let [pool (:buffer-pool st)
+        attempt! #(let [result (if (open? st) (bp/try-borrow! pool) :closed)]
+                    (if (= :full result)
+                      (do (pressure! st) nil)
+                      result))]
+    (if wait?
+      (bp/await-block! pool attempt!)
+      (or (attempt!) :full))))
 
 (defn- reserve-command! [st wait?]
   (let [worker (-> st :req :worker)]

@@ -54,5 +54,49 @@
       (is (thrown? IllegalStateException (pool/release! p block)))
       (finally (pool/retire! p)))))
 
+(defn- borrow-or-wait
+  [p]
+  (let [result (promise)]
+    (Thread/startVirtualThread
+     #(deliver result (pool/await-block!
+                       p (fn [] (let [claim (pool/try-borrow! p)]
+                                  (when-not (= :full claim) claim))))))
+    result))
+
+(deftest each-released-block-goes-to-a-waiting-borrower
+  (let [p (pool/create-stream-pool 16)
+        blocks (mapv (fn [_] (pool/try-borrow! p)) (range 256))
+        waiting (vec (repeatedly 3 #(borrow-or-wait p)))
+        borrowed #(filterv map? (keep (fn [r] (deref r 0 nil)) waiting))]
+    (try
+      (Thread/sleep 50)
+      (is (empty? (borrowed)))
+      (pool/release! p (first blocks))
+      (pool/release! p (second blocks))
+      (let [deadline (+ (System/nanoTime) (* 2000 1000000))]
+        (while (and (< (count (borrowed)) 2) (< (System/nanoTime) deadline))
+          (Thread/sleep 1)))
+      (Thread/sleep 50)
+      (is (= 2 (count (borrowed))))
+      (is (= 256 (pool/checked-out p)))
+      (finally
+        (pool/retire! p)
+        (let [results (mapv #(deref % 2000 :timeout) waiting)]
+          (is (= [:closed] (remove map? results)))
+          (doseq [block (concat (drop 2 blocks) (filter map? results))] (pool/release! p block)))
+        (is (true? (pool/retire! p)))))))
+
+(deftest retirement-ends-every-wait
+  (let [p (pool/create-stream-pool 16)
+        blocks (mapv (fn [_] (pool/try-borrow! p)) (range 256))
+        waiting (vec (repeatedly 3 #(borrow-or-wait p)))]
+    (try
+      (Thread/sleep 50)
+      (is (false? (pool/retire! p)))
+      (is (= [:closed :closed :closed] (mapv #(deref % 2000 :timeout) waiting)))
+      (finally
+        (doseq [block blocks] (pool/release! p block))
+        (is (true? (pool/retire! p)))))))
+
 (deftest rejects-zero-buffer-configuration
   (is (thrown? IllegalArgumentException (pool/create-stream-pool 0))))

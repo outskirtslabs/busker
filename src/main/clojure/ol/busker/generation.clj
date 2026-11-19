@@ -135,7 +135,9 @@
   (.set ^AtomicBoolean (:running?_ worker) false)
   (mailbox/close! (:mailbox worker))
   (effects/close-response-receiver-admission! worker)
-  (callback-dispatch/fail-responses! (:callback-dispatch worker) cause))
+  (callback-dispatch/fail-responses! (:callback-dispatch worker) cause)
+  (when-let [pool (:stream-pool worker)]
+    (bp/wake-all! pool)))
 
 (defn- worker-drained?
   "Returns true when the worker of `state` holds no connection, response,
