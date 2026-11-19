@@ -7,16 +7,10 @@
   (:import
    [java.lang.invoke VarHandle]
    [java.util.concurrent ConcurrentLinkedDeque]
-   [java.util.concurrent.atomic AtomicInteger]
+   [java.util.concurrent.atomic AtomicReference]
    [java.util.concurrent.locks LockSupport]))
 
 (set! *warn-on-reflection* true)
-
-(def ^:private ^:const waiting 0)
-(def ^:private ^:const woken 1)
-(def ^:private ^:const left 2)
-
-(deftype Waiter [^Thread thread ^AtomicInteger state])
 
 (defn create
   "Returns an empty waiter queue."
@@ -24,10 +18,12 @@
   (ConcurrentLinkedDeque.))
 
 (defn- wake!
-  [^Waiter waiter]
-  (when (.compareAndSet ^AtomicInteger (.-state waiter) waiting woken)
-    (LockSupport/unpark (.-thread waiter))
-    true))
+  [^AtomicReference waiter]
+  (let [thread (.get waiter)]
+    (when (and (instance? Thread thread)
+               (.compareAndSet waiter thread :woken))
+      (LockSupport/unpark thread)
+      true)))
 
 (defn signal!
   "Wakes up to `n` threads that wait in [[await!]] on `waiters`, oldest first.
@@ -52,17 +48,14 @@
 
 (defn- join!
   [^ConcurrentLinkedDeque waiters thread]
-  (let [waiter (Waiter. thread (AtomicInteger. waiting))]
+  (let [waiter (AtomicReference. thread)]
     (.offerLast waiters waiter)
     (VarHandle/fullFence)
     waiter))
 
 (defn- leave!
-  "Removes `waiter` from `waiters` when no signal reached it, so the queue holds
-  only live waiters, and passes one wake on when a signal picked it."
-  [^ConcurrentLinkedDeque waiters ^Waiter waiter]
-  (if (.compareAndSet ^AtomicInteger (.-state waiter) waiting left)
-    (.removeLastOccurrence waiters waiter)
+  [waiters ^AtomicReference waiter thread]
+  (when-not (.compareAndSet waiter thread :left)
     (signal! waiters 1)))
 
 (defn await!
@@ -78,22 +71,22 @@
   [^ConcurrentLinkedDeque waiters attempt!]
   (or (attempt!)
       (let [thread (Thread/currentThread)]
-        (loop [^Waiter waiter (join! waiters thread)]
+        (loop [^AtomicReference waiter (join! waiters thread)]
           (let [result (try (attempt!)
                             (catch Throwable t
-                              (leave! waiters waiter)
+                              (leave! waiters waiter thread)
                               (throw t)))]
             (cond
               (some? result)
-              (do (leave! waiters waiter)
+              (do (leave! waiters waiter thread)
                   result)
 
-              (= woken (.get ^AtomicInteger (.-state waiter)))
+              (identical? :woken (.get waiter))
               (recur (join! waiters thread))
 
               :else
               (do (LockSupport/park waiters)
                   (when (Thread/interrupted)
-                    (leave! waiters waiter)
+                    (leave! waiters waiter thread)
                     (throw (InterruptedException.)))
                   (recur waiter))))))))
