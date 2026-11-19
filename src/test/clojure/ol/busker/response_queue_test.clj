@@ -3,6 +3,7 @@
    [clojure.test :refer [deftest is]]
    [ol.busker.buffer-pool :as pool]
    [ol.busker.byte-bounded-queue :as budget]
+   [ol.busker.callback-dispatch :as dispatch]
    [ol.busker.internal.protocols :as pi]
    [ol.busker.native :as native]
    [ol.busker.protocols :as protocols]
@@ -12,16 +13,20 @@
   (:import
    [java.io OutputStream]
    [java.lang.foreign MemorySegment ValueLayout]
-   [java.nio ByteBuffer]))
+   [java.nio ByteBuffer]
+   [java.util.concurrent ConcurrentHashMap]))
 
-(defn- controller [p commands]
-  (queue/create-response-writer
-   {:config {:output-buffer-size (:block-size p)}
-    :worker {:stream-pool p
-             :reserve-command! (fn [_ _ cancelled?] (if (cancelled?) :closed (Object.)))
-             :publish-command! (fn [_ _ command] (swap! commands conj command) :accepted)
-             :release-command! (fn [_ _] nil)}
-    :apply-head! (fn [_ _] nil)}))
+(defn- controller
+  ([p commands] (controller p commands nil))
+  ([p commands work]
+   (queue/create-response-writer
+    {:config {:output-buffer-size (:block-size p)}
+     :worker {:stream-pool p
+              :callback-dispatch {:streaming-work work}
+              :reserve-command! (fn [_ _ cancelled?] (if (cancelled?) :closed (Object.)))
+              :publish-command! (fn [_ _ command] (swap! commands conj command) :accepted)
+              :release-command! (fn [_ _] nil)}
+     :apply-head! (fn [_ _] nil)})))
 
 (defn- consume! [st commands]
   (let [pending @commands]
@@ -137,7 +142,7 @@
             (is (= [nil 0] [(:in-flight @(:state_ st)) (pool/checked-out p)])))
           (finally (queue/on-cleanup st) (pool/retire! p)))))))
 
-(deftest global-block-pressure-flushes-the-unflushed-subset
+(deftest write-without-wait-is-rejected-when-unflushed-responses-hold-every-block
   (with-redefs [pi/wake (fn [_] nil)]
     (let [p (pool/create-stream-pool 8)
           streams (mapv (fn [_] (controller p (atom []))) (range 257))]
@@ -148,10 +153,57 @@
                (queue/emit-bounded! (peek streams) nil 1
                                     (fn [_] (throw (AssertionError. "Producer must not run")))
                                     {:wait? false})))
-        (is (every? #(= 1 (:flush-prefix @(:state_ %))) (take 256 streams)))
         (is (= 256 (pool/checked-out p)))
         (finally
           (doseq [st streams] (queue/on-cleanup st))
+          (pool/retire! p))))))
+
+(defn- write-unflushed! [st commands]
+  (queue/emit-bounded! st nil 1 (fn [^ByteBuffer b] (.put b (byte 1))) {:wait? false})
+  (consume! st commands))
+
+(defn- run-event-loop! [work]
+  (dispatch/drain-responses! {:streaming-work work})
+  (run! queue/on-proceed (vec (.values ^ConcurrentHashMap work))))
+
+(defn- waiting-write-status [p work]
+  (let [commands (atom [])
+        waiting (controller p commands work)
+        result (promise)
+        producer (Thread/startVirtualThread
+                  #(deliver result
+                            (:status (queue/emit-bounded!
+                                      waiting nil 1
+                                      (fn [^ByteBuffer b] (.put b (byte 2))) {}))))
+        deadline (+ (System/nanoTime) 10000000000)]
+    (try
+      (loop []
+        (run-event-loop! work)
+        (when (and (not (realized? result)) (neg? (- (System/nanoTime) deadline)))
+          (Thread/sleep 1)
+          (recur)))
+      (consume! waiting commands)
+      (queue/flush! waiting)
+      (dotimes [_ 2] (run-event-loop! work))
+      (deref result 100 :timeout)
+      (finally
+        (queue/on-cleanup waiting)
+        (.join producer 1000)))))
+
+(deftest waiting-write-gets-a-block-that-idle-unflushed-responses-hold
+  (with-redefs [pi/wake (fn [_] nil)
+                native/sendvec (fn [& _] nil)]
+    (let [p (pool/create-stream-pool 8)
+          work (ConcurrentHashMap.)
+          commands (vec (repeatedly 256 #(atom [])))
+          idle (mapv #(controller p % work) commands)]
+      (try
+        (dotimes [_ 2]
+          (doseq [[st c] (map vector idle commands)] (write-unflushed! st c))
+          (is (= 256 (pool/checked-out p)))
+          (is (= :accepted (waiting-write-status p work))))
+        (finally
+          (doseq [st idle] (queue/on-cleanup st))
           (pool/retire! p))))))
 
 (deftest mailbox-full-releases-preparation-without-calling-producer
