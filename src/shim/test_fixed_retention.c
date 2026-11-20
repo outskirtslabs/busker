@@ -46,10 +46,8 @@ static void final_send(h2o_ostream_t *stream, h2o_req_t *req,
   }
 }
 
-static uint64_t publish(clj_mt_receiver_t *receiver, uint64_t sequence,
-                        int status) {
-  uint64_t claim = clj_h2o_response_try_claim(receiver);
-  CHECK(claim != 0);
+static void publish_claim(clj_mt_receiver_t *receiver, uint64_t claim,
+                          uint64_t sequence, int status) {
   clj_response_slot_t *slot = response_slot_from_handle(receiver, claim);
   slot->data.module_id = 1;
   slot->data.request_seq = sequence;
@@ -61,6 +59,13 @@ static uint64_t publish(clj_mt_receiver_t *receiver, uint64_t sequence,
   slot->data.payload_len = 3;
   memcpy(response_slot_payload(&slot->data), "cat", 3);
   CHECK(clj_h2o_response_publish(receiver, claim) == 1);
+}
+
+static uint64_t publish(clj_mt_receiver_t *receiver, uint64_t sequence,
+                        int status) {
+  uint64_t claim = clj_h2o_response_try_claim(receiver);
+  CHECK(claim != 0);
+  publish_claim(receiver, claim, sequence, status);
   return claim;
 }
 
@@ -110,6 +115,68 @@ static void test_final(h2o_context_t *context, clj_mt_receiver_t *receiver,
   clj_h2o_response_use_release(receiver);
   CHECK(clj_h2o_mt_response_pending(receiver) == 0);
   h2o_mem_clear_pool(&req.pool);
+}
+
+static void ignore_send(h2o_ostream_t *stream, h2o_req_t *req,
+                        h2o_sendvec_t *bufs, size_t count,
+                        h2o_send_state_t state) {
+  (void)stream, (void)req, (void)bufs, (void)count, (void)state;
+}
+
+#define CYCLE_SLOTS 6
+#define CYCLE_SENT (CYCLE_SLOTS / 3)
+
+static void test_freed_slots_can_be_claimed(h2o_context_t *context) {
+  clj_mt_receiver_t *receiver =
+      clj_h2o_mt_create_response_receiver(context, CYCLE_SLOTS, 64);
+  CHECK(receiver != NULL);
+  h2o_conn_t conn = {.ctx = context};
+  for (int round = 0; round <= 3; ++round) {
+    uint64_t claims[CYCLE_SLOTS];
+    for (size_t i = 0; i < CYCLE_SLOTS; ++i) {
+      claims[i] = clj_h2o_response_try_claim(receiver);
+      CHECK(claims[i] != 0);
+    }
+    CHECK(clj_h2o_response_try_claim(receiver) == 0);
+    if (round == 3) {
+      for (size_t i = 0; i < CYCLE_SLOTS; ++i)
+        CHECK(clj_h2o_response_abort(receiver, claims[i]) == 1);
+      break;
+    }
+
+    h2o_req_t reqs[CYCLE_SENT];
+    h2o_ostream_t outputs[CYCLE_SENT];
+    clj_req_ctx_t contexts[CYCLE_SENT];
+    for (size_t i = 0; i < CYCLE_SENT; ++i) {
+      uint64_t seq = i + 1;
+      reqs[i] = (h2o_req_t){.conn = &conn};
+      h2o_mem_init_pool(&reqs[i].pool);
+      reqs[i].input.method = h2o_iovec_init(H2O_STRLIT("GET"));
+      outputs[i] = (h2o_ostream_t){.do_send = ignore_send};
+      reqs[i]._ostr_top = &outputs[i];
+      contexts[i] = (clj_req_ctx_t){.req = &reqs[i],
+                                    .response_receiver = receiver,
+                                    .dispatch_module_id = 1,
+                                    .dispatch_request_seq = seq};
+      CHECK(register_response_request(receiver, &contexts[i], seq));
+    }
+    for (size_t i = 0; i < CYCLE_SLOTS; ++i) {
+      if (i % 3 == 0)
+        CHECK(clj_h2o_response_abort(receiver, claims[i]) == 1);
+      else if (i % 3 == 1)
+        publish_claim(receiver, claims[i], 1000 + i, 200);
+      else
+        publish_claim(receiver, claims[i], i / 3 + 1, 200);
+    }
+    CHECK(clj_h2o_response_ring_drain(receiver) == CYCLE_SLOTS * 2 / 3);
+    CHECK(clj_h2o_response_ring_retained(receiver) == CYCLE_SENT);
+    for (size_t i = 0; i < CYCLE_SENT; ++i) {
+      cleanup_request(&contexts[i]);
+      h2o_mem_clear_pool(&reqs[i].pool);
+    }
+  }
+  CHECK(clj_h2o_mt_response_pending(receiver) == 0);
+  clj_h2o_mt_destroy_response_receiver(receiver);
 }
 
 static void test_independent_release(h2o_context_t *context) {
@@ -507,6 +574,7 @@ int main(void) {
   CHECK(clj_h2o_response_use_acquire(receiver) == 1);
   CHECK(clj_h2o_mt_response_pending(receiver) == 1);
   clj_h2o_response_use_release(receiver);
+  test_freed_slots_can_be_claimed(&context);
   test_final(&context, receiver, 0, "GET", 200);
   test_final(&context, receiver, 1, "GET", 200);
   test_final(&context, receiver, 2, "GET", 200);
