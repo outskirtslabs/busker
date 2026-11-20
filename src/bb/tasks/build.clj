@@ -243,22 +243,14 @@
               (throw e))))))))
 
 (defn publish-libs!
-  "Publishes each library in `dirs`, skipping artifacts that already exist remotely."
+  "Publishes each library in `dirs`, skipping artifacts that already exist
+  remotely. Stops at the first library that fails to publish."
   [dirs]
-  (let [failures (reduce (fn [failures dir]
-                           (try
-                             (publish-dir! dir)
-                             failures
-                             (catch Throwable e
-                               (println "Failed to publish" dir ":" (ex-message e))
-                               (conj failures {:dir dir
-                                               :message (ex-message e)
-                                               :error e}))))
-                         []
-                         dirs)]
-    (when (seq failures)
-      (throw (ex-info "One or more native artifacts failed to publish"
-                      {:failures (mapv #(select-keys % [:dir :message]) failures)}
-                      (:error (first failures)))))
-    nil))
+  (doseq [dir dirs]
+    (try
+      (publish-dir! dir)
+      (catch Throwable e
+        (throw (ex-info (str "Failed to publish " dir ", stopped before the next library")
+                        {:dir dir}
+                        e))))))
 
