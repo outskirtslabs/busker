@@ -1,6 +1,7 @@
 (ns tasks.build
   (:require
    [babashka.fs          :as fs]
+   [babashka.process     :as p]
    [babashka.tasks       :as t]
    [borkdude.rewrite-edn :as r]
    [clojure.edn          :as edn]
@@ -125,6 +126,43 @@
       :else
       (throw (ex-info "Partially published Maven coordinate"
                       state-data)))))
+
+(defn- git
+  "Returns the trimmed output of git `args`. Throws when git fails."
+  [args]
+  (let [{:keys [exit out err]} (apply p/sh "git" args)]
+    (when-not (zero? exit)
+      (throw (ex-info (str "git " (str/join " " args) " failed")
+                      {:exit exit :err err})))
+    (str/trim out)))
+
+(defn check-release!
+  "Throws unless HEAD can be published: no tracked file differs from HEAD,
+  GIT_REV is unset or HEAD, and the annotated tag `v<version>` of the native
+  libs in `dirs` points at HEAD in the repository that the jar poms link to."
+  [dirs]
+  (let [versions (set (map (comp :version lib-project) dirs))
+        _ (when-not (= 1 (count versions))
+            (throw (ex-info "Native libs must have one version"
+                            {:versions versions})))
+        tag-ref (str "refs/tags/v" (first versions))
+        repo (:url (lib-project main-lib-dir))
+        head (git ["rev-parse" "--verify" "HEAD^{commit}"])
+        git-rev (System/getenv "GIT_REV")
+        remote (some (fn [line]
+                       (let [[sha ref] (str/split line #"\t")]
+                         (when (= ref (str tag-ref "^{}")) sha)))
+                     (str/split-lines (git ["ls-remote" "--tags" repo])))]
+    (when-not (re-matches #"[0-9a-f]{40}" head)
+      (throw (ex-info "HEAD is not a commit" {:head head})))
+    (when-not (str/blank? (git ["status" "--porcelain" "--untracked-files=no"]))
+      (throw (ex-info "Tracked files differ from HEAD" {})))
+    (when-not (or (nil? git-rev) (= head (str/trim git-rev)))
+      (throw (ex-info "GIT_REV is set to another commit than HEAD"
+                      {:head head :git-rev git-rev})))
+    (when-not (= head remote)
+      (throw (ex-info (str "annotated " tag-ref " in " repo " does not point at HEAD")
+                      {:head head :remote-commit remote :repo repo})))))
 
 ;; Tasks
 

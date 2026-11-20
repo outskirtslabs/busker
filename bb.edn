@@ -79,16 +79,22 @@
                            (let [component (first *command-line-args*)]
                              (build/lib-bump! dir component)))}
 
+                  publish:check
+                  {:doc  "Check that HEAD is clean and is the tagged commit of the native version"
+                   :task (build/check-release! build/lib-dirs)}
+
                   publish:native
                   {:doc     "Publish native jars to clojars"
-                   :depends [prep build:shim]
-                   :task    (build/publish-libs! build/lib-dirs)}
+                   :depends [publish:check prep build:shim]
+                   :task    (do (build/check-release! build/lib-dirs)
+                                (build/publish-libs! build/lib-dirs))}
 
                   publish:all
                   {:doc     "Publish the clojure libs to clojars"
-                   :depends [jar:all]
-                   :task    (doseq [dir (conj build/lib-dirs ".")]
-                              (build/lib-publish! dir))}
+                   :depends [publish:check jar:all]
+                   :task    (do (build/check-release! build/lib-dirs)
+                                (doseq [dir (conj build/lib-dirs ".")]
+                                  (build/lib-publish! dir)))}
 
                   dev
                   {:doc  "Start a local development repl"
