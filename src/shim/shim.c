@@ -89,6 +89,7 @@ struct clj_mt_receiver_t {
   _Atomic size_t producer_uses;
   _Atomic size_t claim_cursor;
   _Atomic uint64_t claim_sequence;
+  _Atomic size_t ring_free;
   unsigned char *ring_storage;
   _Atomic uint64_t *ready_words;
   size_t ready_word_count;
@@ -880,6 +881,7 @@ static void release_fixed_slot(clj_req_ctx_t *ctx) {
   atomic_fetch_sub_explicit(&receiver->ring_retained, 1, memory_order_release);
   atomic_store_explicit(&slot->state, CLJ_RESPONSE_SLOT_FREE,
                         memory_order_release);
+  atomic_fetch_add_explicit(&receiver->ring_free, 1, memory_order_release);
   ++receiver->loop_freed_slots;
 }
 
@@ -1303,7 +1305,7 @@ uint64_t clj_h2o_response_try_claim(clj_mt_receiver_t *receiver) {
   if (receiver == NULL ||
       !atomic_load_explicit(&receiver->accepts_responses,
                             memory_order_acquire) ||
-      receiver->ring_capacity == 0)
+      atomic_load_explicit(&receiver->ring_free, memory_order_acquire) == 0)
     return 0;
 
   size_t start = atomic_fetch_add_explicit(&receiver->claim_cursor, 1,
@@ -1315,6 +1317,7 @@ uint64_t clj_h2o_response_try_claim(clj_mt_receiver_t *receiver) {
     if (atomic_compare_exchange_strong_explicit(
             &slot->state, &expected, CLJ_RESPONSE_SLOT_CLAIMED,
             memory_order_acq_rel, memory_order_relaxed)) {
+      atomic_fetch_sub_explicit(&receiver->ring_free, 1, memory_order_relaxed);
       slot->data.module_id = 0;
       uint64_t sequence =
           (atomic_fetch_add_explicit(&receiver->claim_sequence, 1,
@@ -1376,6 +1379,7 @@ int clj_h2o_response_abort(clj_mt_receiver_t *receiver,
           memory_order_release, memory_order_relaxed))
     return 0;
 
+  atomic_fetch_add_explicit(&receiver->ring_free, 1, memory_order_release);
   atomic_fetch_sub_explicit(&receiver->ring_claimed, 1,
                             memory_order_release);
   return 1;
@@ -1449,6 +1453,8 @@ size_t clj_h2o_response_ring_drain(clj_mt_receiver_t *receiver) {
                                   memory_order_release);
         atomic_store_explicit(&slot->state, CLJ_RESPONSE_SLOT_FREE,
                               memory_order_release);
+        atomic_fetch_add_explicit(&receiver->ring_free, 1,
+                                  memory_order_release);
         ++receiver->loop_freed_slots;
         ++drained;
       }
@@ -1544,6 +1550,7 @@ clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(
   atomic_init(&receiver->producer_uses, 0);
   atomic_init(&receiver->claim_cursor, 0);
   atomic_init(&receiver->claim_sequence, 0);
+  atomic_init(&receiver->ring_free, ring_capacity);
   clj_response_slot_t *first_slot = response_slot_at(receiver, 0);
   if (!atomic_is_lock_free(&receiver->ready_words[0]) ||
       !atomic_is_lock_free(&first_slot->state) ||
@@ -1554,6 +1561,7 @@ clj_mt_receiver_t *clj_h2o_mt_create_response_receiver(
       !atomic_is_lock_free(&receiver->ring_ready) ||
       !atomic_is_lock_free(&receiver->claim_cursor) ||
       !atomic_is_lock_free(&receiver->claim_sequence) ||
+      !atomic_is_lock_free(&receiver->ring_free) ||
       !atomic_is_lock_free(&receiver->accepts_responses)) {
     free(receiver->ready_words);
     free(receiver->ring_storage);
