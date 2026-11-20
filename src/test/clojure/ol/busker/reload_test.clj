@@ -1161,35 +1161,45 @@
       (finally
         (run! io/delete-file (reverse (file-seq (io/file storage-root))))))))
 
-(deftest failed-startup-reports-a-failed-cleanup-test
-  (let [port (util/free-port)
+(defn- call-with-failing-loop-destroy
+  "Calls `f`. The first destroy of an event loop that is created during the call throws `failure`."
+  [failure f]
+  (let [create native/evloop-create
         destroy native/evloop-destroy
-        thrown_ (atom false)
-        failure (ex-info "simulated cleanup failure" {})]
-    (with-redefs [native/create-ssl-ctx (fn [& _] mem/null)
+        loops_ (atom #{})
+        thrown_ (atom false)]
+    (with-redefs [native/evloop-create (fn []
+                                         (let [loop (create)]
+                                           (swap! loops_ conj loop)
+                                           loop))
                   native/evloop-destroy (fn [loop]
                                           (destroy loop)
-                                          (when (compare-and-set! thrown_ false true)
+                                          (when (and (contains? @loops_ loop)
+                                                     (compare-and-set! thrown_ false true))
                                             (throw failure)))]
-      (let [error (start-failure (tls-response-config port (constantly {:status 200})))]
+      (f))))
+
+(deftest failed-startup-reports-a-failed-cleanup-test
+  (let [port (util/free-port)
+        failure (ex-info "simulated cleanup failure" {})]
+    (with-redefs [native/create-ssl-ctx (fn [& _] mem/null)]
+      (let [error (call-with-failing-loop-destroy
+                   failure
+                   #(start-failure (tls-response-config port (constantly {:status 200}))))]
         (is (some #(identical? failure %)
                   (mapcat #(.getSuppressed ^Throwable %)
                           (take-while some? (iterate ex-cause error)))))))))
 
 (deftest failed-startup-keeps-its-error-when-cleanup-rethrows-it-test
   (let [port (util/free-port)
-        destroy native/evloop-destroy
-        thrown_ (atom false)
         failure (ex-info "simulated worker startup failure" {})]
     (with-redefs [evloop/start-worker! (fn [& _]
-                                         (throw failure))
-                  native/evloop-destroy (fn [loop]
-                                          (destroy loop)
-                                          (when (compare-and-set! thrown_ false true)
-                                            (throw failure)))]
+                                         (throw failure))]
       (let [causes (take-while some? (iterate ex-cause
-                                              (start-failure
-                                               (response-config port (constantly {:status 200})))))]
+                                              (call-with-failing-loop-destroy
+                                               failure
+                                               #(start-failure
+                                                 (response-config port (constantly {:status 200}))))))]
         (is (some #(identical? failure %) causes))
         (is (not-any? #(instance? IllegalArgumentException %) causes))))))
 
