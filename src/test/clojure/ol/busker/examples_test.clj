@@ -121,7 +121,7 @@
             repl-example? (= "first-server" example)]
         (is (= (if repl-example?
                  {:git/url "https://github.com/outskirtslabs/busker"
-                  :git/sha "c4b506e269dd6483dc988fa7ca2717d849ba8f4d"}
+                  :git/sha "5871d311fb6b2e6fa034bbcb833bc516d5c73253"}
                  {:local/root "../../"})
                (get-in deps-edn [:deps 'com.outskirtslabs/busker])))
         (if repl-example?

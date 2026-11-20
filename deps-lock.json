@@ -1,9 +1,9 @@
 {
   "git": {
-    "com.outskirtslabs/busker/c4b506e269dd6483dc988fa7ca2717d849ba8f4d": {
+    "com.outskirtslabs/busker/5871d311fb6b2e6fa034bbcb833bc516d5c73253": {
       "common_dir": "https/github.com/outskirtslabs/busker",
-      "rev": "c4b506e269dd6483dc988fa7ca2717d849ba8f4d",
-      "sha256": "0c9il7v10xk6ifd7l2mm8kgbmsqmnhq1fvp4yj9m9i3rblqbv2qb",
+      "rev": "5871d311fb6b2e6fa034bbcb833bc516d5c73253",
+      "sha256": "0c9g5giixqyjdp7qfml3n0mkcasnmg99ji6kxg9k2cba492kk9b1",
       "url": "https://github.com/outskirtslabs/busker"
     },
     "io.github.outskirtslabs/clave/04f7bf854bcbe379df14e3f9d7221af9d0c030d6": {
@@ -488,11 +488,11 @@
     "com/oracle/oci/sdk/oci-java-sdk-bom/3.86.2/oci-java-sdk-bom-3.86.2.pom": {
       "sha256": "a675ffec09645b396e8fd1a503450b93a72e80be831209eaf551f7597e77b8f7"
     },
-    "com/outskirtslabs/busker/linux-aarch64/0.0.6/linux-aarch64-0.0.6.jar": {
-      "sha256": "ee33e841d17279ac2d2d727e2f8a8a96908f0a42fa8f925387e1d18f05d22ba0"
+    "com/outskirtslabs/busker/linux-aarch64/0.0.7/linux-aarch64-0.0.7.jar": {
+      "sha256": "1d9d99462d702531a1aa91cb81577310a6b83223070dc404fe9f2a71e8a1c219"
     },
-    "com/outskirtslabs/busker/linux-aarch64/0.0.6/linux-aarch64-0.0.6.pom": {
-      "sha256": "7eb81678261a252582319c7e7654cfc49e65385f740c933ff212c887c0ce9fab"
+    "com/outskirtslabs/busker/linux-aarch64/0.0.7/linux-aarch64-0.0.7.pom": {
+      "sha256": "2b71f6f139349da5b603f8bf54135ec8250b4f117c8ea9d6434fdbdd7ab5a509"
     },
     "com/outskirtslabs/busker/macos-aarch64/0.0.4/macos-aarch64-0.0.4.jar": {
       "sha256": "81fe54a7f2d7b18b7f214e3b5a998585fdb4cc7a82d23f34d38245868c44a5e5"
@@ -500,11 +500,11 @@
     "com/outskirtslabs/busker/macos-aarch64/0.0.4/macos-aarch64-0.0.4.pom": {
       "sha256": "1e6784074fce2575e3f279f20fe2719ef0f242da6ee417173d47b9e844420601"
     },
-    "com/outskirtslabs/busker/macos-x86-64/0.0.6/macos-x86-64-0.0.6.jar": {
-      "sha256": "0614702e48324b53662f49c980ac5eeb55879ac560ab6e0dd80f5a138a38be4a"
+    "com/outskirtslabs/busker/macos-x86-64/0.0.7/macos-x86-64-0.0.7.jar": {
+      "sha256": "447c2341ee40bb6874a4cd675c05ac9137d7e99f9175b81a01de6d1c4ff08d3b"
     },
-    "com/outskirtslabs/busker/macos-x86-64/0.0.6/macos-x86-64-0.0.6.pom": {
-      "sha256": "e29bb040eae468d74408bd6ef15ac50d164ae725cc03d37b7e558924bd6a60a2"
+    "com/outskirtslabs/busker/macos-x86-64/0.0.7/macos-x86-64-0.0.7.pom": {
+      "sha256": "5a53621ead21bbc84bbd0a7e2d4eab5d606f7eb08f36511702c87b13cb1351ca"
     },
     "com/s-exp/enso/1.0.0-beta94/enso-1.0.0-beta94.jar": {
       "sha256": "a05a61be4b8c480489a18c881ce33c921a5a55ea13117ef649b856a63f6aab54"
